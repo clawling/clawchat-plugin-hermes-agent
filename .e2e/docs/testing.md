@@ -113,6 +113,41 @@ After the agent exits, the resulting `.e2e/tmp/hermes_data/` is the
 post-install snapshot (look at `config.yaml`, `.env`,
 `plugins/clawchat/`, `logs/`, etc.) which is useful for debugging.
 
+## Post-install verification: `gateway run`
+
+A successful install run leaves `.e2e/tmp/hermes_data/` populated with
+the plugin installed, activated, and the `clawchat` platform configured
+in `config.yaml` / `.env`. To verify the runtime adapter actually boots
+and stays connected against that snapshot — no chat turn, no install
+work — start the gateway directly:
+
+```bash
+docker run --rm -it \
+    -v ./.e2e/tmp/hermes_data:/opt/data \
+    nousresearch/hermes-agent gateway run
+```
+
+Expected behavior on a healthy install:
+
+- The container starts, loads `plugins/clawchat/`, and the logs show
+  the `CLAWCHAT` platform registering through `ctx.register_platform`.
+- The WebSocket connects to `CLAWCHAT_WEBSOCKET_URL` and stays open
+  (no reconnect loop, no auth-rejection backoff).
+- Ctrl-C exits cleanly.
+
+Failure modes and where to look:
+
+| Symptom | Where to look |
+|---------|---------------|
+| Gateway exits immediately | `.e2e/tmp/hermes_data/logs/` for the boot stack trace; check `plugins/clawchat/` was actually written. |
+| Reconnect loop on the WS | `.e2e/tmp/hermes_data/.env` — `CLAWCHAT_TOKEN` / `CLAWCHAT_REFRESH_TOKEN` may be missing, expired, or for a different user. |
+| `CLAWCHAT` platform never registers | `config.yaml` — confirm `platforms.clawchat` exists and `enabled: true`. If absent, the install half failed; rerun `bash .e2e/local_start_test.sh`. |
+
+If the snapshot is broken, rebuild it with another
+`bash .e2e/local_start_test.sh` rather than hand-editing the data dir
+— each install run reseeds from `tmp/hermes_data_base/`, so you get a
+clean state instead of compounding partial fixes.
+
 ## Iterating on a failing run
 
 - The fastest reproduction is to re-run `bash .e2e/local_start_test.sh`
@@ -122,11 +157,13 @@ post-install snapshot (look at `config.yaml`, `.env`,
   `.e2e/tmp/hermes_data/logs/`, `.e2e/tmp/hermes_data/.env`, and
   `.e2e/tmp/hermes_data/config.yaml` after the script exits.
 - To pin a specific Hermes image, override the `image:tag` in
-  `local_start_test.sh` before running. The two commented lines at
-  the bottom of the script also show how to swap the chat-driven
-  install for a direct `gateway run`, which is useful when you want
-  to debug the runtime adapter without going through the install
-  flow.
+  `local_start_test.sh` before running.
+- To debug the runtime adapter without re-running the install half,
+  use the `gateway run` invocation from
+  [Post-install verification](#post-install-verification-gateway-run)
+  against the existing `.e2e/tmp/hermes_data/`. The two commented
+  lines at the bottom of `local_start_test.sh` are the same command,
+  kept inline as a quick reference.
 - Connect codes are one-time-use. If a run fails after the code is
   consumed, just re-run the script — it mints a new code on each
   invocation.
