@@ -9,7 +9,6 @@ dist/
 *.tgz
 tmp
 .e2e/hermes-home-backup/
-.e2e/run-home/
-.e2e/runs/
-.e2e/logs/
+.e2e/.env
+.e2e/tmp/
 docs/superpowers/

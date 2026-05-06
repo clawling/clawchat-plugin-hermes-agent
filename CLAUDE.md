@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Always read the relevant doc before changing a feature, and update it after. Whenever you add, remove, or change a Hermes tool, CLI subcommand, env var, anchor patch, config field, or wire-protocol behavior, update the matching file in the same change set:
 
-- `README.md`, `install.md`, `dev_install.md` — install/quick-start, env vars, user-visible flows
+- `README.md`, `install.md`, `.e2e/dev_install.md` — install/quick-start, env vars, user-visible flows
 - `plugin.yaml` — manifest (`requires_env`, `provides_tools`, `provides_hooks`); must match what `register(ctx)` actually registers
 - `docs/clawchat-protocol.md` — wire protocol reference (the spec; `docs/protocol.md` documents the Python builder API)
 - `docs/` per-module references — keep one doc per `src/clawchat_gateway/*.py` module
