@@ -20,13 +20,11 @@ hermes plugins list | grep hermes-clawchat
 hermes plugins uninstall hermes-clawchat   # only if listed
 ```
 
-## 3. Install and enable the plugin from joe/test
+## 3. Install and enable the plugin from the staged source
 
-`hermes plugins install` shallow-clones the default branch, so for a feature branch we clone the branch ourselves and hand Hermes a local path:
+The harness bind-mounts the host's current working tree of `hermes-clawchat` (tracked + untracked files, gitignore-respected) at `/tmp/hermes-clawchat`, so we install Hermes against that local checkout — no clone, no branch flag.
 
 ```bash
-rm -rf /tmp/hermes-clawchat
-git clone --depth 1 --branch joe/test https://github.com/clawling/hermes-clawchat.git /tmp/hermes-clawchat
 hermes plugins install file:///tmp/hermes-clawchat --enable
 ```
 

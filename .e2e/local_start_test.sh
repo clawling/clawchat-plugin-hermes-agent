@@ -57,9 +57,22 @@ fi
 
 rm -rf ./.e2e/tmp/hermes_data
 cp -r ./.e2e/tmp/hermes_data_base ./.e2e/tmp/hermes_data
+
+# Stage the host's current working tree (tracked + untracked,
+# .gitignore-respected) into ./.e2e/tmp/hermes-clawchat so the in-container
+# `hermes plugins install file:///tmp/hermes-clawchat` reads from this
+# checkout instead of cloning a remote branch from GitHub. .e2e/tmp/ is
+# gitignored, so the stage dir excludes itself.
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+STAGE_DIR="$SCRIPT_DIR/tmp/hermes-clawchat"
+rm -rf "$STAGE_DIR"
+mkdir -p "$STAGE_DIR"
+( cd "$REPO_ROOT" && git ls-files -co --exclude-standard | tar -cf - -T - ) | tar -xf - -C "$STAGE_DIR"
+
 docker run -it --rm \
     -v ./.e2e/tmp/hermes_data:/opt/data \
     -v ./.e2e/dev_install.md:/opt/dev_install.md:ro \
+    -v ./.e2e/tmp/hermes-clawchat:/tmp/hermes-clawchat:ro \
     nousresearch/hermes-agent chat -q "Here is the connect <CODE>: $CODE; Install and configure clawchat by following the instructions in the local file (use tool:'execute_code' to read it with Python): /opt/dev_install.md"
 #docker run -it --rm  -v ./.e2e/tmp/hermes_data:/opt/data nousresearch/hermes-agent gateway run
 #docker run -it -v ./.e2e/tmp/hermes_data:/opt/data nousresearch/hermes-agent gateway run

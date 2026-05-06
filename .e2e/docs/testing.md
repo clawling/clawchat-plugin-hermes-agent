@@ -35,6 +35,7 @@ scripts, fixtures, docs, and `.env.example` are checked in.
 | `dev_install.md` | Install instructions consumed by the agent during the test. Mounted into the container at `/opt/dev_install.md` and read with `execute_code`. |
 | `tmp/hermes_data_base/` | Baseline Hermes data dir (config, model creds, etc.). Bootstrapped once, then reused. Gitignored. |
 | `tmp/hermes_data/` | Per-run copy of the baseline. Recreated on every invocation. Gitignored. |
+| `tmp/hermes-clawchat/` | Per-run staging copy of the host plugin checkout (tracked + untracked, gitignore-respected). Bind-mounted into the container at `/tmp/hermes-clawchat:ro` so the agent can `hermes plugins install file:///tmp/hermes-clawchat` against local code without cloning. Gitignored. |
 
 ## Prerequisites
 
@@ -96,18 +97,25 @@ What happens, in order:
    bootstrap hint otherwise.
 4. Wipes `.e2e/tmp/hermes_data/` and copies a fresh tree from the
    baseline.
-5. Runs `nousresearch/hermes-agent chat -q "…"` with two volume
+5. Stages the host's current working tree (tracked + untracked,
+   gitignore-respected) into `.e2e/tmp/hermes-clawchat/` via
+   `git ls-files -co --exclude-standard | tar`. This is what the
+   in-container install reads from, so local edits flow into the
+   test without a commit/push round-trip.
+6. Runs `nousresearch/hermes-agent chat -q "…"` with three volume
    mounts:
    - `./.e2e/tmp/hermes_data:/opt/data` — the writable data dir for
      this run.
    - `./.e2e/dev_install.md:/opt/dev_install.md:ro` — the install
      guide the agent reads via `execute_code`.
+   - `./.e2e/tmp/hermes-clawchat:/tmp/hermes-clawchat:ro` — the
+     staged plugin source the agent installs from.
 
    The chat prompt hands the agent the one-time connect code and
    tells it to follow `/opt/dev_install.md`. From there the agent
-   drives `hermes plugins install`, enables `clawchat`, runs
-   `python -m clawchat_gateway.activate <CODE>`, and dispatches the
-   gateway restart — all inside the container.
+   drives `hermes plugins install file:///tmp/hermes-clawchat`,
+   runs `python -m clawchat_gateway.activate <CODE>`, and dispatches
+   the gateway restart — all inside the container.
 
 After the agent exits, the resulting `.e2e/tmp/hermes_data/` is the
 post-install snapshot (look at `config.yaml`, `.env`,
