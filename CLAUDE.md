@@ -20,7 +20,7 @@ A **Hermes Agent plugin** that integrates the ClawChat messaging platform. It is
 
 The root `__init__.py` is the plugin entrypoint; `plugin.yaml` is the manifest; `clawchat_gateway/` is the gateway adapter package (also pip-installable as `clawchat-gateway`).
 
-The source code of hermes-agent is available locally at `tmp/hermes-agent/` — refer to its code and changelog (`RELEASE_v0.*.md`) when you need to understand host APIs, the platform registry contract, or behavior changes across Hermes versions.
+The source code of hermes-agent is available locally at `tmp/hermes-agent/` — refer to its code and changelog (`RELEASE_v0.*.md`) when you need to understand host APIs, the platform registry contract, or behavior changes across Hermes versions. When modifying the plugin, follow the official guidelines of hermes-agent as much as possible — prefer the documented plugin/platform APIs over ad-hoc patching, and match the host's conventions (naming, lifecycle, error surface, config shape) so the plugin behaves like a first-party platform.
 
 For boot sequence, runtime data flow, design choices, the self-echo guard rationale, and the per-module catalogue, see `docs/architecture.md` and `docs/README.md`.
 
