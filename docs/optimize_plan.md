@@ -21,4 +21,4 @@
   adapter.py / connection.py 在热路径里有重复 decode、重复遍历 payload、为日志再解析一次队列帧的情况。流量高时这些都是纯额外开销。
 - 清理 active run 的状态结构  
   adapter.py 里 _resolve_active_run（adapter.py:686-704）当前已经是基于 _active_runs_by_id / _active_chat_runs 两个 dict 的 O(1) 查找，并不存在“线性扫描”问题；真正值得关注的是这两个 dict 的清理路径以及它们之间的一致性维护——失败/中断场景下容易残留 stale 条目，并发会话多时会放大状态管理成本。
-补一个验证结论：我试图做 LSP 级诊断，但当前环境里的 Python LSP（basedpyright）没安装，所以这次结论主要基于源码阅读、AST 搜索和并行子代理审查，而不是静态类型诊断。
+补一个验证结论：本次结论主要基于源码阅读、AST 搜索和并行子代理审查。Python LSP（basedpyright，当前为 1.38.4）目前已安装于 `/Users/joe/.local/bin/basedpyright`，后续可在此基础上补一轮静态类型诊断。
