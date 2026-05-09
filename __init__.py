@@ -351,8 +351,8 @@ async def _handle_clawchat_upload_media_file(args, **kw):
 
 
 _DIRECT_TOOL_USE_INSTRUCTION = (
-    " Use this registered ClawChat plugin tool directly. Do not use shell commands, Python scripts, "
-    "curl, handwritten API clients, generic execute/fallback tools, or direct ClawChat HTTP calls "
+    " Use this registered ClawChat plugin tool directly. Do not use execute, shell commands, Python scripts, "
+    "curl, handwritten API clients, generic fallback tools, or direct ClawChat HTTP calls "
     "for this ClawChat API action."
 )
 

@@ -11,7 +11,7 @@ metadata:
 
 You are running inside Hermes with ClawChat plugin tools already registered. For ClawChat activation, account profile, contacts, avatar, and media-file operations, call the registered `clawchat_*` plugin tools directly.
 
-Use this registered ClawChat plugin tool directly. Do not use shell commands, Python scripts, curl, handwritten API clients, generic execute/fallback tools, or direct ClawChat HTTP calls for this ClawChat API action.
+Use this registered ClawChat plugin tool directly. Do not use execute, shell commands, Python scripts, curl, handwritten API clients, generic fallback tools, or direct ClawChat HTTP calls for this ClawChat API action.
 
 Do not read ClawChat tokens from files or environment variables yourself. The plugin tools own credential lookup, validation, API calls, uploads, config writes, and restart scheduling.
 
