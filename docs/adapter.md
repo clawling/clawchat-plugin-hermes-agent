@@ -73,7 +73,7 @@ class ClawChatAdapter(BasePlatformAdapter):
 | Method | Purpose |
 |---|---|
 | `async _on_state_change(state: ConnectionState)` | Log-only. |
-| `async _on_message(frame: dict)` | Parse via `parse_inbound_message`; skip if filtered; delegate to `_handle_inbound`. |
+| `async _on_message(frame: dict)` | Route `interaction.submit`, parse via `parse_inbound_message`, skip if filtered, then delegate to `_handle_inbound`. |
 | `async _handle_inbound(inbound: InboundMessage)` | Resolve `reply_preview`, download media, build `MessageEvent`, attach group-only covenant `channel_prompt` and activation `auto_skill` / prompt when applicable, then `await self.handle_message(event)`. |
 | `_should_attach_activation_skill(text) -> bool` | `True` iff `_ACTIVATION_INTENT_RE` matches. |
 | `_compose_channel_prompt(inbound)` | Build the per-event `channel_prompt`: group covenant for `chat_type == "group"`, activation prompt for activation intent, joined with a blank line when both apply. Direct non-activation messages return `None`. |
@@ -84,8 +84,8 @@ class ClawChatAdapter(BasePlatformAdapter):
 | Method | Signature | Notes |
 |---|---|---|
 | `async send` | `(chat_id, content="", reply_to=None, metadata=None, **kwargs) -> SendResult` | Suppresses tool-progress noise according to `show_tool_progress`, filters `<think>` / raw tool blocks according to `show_*_output`, builds fragments, then either emits a single `message.reply` (static mode — non-stream config or media-only/rich interaction) or `message.created` + `message.add` with the first delta. Registers an `_ActiveRun` for the new `message_id`. |
-| `async edit_message` | `(chat_id, message_id, content) -> SendResult` | Resolve active run; compute delta against `run.last_text`; emit `message.add` with `sequence += 1`. No-op when delta is empty. Returns `success=False, error="no active run for message_id"` if the run was discarded. |
-| `async on_run_complete` | `(chat_id, final_text, message_id=None) -> None` | Flush final delta, emit `message.done` + `message.reply` (with `reply_to_message_id` preserved from the initial `send`). Discards the run from tracking maps. Hermes v0.12+ reaches this through the registered platform adapter lifecycle; legacy installs wire it through `post_stream_hook` / `normal_stream_done_hook` patches. |
+| `async edit_message` | `(chat_id, message_id, content) -> SendResult` | Resolve active run; compute delta against `run.last_text`; emit `message.add` with `sequence += 1`. No-op when delta is empty. If a late edit targets a completed run, returns `success=True` without sending frames so Hermes does not fall back to a duplicate send. Returns `success=False, error="no active run for message_id"` only for unknown runs. |
+| `async on_run_complete` | `(chat_id, final_text, message_id=None) -> None` | Flush final delta, emit `message.done`, and discard the run from tracking maps. It intentionally does not emit a trailing materialized `message.reply`; static mode is the only path that emits `message.reply`. Duplicate completion for the same completed `message_id` is a no-op. Hermes v0.12+ reaches this through the registered platform adapter lifecycle; legacy installs wire it through `post_stream_hook` / `normal_stream_done_hook` patches. |
 | `async send_image` | `(chat_id, image_url, caption=None, reply_to=None, metadata=None) -> SendResult` | Merge `[image_url]` into `metadata["media_urls"]` and delegate to `send`. |
 | `async send_image_file` | `(chat_id, image_path, caption=None, reply_to=None, **kwargs) -> SendResult` | Same shape as `send_image` for local paths. |
 
@@ -98,6 +98,7 @@ class ClawChatAdapter(BasePlatformAdapter):
 | `_next_run_order() -> int` | Monotonic counter for `_ActiveRun.started_order`. |
 | `_resolve_active_run(*, chat_id, message_id=None) -> _ActiveRun \| None` | Lookup by `message_id` (validating `chat_id`) or fall back to latest run for the chat. |
 | `_discard_run(run)` | Remove from `_active_runs_by_id`; if it was the latest for its chat, pick a replacement via `_find_latest_run_for_chat` or drop the chat entry. |
+| `_remember_completed_run(message_id)` | Bounded completed-run cache used to make late edits / duplicate completion callbacks idempotent. |
 | `_find_latest_run_for_chat(chat_id) -> _ActiveRun \| None` | Highest `started_order` whose `chat_id` matches. |
 | `_should_use_static_mode(fragments) -> bool` | `True` when `reply_mode != "stream"` or any fragment is non-text. |
 | `_filter_output_content(content) -> str` | Apply the `<think>` / tool-block regexes unless the corresponding `show_*_output` flag is on. |

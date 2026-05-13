@@ -55,7 +55,7 @@ Uses a `FakeConnection` stand-in so no WebSocket I/O is performed. Coverage:
 - `_on_message` — builds `MessageEvent`, attaches a group-only covenant through `channel_prompt`, preserves direct messages without group covenant text, composes group covenant + activation prompt when both apply, attaches the `clawchat` skill on activation-intent text, downloads media before dispatch, logs inbound parse / dispatch, logs parse drops, maps `reply_preview` fields.
 - `send` — static mode (`message.reply`); default filtering of `<think>` and tool output; override via `show_*_output`; suppression and preservation of gateway tool-progress tickers (both for `send` and `edit_message`); logging.
 - Typing indicators — active / inactive / dedupe.
-- Streaming mode — `message.created` → `message.add` sequence, incomplete-block filtering before delta; `edit_message` delta emission; targeting by `message_id` when multiple runs overlap; `on_run_complete` emits `message.done` + `message.reply` and finalises the requested run during overlap.
+- Streaming mode — `message.created` → `message.add` sequence, incomplete-block filtering before delta; `edit_message` delta emission; targeting by `message_id` when multiple runs overlap; `on_run_complete` emits `message.done` without a trailing `message.reply`, finalises the requested run during overlap, and treats late edits / duplicate completion callbacks for a completed run as idempotent no-ops.
 - Outbound media — forces static mode when media is present; classifies non-image MIME correctly; uploads local files before the static reply; `send_image_file` path.
 
 ### `tests/test_api_client.py`
@@ -133,6 +133,7 @@ Static checks for the Docker E2E install harness: `.e2e/dev_install.md` must uni
 Behavior of `_clawchat_pre_gateway_dispatch`:
 
 - Self-echo (CLAWCHAT platform + sender `user_id == bot_user_id`) returns `{"action": "skip", "reason": "clawchat-self-echo"}`.
+- String `"clawchat"` platform and config keys are treated the same as the enum form.
 - Real user message on CLAWCHAT (different `user_id`) returns `None` (no skip).
 - Different platform (e.g., QQBOT) is left alone even when sender matches the configured CLAWCHAT bot user_id.
 - When the gateway has no configured bot user_id, the hook does not skip (defensive: would otherwise drop everything).

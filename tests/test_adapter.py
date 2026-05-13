@@ -700,7 +700,7 @@ async def test_edit_message_targets_run_by_message_id_with_overlapping_streams()
     assert adapter._active_runs_by_id[second.message_id].last_text == "second"
 
 
-async def test_edit_message_with_finalize_emits_done_and_reply():
+async def test_edit_message_with_finalize_emits_done_only():
     adapter = _make_adapter(reply_mode="stream")
     first = await adapter.send(chat_id="u1", content="hello")
     adapter._connection.sent_frames.clear()
@@ -716,13 +716,56 @@ async def test_edit_message_with_finalize_emits_done_and_reply():
     assert [frame["event"] for frame in adapter._connection.sent_frames] == [
         "message.add",
         "message.done",
-        "message.reply",
     ]
     assert adapter._connection.sent_frames[0]["payload"]["fragments"][0]["delta"] == " world"
     assert adapter._connection.sent_frames[1]["payload"]["fragments"] == [
         {"kind": "text", "text": "hello world"}
     ]
     assert first.message_id not in adapter._active_runs_by_id
+
+
+async def test_edit_message_after_finalize_is_idempotent_success(caplog):
+    adapter = _make_adapter(reply_mode="stream")
+    first = await adapter.send(chat_id="u1", content="hello")
+    await adapter.edit_message(
+        chat_id="u1",
+        message_id=first.message_id or "",
+        content="hello world",
+        finalize=True,
+    )
+    adapter._connection.sent_frames.clear()
+
+    with caplog.at_level(logging.WARNING, logger="clawchat_gateway.adapter"):
+        result = await adapter.edit_message(
+            chat_id="u1",
+            message_id=first.message_id or "",
+            content="hello world",
+        )
+
+    assert result.success is True
+    assert result.message_id == first.message_id
+    assert adapter._connection.sent_frames == []
+    assert caplog.records == []
+
+
+async def test_duplicate_on_run_complete_after_finalize_is_idempotent():
+    adapter = _make_adapter(reply_mode="stream")
+    first = await adapter.send(chat_id="u1", content="hello")
+    await adapter.edit_message(
+        chat_id="u1",
+        message_id=first.message_id or "",
+        content="hello world",
+        finalize=True,
+    )
+    adapter._connection.sent_frames.clear()
+
+    await adapter.on_run_complete(
+        chat_id="u1",
+        final_text="hello world",
+        message_id=first.message_id,
+    )
+
+    assert adapter._connection.sent_frames == []
 
 
 async def test_v012_stream_edits_strip_cursor_and_finalize_lifecycle():
@@ -747,12 +790,10 @@ async def test_v012_stream_edits_strip_cursor_and_finalize_lifecycle():
         "message.add",
         "message.add",
         "message.done",
-        "message.reply",
     ]
     first_add = adapter._connection.sent_frames[1]["payload"]["fragments"][0]
     second_add = adapter._connection.sent_frames[2]["payload"]["fragments"][0]
     done = adapter._connection.sent_frames[3]
-    reply = adapter._connection.sent_frames[4]
     assert first_add == {"kind": "text", "text": "Hey! I'm", "delta": "Hey! I'm"}
     assert second_add == {
         "kind": "text",
@@ -760,9 +801,6 @@ async def test_v012_stream_edits_strip_cursor_and_finalize_lifecycle():
         "delta": " doing well",
     }
     assert done["payload"]["fragments"] == [{"kind": "text", "text": "Hey! I'm doing well"}]
-    assert reply["payload"]["message"]["body"]["fragments"] == [
-        {"kind": "text", "text": "Hey! I'm doing well"}
-    ]
     assert all(
         "▉" not in str(frame)
         for frame in adapter._connection.sent_frames
@@ -786,7 +824,7 @@ async def test_edit_message_ignores_unknown_kwargs():
     assert [frame["event"] for frame in adapter._connection.sent_frames] == ["message.add"]
 
 
-async def test_on_run_complete_emits_message_done_without_static_reply():
+async def test_on_run_complete_emits_message_done_without_trailing_reply():
     adapter = _make_adapter(reply_mode="stream")
     first = await adapter.send(chat_id="u1", content="hello")
     adapter._connection.sent_frames.clear()
@@ -796,14 +834,9 @@ async def test_on_run_complete_emits_message_done_without_static_reply():
     assert [frame["event"] for frame in adapter._connection.sent_frames] == [
         "message.add",
         "message.done",
-        "message.reply",
     ]
     assert adapter._connection.sent_frames[1]["payload"]["message_id"] == first.message_id
     assert adapter._connection.sent_frames[1]["payload"]["fragments"] == [
-        {"kind": "text", "text": "hello world"}
-    ]
-    assert adapter._connection.sent_frames[2]["payload"]["message_id"] == first.message_id
-    assert adapter._connection.sent_frames[2]["payload"]["message"]["body"]["fragments"] == [
         {"kind": "text", "text": "hello world"}
     ]
     assert first.message_id not in adapter._active_runs_by_id
@@ -839,7 +872,6 @@ async def test_on_run_complete_finalizes_requested_run_during_overlap():
     assert [frame["event"] for frame in adapter._connection.sent_frames] == [
         "message.add",
         "message.done",
-        "message.reply",
     ]
     assert adapter._connection.sent_frames[1]["payload"]["message_id"] == first.message_id
     assert first.message_id not in adapter._active_runs_by_id

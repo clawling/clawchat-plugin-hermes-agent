@@ -16,7 +16,8 @@ author: NewBase
 requires_env:
   - CLAWCHAT_TOKEN
   - CLAWCHAT_REFRESH_TOKEN
-provides_hooks: []
+provides_hooks:
+  - pre_gateway_dispatch
 provides_tools:
   - clawchat_activate
   - clawchat_get_account_profile
@@ -77,8 +78,9 @@ Each handler is `async`, takes `(args: dict, **kw)`, logs `task_id`, and returns
 
 | Function | Signature | Purpose |
 |---|---|---|
-| `_resolve_clawchat_bot_user_id` | `(gateway) -> str \| None` | Look up the bot's own ClawChat `user_id` from the loaded `gateway.config.platforms[Platform.CLAWCHAT]` via `ClawChatConfig.from_platform_config(...)`. Re-resolved on every hook call (not cached) so freshly activated values are picked up immediately. Returns `None` when `gateway.config` / the platform entry / `user_id` is missing. |
-| `_clawchat_pre_gateway_dispatch` | `(*, event, gateway, session_store=None, **_) -> dict \| None` | Hook handler. Returns `{"action": "skip", "reason": "clawchat-self-echo"}` when the event source is the ClawChat platform **and** the sender's `user_id` matches the resolved bot user_id. Returns `None` to let the dispatch proceed in every other case (other platforms, missing sender, no configured bot user_id). |
+| `_platform_value` / `_is_clawchat_platform` | `(platform) -> str` / `(platform) -> bool` | Normalize enum, dynamic enum, and string platform values so hook checks keep working across Hermes registry modes. |
+| `_resolve_clawchat_bot_user_id` | `(gateway) -> str \| None` | Look up the bot's own ClawChat `user_id` from the loaded `gateway.config.platforms` via `ClawChatConfig.from_platform_config(...)`. Accepts `Platform.CLAWCHAT`, string `"clawchat"`, and dynamic enum-like keys. Re-resolved on every hook call (not cached) so freshly activated values are picked up immediately. Returns `None` when `gateway.config` / the platform entry / `user_id` is missing. |
+| `_clawchat_pre_gateway_dispatch` | `(*, event, gateway, session_store=None, **_) -> dict \| None` | Hook handler. Returns `{"action": "skip", "reason": "clawchat-self-echo"}` when the event source normalizes to the ClawChat platform **and** the sender's `user_id` matches the resolved bot user_id. Returns `None` to let the dispatch proceed in every other case (other platforms, missing sender, no configured bot user_id). |
 
 Without this hook, hermes-agent's interrupt-on-new-message logic treats the WebSocket echo of the bot's own outbound chunks as a fresh user message, which cancels the in-flight turn and produces an infinite "Operation interrupted: waiting for model response" cascade.
 

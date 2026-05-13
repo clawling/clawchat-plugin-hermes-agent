@@ -21,7 +21,7 @@ This document describes the final wire contract implemented in this repository.
 - Server-originated `message.send` and `message.reply` fill top-level `sender`.
 - Uplink `message.send` / `message.reply` payloads omit `message.streaming`. They SHOULD omit `message_id` too; when present, the server preserves it verbatim (used by streaming producers to finalize a stream — the finalize reply carries the stream's id so the offline store collapses both into a single row).
 - Downlink `message.send` / `message.reply` payloads include payload-level `message_id` plus `message.streaming`.
-- **Streaming lifecycle events (`message.created` / `message.add` / `message.done` / `message.failed`) use a flat payload**: `fragments`, `streaming`, `sequence`, `mutation`, `added_at`, `completed_at` live at `payload` top level — NOT nested in `payload.message.body`. This differs from `message.send` / `message.reply`, which carry a materialized `message{body, context, streaming}` object. The consolidation step that emits a trailing `message.reply` converts the flat stream into the materialized shape.
+- **Streaming lifecycle events (`message.created` / `message.add` / `message.done` / `message.failed`) use a flat payload**: `fragments`, `streaming`, `sequence`, `mutation`, `added_at`, `completed_at` live at `payload` top level — NOT nested in `payload.message.body`. This differs from `message.send` / `message.reply`, which carry a materialized `message{body, context, streaming}` object. Online producers should finish the stream with `message.done`; replay/storage layers can materialize completed streams as `message.reply` for missed-message replay.
 - On `message.add`, every text fragment MUST carry both `text` (cumulative so far) and `delta` (the new piece added this round). Downstream consumers can rebuild the running text from either — `text` is idempotent on replay, `delta` is cheap to apply incrementally.
 - Canonical business events never use payload-level `to` / `sender`.
 - Canonical message objects never use nested `message.chat` or `message.sender`.
@@ -240,9 +240,9 @@ consolidated `message.reply` emitted at the end of a stream.
 Streaming lifecycle events (`message.created` / `message.add` /
 `message.done` / `message.failed`) use a **flat** payload — fragments
 and streaming metadata live at `payload` top level, NOT inside
-`payload.message.body`. The consolidation step converts this flat form
-into the materialized `message{body, context, streaming}` shape when it
-emits the trailing `message.reply`.
+`payload.message.body`. Replay/storage layers can convert this flat form
+into the materialized `message{body, context, streaming}` shape for
+missed-message replay.
 
 ### `message.created` payload
 
@@ -481,9 +481,12 @@ Client → server reply intent:
 }
 ```
 
-Consolidated final reply at the end of a stream — SAME `message_id` as
-the `message.created` / `message.add` / `message.done` sequence, and
-optionally quotes the user message that triggered the stream:
+Replay-materialized completed stream — SAME `message_id` as the
+`message.created` / `message.add` / `message.done` sequence, and
+optionally quotes the user message that triggered the stream. Online
+streaming producers should not send this immediately after `message.done`;
+it is the shape replay/storage layers use when a recipient missed the live
+stream:
 
 ```json
 {
@@ -512,9 +515,8 @@ optionally quotes the user message that triggered the stream:
 }
 ```
 
-Reusing the stream's `message_id` on the finalize reply lets the offline
-store's UNIQUE `(user_id, message_id)` constraint collapse the stream's
-merged form and the finalized reply into one row.
+Reusing the stream's `message_id` on the replay materialization lets the
+offline store keep one durable completed-stream row.
 
 ### `offline.batch` (deprecated)
 
@@ -729,9 +731,9 @@ disconnect or failover.
 
 ## Typing + streaming reply pattern
 
-Streaming responses commonly follow a "typing on → stream → typing off →
-final reply" arc, e.g. an AI agent that streams a visible thinking trace
-and then posts a polished answer:
+Streaming responses commonly follow a "typing on → stream → typing off"
+arc, e.g. an AI agent that streams a visible answer and then seals the
+stream:
 
 ```
 typing.update{is_typing:true}
@@ -740,7 +742,6 @@ message.add(msg_id=M1, sequence=0, delta="Hello")   ×
 message.add(msg_id=M1, sequence=1, delta=", world") ×
 message.done(msg_id=M1)
 typing.update{is_typing:false}
-message.reply(msg_id=M1)        ← SAME id → offline store collapses both rows
 ```
 
 Invariants the hub enforces:
@@ -751,9 +752,11 @@ Invariants the hub enforces:
   sender. It never loops back to the sender.
 - Streaming events share the producer-chosen `message_id`; the server
   does not rewrite it.
-- The trailing `message.reply` SHOULD use the stream's `message_id` so
-  the offline store's UNIQUE `(user_id, message_id)` constraint collapses
-  the stream's merged form and the finalized reply into one row.
+- Online streaming producers SHOULD NOT emit a trailing materialized
+  `message.reply` after `message.done`; `message.done` already carries the
+  full merged fragments. Sending both can render duplicate visible replies
+  in clients that do not collapse live lifecycle frames with materialized
+  replies.
 - On `message.add`, each text fragment MUST carry both `text` and `delta`.
 
 ## Streaming uplink rule

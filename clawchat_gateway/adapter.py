@@ -46,6 +46,7 @@ inbound_trace = logging.getLogger("clawchat_gateway.inbound_trace")
 TYPING_REFRESH_SECONDS = 10.0
 INBOUND_RATE_WINDOW_SECONDS = 30.0
 INBOUND_RATE_WARN_THRESHOLD = 5
+COMPLETED_RUN_CACHE_MAX = 1024
 
 _THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
 _THINK_OPEN_RE = re.compile(r"<think\b[^>]*>.*\Z", re.IGNORECASE | re.DOTALL)
@@ -142,6 +143,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._typing_state: dict[str, tuple[bool, float]] = {}
         self._run_counter = 0
         self._inbound_window: dict[str, deque[float]] = {}
+        self._completed_run_ids: set[str] = set()
+        self._completed_run_order: deque[str] = deque()
 
     async def connect(self) -> bool:
         await self._connection.start()
@@ -517,6 +520,13 @@ class ClawChatAdapter(BasePlatformAdapter):
     ) -> SendResult:
         run = self._resolve_active_run(chat_id=chat_id, message_id=message_id)
         if run is None:
+            if message_id and message_id in self._completed_run_ids:
+                logger.info(
+                    "clawchat edit skipped chat_id=%s message_id=%s reason=run_already_complete",
+                    chat_id,
+                    message_id,
+                )
+                return SendResult(success=True, message_id=message_id)
             logger.warning(
                 "clawchat edit skipped chat_id=%s message_id=%s reason=no_active_run",
                 chat_id,
@@ -561,6 +571,13 @@ class ClawChatAdapter(BasePlatformAdapter):
     ) -> None:
         run = self._resolve_active_run(chat_id=chat_id, message_id=message_id)
         if run is None:
+            if message_id and message_id in self._completed_run_ids:
+                logger.info(
+                    "clawchat run complete skipped chat_id=%s message_id=%s reason=run_already_complete",
+                    chat_id,
+                    message_id,
+                )
+                return
             logger.warning(
                 "clawchat run complete skipped chat_id=%s message_id=%s reason=no_active_run",
                 chat_id,
@@ -568,6 +585,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
             return
         self._discard_run(run)
+        self._remember_completed_run(run.message_id)
         logger.info(
             "clawchat run complete chat_id=%s message_id=%s final_len=%d",
             chat_id,
@@ -600,21 +618,20 @@ class ClawChatAdapter(BasePlatformAdapter):
                 sequence=run.sequence,
             )
         )
-        await self._connection.send_frame(
-            build_message_reply_event(
-                chat_id=chat_id,
-                chat_type=run.chat_type,
-                message_id=run.message_id,
-                fragments=await self._build_fragments(run.last_text),
-                reply_to_message_id=run.reply_to_message_id,
-                include_message_id=True,
-            )
-        )
         logger.info(
             "clawchat stream done queued chat_id=%s message_id=%s",
             chat_id,
             run.message_id,
         )
+
+    def _remember_completed_run(self, message_id: str) -> None:
+        if message_id in self._completed_run_ids:
+            return
+        self._completed_run_ids.add(message_id)
+        self._completed_run_order.append(message_id)
+        while len(self._completed_run_order) > COMPLETED_RUN_CACHE_MAX:
+            old_message_id = self._completed_run_order.popleft()
+            self._completed_run_ids.discard(old_message_id)
 
     async def on_run_failed(
         self,

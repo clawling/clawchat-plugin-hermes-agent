@@ -53,6 +53,20 @@ def test_self_echo_is_skipped():
     assert result == {"action": "skip", "reason": "clawchat-self-echo"}
 
 
+def test_self_echo_is_skipped_with_string_platform_config():
+    plugin = _load_root_plugin()
+    gateway = _Gateway(
+        config=_Config(
+            platforms={"clawchat": _PlatformConfig(extra={"user_id": "bot-1"})}
+        )
+    )
+    event = _build_event(platform="clawchat", user_id="bot-1")
+
+    result = plugin._clawchat_pre_gateway_dispatch(event=event, gateway=gateway)
+
+    assert result == {"action": "skip", "reason": "clawchat-self-echo"}
+
+
 def test_real_user_message_is_allowed():
     plugin = _load_root_plugin()
     gateway = _build_gateway(bot_user_id="bot-1")

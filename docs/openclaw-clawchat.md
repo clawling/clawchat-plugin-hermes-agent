@@ -17,7 +17,7 @@ ClawChat connects OpenClaw to the ClawChat Protocol v2 over WebSocket via
 `@newbase-clawchat/sdk@^0.1.0`, plus a small REST surface mounted under
 `/v1/*` for profile / social / media operations. It supports text + media
 chat in both direct and group rooms, progressive streaming replies with a
-consolidated final `message.reply`, reply context pass-through, and an
+stream finalization via `message.done`, reply context pass-through, and an
 invite-code based onboarding flow.
 
 ## Features
@@ -26,7 +26,7 @@ invite-code based onboarding flow.
 - Invite-code onboarding (`openclaw channels setup --channel openclaw-clawchat --code INV-XXXX`)
 - Inbound `message.send` and `message.reply` with reply context
 - Direct + group chat. Group trigger policy is configurable (`groupMode: "all" | "mention"`)
-- Outbound text replies: static or progressive streaming with a final consolidated `message.reply`
+- Outbound text replies: static `message.reply` or progressive streaming finalized by `message.done`
 - Typing lifecycle events for both reply modes
 - Media fragments (image / file / audio / video) in either direction
 - Filtered forwarding for thinking / tool-call content
@@ -248,7 +248,7 @@ appended to the agent's system prompt when a clawchat turn arrives:
   specific chat explicitly, use `cc:{chat_id}` (direct, default) or
   `cc:group:{chat_id}` (group). `clawchat:` is accepted as a synonym.
 - ClawChat supports media fragments (image / file / audio / video) alongside text in the same message.
-- ClawChat stream mode emits `message.created` → progressive `message.add` deltas → `message.done`, followed by a consolidated `message.reply` with the merged text.
+- ClawChat stream mode emits `message.created` → progressive `message.add` deltas → `message.done`. It does not also emit a consolidated `message.reply` for the same live stream.
 
 ## Media
 
@@ -288,8 +288,8 @@ choice.
 - inbound `message.reply` → chat turn with reply context
 - outbound static reply → SDK `sendMessage` / `replyMessage` (ack-tracked)
 - outbound stream reply → `message.created` / `message.add` (many) /
-  `message.done` / then a consolidated `message.reply` — all four frames
-  share the **agent-side** `payload.message_id` minted at `created` time
+  `message.done` — all stream frames share the **agent-side**
+  `payload.message_id` minted at `created` time
   (never reuses the inbound user id)
 - typing indicator → `typing.update`
 
@@ -514,10 +514,8 @@ sequenceDiagram
     AGT-->>GW: onIdle (agent run complete)
     GW->>SDK: emitStreamDone<br/>fragments:[{ kind:"text", text:&lt;merged&gt; }]
     SDK->>WS: frame
-    GW->>SDK: emitFinalStreamReply (low-level transport send)<br/>message.reply<br/>payload.message_id = "agent-stream-…"<br/>reply_to_msg_id = user-msg-01K…
-    SDK->>WS: frame
     WS->>SRV: forward
-    SRV-->>USER: final reply
+    SRV-->>USER: stream finalized
   end
 
   %% --- static outbound ---
@@ -605,7 +603,7 @@ sequenceDiagram
 
 ### Reply shape is wrong for your client
 - Use `replyMode: "static"` for clients expecting one final message.
-- Use `replyMode: "stream"` for clients that render incremental assistant output — they'll see `message.created` → many `message.add` → `message.done`, followed by a consolidated `message.reply` (same `message_id`).
+- Use `replyMode: "stream"` for clients that render incremental assistant output — they'll see `message.created` → many `message.add` → `message.done`.
 
 ### Group bot is too chatty
 - Default `groupMode: "all"` replies to every group message. Switch to `"mention"` for quieter groups, and make sure the client's `context.mentions` includes your `userId` when the bot should reply.

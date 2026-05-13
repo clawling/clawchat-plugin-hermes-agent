@@ -361,6 +361,15 @@ def _direct_tool_description(description: str) -> str:
     return description + " " + _DIRECT_TOOL_USE_INSTRUCTION
 
 
+def _platform_value(platform) -> str:
+    value = getattr(platform, "value", platform)
+    return str(value or "").lower()
+
+
+def _is_clawchat_platform(platform) -> bool:
+    return _platform_value(platform) == "clawchat"
+
+
 def _resolve_clawchat_bot_user_id(gateway) -> str | None:
     """Look up the ClawChat bot's own user_id from the loaded gateway config.
 
@@ -376,6 +385,13 @@ def _resolve_clawchat_bot_user_id(gateway) -> str | None:
     if not isinstance(platforms, dict):
         return None
     platform_config = platforms.get(getattr(Platform, "CLAWCHAT", None))
+    if platform_config is None:
+        platform_config = platforms.get("clawchat")
+    if platform_config is None:
+        for platform_key, config in platforms.items():
+            if _is_clawchat_platform(platform_key):
+                platform_config = config
+                break
     if platform_config is None:
         return None
     try:
@@ -396,12 +412,10 @@ def _clawchat_pre_gateway_dispatch(*, event, gateway, session_store=None, **_):
     cancels the in-flight turn and produces an "Operation interrupted:
     waiting for model response" cascade (iteration 1/N restarts forever).
     """
-    try:
-        from gateway.config import Platform
-    except Exception:
-        return None
     source = getattr(event, "source", None)
-    if source is None or getattr(source, "platform", None) != getattr(Platform, "CLAWCHAT", None):
+    if source is None or not _is_clawchat_platform(
+        getattr(source, "platform", None)
+    ):
         return None
     sender_id = getattr(source, "user_id", None)
     if not sender_id:
