@@ -124,6 +124,10 @@ Comprehensive registration / schema / behavior tests for the repo-root `__init__
 
 Static check that `plugin.yaml` has `kind: platform` and `requires_env == ["CLAWCHAT_TOKEN", "CLAWCHAT_REFRESH_TOKEN"]`. Catches manifest drift when the env-var contract changes.
 
+### `tests/test_e2e_install_docs.py`
+
+Static checks for the Docker E2E install harness: `.e2e/dev_install.md` must uninstall the real manifest plugin name (`clawchat`), and `.e2e/local_start_test.sh` must clear stale installed plugin directories copied from the baseline before staging local source.
+
 ### `tests/test_self_echo_hook.py`
 
 Behavior of `_clawchat_pre_gateway_dispatch`:

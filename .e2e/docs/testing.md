@@ -96,7 +96,9 @@ What happens, in order:
 3. Verifies `.e2e/tmp/hermes_data_base/` exists; bails with a
    bootstrap hint otherwise.
 4. Wipes `.e2e/tmp/hermes_data/` and copies a fresh tree from the
-   baseline.
+   baseline. It then removes any preinstalled `plugins/clawchat/` or
+   legacy `plugins/hermes-clawchat/` directory inherited from the
+   baseline so the next install must use the staged source.
 5. Stages the host's current working tree (tracked + untracked,
    gitignore-respected) into `.e2e/tmp/hermes-clawchat/` via
    `git ls-files -co --exclude-standard | tar`. This is what the
@@ -113,9 +115,10 @@ What happens, in order:
 
    The chat prompt hands the agent the one-time connect code and
    tells it to follow `/opt/dev_install.md`. From there the agent
-   drives `hermes plugins install file:///tmp/hermes-clawchat`,
-   runs `python -m clawchat_gateway.activate <CODE>`, and dispatches
-   the gateway restart — all inside the container.
+   removes any existing `clawchat` plugin, drives
+   `hermes plugins install file:///tmp/hermes-clawchat`, runs
+   `python -m clawchat_gateway.activate <CODE>`, and dispatches the
+   gateway restart — all inside the container.
 
 After the agent exits, the resulting `.e2e/tmp/hermes_data/` is the
 post-install snapshot (look at `config.yaml`, `.env`,

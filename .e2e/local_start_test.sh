@@ -57,6 +57,8 @@ fi
 
 rm -rf ./.e2e/tmp/hermes_data
 cp -r ./.e2e/tmp/hermes_data_base ./.e2e/tmp/hermes_data
+rm -rf ./.e2e/tmp/hermes_data/plugins/clawchat
+rm -rf ./.e2e/tmp/hermes_data/plugins/hermes-clawchat
 
 # Stage the host's current working tree (tracked + untracked,
 # .gitignore-respected) into ./.e2e/tmp/hermes-clawchat so the in-container

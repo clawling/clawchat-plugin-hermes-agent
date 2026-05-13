@@ -8,7 +8,7 @@ Formats the default ClawChat group covenant for Hermes' per-event `MessageEvent.
 
 | Name | Purpose |
 |---|---|
-| `DEFAULT_GROUP_COVENANT` | Default product copy applied to group conversations. Tests may monkeypatch this with fixture text. |
+| `DEFAULT_GROUP_COVENANT` | Default product copy applied to group conversations. It currently includes the E2E fixture sentence about 陈平安 / 落魄山共和国 / 卡拉米星球 so live request dumps can prove group-only injection is active. |
 
 ## Functions
 

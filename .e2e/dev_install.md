@@ -1,6 +1,6 @@
-# Install `hermes-clawchat` Plugin (joe/test branch)
+# Install `clawchat` Plugin From the Local E2E Stage
 
-A short, deterministic guide for installing the ClawChat plugin from the `joe/test` branch. Follow the steps in order. Each step is one tool:'terminal' call — do not split, do not improvise, do not run additional `hermes` commands beyond what is listed here.
+A short, deterministic guide for installing the ClawChat plugin from the local `/tmp/hermes-clawchat` stage. Follow the steps in order. Each step is one tool:'terminal' call — do not split, do not improvise, do not run additional `hermes` commands beyond what is listed here.
 
 ## 1. Verify the Hermes environment
 
@@ -16,8 +16,12 @@ If `hermes` is not on the path, source the Hermes venv first.
 ## 2. Remove any existing installation
 
 ```bash
-hermes plugins list | grep hermes-clawchat
-hermes plugins uninstall hermes-clawchat   # only if listed
+if hermes plugins list | grep -Eq '(^|[[:space:]])clawchat([[:space:]]|$)'; then
+    hermes plugins uninstall clawchat
+fi
+if hermes plugins list | grep -Eq '(^|[[:space:]])hermes-clawchat([[:space:]]|$)'; then
+    hermes plugins uninstall hermes-clawchat
+fi
 ```
 
 ## 3. Install and enable the plugin from the staged source
