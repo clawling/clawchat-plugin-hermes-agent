@@ -34,7 +34,7 @@ class ClawChatConfig:
     refresh_token: str = ""
     user_id: str = ""
     reply_mode: str = "stream"
-    group_mode: str = "mention"
+    group_mode: str = "all"
     stream_flush_interval_ms: int = 250
     stream_min_chunk_chars: int = 40
     stream_max_buffer_chars: int = 2000
@@ -57,7 +57,7 @@ class ClawChatConfig:
 Field groups:
 
 - **Connectivity** — `websocket_url`, `base_url`, `token`, `refresh_token`, `user_id`. All are resolved via `_get_env(...)` first (see "Env-var resolution priority" above), then fall back to `extra`.
-- **Behaviour** — `reply_mode` (`"stream"` enables live delta sends; anything else falls back to a single `message.reply`), `group_mode` (`"mention"` filters inbound group messages to those that @mention `user_id`).
+- **Behaviour** — `reply_mode` (`"stream"` enables live delta sends; anything else falls back to a single `message.reply`), `group_mode` (`"all"` accepts every inbound group message by default; `"mention"` opts into filtering group messages to those that @mention `user_id`).
 - **Streaming tunables** — `stream_flush_interval_ms`, `stream_min_chunk_chars`, `stream_max_buffer_chars` (currently consumed externally / not by the adapter directly).
 - **Reconnect** — initial delay, max delay, jitter ratio, max retries (`float("inf")` ≈ forever).
 - **Heartbeat** — `ping_interval` / `ping_timeout` for the WebSocket library (in ms; divided by 1000 in `connection.py`).

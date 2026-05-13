@@ -25,7 +25,7 @@ def test_config_defaults():
     assert cfg.refresh_token == "rt"
     assert cfg.user_id == "u1"
     assert cfg.reply_mode == "stream"
-    assert cfg.group_mode == "mention"
+    assert cfg.group_mode == "all"
     assert cfg.stream_flush_interval_ms == 250
     assert cfg.stream_min_chunk_chars == 40
     assert cfg.stream_max_buffer_chars == 2000
@@ -149,7 +149,7 @@ def test_config_ignores_openclaw_camel_case_extra_keys():
     assert cfg.refresh_token == ""
     assert cfg.user_id == ""
     assert cfg.reply_mode == "stream"
-    assert cfg.group_mode == "mention"
+    assert cfg.group_mode == "all"
     assert cfg.reconnect_initial_delay_ms == 500
     assert cfg.reconnect_max_delay_ms == 15000
     assert cfg.reconnect_jitter_ratio == 0.3

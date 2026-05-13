@@ -41,12 +41,18 @@ When you add a new import from `gateway.*` in production code, extend `fake_herm
 - `test_persist_activation_writes_secrets_to_env_and_config_without_secrets` — monkeypatches `$HERMES_HOME`; calls `activate.persist_activation` and checks that `.env` has the ClawChat tokens while `config.yaml` has enabled ClawChat, non-secret `extra` keys, and streaming/display defaults.
 - `test_persist_activation_removes_stale_config_secrets_and_refresh_env` — ensures a reactivation removes old YAML token fields, updates `CLAWCHAT_TOKEN`, removes stale `CLAWCHAT_REFRESH_TOKEN` when no refresh token is returned, and preserves unrelated `.env` entries.
 
-### `tests/test_adapter.py` (~26 tests)
+### `tests/test_group_context.py`
+
+- `format_group_covenant_prompt` returns `None` for blank covenant text.
+- Non-empty covenant text is wrapped under `ClawChat group covenant:`.
+- `build_group_channel_prompt` formats the default covenant; tests monkeypatch the default with fixture text.
+
+### `tests/test_adapter.py`
 
 Uses a `FakeConnection` stand-in so no WebSocket I/O is performed. Coverage:
 
 - `compute_delta` behaviour for append and reset cases.
-- `_on_message` — builds `MessageEvent`, attaches the `clawchat` skill on activation-intent text, downloads media before dispatch, logs inbound parse / dispatch, logs parse drops, maps `reply_preview` fields.
+- `_on_message` — builds `MessageEvent`, attaches a group-only covenant through `channel_prompt`, preserves direct messages without group covenant text, composes group covenant + activation prompt when both apply, attaches the `clawchat` skill on activation-intent text, downloads media before dispatch, logs inbound parse / dispatch, logs parse drops, maps `reply_preview` fields.
 - `send` — static mode (`message.reply`); default filtering of `<think>` and tool output; override via `show_*_output`; suppression and preservation of gateway tool-progress tickers (both for `send` and `edit_message`); logging.
 - Typing indicators — active / inactive / dedupe.
 - Streaming mode — `message.created` → `message.add` sequence, incomplete-block filtering before delta; `edit_message` delta emission; targeting by `message_id` when multiple runs overlap; `on_run_complete` emits `message.done` + `message.reply` and finalises the requested run during overlap.
@@ -132,6 +138,7 @@ Behavior of `_clawchat_pre_gateway_dispatch`:
 
 Matrix of `parse_inbound_message` edge cases:
 
+- Default group mode `all` accepts unmentioned group messages.
 - Group-mode `mention` requires the bot to be mentioned.
 - `reply_preview` passes through.
 - Group-mode `mention` accepts when mentioned; group-mode `all` accepts without mention.

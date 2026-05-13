@@ -21,6 +21,7 @@ from gateway.platforms.base import (
 
 from clawchat_gateway.config import ClawChatConfig
 from clawchat_gateway.connection import ClawChatConnection, ConnectionState
+from clawchat_gateway.group_context import build_group_channel_prompt
 from clawchat_gateway.inbound import InboundMessage, parse_inbound_message
 from clawchat_gateway.media_runtime import (
     download_inbound_media,
@@ -324,9 +325,11 @@ class ClawChatAdapter(BasePlatformAdapter):
             reply_to_message_id=reply_to_message_id,
             reply_to_text=reply_to_text,
         )
+        channel_prompt = self._compose_channel_prompt(inbound)
         if self._should_attach_activation_skill(inbound.text):
             event.auto_skill = "clawchat"
-            event.channel_prompt = _CLAWCHAT_SKILL_PROMPT
+        if channel_prompt:
+            event.channel_prompt = channel_prompt
         logger.info(
             "clawchat dispatch to hermes chat_id=%s user_id=%s text_len=%d media=%d downloaded=%d reply_to=%s",
             inbound.chat_id,
@@ -393,6 +396,16 @@ class ClawChatAdapter(BasePlatformAdapter):
         if not _ACTIVATION_INTENT_RE.search(normalized):
             return False
         return True
+
+    def _compose_channel_prompt(self, inbound: InboundMessage) -> str | None:
+        prompts: list[str] = []
+        if inbound.chat_type == "group":
+            group_prompt = build_group_channel_prompt()
+            if group_prompt:
+                prompts.append(group_prompt)
+        if self._should_attach_activation_skill(inbound.text):
+            prompts.append(_CLAWCHAT_SKILL_PROMPT)
+        return "\n\n".join(prompts) or None
 
     async def _download_inbound_media(self, inbound: InboundMessage) -> list[Any]:
         if not inbound.media_urls:

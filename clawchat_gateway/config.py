@@ -66,7 +66,7 @@ class ClawChatConfig:
     refresh_token: str = ""
     user_id: str = ""
     reply_mode: str = "stream"
-    group_mode: str = "mention"
+    group_mode: str = "all"
     stream_flush_interval_ms: int = 250
     stream_min_chunk_chars: int = 40
     stream_max_buffer_chars: int = 2000
@@ -118,7 +118,7 @@ class ClawChatConfig:
             reply_mode=_get_env("CLAWCHAT_REPLY_MODE")
             or _get_config_value(extra, "reply_mode", "stream"),
             group_mode=_get_env("CLAWCHAT_GROUP_MODE")
-            or _get_config_value(extra, "group_mode", "mention"),
+            or _get_config_value(extra, "group_mode", "all"),
             stream_flush_interval_ms=_get_config_value(stream, "flush_interval_ms", 250),
             stream_min_chunk_chars=_get_config_value(stream, "min_chunk_chars", 40),
             stream_max_buffer_chars=_get_config_value(stream, "max_buffer_chars", 2000),

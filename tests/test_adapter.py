@@ -108,6 +108,73 @@ async def test_on_message_attaches_clawchat_skill_for_activation_intent():
     assert "python -m clawchat_gateway.activate CODE" in event.channel_prompt
 
 
+async def test_group_message_attaches_group_covenant_channel_prompt(monkeypatch):
+    monkeypatch.setattr(
+        "clawchat_gateway.adapter.build_group_channel_prompt",
+        lambda: "ClawChat group covenant:\n群里陈平安是落魄山共和国的国王。它的位置在卡拉米星球的洪荒大陆上。",
+    )
+    adapter = _make_adapter()
+    inbound = InboundMessage(
+        chat_id="room1",
+        chat_type="group",
+        sender_id="u1",
+        sender_name="alice",
+        text="hello group",
+        raw_message={"x": 1},
+    )
+
+    await adapter._handle_inbound(inbound)
+
+    event = adapter.handled[0]
+    assert event.channel_prompt == (
+        "ClawChat group covenant:\n"
+        "群里陈平安是落魄山共和国的国王。它的位置在卡拉米星球的洪荒大陆上。"
+    )
+
+
+async def test_direct_message_does_not_attach_group_covenant(monkeypatch):
+    monkeypatch.setattr(
+        "clawchat_gateway.adapter.build_group_channel_prompt",
+        lambda: "ClawChat group covenant:\n群里陈平安是落魄山共和国的国王。它的位置在卡拉米星球的洪荒大陆上。",
+    )
+    adapter = _make_adapter()
+    inbound = InboundMessage(
+        chat_id="u1",
+        chat_type="direct",
+        sender_id="u1",
+        sender_name="alice",
+        text="hello dm",
+        raw_message={"x": 1},
+    )
+
+    await adapter._handle_inbound(inbound)
+
+    assert adapter.handled[0].channel_prompt is None
+
+
+async def test_group_activation_prompt_appends_covenant(monkeypatch):
+    monkeypatch.setattr(
+        "clawchat_gateway.adapter.build_group_channel_prompt",
+        lambda: "ClawChat group covenant:\n群里陈平安是落魄山共和国的国王。它的位置在卡拉米星球的洪荒大陆上。",
+    )
+    adapter = _make_adapter()
+    inbound = InboundMessage(
+        chat_id="room1",
+        chat_type="group",
+        sender_id="u1",
+        sender_name="alice",
+        text="clawchat 的激活码是 R4E1IW",
+        raw_message={"x": 1},
+    )
+
+    await adapter._handle_inbound(inbound)
+
+    event = adapter.handled[0]
+    assert "ClawChat group covenant:" in event.channel_prompt
+    assert "群里陈平安是落魄山共和国的国王" in event.channel_prompt
+    assert "python -m clawchat_gateway.activate CODE" in event.channel_prompt
+
+
 async def test_on_message_downloads_media_before_dispatch(monkeypatch, tmp_path):
     adapter = _make_adapter(
         base_url="http://company.newbaselab.com:10086",

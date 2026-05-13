@@ -20,6 +20,7 @@ Per-module catalogue of structures and functions. For runtime flow and the boot 
 | `clawchat_gateway/connection.py` | WebSocket supervisor, handshake, send queue | [connection.md](./connection.md) |
 | `clawchat_gateway/protocol.py` | Frame builders, encoding, signature helpers (Python API) | [protocol.md](./protocol.md) |
 | `clawchat_gateway/inbound.py` | Inbound WebSocket frame parser | [inbound.md](./inbound.md) |
+| `clawchat_gateway/group_context.py` | Group covenant prompt formatting for `MessageEvent.channel_prompt` | [group-context.md](./group-context.md) |
 | `clawchat_gateway/stream_buffer.py` | `compute_delta` streaming helper | [stream-buffer.md](./stream-buffer.md) |
 | `clawchat_gateway/media_runtime.py` | Upload / download helpers + local-root guards | [media-runtime.md](./media-runtime.md) |
 | `clawchat_gateway/device_id.py` | Stable `X-Device-Id` resolver | [device-id.md](./device-id.md) |

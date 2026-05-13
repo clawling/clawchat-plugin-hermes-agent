@@ -25,7 +25,7 @@ invite-code based onboarding flow.
 - WebSocket transport via `@newbase-clawchat/sdk` (auto reconnect with exponential backoff, heartbeat, ack tracking)
 - Invite-code onboarding (`openclaw channels setup --channel openclaw-clawchat --code INV-XXXX`)
 - Inbound `message.send` and `message.reply` with reply context
-- Direct + group chat. Group trigger policy is configurable (`groupMode: "mention" | "all"`)
+- Direct + group chat. Group trigger policy is configurable (`groupMode: "all" | "mention"`)
 - Outbound text replies: static or progressive streaming with a final consolidated `message.reply`
 - Typing lifecycle events for both reply modes
 - Media fragments (image / file / audio / video) in either direction
@@ -154,7 +154,7 @@ Edit `~/.openclaw/openclaw.json` (or let `setup` + `login` write it for you):
       // websocketUrl / baseUrl default to DEFAULT_WEBSOCKET_URL /
       // DEFAULT_BASE_URL in config.ts — override only when self-hosting.
       replyMode: "stream",
-      groupMode: "mention",     // "mention" | "all"
+      groupMode: "all",         // "all" | "mention"
       forwardThinking: true,
       forwardToolCalls: false,
       // token / userId / refreshToken are written by the login flow.
@@ -174,7 +174,7 @@ Edit `~/.openclaw/openclaw.json` (or let `setup` + `login` write it for you):
 | `refreshToken`            | string                  | — (written by login)    | Refresh token paired with `token`                                                   |
 | `userId`                  | string                  | — (written by login)    | Stable agent id; used on mention detection and sender identity                      |
 | `replyMode`               | `"static" \| "stream"`  | `"static"`              | Reply style                                                                         |
-| `groupMode`               | `"mention" \| "all"`    | `"mention"`             | Group trigger policy (see below)                                                    |
+| `groupMode`               | `"all" \| "mention"`    | `"all"`                 | Group trigger policy (see below)                                                    |
 | `forwardThinking`         | boolean                 | `true`                  | Forward reasoning / thinking content to chat                                        |
 | `forwardToolCalls`        | boolean                 | `false`                 | Forward tool call content to chat                                                   |
 | `stream.flushIntervalMs`  | integer                 | `250`                   | Streaming throttle window                                                           |
@@ -193,9 +193,9 @@ Edit `~/.openclaw/openclaw.json` (or let `setup` + `login` write it for you):
 
 Controls how group-chat messages are handled:
 
-- **`"mention"` (default)**: only messages whose `context.mentions` list contains our
+- **`"all"` (default)**: every group message triggers a reply — open-listen mode.
+- **`"mention"`**: only messages whose `context.mentions` list contains our
   `userId` trigger a reply. Quiet groups stay quiet.
-- **`"all"`**: every group message triggers a reply — open-listen mode.
 
 Direct chats are always triggered regardless of this setting.
 
@@ -607,8 +607,8 @@ sequenceDiagram
 - Use `replyMode: "static"` for clients expecting one final message.
 - Use `replyMode: "stream"` for clients that render incremental assistant output — they'll see `message.created` → many `message.add` → `message.done`, followed by a consolidated `message.reply` (same `message_id`).
 
-### Group bot stays silent
-- Default `groupMode: "mention"` requires an `@<self>` mention on every turn. Switch to `"all"` for open-listen, or make sure the client's `context.mentions` actually includes your `userId`.
+### Group bot is too chatty
+- Default `groupMode: "all"` replies to every group message. Switch to `"mention"` for quieter groups, and make sure the client's `context.mentions` includes your `userId` when the bot should reply.
 
 ### Noisy chat
 - Set `forwardThinking: false` to suppress reasoning blocks.

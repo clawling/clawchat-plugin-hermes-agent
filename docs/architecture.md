@@ -55,6 +55,7 @@ ClawChatAdapter ----send----> ClawChatConnection (WebSocket)  <----> ClawChat se
 - **Filter-before-send.** Adapter strips `<think>...</think>` blocks and tool-invocation fence/tag blocks out of visible output unless `show_think_output` / `show_tools_output` are explicitly enabled.
 - **Activation self-restart.** After `clawchat_activate` writes `CLAWCHAT_TOKEN` / `CLAWCHAT_REFRESH_TOKEN` to `~/.hermes/.env` and non-secret platform settings to `~/.hermes/config.yaml`, the handler calls `restart.schedule_gateway_restart(delay_seconds=2)`. That helper resolves `HERMES_HOME` / `HERMES_DIR` / the hermes binary path and spawns a detached `sh -lc 'sleep 2; HERMES_HOME=… HERMES_DIR=… <hermes-bin> gateway restart'` with `start_new_session=True` so the restart survives the parent worker being torn down. See [restart.md](./restart.md).
 - **Self-echo guard.** `_clawchat_pre_gateway_dispatch` (registered as a `pre_gateway_dispatch` hook) drops inbound frames whose sender is the bot's own ClawChat `user_id`. Without it, hermes-agent's interrupt-on-new-message logic treats the WebSocket echo of the bot's own outbound chunks as a fresh user message and cancels the in-flight turn (interrupt loop). The bot user_id is re-resolved on every call so it picks up fresh activation.
+- **Group covenant injection.** Inbound group messages get a ClawChat covenant through `MessageEvent.channel_prompt`, which Hermes applies as an ephemeral system prompt at API-call time and does not persist to transcript history. Direct messages do not receive this group covenant. Activation-intent group messages compose the group covenant with the activation prompt instead of overwriting either one.
 
 ## Environment variables
 
@@ -62,6 +63,6 @@ Runtime (read by Hermes v0.12+ platform registration helpers, the ClawChat Pytho
 
 - `HERMES_HOME` — Hermes data dir (default `~/.hermes`). Controls `config.yaml`, `.env`, `skills/`, `plugins/` locations.
 - `HERMES_DIR` / `HERMES_AGENT_DIR` — hermes-agent install dir (default `$HERMES_HOME/hermes-agent`, or `/opt/hermes` if present).
-- `CLAWCHAT_WEBSOCKET_URL` / `CLAWCHAT_WS_URL`, `CLAWCHAT_BASE_URL`, `CLAWCHAT_TOKEN`, `CLAWCHAT_REFRESH_TOKEN`, `CLAWCHAT_USER_ID`, `CLAWCHAT_REPLY_MODE`, `CLAWCHAT_GROUP_MODE`, `CLAWCHAT_MEDIA_LOCAL_ROOTS` — override values in `platforms.clawchat.extra`; legacy patch installs inject the same values through the `env_overrides` blocks.
+- `CLAWCHAT_WEBSOCKET_URL` / `CLAWCHAT_WS_URL`, `CLAWCHAT_BASE_URL`, `CLAWCHAT_TOKEN`, `CLAWCHAT_REFRESH_TOKEN`, `CLAWCHAT_USER_ID`, `CLAWCHAT_REPLY_MODE`, `CLAWCHAT_GROUP_MODE`, `CLAWCHAT_MEDIA_LOCAL_ROOTS` — override values in `platforms.clawchat.extra`; legacy patch installs inject the same values through the `env_overrides` blocks. `CLAWCHAT_GROUP_MODE` defaults to `"all"`; set it to `"mention"` to require an @mention in group chats.
 - `CLAWCHAT_ALLOWED_USERS`, `CLAWCHAT_ALLOW_ALL_USERS` — auth allowlist. The platform registration advertises these env vars to Hermes; `install.py` / `_configure_runtime_defaults()` set `CLAWCHAT_ALLOW_ALL_USERS=true` by default.
 - `CLAWCHAT_DEVICE_ID` — override the auto-derived device id.

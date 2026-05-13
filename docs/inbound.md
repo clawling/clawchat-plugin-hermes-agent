@@ -47,7 +47,7 @@ Returns `None` (so the adapter drops the frame) when:
 - `payload` is not a dict.
 - `payload.message` is not a dict.
 - `message.context` is not a dict.
-- `chat_type == "group"` **and** `config.group_mode == "mention"` **and** the bot's `config.user_id` is not in `context.mentions`.
+- `chat_type == "group"` **and** `config.group_mode == "mention"` **and** the bot's `config.user_id` is not in `context.mentions`. The default `group_mode` is `"all"`, so mention filtering is opt-in.
 - `envelope.sender` is not a dict.
 
 Otherwise:
@@ -60,4 +60,4 @@ Otherwise:
 4. Extract `sender.id` / `sender.nick_name`.
 5. Pass `context.reply` through as `reply_preview`.
 
-The resulting `InboundMessage` is the adapter's canonical representation; group-mention filtering and media extraction happen here so the adapter's `_handle_inbound` stays simple.
+The resulting `InboundMessage` is the adapter's canonical representation; opt-in group-mention filtering and media extraction happen here so the adapter's `_handle_inbound` stays simple.
