@@ -260,19 +260,21 @@ async def _handle_clawchat_activate(args, **kw):
     _handle_clawchat_activate._last_task_id = task_id
     logger.info("clawchat_activate start task_id=%s", task_id)
     try:
-        from clawchat_gateway.activate import activate
+        from clawchat_gateway.activate import activate_and_maybe_restart
         from clawchat_gateway.api_client import DEFAULT_BASE_URL
-        from clawchat_gateway.restart import schedule_gateway_restart
 
         base_url = str(args.get("baseUrl") or "").strip() or DEFAULT_BASE_URL
-        result = await activate(str(args.get("code") or "").strip(), base_url=base_url)
-        result["ok"] = True
-        restart_command = schedule_gateway_restart(delay_seconds=2)
-        result["restart_scheduled"] = True
-        result["restart_delay_seconds"] = 2
-        result["restart_message"] = "ClawChat activation is saved. Hermes restart has been scheduled in the background."
+        result = await activate_and_maybe_restart(
+            str(args.get("code") or "").strip(),
+            base_url=base_url,
+            restart=True,
+        )
         logger.info("clawchat_activate done task_id=%s user_id=%s", task_id, result.get("user_id"))
-        logger.info("clawchat_activate scheduled restart task_id=%s command=%s", task_id, restart_command)
+        logger.info(
+            "clawchat_activate scheduled restart task_id=%s command=%s",
+            task_id,
+            result.get("restart_command"),
+        )
         return _tool_result(result)
     except Exception as exc:
         logger.warning("clawchat_activate failed task_id=%s error=%s", task_id, exc)

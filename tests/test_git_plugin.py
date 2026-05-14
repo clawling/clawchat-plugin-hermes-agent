@@ -81,3 +81,26 @@ def test_git_plugin_handlers_accept_task_id(monkeypatch):
     assert json.loads(result) == {
         "updated": {"nickname": "bot", "avatar_url": "https://cdn/avatar.png", "bio": "hi"}
     }
+
+
+def test_clawchat_activate_handler_uses_shared_activation_runner(monkeypatch):
+    module = _load_root_plugin()
+    called = []
+
+    async def fake_runner(code: str, *, base_url: str, restart: bool):
+        called.append((code, base_url, restart))
+        return {"ok": True, "user_id": "agent-1"}
+
+    import clawchat_gateway.activate as activate_mod
+
+    monkeypatch.setattr(activate_mod, "activate_and_maybe_restart", fake_runner)
+
+    result = asyncio.run(
+        module._handle_clawchat_activate(
+            {"code": "ABC123", "baseUrl": "https://chat.example"},
+            task_id="trace-activate",
+        )
+    )
+
+    assert called == [("ABC123", "https://chat.example", True)]
+    assert json.loads(result) == {"ok": True, "user_id": "agent-1"}
