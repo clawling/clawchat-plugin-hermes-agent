@@ -450,6 +450,44 @@ class ClawChatConnection:
         if self._state == ConnectionState.READY and ftype in (None, "event") and frame.get("event") == "message.ack":
             self._handle_ack(frame)
             return
+        if self._state == ConnectionState.READY and ftype in (None, "event") and frame.get("event") == "ping":
+            trace_id = str(frame.get("trace_id") or frame.get("id") or "")
+            logger.info(
+                format_ws_log(
+                    event="protocol_ping_received",
+                    account_id=self._account_id,
+                    attempt=self._attempt,
+                    reconnect_count=self._reconnect_count,
+                    state=ConnectionState.READY.value,
+                    action="send_pong",
+                    fields=[("trace_id", trace_id)],
+                )
+            )
+            if self._ws is not None:
+                await self._ws.send(
+                    encode_frame(
+                        {
+                            "version": "2",
+                            "event": "pong",
+                            "trace_id": trace_id,
+                            "payload": {},
+                        }
+                    )
+                )
+            return
+        if self._state == ConnectionState.READY and ftype in (None, "event") and frame.get("event") == "pong":
+            logger.info(
+                format_ws_log(
+                    event="protocol_pong_received",
+                    account_id=self._account_id,
+                    attempt=self._attempt,
+                    reconnect_count=self._reconnect_count,
+                    state=ConnectionState.READY.value,
+                    action="ignore",
+                    fields=[("trace_id", frame.get("trace_id") or frame.get("id"))],
+                )
+            )
+            return
         logger.info(
             "clawchat ws ignored event=%s type=%s state=%s",
             frame.get("event"),
@@ -717,3 +755,18 @@ class ClawChatConnection:
         )
         if not pending.future.done():
             pending.future.set_result(frame)
+
+    async def _handle_heartbeat_timeout(self) -> None:
+        logger.info(
+            format_ws_log(
+                event="heartbeat_timeout",
+                account_id=self._account_id,
+                attempt=self._attempt,
+                reconnect_count=self._reconnect_count,
+                state=self._state.value,
+                action="reconnect",
+                fields=[("timeout_ms", self._cfg.heartbeat_timeout_ms)],
+            )
+        )
+        if self._ws is not None:
+            await self._ws.close()

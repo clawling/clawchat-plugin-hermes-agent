@@ -796,6 +796,86 @@ async def test_unmatched_ack_logs_and_non_ackable_events_do_not_track(monkeypatc
     ) in messages
 
 
+async def test_ready_json_ping_sends_pong_and_logs(monkeypatch, caplog):
+    srv = FakeClawChatServer()
+    monkeypatch.setattr("clawchat_gateway.connection._ws_connect", srv.connect)
+
+    async def on_message(_frame):
+        pass
+
+    conn = ClawChatConnection(_cfg(), on_message=on_message)
+    with caplog.at_level(logging.INFO, logger="clawchat_gateway.connection"):
+        await conn.start()
+        try:
+            await _wait_for_ready(conn, srv)
+            srv.enqueue_from_server(
+                {"version": "2", "event": "ping", "trace_id": "ping-1", "payload": {}}
+            )
+            pong = await srv.read_client_frame(timeout=1.0)
+            assert pong["event"] == "pong"
+            assert pong["trace_id"] == "ping-1"
+        finally:
+            await conn.stop()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert (
+        "clawchat.ws event=protocol_ping_received account_id=default attempt=1 "
+        "reconnect_count=0 state=ready action=send_pong trace_id=ping-1"
+    ) in messages
+
+
+async def test_ready_json_pong_logs_and_is_ignored(monkeypatch, caplog):
+    srv = FakeClawChatServer()
+    monkeypatch.setattr("clawchat_gateway.connection._ws_connect", srv.connect)
+
+    async def on_message(_frame):
+        pass
+
+    conn = ClawChatConnection(_cfg(), on_message=on_message)
+    with caplog.at_level(logging.INFO, logger="clawchat_gateway.connection"):
+        await conn.start()
+        try:
+            await _wait_for_ready(conn, srv)
+            srv.enqueue_from_server(
+                {"version": "2", "event": "pong", "trace_id": "pong-1", "payload": {}}
+            )
+            await _wait_until(
+                lambda: any("event=protocol_pong_received" in record.getMessage() for record in caplog.records)
+            )
+        finally:
+            await conn.stop()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert (
+        "clawchat.ws event=protocol_pong_received account_id=default attempt=1 "
+        "reconnect_count=0 state=ready action=ignore trace_id=pong-1"
+    ) in messages
+
+
+async def test_heartbeat_timeout_logs_and_reconnects(monkeypatch, caplog):
+    srv = FakeClawChatServer()
+    monkeypatch.setattr("clawchat_gateway.connection._ws_connect", srv.connect)
+
+    async def on_message(_frame):
+        pass
+
+    conn = ClawChatConnection(_cfg(heartbeat_timeout_ms=25), on_message=on_message)
+    with caplog.at_level(logging.INFO, logger="clawchat_gateway.connection"):
+        await conn.start()
+        try:
+            await _wait_for_ready(conn, srv)
+            await conn._handle_heartbeat_timeout()
+            await _wait_until(lambda: len(srv.connect_calls) >= 2)
+        finally:
+            await conn.stop()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert (
+        "clawchat.ws event=heartbeat_timeout account_id=default attempt=1 "
+        "reconnect_count=0 state=ready action=reconnect timeout_ms=25"
+    ) in messages
+
+
 async def test_ready_send_failure_requeues_for_next_connection(monkeypatch):
     srv = FakeClawChatServer()
     monkeypatch.setattr("clawchat_gateway.connection._ws_connect", srv.connect)
