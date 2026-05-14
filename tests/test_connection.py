@@ -449,7 +449,10 @@ async def test_connection_logs_receive_dispatch_and_send(monkeypatch, caplog):
     assert any("payload_keys=['message']" in message for message in messages)
     assert any("message_keys=['context', 'fragments']" in message for message in messages)
     assert any("body_type=NoneType" in message for message in messages)
-    assert any("clawchat ws send event=message.reply id=out-1" in message for message in messages)
+    assert (
+        "clawchat.ws event=send_flush account_id=default attempt=1 reconnect_count=0 "
+        "state=ready action=send event_name=message.reply trace_id=out-1 chat_id=- remaining=0"
+    ) in messages
 
 
 async def test_ready_dispatches_message_reply(monkeypatch):
@@ -533,6 +536,96 @@ async def test_queued_frames_flush_in_order_after_handshake(monkeypatch):
         await conn.stop()
 
 
+async def test_send_queue_drops_oldest_and_logs_canonical_message(caplog):
+    async def on_message(_frame):
+        pass
+
+    conn = ClawChatConnection(_cfg(), on_message=on_message)
+    with caplog.at_level(logging.INFO, logger="clawchat_gateway.connection"):
+        for index in range(129):
+            await conn.send_frame(
+                {
+                    "version": "2",
+                    "event": "message.reply",
+                    "trace_id": f"trace-{index}",
+                    "chat_id": f"chat-{index}",
+                    "payload": {},
+                }
+            )
+
+    assert len(conn._send_queue) == 128
+    assert conn._send_queue[0].trace_id == "trace-1"
+    messages = [record.getMessage() for record in caplog.records]
+    assert (
+        "clawchat.ws event=send_queue_drop account_id=default attempt=0 "
+        "reconnect_count=0 state=disconnected action=drop_oldest "
+        "event_name=message.reply trace_id=trace-0 chat_id=chat-0 "
+        "queue_size=127 queue_max=128"
+    ) in messages
+    assert (
+        "clawchat.ws event=send_queued account_id=default attempt=0 "
+        "reconnect_count=0 state=disconnected action=queue "
+        "event_name=message.reply trace_id=trace-128 chat_id=chat-128 queue_size=128"
+    ) in messages
+
+
+async def test_flush_logs_send_flush_and_send_failed(monkeypatch, caplog):
+    srv = FakeClawChatServer()
+    failed = False
+
+    async def connect_with_first_send_failure(url: str, **kwargs):
+        nonlocal failed
+        ws = await srv.connect(url, **kwargs)
+        real_send = ws.send
+
+        async def flaky_send(text: str):
+            nonlocal failed
+            if '"event":"connect"' not in text and not failed:
+                failed = True
+                raise ConnectionError("flush failed")
+            await real_send(text)
+
+        if len(srv.connect_calls) == 1:
+            monkeypatch.setattr(ws, "send", flaky_send)
+        return ws
+
+    monkeypatch.setattr("clawchat_gateway.connection._ws_connect", connect_with_first_send_failure)
+
+    async def on_message(_frame):
+        pass
+
+    conn = ClawChatConnection(_cfg(), on_message=on_message)
+    await conn.send_frame(
+        {
+            "version": "2",
+            "event": "message.reply",
+            "trace_id": "queued-1",
+            "chat_id": "chat-1",
+            "payload": {},
+        }
+    )
+    with caplog.at_level(logging.INFO, logger="clawchat_gateway.connection"):
+        await conn.start()
+        try:
+            await _complete_handshake(srv)
+            await _wait_until(lambda: len(srv.connect_calls) >= 2, timeout=0.3)
+        finally:
+            await conn.stop()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert (
+        "clawchat.ws event=send_flush account_id=default attempt=1 "
+        "reconnect_count=0 state=ready action=send event_name=message.reply "
+        "trace_id=queued-1 chat_id=chat-1 remaining=0"
+    ) in messages
+    assert (
+        "clawchat.ws event=send_failed account_id=default attempt=1 "
+        "reconnect_count=0 state=ready action=requeue_reconnect event_name=message.reply "
+        "trace_id=queued-1 chat_id=chat-1 queue_size=1"
+    ) in messages
+    assert conn._send_queue[0].trace_id == "queued-1"
+
+
 async def test_queued_frame_survives_failed_flush_and_reconnect(monkeypatch):
     srv = FakeClawChatServer()
     failed = False
@@ -569,6 +662,138 @@ async def test_queued_frame_survives_failed_flush_and_reconnect(monkeypatch):
         assert replayed["id"] == "queued-1"
     finally:
         await conn.stop()
+
+
+async def test_message_reply_waits_for_ack_after_actual_send(monkeypatch, caplog):
+    srv = FakeClawChatServer()
+    monkeypatch.setattr("clawchat_gateway.connection._ws_connect", srv.connect)
+
+    async def on_message(_frame):
+        pass
+
+    conn = ClawChatConnection(_cfg(), on_message=on_message)
+    with caplog.at_level(logging.INFO, logger="clawchat_gateway.connection"):
+        await conn.start()
+        try:
+            await _wait_for_ready(conn, srv)
+            send_task = asyncio.create_task(
+                conn.send_frame(
+                    {
+                        "version": "2",
+                        "event": "message.reply",
+                        "trace_id": "trace-ack",
+                        "chat_id": "chat-1",
+                        "payload": {},
+                    },
+                    wait_for_ack=True,
+                )
+            )
+            sent = await srv.read_client_frame(timeout=1.0)
+            assert sent["trace_id"] == "trace-ack"
+            assert "trace-ack" in conn._pending_acks
+            assert send_task.done() is False
+            srv.enqueue_from_server(
+                {
+                    "version": "2",
+                    "event": "message.ack",
+                    "trace_id": "trace-ack",
+                    "chat_id": "chat-1",
+                    "payload": {"message_id": "msg-1"},
+                }
+            )
+            await asyncio.wait_for(send_task, timeout=1.0)
+            assert "trace-ack" not in conn._pending_acks
+        finally:
+            await conn.stop()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert (
+        "clawchat.ws event=ack_received account_id=default attempt=1 "
+        "reconnect_count=0 state=ready action=resolve event_name=message.reply "
+        "trace_id=trace-ack chat_id=chat-1 message_id=msg-1"
+    ) in messages
+
+
+async def test_ack_timeout_rejects_without_reconnect(monkeypatch, caplog):
+    srv = FakeClawChatServer()
+    monkeypatch.setattr("clawchat_gateway.connection._ws_connect", srv.connect)
+
+    async def on_message(_frame):
+        pass
+
+    conn = ClawChatConnection(_cfg(ack_timeout_ms=20), on_message=on_message)
+    with caplog.at_level(logging.INFO, logger="clawchat_gateway.connection"):
+        await conn.start()
+        try:
+            await _wait_for_ready(conn, srv)
+            with pytest.raises(asyncio.TimeoutError):
+                await conn.send_frame(
+                    {
+                        "version": "2",
+                        "event": "message.reply",
+                        "trace_id": "trace-timeout",
+                        "chat_id": "chat-1",
+                        "payload": {},
+                    },
+                    wait_for_ack=True,
+                )
+            await asyncio.sleep(0.05)
+            assert len(srv.connect_calls) == 1
+        finally:
+            await conn.stop()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert (
+        "clawchat.ws event=ack_timeout account_id=default attempt=1 "
+        "reconnect_count=0 state=ready action=reject_no_reconnect event_name=message.reply "
+        "trace_id=trace-timeout chat_id=chat-1 timeout_ms=20"
+    ) in messages
+
+
+async def test_unmatched_ack_logs_and_non_ackable_events_do_not_track(monkeypatch, caplog):
+    srv = FakeClawChatServer()
+    monkeypatch.setattr("clawchat_gateway.connection._ws_connect", srv.connect)
+
+    async def on_message(_frame):
+        pass
+
+    conn = ClawChatConnection(_cfg(), on_message=on_message)
+    with caplog.at_level(logging.INFO, logger="clawchat_gateway.connection"):
+        await conn.start()
+        try:
+            await _wait_for_ready(conn, srv)
+            await conn.send_frame(
+                {
+                    "version": "2",
+                    "event": "message.add",
+                    "trace_id": "trace-add",
+                    "chat_id": "chat-1",
+                    "payload": {},
+                },
+                wait_for_ack=True,
+            )
+            await srv.read_client_frame(timeout=1.0)
+            assert conn._pending_acks == {}
+            srv.enqueue_from_server(
+                {
+                    "version": "2",
+                    "event": "message.ack",
+                    "trace_id": "missing",
+                    "chat_id": "chat-1",
+                    "payload": {},
+                }
+            )
+            await _wait_until(
+                lambda: any("event=ack_unmatched" in record.getMessage() for record in caplog.records)
+            )
+        finally:
+            await conn.stop()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert (
+        "clawchat.ws event=ack_unmatched account_id=default attempt=1 "
+        "reconnect_count=0 state=ready action=ignore trace_id=missing chat_id=chat-1"
+    ) in messages
 
 
 async def test_ready_send_failure_requeues_for_next_connection(monkeypatch):

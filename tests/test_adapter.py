@@ -12,6 +12,7 @@ from clawchat_gateway.stream_buffer import compute_delta
 class FakeConnection:
     def __init__(self) -> None:
         self.sent_frames: list[dict] = []
+        self.wait_for_ack: list[bool] = []
         self.started = False
         self.stopped = False
 
@@ -21,8 +22,9 @@ class FakeConnection:
     async def stop(self) -> None:
         self.stopped = True
 
-    async def send_frame(self, frame: dict) -> None:
+    async def send_frame(self, frame: dict, *, wait_for_ack: bool = False) -> None:
         self.sent_frames.append(frame)
+        self.wait_for_ack.append(wait_for_ack)
 
 
 def _make_adapter(**extra) -> ClawChatAdapter:
@@ -340,6 +342,7 @@ async def test_send_emits_message_reply_for_static_mode():
 
     assert result.success is True
     assert adapter._connection.sent_frames[0]["event"] == "message.reply"
+    assert adapter._connection.wait_for_ack == [True]
     assert adapter._connection.sent_frames[0]["version"] == "2"
     assert "message_id" not in adapter._connection.sent_frames[0]["payload"]
     assert adapter._connection.sent_frames[0]["payload"]["message"]["body"]["fragments"] == [

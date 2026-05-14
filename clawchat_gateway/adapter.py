@@ -465,7 +465,8 @@ class ClawChatAdapter(BasePlatformAdapter):
                     message_id=message_id,
                     fragments=fragments,
                     reply_to_message_id=reply_to,
-                )
+                ),
+                wait_for_ack=True,
             )
             logger.info(
                 "clawchat send static reply queued chat_id=%s message_id=%s fragments=%d",

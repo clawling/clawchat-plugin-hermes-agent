@@ -7,6 +7,7 @@ import enum
 import logging
 import random
 from collections import deque
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 try:
@@ -32,6 +33,26 @@ logger = logging.getLogger("clawchat_gateway.connection")
 HANDSHAKE_TIMEOUT_SECONDS = 10.0
 SEND_QUEUE_MAX = 128
 BACKOFF_RESET_AFTER_SECONDS = 5.0
+ACKABLE_EVENTS = {"message.send", "message.reply"}
+
+
+@dataclass
+class _QueuedFrame:
+    text: str
+    event_name: str
+    trace_id: str
+    chat_id: str
+    ack_future: asyncio.Future[dict[str, Any]] | None = None
+    ack_timeout_task: asyncio.Task[None] | None = None
+
+
+@dataclass
+class _PendingAck:
+    event_name: str
+    trace_id: str
+    chat_id: str
+    future: asyncio.Future[dict[str, Any]]
+    timeout_task: asyncio.Task[None]
 
 
 async def _ws_connect(url: str, **kwargs: Any) -> Any:
@@ -78,8 +99,9 @@ class ClawChatConnection:
         self._read_task: asyncio.Task[None] | None = None
         self._hello_wait: asyncio.Future[bool] | None = None
         self._pending_connect_id: str | None = None
-        self._send_queue: deque[str] = deque()
+        self._send_queue: deque[_QueuedFrame] = deque()
         self._flushing_send_queue = False
+        self._pending_acks: dict[str, _PendingAck] = {}
 
     async def start(self) -> None:
         if self._supervisor_task is not None:
@@ -111,10 +133,9 @@ class ClawChatConnection:
                 pass
             self._supervisor_task = None
 
-    async def send_frame(self, frame: dict[str, Any]) -> None:
+    async def send_frame(self, frame: dict[str, Any], *, wait_for_ack: bool = False) -> None:
         text = encode_frame(frame)
-        event = str(frame.get("event") or frame.get("type") or "unknown")
-        frame_id = str(frame.get("id") or frame.get("trace_id") or "")
+        queued = self._queued_frame(frame, text, wait_for_ack=wait_for_ack)
         if (
             self._state == ConnectionState.READY
             and self._ws is not None
@@ -123,30 +144,33 @@ class ClawChatConnection:
         ):
             try:
                 logger.info(
-                    "clawchat ws send event=%s id=%s bytes=%d",
-                    event,
-                    frame_id,
-                    len(text),
+                    format_ws_log(
+                        event="send_flush",
+                        account_id=self._account_id,
+                        attempt=self._attempt,
+                        reconnect_count=self._reconnect_count,
+                        state=ConnectionState.READY.value,
+                        action="send",
+                        fields=[
+                            ("event_name", queued.event_name),
+                            ("trace_id", queued.trace_id),
+                            ("chat_id", queued.chat_id),
+                            ("remaining", 0),
+                        ],
+                    )
                 )
                 await self._ws.send(text)
+                self._start_ack_timer_if_needed(queued)
             except Exception:
-                self._enqueue_text(text, front=True)
-                logger.warning(
-                    "clawchat ws send failed; queued event=%s id=%s queue_size=%d",
-                    event,
-                    frame_id,
-                    len(self._send_queue),
-                )
+                self._enqueue_frame(queued, front=True, log_queued=False)
+                self._log_send_failed(queued)
                 raise
+            if queued.ack_future is not None:
+                await queued.ack_future
             return
-        self._enqueue_text(text)
-        logger.info(
-            "clawchat ws queued event=%s id=%s state=%s queue_size=%d",
-            event,
-            frame_id,
-            self._state.value,
-            len(self._send_queue),
-        )
+        self._enqueue_frame(queued)
+        if queued.ack_future is not None:
+            await queued.ack_future
 
     @property
     def is_ready(self) -> bool:
@@ -334,22 +358,30 @@ class ClawChatConnection:
         self._flushing_send_queue = True
         try:
             while self._send_queue:
-                text = self._send_queue[0]
-                try:
-                    frame = decode_frame(text)
-                    event = str(frame.get("event") or frame.get("type") or "unknown")
-                    frame_id = str(frame.get("id") or frame.get("trace_id") or "")
-                except (TypeError, ValueError):
-                    event = "malformed"
-                    frame_id = ""
                 logger.info(
-                    "clawchat ws flush queued event=%s id=%s remaining=%d",
-                    event,
-                    frame_id,
-                    len(self._send_queue),
+                    format_ws_log(
+                        event="send_flush",
+                        account_id=self._account_id,
+                        attempt=self._attempt,
+                        reconnect_count=self._reconnect_count,
+                        state=ConnectionState.READY.value,
+                        action="send",
+                        fields=[
+                            ("event_name", self._send_queue[0].event_name),
+                            ("trace_id", self._send_queue[0].trace_id),
+                            ("chat_id", self._send_queue[0].chat_id),
+                            ("remaining", len(self._send_queue) - 1),
+                        ],
+                    )
                 )
-                await ws.send(text)
-                self._send_queue.popleft()
+                queued = self._send_queue[0]
+                try:
+                    await ws.send(queued.text)
+                    self._start_ack_timer_if_needed(queued)
+                    self._send_queue.popleft()
+                except Exception:
+                    self._log_send_failed(queued)
+                    raise
         finally:
             self._flushing_send_queue = False
 
@@ -414,6 +446,9 @@ class ClawChatConnection:
                 body_len,
             )
             await self._on_message(frame)
+            return
+        if self._state == ConnectionState.READY and ftype in (None, "event") and frame.get("event") == "message.ack":
+            self._handle_ack(frame)
             return
         logger.info(
             "clawchat ws ignored event=%s type=%s state=%s",
@@ -510,14 +545,175 @@ class ClawChatConnection:
             self._pending_connect_id,
         )
 
-    def _enqueue_text(self, text: str, *, front: bool = False) -> None:
+    def _queued_frame(
+        self,
+        frame: dict[str, Any],
+        text: str,
+        *,
+        wait_for_ack: bool,
+    ) -> _QueuedFrame:
+        event_name = str(frame.get("event") or frame.get("type") or "unknown")
+        trace_id = str(frame.get("trace_id") or frame.get("id") or "")
+        chat_id = str(frame.get("chat_id") or "")
+        ack_future = None
+        if wait_for_ack and event_name in ACKABLE_EVENTS:
+            ack_future = asyncio.get_running_loop().create_future()
+        return _QueuedFrame(
+            text=text,
+            event_name=event_name,
+            trace_id=trace_id,
+            chat_id=chat_id,
+            ack_future=ack_future,
+        )
+
+    def _enqueue_frame(
+        self,
+        queued: _QueuedFrame,
+        *,
+        front: bool = False,
+        log_queued: bool = True,
+    ) -> None:
         if len(self._send_queue) >= SEND_QUEUE_MAX:
-            logger.warning("clawchat send queue full, dropping oldest frame")
-            if front:
-                self._send_queue.pop()
-            else:
-                self._send_queue.popleft()
+            dropped = self._send_queue.pop() if front else self._send_queue.popleft()
+            if dropped.ack_future is not None and not dropped.ack_future.done():
+                dropped.ack_future.set_exception(asyncio.QueueFull())
+            logger.info(
+                format_ws_log(
+                    event="send_queue_drop",
+                    account_id=self._account_id,
+                    attempt=self._attempt,
+                    reconnect_count=self._reconnect_count,
+                    state=self._state.value,
+                    action="drop_oldest",
+                    fields=[
+                        ("event_name", dropped.event_name),
+                        ("trace_id", dropped.trace_id),
+                        ("chat_id", dropped.chat_id),
+                        ("queue_size", len(self._send_queue)),
+                        ("queue_max", SEND_QUEUE_MAX),
+                    ],
+                )
+            )
         if front:
-            self._send_queue.appendleft(text)
+            self._send_queue.appendleft(queued)
         else:
-            self._send_queue.append(text)
+            self._send_queue.append(queued)
+        if log_queued:
+            logger.info(
+                format_ws_log(
+                    event="send_queued",
+                    account_id=self._account_id,
+                    attempt=self._attempt,
+                    reconnect_count=self._reconnect_count,
+                    state=self._state.value,
+                    action="queue",
+                    fields=[
+                        ("event_name", queued.event_name),
+                        ("trace_id", queued.trace_id),
+                        ("chat_id", queued.chat_id),
+                        ("queue_size", len(self._send_queue)),
+                    ],
+                )
+            )
+
+    def _log_send_failed(self, queued: _QueuedFrame) -> None:
+        logger.info(
+            format_ws_log(
+                event="send_failed",
+                account_id=self._account_id,
+                attempt=self._attempt,
+                reconnect_count=self._reconnect_count,
+                state=self._state.value,
+                action="requeue_reconnect",
+                fields=[
+                    ("event_name", queued.event_name),
+                    ("trace_id", queued.trace_id),
+                    ("chat_id", queued.chat_id),
+                    ("queue_size", len(self._send_queue)),
+                ],
+            )
+        )
+
+    def _start_ack_timer_if_needed(self, queued: _QueuedFrame) -> None:
+        if queued.ack_future is None:
+            return
+        if queued.trace_id in self._pending_acks:
+            return
+
+        async def timeout_ack() -> None:
+            try:
+                await asyncio.sleep(self._cfg.ack_timeout_ms / 1000.0)
+            except asyncio.CancelledError:
+                raise
+            pending = self._pending_acks.pop(queued.trace_id, None)
+            if pending is None or pending.future.done():
+                return
+            logger.info(
+                format_ws_log(
+                    event="ack_timeout",
+                    account_id=self._account_id,
+                    attempt=self._attempt,
+                    reconnect_count=self._reconnect_count,
+                    state=self._state.value,
+                    action="reject_no_reconnect",
+                    fields=[
+                        ("event_name", pending.event_name),
+                        ("trace_id", pending.trace_id),
+                        ("chat_id", pending.chat_id),
+                        ("timeout_ms", self._cfg.ack_timeout_ms),
+                    ],
+                )
+            )
+            pending.future.set_exception(asyncio.TimeoutError())
+
+        timeout_task = asyncio.create_task(timeout_ack(), name="clawchat-ack-timeout")
+        queued.ack_timeout_task = timeout_task
+        self._pending_acks[queued.trace_id] = _PendingAck(
+            event_name=queued.event_name,
+            trace_id=queued.trace_id,
+            chat_id=queued.chat_id,
+            future=queued.ack_future,
+            timeout_task=timeout_task,
+        )
+
+    def _handle_ack(self, frame: dict[str, Any]) -> None:
+        trace_id = str(frame.get("trace_id") or frame.get("id") or "")
+        chat_id = str(frame.get("chat_id") or "")
+        pending = self._pending_acks.pop(trace_id, None)
+        if pending is None:
+            logger.info(
+                format_ws_log(
+                    event="ack_unmatched",
+                    account_id=self._account_id,
+                    attempt=self._attempt,
+                    reconnect_count=self._reconnect_count,
+                    state=self._state.value,
+                    action="ignore",
+                    fields=[
+                        ("trace_id", trace_id),
+                        ("chat_id", chat_id),
+                    ],
+                )
+            )
+            return
+        pending.timeout_task.cancel()
+        payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+        message_id = payload.get("message_id") if isinstance(payload.get("message_id"), str) else None
+        logger.info(
+            format_ws_log(
+                event="ack_received",
+                account_id=self._account_id,
+                attempt=self._attempt,
+                reconnect_count=self._reconnect_count,
+                state=self._state.value,
+                action="resolve",
+                fields=[
+                    ("event_name", pending.event_name),
+                    ("trace_id", trace_id),
+                    ("chat_id", pending.chat_id or chat_id),
+                    ("message_id", message_id),
+                ],
+            )
+        )
+        if not pending.future.done():
+            pending.future.set_result(frame)
