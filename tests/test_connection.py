@@ -75,7 +75,7 @@ async def test_challenge_endpoint_sends_connect_before_ready(monkeypatch):
         pass
 
     conn = ClawChatConnection(
-        _cfg(websocket_url="ws://company.newbaselab.com:10086/ws"),
+        _cfg(websocket_url="wss://app.clawling.com/ws"),
         on_message=on_message,
     )
     await conn.start()
@@ -386,8 +386,53 @@ async def test_hello_fail_logs_auth_failed_and_stops_reconnect(monkeypatch, capl
     messages = [record.getMessage() for record in caplog.records]
     assert (
         "clawchat.ws event=auth_failed account_id=default attempt=1 reconnect_count=0 "
-        f"state=auth_failed action=stop_reconnect trace_id={req['trace_id']} reason=authentication failed"
+        f"state=auth_failed action=stop_reconnect trace_id={req['trace_id']} "
+        f"pending_id={req['trace_id']} trace_id_match=true reason=authentication failed"
     ) in messages
+
+
+async def test_hello_fail_with_missing_trace_id_still_stops_reconnect(monkeypatch, caplog):
+    srv = FakeClawChatServer()
+    monkeypatch.setattr("clawchat_gateway.connection._ws_connect", srv.connect)
+
+    async def on_message(_frame):
+        pass
+
+    conn = ClawChatConnection(_cfg(), on_message=on_message)
+    with caplog.at_level("INFO", logger="clawchat_gateway.connection"):
+        await conn.start()
+        try:
+            await _wait_for_connect(srv)
+            srv.enqueue_from_server(
+                {
+                    "version": "2",
+                    "event": "connect.challenge",
+                    "trace_id": "challenge",
+                    "payload": {"nonce": "N"},
+                }
+            )
+            req = await srv.read_client_frame(timeout=1.0)
+            srv.enqueue_from_server(
+                {
+                    "version": "2",
+                    "event": "hello-fail",
+                    "trace_id": "",
+                    "payload": {"reason": "authentication failed"},
+                }
+            )
+            await _wait_until(lambda: conn._state.value in {"auth_failed", "closed"})
+            await asyncio.sleep(0.05)
+            assert len(srv.connect_calls) == 1
+        finally:
+            await conn.stop()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert (
+        "clawchat.ws event=auth_failed account_id=default attempt=1 reconnect_count=0 "
+        f"state=auth_failed action=stop_reconnect trace_id=- "
+        f"pending_id={req['trace_id']} trace_id_match=false reason=authentication failed"
+    ) in messages
+    assert not any("handshake response ignored" in m for m in messages)
 
 
 async def test_queued_outbound_frame_flushes_after_ready(monkeypatch):

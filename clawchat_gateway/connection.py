@@ -316,13 +316,20 @@ class ClawChatConnection:
             await self._read_task
         finally:
             self._cancel_stable_ready_reset()
-            if self._read_task is not None and not self._read_task.done():
-                self._read_task.cancel()
+            read_task = self._read_task
+            if read_task is not None:
+                if not read_task.done():
+                    read_task.cancel()
+                try:
+                    await read_task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
             try:
                 await ws.close()
             except Exception:  # noqa: BLE001
                 pass
             self._ws = None
+            self._read_task = None
         if not self._stopping and not self._auth_failed:
             logger.info(
                 format_ws_log(
@@ -596,13 +603,13 @@ class ClawChatConnection:
             if self._hello_wait is not None and not self._hello_wait.done():
                 self._hello_wait.set_result(True)
             return
-        if (
-            self._pending_connect_id
-            and frame.get("event") == "hello-fail"
-            and frame.get("trace_id") == self._pending_connect_id
-        ):
+        if frame.get("event") == "hello-fail":
             payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
             reason = payload.get("reason") if isinstance(payload.get("reason"), str) else None
+            frame_trace_id = frame.get("trace_id")
+            trace_id_match = bool(
+                self._pending_connect_id and frame_trace_id == self._pending_connect_id
+            )
             self._auth_failed = True
             self._stopping = True
             await self._set_state(ConnectionState.AUTH_FAILED)
@@ -615,7 +622,9 @@ class ClawChatConnection:
                     state=ConnectionState.AUTH_FAILED.value,
                     action="stop_reconnect",
                     fields=[
-                        ("trace_id", frame.get("trace_id")),
+                        ("trace_id", frame_trace_id),
+                        ("pending_id", self._pending_connect_id),
+                        ("trace_id_match", trace_id_match),
                         ("reason", reason),
                     ],
                 )

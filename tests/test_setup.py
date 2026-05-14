@@ -19,7 +19,7 @@ def test_setup_clawchat_platform_activates_without_restart(monkeypatch, capsys):
             "ok": True,
             "user_id": "agent-1",
             "base_url": base_url,
-            "websocket_url": "ws://company.newbaselab.com:10086/ws",
+            "websocket_url": "wss://app.clawling.com/ws",
             "token": "***",
             "refresh_token": "***",
         }

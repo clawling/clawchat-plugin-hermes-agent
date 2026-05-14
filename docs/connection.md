@@ -73,7 +73,7 @@ Final state is `CLOSED`.
 
 1. Open the WebSocket with headers `Authorization: Bearer <token>`, `X-Device-Id: <device_id>`, subprotocols `["clawchat.v1", f"bearer.{token}"]`, `ping_interval` and `ping_timeout` from config.
 2. Transition to `HANDSHAKING`, answer `connect.challenge` with the msghub `ConnectPayload`, and wait for matching `hello-ok`.
-3. On matching `hello-fail`, log `auth_failed`, set state to `AUTH_FAILED`, close the socket, and stop reconnect attempts until credentials are refreshed.
+3. On any `hello-fail` while `HANDSHAKING`, log `auth_failed` (with `trace_id_match=true|false` for diagnostic) carrying `payload.reason`, set state to `AUTH_FAILED`, close the socket, and stop reconnect attempts until credentials are refreshed. The `trace_id` match is logged but not required, because `hello-fail` is terminal and only one `connect` is in flight per session — strict matching would let any server bug that omits the echo (or any close before the match runs) hide the rejection reason behind a reconnect storm.
 4. Record `ready_started_at`, log `handshake_ok`, `_flush_send_queue(ws)`, then `await self._read_task` (idle until the server disconnects).
 4. `finally` branch: cancel read task, close ws.
 5. Cancel the stable-ready reset timer if the session disconnects before it fires.
@@ -83,7 +83,7 @@ Final state is `CLOSED`.
 | Method | Purpose |
 |---|---|
 | `async _handle_challenge(frame)` | Extract the challenge nonce, build a `connect` request with token, nonce, stable device id, and `{multi_device, device_replay}` capabilities, and send it. |
-| `async _maybe_finish_handshake(frame)` | Resolve the hello-wait future only when the `hello-ok` response matches the pending `connect` trace id; matching `hello-fail` stops reconnect. |
+| `async _maybe_finish_handshake(frame)` | Resolve the hello-wait future to `True` only when the `hello-ok` response matches the pending `connect` trace id. Any `hello-fail` received while `HANDSHAKING` resolves to `False`, sets `AUTH_FAILED`, and stops reconnect (terminal frame, one connect in flight); the `trace_id` match is logged via `trace_id_match` for diagnostic but not gated. |
 
 ### Send queue
 
