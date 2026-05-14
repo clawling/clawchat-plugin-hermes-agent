@@ -10,6 +10,7 @@ from urllib.parse import urlparse, urlunparse
 import yaml
 
 from clawchat_gateway.api_client import DEFAULT_BASE_URL, DEFAULT_WEBSOCKET_URL, ClawChatApiClient
+from clawchat_gateway.restart import schedule_gateway_restart
 
 
 def _hermes_config_api() -> dict[str, Callable[..., Any]] | None:
@@ -195,6 +196,27 @@ async def activate(code: str, *, base_url: str) -> dict[str, Any]:
     )
 
 
+async def activate_and_maybe_restart(
+    code: str,
+    *,
+    base_url: str,
+    restart: bool,
+    restart_delay_seconds: int = 2,
+) -> dict[str, Any]:
+    payload = await activate(code.strip(), base_url=base_url)
+    payload["ok"] = True
+    if restart:
+        payload["restart_scheduled"] = True
+        payload["restart_delay_seconds"] = restart_delay_seconds
+        payload["restart_command"] = schedule_gateway_restart(
+            delay_seconds=restart_delay_seconds
+        )
+        payload["restart_message"] = (
+            "ClawChat activation is saved. Hermes restart has been scheduled in the background."
+        )
+    return payload
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m clawchat_gateway.activate")
     parser.add_argument("code", help="ClawChat activation code")
@@ -205,16 +227,13 @@ def main(argv: list[str] | None = None) -> int:
         help="Skip the detached `hermes gateway restart` dispatched after activation.",
     )
     args = parser.parse_args(argv)
-    payload = asyncio.run(activate(args.code.strip(), base_url=args.base_url))
-    if not args.no_restart:
-        from clawchat_gateway.restart import schedule_gateway_restart
-
-        payload["restart_scheduled"] = True
-        payload["restart_delay_seconds"] = 2
-        payload["restart_command"] = schedule_gateway_restart(delay_seconds=2)
-        payload["restart_message"] = (
-            "ClawChat activation saved. Hermes gateway restart dispatched in the background."
+    payload = asyncio.run(
+        activate_and_maybe_restart(
+            args.code,
+            base_url=args.base_url,
+            restart=not args.no_restart,
         )
+    )
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
