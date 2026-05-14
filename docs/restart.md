@@ -5,7 +5,10 @@ Schedules a detached `hermes gateway restart` after activation so the gateway pi
 Used by:
 
 - `clawchat_gateway.activate.main` — the CLI dispatches a restart unless `--no-restart` is passed.
-- `_handle_clawchat_activate` in the repo-root `__init__.py` — the Hermes tool handler dispatches a restart after `activate(...)` returns.
+- `clawchat_gateway.cli.handle_clawchat_cli` — the native `hermes clawchat activate CODE` command dispatches a restart unless `--no-restart` is passed.
+- `_handle_clawchat_activate` in the repo-root `__init__.py` — the Hermes tool handler dispatches a restart through `activate_and_maybe_restart(..., restart=True)`.
+
+Not used by `clawchat_gateway.setup.setup_clawchat_platform`, which calls activation with `restart=False` so Hermes gateway setup can decide the final service action after the full setup flow: restart a running gateway, start an installed stopped gateway, or install/start a service when needed.
 
 ## Helpers
 

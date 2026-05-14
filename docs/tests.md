@@ -41,6 +41,17 @@ When you add a new import from `gateway.*` in production code, extend `fake_herm
 - `test_persist_activation_writes_secrets_to_env_and_config_without_secrets` — monkeypatches `$HERMES_HOME`; calls `activate.persist_activation` and checks that `.env` has the ClawChat tokens while `config.yaml` has enabled ClawChat, non-secret `extra` keys, and streaming/display defaults.
 - `test_persist_activation_removes_stale_config_secrets_and_refresh_env` — ensures a reactivation removes old YAML token fields, updates `CLAWCHAT_TOKEN`, removes stale `CLAWCHAT_REFRESH_TOKEN` when no refresh token is returned, and preserves unrelated `.env` entries.
 - `test_persist_activation_uses_hermes_config_helpers_when_available` — injects a fake `hermes_cli.config` module and verifies activation persistence delegates to Hermes' `save_env_value`, `remove_env_value`, and `save_config` helpers when they are importable.
+- `activate_and_maybe_restart` coverage verifies the shared activation wrapper appends `ok`, schedules restart metadata and command when requested, and leaves restart scheduling untouched when `restart=False`.
+
+### `tests/test_setup.py`
+
+- `setup_clawchat_platform` prompts for activation code and optional base URL, calls `activate_and_maybe_restart(..., restart=False)`, prints the configured user/base/WebSocket summary, and tells the user Hermes gateway setup will handle the final gateway service step after finishing.
+- Blank activation code exits cleanly with a skip message and no activation call.
+
+### `tests/test_clawchat_cli.py`
+
+- `setup_clawchat_cli` parses `hermes clawchat activate CODE` defaults and `--base-url` / `--no-restart` options.
+- `handle_clawchat_cli` calls `activate_and_maybe_restart(..., restart=True)` by default, prints the activation and restart status lines, and honors `--no-restart` by omitting the restart line.
 
 ### `tests/test_group_context.py`
 
@@ -104,16 +115,19 @@ Imports the repo-root `__init__.py` via a dummy `_Ctx` context and verifies:
 
 - `register(ctx)` adds the seven ClawChat tools and a skill.
 - Tool handlers accept and echo `task_id`.
+- `_handle_clawchat_activate` delegates to `activate_and_maybe_restart(..., restart=True)`.
 
 ### `tests/test_plugin.py`
 
 Comprehensive registration / schema / behavior tests for the repo-root `__init__.py`. Defines a `_Ctx` (tools + skills + hooks) and a richer `_PlatformCtx` (adds `register_platform`). Coverage:
 
 - `test_plugin_registers_clawchat_platform_with_registry` — `register(ctx)` calls `ctx.register_platform("clawchat", ...)` with the expected label, callables (`adapter_factory`, `check_fn`, `validate_config`, `is_connected`), `required_env`, allowlist env names, and a platform hint that mentions `MEDIA:/absolute/local/path` and forbids `MEDIA:https://`.
+- `test_plugin_platform_setup_fn_delegates_to_gateway_setup_without_installer` — the registered platform `setup_fn` delegates to `clawchat_gateway.setup.setup_clawchat_platform` without invoking the legacy installer.
 - `test_plugin_platform_check_only_verifies_dependencies` — the registered `check_fn` returns `True` when `_clawchat_dependencies_available` is True, **without** invoking `_clawchat_connection_configured` (separation of dependency check from credential validation).
 - `test_plugin_platform_validation_falls_back_to_home_config` — `validate_config(SimpleNamespace(extra={}))` returns `True` when the merged `$HERMES_HOME/config.yaml` supplies `websocket_url` and the `.env` supplies `CLAWCHAT_TOKEN`.
 - `test_plugin_adapter_factory_merges_home_config` — adapter factory merges `extra` from `$HERMES_HOME/config.yaml` so a sparse runtime config still produces a fully populated `ClawChatConfig`.
 - `test_plugin_registers_all_tools` — registers exactly the seven `clawchat_*` tools, all `is_async=True`.
+- `test_plugin_registers_native_clawchat_cli_command` — `register(ctx)` exposes the native `clawchat` plugin CLI command through `ctx.register_cli_command`.
 - `test_plugin_tool_descriptions_forbid_execute_fallbacks` — every tool description includes `"Do not use execute"`.
 - `test_upload_media_tool_description_is_link_only_not_current_chat_delivery` — `clawchat_upload_media_file` description distinguishes "shareable URL" upload vs `MEDIA:/absolute/local/path` for current-chat delivery.
 - `test_clawchat_skill_uses_plugin_tools_not_shell_commands` / `…_distinguishes_media_delivery_from_media_link_uploads` — direct text assertions on `skills/clawchat/SKILL.md` keep the skill aligned with the tool registration.

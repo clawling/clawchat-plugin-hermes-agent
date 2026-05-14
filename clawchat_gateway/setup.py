@@ -33,4 +33,7 @@ def setup_clawchat_platform() -> None:
     print(f"  User ID: {result.get('user_id')}")
     print(f"  Base URL: {result.get('base_url')}")
     print(f"  WebSocket URL: {result.get('websocket_url')}")
-    print("Hermes gateway setup will offer to restart the gateway after you finish.")
+    print(
+        "Hermes gateway setup will handle the final gateway service step "
+        "after you finish."
+    )

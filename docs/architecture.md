@@ -9,7 +9,7 @@ The package `clawchat_gateway` is also pip-installable (`pyproject.toml` → `[p
 ## Boot sequence
 
 1. Hermes loads the repo root as a plugin. Module-level code in `__init__.py` prepends the plugin root to `sys.path` so absolute imports of `clawchat_gateway.*` resolve both in this process and in the `python -m clawchat_gateway.activate` subprocess. Hermes then calls `register(ctx)`.
-2. `_register_platform(ctx)` calls `ctx.register_platform(...)` with the ClawChat adapter factory, config validation hooks, allowlist env vars, and platform prompt hint. If the platform registry API is not available, `register(ctx)` falls back to `_install_gateway()` for legacy Hermes builds.
+2. `_register_platform(ctx)` calls `ctx.register_platform(...)` with the ClawChat adapter factory, `setup_fn`, config validation hooks, allowlist env vars, and platform prompt hint. If the platform registry API is not available, `register(ctx)` falls back to `_install_gateway()` for legacy Hermes builds.
 3. `_configure_runtime_defaults()` seeds ClawChat allow-all / streaming defaults in `$HERMES_HOME`.
 4. `_register_tools(ctx)` registers seven tools:
    - `clawchat_activate` — exchange an activation code for ClawChat credentials.
@@ -19,8 +19,9 @@ The package `clawchat_gateway` is also pip-installable (`pyproject.toml` → `[p
    - `clawchat_update_account_profile` — update nickname, avatar URL, and/or bio.
    - `clawchat_upload_avatar_image` — upload a local avatar image and return a hosted URL.
    - `clawchat_upload_media_file` — upload a local media/file attachment and return a public URL.
-5. `ctx.register_hook("pre_gateway_dispatch", _clawchat_pre_gateway_dispatch)` installs the self-echo guard (see "Self-echo guard" below).
-6. `ctx.register_skill("clawchat", skills/clawchat/SKILL.md)` attaches the skill.
+5. `_register_cli_commands(ctx)` exposes `hermes clawchat activate CODE` on Hermes builds that support plugin CLI commands.
+6. `ctx.register_hook("pre_gateway_dispatch", _clawchat_pre_gateway_dispatch)` installs the self-echo guard (see "Self-echo guard" below).
+7. `ctx.register_skill("clawchat", skills/clawchat/SKILL.md)` attaches the skill.
 
 When the legacy fallback runs in step 3, `_refresh_gateway_module_cache()` is called immediately after `install.main(...)` returns. It calls `importlib.invalidate_caches()` and reloads `gateway.config`, `gateway.run`, and `clawchat_gateway.adapter` — necessary because hermes-agent may have already imported `gateway.config` (binding the pre-patch `Platform` enum) before plugin discovery ran.
 
@@ -53,7 +54,7 @@ ClawChatAdapter ----send----> ClawChatConnection (WebSocket)  <----> ClawChat se
 - **Two supported WebSocket paths.** If the WebSocket URL path is `/v1/ws`, the legacy hello/challenge handshake is skipped (realtime subprotocol). Otherwise the adapter does a `connect` frame with HMAC `sign` over `client_id|nonce` and waits for `hello-ok`.
 - **Streaming with deltas.** `stream_buffer.compute_delta(prev, curr)` produces the appended chunk so `message.add` carries only the delta. If the new text isn't a prefix-extension of the previous, the full text is resent.
 - **Filter-before-send.** Adapter strips `<think>...</think>` blocks and tool-invocation fence/tag blocks out of visible output unless `show_think_output` / `show_tools_output` are explicitly enabled.
-- **Activation self-restart.** After `clawchat_activate` writes `CLAWCHAT_TOKEN` / `CLAWCHAT_REFRESH_TOKEN` to `~/.hermes/.env` and non-secret platform settings to `~/.hermes/config.yaml`, the handler calls `restart.schedule_gateway_restart(delay_seconds=2)`. That helper resolves `HERMES_HOME` / `HERMES_DIR` / the hermes binary path and spawns a detached `sh -lc 'sleep 2; HERMES_HOME=… HERMES_DIR=… <hermes-bin> gateway restart'` with `start_new_session=True` so the restart survives the parent worker being torn down. See [restart.md](./restart.md).
+- **Shared activation helper.** `activate_and_maybe_restart(...)` is used by the `clawchat_activate` tool, `hermes clawchat activate CODE`, `python -m clawchat_gateway.activate CODE`, and `hermes gateway setup`. Tool and CLI activation schedule a detached restart by default; gateway setup passes `restart=False` because Hermes owns the final service action after setup: restart a running gateway, start an installed stopped gateway, or install/start a service when needed. See [activate.md](./activate.md), [cli.md](./cli.md), [setup.md](./setup.md), and [restart.md](./restart.md).
 - **Self-echo guard.** `_clawchat_pre_gateway_dispatch` (registered as a `pre_gateway_dispatch` hook) drops inbound frames whose sender is the bot's own ClawChat `user_id`. Without it, hermes-agent's interrupt-on-new-message logic treats the WebSocket echo of the bot's own outbound chunks as a fresh user message and cancels the in-flight turn (interrupt loop). The bot user_id is re-resolved on every call so it picks up fresh activation, and the platform/config lookup accepts enum, dynamic enum, and string `"clawchat"` keys.
 - **Group covenant injection.** Inbound group messages get a ClawChat covenant through `MessageEvent.channel_prompt`, which Hermes applies as an ephemeral system prompt at API-call time and does not persist to transcript history. Direct messages do not receive this group covenant. Activation-intent group messages compose the group covenant with the activation prompt instead of overwriting either one.
 

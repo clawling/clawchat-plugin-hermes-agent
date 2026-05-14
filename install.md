@@ -33,6 +33,25 @@ On Hermes v0.12.0 and newer this loads ClawChat as a pluggable gateway platform.
 
 ## 4. Activate and dispatch the restart — one terminal call, then stop
 
+Prefer the native plugin CLI command registered by Hermes:
+
+```bash
+hermes clawchat activate CLAWCHAT_CODE_GOES_HERE
+```
+
+Replace `CLAWCHAT_CODE_GOES_HERE` with the activation code the user provided in their original message. The code is one-time-use. If `hermes clawchat` is not recognized, use the fallback block below. If the native command is recognized but activation itself fails, surface stderr verbatim and ask for a fresh code instead of retrying.
+
+`hermes clawchat activate CODE` writes `CLAWCHAT_TOKEN` and `CLAWCHAT_REFRESH_TOKEN` to `$HERMES_HOME/.env`, writes non-secret ClawChat platform config to `config.yaml`, and dispatches a detached `hermes gateway restart` so the gateway picks up the new credentials. When it exits 0 with:
+
+```text
+clawchat: activation complete for <user_id>
+clawchat: Hermes restart scheduled in 2s
+```
+
+the install is done. Reply once: "ClawChat is activated and the gateway is restarting in the background; it will be live in a few seconds."
+
+Use the fallback block below only when `hermes clawchat` is not available in the installed Hermes build.
+
 Run the block below in **one** tool:'terminal' invocation. Replace `CLAWCHAT_CODE_GOES_HERE` with the activation code the user provided in their original message — pass it as a positional argument to `clawchat_gateway.activate` (no stdin pipe, no `echo | …`). The code is one-time-use; if the command fails, surface the stderr verbatim and ask for a fresh code instead of retrying.
 
 ```bash

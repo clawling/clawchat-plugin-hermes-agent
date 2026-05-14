@@ -32,6 +32,8 @@ Per-module catalogue of structures and functions. For runtime flow and the boot 
 | `clawchat_gateway/config.py` | `ClawChatConfig` dataclass + env-var resolution | [config.md](./config.md) |
 | `clawchat_gateway/api_client.py` | REST HTTP client (`ClawChatApiClient`) | [api-client.md](./api-client.md) |
 | `clawchat_gateway/activate.py` | Activation CLI (`/v1/agents/connect`) | [activate.md](./activate.md) |
+| `clawchat_gateway/cli.py` | Native Hermes `hermes clawchat ...` command wiring | [cli.md](./cli.md) |
+| `clawchat_gateway/setup.py` | Interactive Hermes gateway setup hook | [setup.md](./setup.md) |
 | `clawchat_gateway/restart.py` | `schedule_gateway_restart` — detached `hermes gateway restart` | [restart.md](./restart.md) |
 | `clawchat_gateway/install.py` | Runtime default helpers + legacy anchor-patch installer | [installer.md](./installer.md) |
 

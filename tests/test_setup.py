@@ -36,6 +36,8 @@ def test_setup_clawchat_platform_activates_without_restart(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "ClawChat activation complete" in out
     assert "agent-1" in out
+    assert "Hermes gateway setup will handle the final gateway service step" in out
+    assert "will offer to restart" not in out
     assert prompts[0].startswith("ClawChat activation code")
     assert prompts[1].startswith("ClawChat API base URL")
 
