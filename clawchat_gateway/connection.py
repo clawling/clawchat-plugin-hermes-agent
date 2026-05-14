@@ -25,6 +25,7 @@ from clawchat_gateway.protocol import (
 )
 from clawchat_gateway.device_id import get_device_id
 from clawchat_gateway.ws_log import format_ws_log
+from clawchat_gateway.ws_state import ReconnectTracker
 
 logger = logging.getLogger("clawchat_gateway.connection")
 
@@ -70,6 +71,7 @@ class ClawChatConnection:
         self._ws: Any = None
         self._stopping = False
         self._auth_failed = False
+        self._tracker = ReconnectTracker()
         self._attempt = 0
         self._reconnect_count = 0
         self._supervisor_task: asyncio.Task[None] | None = None
@@ -166,6 +168,7 @@ class ClawChatConnection:
         max_delay_seconds = self._cfg.reconnect_max_delay_ms / 1000.0
         max_retries = self._cfg.reconnect_max_retries
         retries = 0
+        reconnect_reason = "-"
         while not self._stopping:
             try:
                 await self._set_state(ConnectionState.CONNECTING)
@@ -173,10 +176,40 @@ class ClawChatConnection:
                 if stable_session:
                     delay_seconds = self._cfg.reconnect_initial_delay_ms / 1000.0
                     retries = 0
+                    self._tracker.reset_reconnect_count()
+                    snapshot = self._tracker.snapshot()
+                    self._attempt = snapshot.attempt
+                    self._reconnect_count = snapshot.reconnect_count
+                    logger.info(
+                        format_ws_log(
+                            event="reconnect_backoff_reset",
+                            account_id=self._account_id,
+                            attempt=snapshot.attempt,
+                            reconnect_count=snapshot.reconnect_count,
+                            state=ConnectionState.READY.value,
+                            action="reset",
+                            fields=[("stable_ms", 5000)],
+                        )
+                    )
+                reconnect_reason = "-"
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
-                logger.warning("clawchat connection lost: %s", exc)
+                reconnect_reason = str(exc) or type(exc).__name__
+                logger.warning(
+                    format_ws_log(
+                        event="connection_lost",
+                        account_id=self._account_id,
+                        attempt=self._attempt,
+                        reconnect_count=self._reconnect_count,
+                        state=self._state.value,
+                        action="reconnect",
+                        fields=[
+                            ("code", "-"),
+                            ("reason", reconnect_reason),
+                        ],
+                    )
+                )
             if self._stopping:
                 break
             retries += 1
@@ -184,18 +217,48 @@ class ClawChatConnection:
                 break
             await self._set_state(ConnectionState.RECONNECTING)
             jitter = random.uniform(0.0, delay_seconds * self._cfg.reconnect_jitter_ratio)
-            await asyncio.sleep(delay_seconds + jitter)
+            delay_with_jitter = delay_seconds + jitter
+            self._tracker.mark_reconnect_scheduled()
+            next_reconnect_count = self._tracker.snapshot().reconnect_count + 1
+            logger.info(
+                format_ws_log(
+                    event="reconnect_scheduled",
+                    account_id=self._account_id,
+                    attempt=self._attempt,
+                    reconnect_count=next_reconnect_count,
+                    state=ConnectionState.RECONNECTING.value,
+                    action="wait",
+                    fields=[
+                        ("delay_ms", int(delay_with_jitter * 1000)),
+                        ("max_delay_ms", self._cfg.reconnect_max_delay_ms),
+                        ("reason", reconnect_reason),
+                    ],
+                )
+            )
+            await asyncio.sleep(delay_with_jitter)
             delay_seconds = min(delay_seconds * 2.0, max_delay_seconds)
         await self._set_state(ConnectionState.CLOSED)
 
     async def _run_one_connection(self) -> bool:
+        attempt, reconnect_count = self._tracker.next_connect()
+        self._attempt = attempt
+        self._reconnect_count = reconnect_count
         logger.info(
-            "clawchat ws connecting url=%s heartbeat_ms=%d/%d",
-            self._cfg.websocket_url,
-            self._cfg.heartbeat_interval_ms,
-            self._cfg.heartbeat_timeout_ms,
+            format_ws_log(
+                event="connect_start",
+                account_id=self._account_id,
+                attempt=attempt,
+                reconnect_count=reconnect_count,
+                state=ConnectionState.CONNECTING.value,
+                action="connect",
+                fields=[
+                    ("url", self._cfg.websocket_url),
+                    ("queue_size", len(self._send_queue)),
+                ],
+            )
         )
-        self._attempt += 1
+        loop = asyncio.get_running_loop()
+        handshake_started_at = loop.time()
         ws = await _ws_connect(
             self._cfg.websocket_url,
             additional_headers={
@@ -211,7 +274,6 @@ class ClawChatConnection:
         ready_started_at: float | None = None
         await self._set_state(ConnectionState.HANDSHAKING)
 
-        loop = asyncio.get_running_loop()
         self._hello_wait = loop.create_future()
         self._read_task = asyncio.create_task(self._read_loop(ws), name="clawchat-read")
         try:
@@ -222,6 +284,22 @@ class ClawChatConnection:
             if not hello_ok or self._auth_failed:
                 return False
             await self._set_state(ConnectionState.READY)
+            elapsed_ms = int((loop.time() - handshake_started_at) * 1000)
+            logger.info(
+                format_ws_log(
+                    event="handshake_ok",
+                    account_id=self._account_id,
+                    attempt=self._attempt,
+                    reconnect_count=self._reconnect_count,
+                    state=ConnectionState.READY.value,
+                    action="flush_queue",
+                    fields=[
+                        ("trace_id", self._pending_connect_id),
+                        ("elapsed_ms", elapsed_ms),
+                        ("queue_size", len(self._send_queue)),
+                    ],
+                )
+            )
             ready_started_at = loop.time()
             await self._flush_send_queue(ws)
             await self._read_task
@@ -233,6 +311,21 @@ class ClawChatConnection:
             except Exception:  # noqa: BLE001
                 pass
             self._ws = None
+        if not self._stopping and not self._auth_failed:
+            logger.info(
+                format_ws_log(
+                    event="connection_lost",
+                    account_id=self._account_id,
+                    attempt=self._attempt,
+                    reconnect_count=self._reconnect_count,
+                    state=self._state.value,
+                    action="reconnect",
+                    fields=[
+                        ("code", "-"),
+                        ("reason", "-"),
+                    ],
+                )
+            )
         if ready_started_at is None:
             return False
         return (loop.time() - ready_started_at) >= BACKOFF_RESET_AFTER_SECONDS
@@ -336,6 +429,20 @@ class ClawChatConnection:
             return
         req_id = new_frame_id("trace")
         self._pending_connect_id = req_id
+        logger.info(
+            format_ws_log(
+                event="challenge_received",
+                account_id=self._account_id,
+                attempt=self._attempt,
+                reconnect_count=self._reconnect_count,
+                state=ConnectionState.HANDSHAKING.value,
+                action="send_connect",
+                fields=[
+                    ("challenge_trace_id", frame.get("trace_id")),
+                    ("has_nonce", bool(nonce)),
+                ],
+            )
+        )
         connect_req = build_connect_request(
             frame_id=req_id,
             token=self._cfg.token,
@@ -343,13 +450,25 @@ class ClawChatConnection:
             device_id=get_device_id(),
             capabilities={"multi_device": True, "device_replay": True},
         )
-        logger.info("clawchat ws handshake challenge received; sending connect id=%s", req_id)
         await self._ws.send(encode_frame(connect_req))
+        logger.info(
+            format_ws_log(
+                event="connect_sent",
+                account_id=self._account_id,
+                attempt=self._attempt,
+                reconnect_count=self._reconnect_count,
+                state=ConnectionState.HANDSHAKING.value,
+                action="await_hello",
+                fields=[
+                    ("trace_id", req_id),
+                    ("device_id", get_device_id()),
+                ],
+            )
+        )
 
     async def _maybe_finish_handshake(self, frame: dict[str, Any]) -> None:
         if self._pending_connect_id and is_hello_ok(frame, self._pending_connect_id):
             if self._hello_wait is not None and not self._hello_wait.done():
-                logger.info("clawchat ws handshake complete id=%s", self._pending_connect_id)
                 self._hello_wait.set_result(True)
             return
         if (

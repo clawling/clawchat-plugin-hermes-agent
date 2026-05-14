@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 
 import pytest
 
@@ -134,6 +135,41 @@ async def test_connection_reaches_ready_after_challenge_handshake(monkeypatch):
         assert "ready" in [s.value for s in seen]
     finally:
         await conn.stop()
+
+
+async def test_connection_logs_canonical_connect_and_handshake(monkeypatch, caplog):
+    srv = FakeClawChatServer()
+    monkeypatch.setattr("clawchat_gateway.connection._ws_connect", srv.connect)
+    monkeypatch.setattr("clawchat_gateway.connection.get_device_id", lambda: "hermes-test-device")
+
+    async def on_message(_frame):
+        pass
+
+    conn = ClawChatConnection(_cfg(), on_message=on_message)
+    with caplog.at_level(logging.INFO, logger="clawchat_gateway.connection"):
+        await conn.start()
+        try:
+            req = await _complete_handshake(srv)
+            await _wait_until(lambda: conn.is_ready)
+        finally:
+            await conn.stop()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert (
+        "clawchat.ws event=connect_start account_id=default attempt=1 "
+        "reconnect_count=0 state=connecting action=connect url=ws://fake/ws queue_size=0"
+    ) in messages
+    assert any(
+        re.fullmatch(
+            (
+                "clawchat\\.ws event=handshake_ok account_id=default attempt=1 "
+                "reconnect_count=0 state=ready action=flush_queue "
+                f"trace_id={re.escape(req['trace_id'])} elapsed_ms=\\d+ queue_size=0"
+            ),
+            message,
+        )
+        for message in messages
+    )
 
 
 async def test_challenge_frames_are_ignored(monkeypatch):
@@ -591,6 +627,66 @@ async def test_backoff_progresses_for_repeated_connect_failures(monkeypatch):
 
     assert len(srv.connect_calls) >= 3
     assert sleep_calls[:2] == [0.01, 0.02]
+
+
+async def test_reconnect_scheduled_uses_canonical_log(monkeypatch, caplog):
+    srv = FakeClawChatServer()
+    srv.set_auto_fail(True)
+    monkeypatch.setattr("clawchat_gateway.connection._ws_connect", srv.connect)
+    monkeypatch.setattr("clawchat_gateway.connection.random.uniform", lambda _a, _b: 0.0)
+
+    real_sleep = asyncio.sleep
+
+    async def recording_sleep(_secs: float):
+        await real_sleep(0)
+
+    monkeypatch.setattr("clawchat_gateway.connection.asyncio.sleep", recording_sleep)
+
+    async def on_message(_frame):
+        pass
+
+    conn = ClawChatConnection(_cfg(reconnect_max_retries=1), on_message=on_message)
+    with caplog.at_level(logging.INFO, logger="clawchat_gateway.connection"):
+        await conn.start()
+        try:
+            await _wait_until(lambda: len(srv.connect_calls) >= 2, sleep=real_sleep)
+        finally:
+            await conn.stop()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert (
+        "clawchat.ws event=reconnect_scheduled account_id=default attempt=1 "
+        "reconnect_count=1 state=reconnecting action=wait delay_ms=10 "
+        "max_delay_ms=40 reason=fake auto-fail"
+    ) in messages
+
+
+async def test_reconnect_backoff_reset_logs_after_stable_ready(monkeypatch, caplog):
+    srv = FakeClawChatServer()
+    monkeypatch.setattr("clawchat_gateway.connection._ws_connect", srv.connect)
+    monkeypatch.setattr("clawchat_gateway.connection.BACKOFF_RESET_AFTER_SECONDS", 0.0)
+
+    async def on_message(_frame):
+        pass
+
+    conn = ClawChatConnection(_cfg(), on_message=on_message)
+    with caplog.at_level(logging.INFO, logger="clawchat_gateway.connection"):
+        await conn.start()
+        try:
+            await _wait_for_ready(conn, srv)
+            await srv.disconnect()
+            await _wait_until(
+                lambda: any(
+                    record.getMessage()
+                    == (
+                        "clawchat.ws event=reconnect_backoff_reset account_id=default attempt=1 "
+                        "reconnect_count=0 state=ready action=reset stable_ms=5000"
+                    )
+                    for record in caplog.records
+                )
+            )
+        finally:
+            await conn.stop()
 
 
 async def test_backoff_progresses_for_flapping_ready_connections(monkeypatch):
