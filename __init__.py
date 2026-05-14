@@ -634,6 +634,22 @@ def _register_tools(ctx) -> None:
     )
 
 
+def _register_cli_commands(ctx) -> None:
+    register_cli_command = getattr(ctx, "register_cli_command", None)
+    if not callable(register_cli_command):
+        return
+
+    from clawchat_gateway.cli import handle_clawchat_cli, setup_clawchat_cli
+
+    register_cli_command(
+        "clawchat",
+        "Manage ClawChat integration",
+        setup_clawchat_cli,
+        handler_fn=handle_clawchat_cli,
+        description="Activate and manage the ClawChat Hermes gateway integration.",
+    )
+
+
 def register(ctx) -> None:
     if _register_platform(ctx):
         _configure_runtime_defaults()
@@ -650,6 +666,7 @@ def register(ctx) -> None:
             raise
 
     _register_tools(ctx)
+    _register_cli_commands(ctx)
     ctx.register_hook("pre_gateway_dispatch", _clawchat_pre_gateway_dispatch)
 
     skill = _plugin_dir() / "skills" / "clawchat" / "SKILL.md"

@@ -2,7 +2,7 @@
 
 Exchanges a ClawChat activation (invite) code for a token via `/v1/agents/connect`, persists secrets into `$HERMES_HOME/.env`, and writes non-secret platform settings + streaming defaults into `$HERMES_HOME/config.yaml`. When running inside Hermes, persistence goes through `hermes_cli.config` helpers (`read_raw_config`, `save_config`, `save_env_value`, `remove_env_value`) so Hermes owns atomic writes, permissions, managed-mode handling, and env-cache invalidation. The module keeps direct file I/O only as a fallback for tests or standalone installs where `hermes_cli` is not importable.
 
-Exposed as both a Python API (used by the `clawchat_activate` tool handler) and a CLI (`python -m clawchat_gateway.activate CODE`).
+Exposed as a Python API (used by the `clawchat_activate` tool handler), a native Hermes CLI command (`hermes clawchat activate CODE`), and a standalone module CLI (`python -m clawchat_gateway.activate CODE`).
 
 ## Helpers
 
@@ -93,3 +93,24 @@ Runs `asyncio.run(activate(...))`. On success (and unless `--no-restart` is pass
 3. Pretty-prints the payload (`ensure_ascii=False, indent=2`) and exits 0.
 
 API errors bubble up as exceptions (no try/except wrapper in `main`), so the CLI crashes with a traceback on transport / auth failure. The Hermes tool handler `_handle_clawchat_activate` catches these and converts them to a `_tool_error` envelope; it also schedules the restart on its own path independent of the CLI flag.
+
+## Native Hermes CLI — `hermes clawchat activate CODE`
+
+Registered by the plugin via `ctx.register_cli_command("clawchat", ...)` when the host supports native plugin CLI commands.
+
+```
+usage: hermes clawchat activate [--base-url URL] [--no-restart] CODE
+```
+
+- `code` — positional, required activation code.
+- `--base-url` — default `DEFAULT_BASE_URL`.
+- `--no-restart` — pass `restart=False` to the shared activation helper.
+
+The command calls `activate_and_maybe_restart(code, base_url=..., restart=not no_restart)`. On success it prints concise status lines:
+
+```
+clawchat: activation complete for <user_id>
+clawchat: Hermes restart scheduled in <seconds>s
+```
+
+The restart line is omitted when no restart was scheduled.

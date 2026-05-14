@@ -21,6 +21,7 @@ class _Ctx:
         self.tools = {}
         self.skills = {}
         self.hooks = {}
+        self.cli_commands = {}
 
     def register_tool(self, name, toolset, schema, handler, **kwargs):
         self.tools[name] = {"toolset": toolset, "schema": schema, "handler": handler, **kwargs}
@@ -30,6 +31,22 @@ class _Ctx:
 
     def register_hook(self, name, handler):
         self.hooks.setdefault(name, []).append(handler)
+
+    def register_cli_command(
+        self,
+        name,
+        help,
+        setup_fn,
+        handler_fn=None,
+        description="",
+    ):
+        self.cli_commands[name] = {
+            "name": name,
+            "help": help,
+            "setup_fn": setup_fn,
+            "handler_fn": handler_fn,
+            "description": description,
+        }
 
 
 class _PlatformCtx(_Ctx):
@@ -229,6 +246,22 @@ def test_plugin_registers_all_tools(monkeypatch):
         "clawchat_upload_media_file",
     }
     assert all(ctx.tools[name]["is_async"] is True for name in ctx.tools)
+
+
+def test_plugin_registers_native_clawchat_cli_command(monkeypatch):
+    module = _load_plugin_module()
+    monkeypatch.setattr(module, "_install_gateway", lambda: None)
+    ctx = _Ctx()
+
+    module.register(ctx)
+
+    command = ctx.cli_commands["clawchat"]
+    assert command["help"] == "Manage ClawChat integration"
+    assert command["description"] == (
+        "Activate and manage the ClawChat Hermes gateway integration."
+    )
+    assert callable(command["setup_fn"])
+    assert callable(command["handler_fn"])
 
 
 def test_plugin_tool_descriptions_forbid_execute_fallbacks(monkeypatch):
