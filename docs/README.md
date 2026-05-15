@@ -8,7 +8,7 @@ Per-module catalogue of structures and functions. For runtime flow and the boot 
 
 | File | Purpose | Doc |
 |---|---|---|
-| `__init__.py` (repo root) | Hermes plugin entrypoint — registers the ClawChat platform, tool module, CLI, slash command, hooks, and skill | [plugin-entrypoint.md](./plugin-entrypoint.md) |
+| `__init__.py` (repo root) | Hermes plugin entrypoint — registers the ClawChat platform, tool module, CLI, slash command, and hooks | [plugin-entrypoint.md](./plugin-entrypoint.md) |
 | `plugin.yaml` | Hermes plugin manifest | [plugin-entrypoint.md](./plugin-entrypoint.md) |
 | `clawchat_gateway/__init__.py` | Package surface | [plugin-entrypoint.md](./plugin-entrypoint.md) |
 
@@ -47,7 +47,6 @@ Per-module catalogue of structures and functions. For runtime flow and the boot 
 | `clawchat_gateway/plugin_tools.py` | Hermes tool schemas, registration, and JSON-string tool handlers | [plugin-tools.md](./plugin-tools.md) |
 | `clawchat_gateway/tools.py` | Async handlers for the six account/profile/media tools | [tools.md](./tools.md) |
 | `clawchat_gateway/profile.py` | Profile CLI (`get`, `get-user`, `friends`, `update`, `upload-avatar`, `upload-media`) | [profile.md](./profile.md) |
-| `skills/clawchat/SKILL.md` | Hermes skill surfaced to the model | [skill.md](./skill.md) |
 | `tests/` | Pytest suite and hermes-agent stubs | [tests.md](./tests.md) |
 
 ### Wire-protocol references

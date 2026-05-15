@@ -109,7 +109,6 @@ Order of operations inside `register(ctx)`:
 4. `_register_cli_commands(ctx)` registers the native `hermes clawchat` CLI command when supported.
 5. `_register_commands(ctx)` registers `/clawchat-activate` when supported.
 6. `ctx.register_hook("pre_gateway_dispatch", _clawchat_pre_gateway_dispatch)` installs the self-echo guard.
-7. If `skills/clawchat/SKILL.md` exists, `ctx.register_skill("clawchat", skill, description=...)`.
 
 ## `clawchat_gateway/__init__.py`
 

@@ -21,7 +21,6 @@ The package `clawchat_gateway` is also pip-installable (`pyproject.toml` → `[p
 5. `_register_cli_commands(ctx)` exposes `hermes clawchat activate CODE` on Hermes builds that support plugin CLI commands.
 6. `_register_commands(ctx)` exposes `/clawchat-activate CODE` on Hermes builds that support plugin slash commands.
 7. `ctx.register_hook("pre_gateway_dispatch", _clawchat_pre_gateway_dispatch)` installs the self-echo guard (see "Self-echo guard" below).
-8. `ctx.register_skill("clawchat", skills/clawchat/SKILL.md)` attaches the skill.
 
 ## Runtime data flow
 

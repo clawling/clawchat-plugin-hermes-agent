@@ -71,7 +71,7 @@ When you add a new import from `gateway.*` in production code, extend `fake_herm
 Uses a `FakeConnection` stand-in so no WebSocket I/O is performed. Coverage:
 
 - `compute_delta` behaviour for append and reset cases.
-- `_on_message` — builds `MessageEvent`, attaches a group-only covenant through `channel_prompt`, preserves direct messages without group covenant text, composes group covenant + activation prompt when both apply, attaches the `clawchat` skill on activation-intent text, downloads media before dispatch, logs inbound parse / dispatch, logs parse drops, maps `reply_preview` fields.
+- `_on_message` — builds `MessageEvent`, attaches a group-only covenant through `channel_prompt`, preserves direct messages without group covenant text, composes group covenant + activation prompt when both apply, does not attach a bundled ClawChat skill for activation intent, downloads media before dispatch, logs inbound parse / dispatch, logs parse drops, maps `reply_preview` fields.
 - `send` — static mode (`message.reply`); default filtering of `<think>` and tool output; override via `show_*_output`; suppression and preservation of gateway tool-progress tickers (both for `send` and `edit_message`); logging.
 - Typing indicators — active / inactive / dedupe.
 - Streaming mode — `message.created` → `message.add` sequence, incomplete-block filtering before delta; `edit_message` delta emission; targeting by `message_id` when multiple runs overlap; `on_run_complete` emits `message.done` without a trailing `message.reply`, finalises the requested run during overlap, and treats late edits / duplicate completion callbacks for a completed run as idempotent no-ops.
@@ -130,7 +130,7 @@ Verifies reconnect attempt counting, consecutive reconnect counting, and stable-
 
 Imports the repo-root `__init__.py` via a dummy `_Ctx` context and verifies:
 
-- `register(ctx)` adds the six account/profile/media ClawChat tools, the `/clawchat-activate` slash command, and a skill.
+- `register(ctx)` adds the six account/profile/media ClawChat tools and the `/clawchat-activate` slash command, without registering a bundled skill.
 - Tool handlers in `clawchat_gateway.plugin_tools` accept and echo `task_id`.
 
 ### `tests/test_plugin.py`
@@ -148,7 +148,7 @@ Comprehensive registration / schema / behavior tests for the repo-root `__init__
 - `test_plugin_registers_clawchat_activate_slash_command` — `register(ctx)` exposes `/clawchat-activate` through `ctx.register_command`.
 - `test_plugin_tool_descriptions_forbid_execute_fallbacks` — every tool description includes `"Do not use execute"`.
 - `test_upload_media_tool_description_is_link_only_not_current_chat_delivery` — `clawchat_upload_media_file` description distinguishes "shareable URL" upload vs `MEDIA:/absolute/local/path` for current-chat delivery.
-- `test_clawchat_skill_uses_plugin_tools_not_shell_commands` / `…_distinguishes_media_delivery_from_media_link_uploads` — direct text assertions on `skills/clawchat/SKILL.md` keep the skill aligned with the tool registration.
+- `test_plugin_does_not_register_clawchat_skill` — verifies the plugin does not call `ctx.register_skill`, even if a legacy skill file exists.
 - `test_plugin_tool_handlers_return_json_strings_for_hermes_v012` — `handle_clawchat_get_account_profile` returns a JSON string (not a dict) because Hermes v0.12 expects strings; verifies UTF-8 round-trip.
 - `test_plugin_upload_avatar_image_rejects_relative_path` — handler returns a `validation` error envelope for relative paths (without making any API calls).
 - `test_plugin_requires_platform_registry` — `register(ctx)` raises a clear error when the host lacks `ctx.register_platform`.

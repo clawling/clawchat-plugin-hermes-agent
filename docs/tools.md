@@ -60,5 +60,4 @@ The `meta` block is only present for `_api_error` results that carry one of `sta
 2. Surface it from `clawchat_gateway/plugin_tools.py::register_tools` with a JSON schema and an emoji; wire a thin `handle_clawchat_<name>` dispatcher that wraps the result with `_tool_result(...)`.
 3. Surface it from `profile.py::main` as a subparser that calls the handler with `asyncio.run` and prints the same JSON.
 4. Add the tool name to `plugin.yaml::provides_tools`.
-5. Mirror the trigger/usage guidance in `skills/clawchat/SKILL.md`.
-6. Cover with `tests/test_tools.py` (handler-level) and `tests/test_plugin.py` (registration / schema).
+5. Cover with `tests/test_tools.py` (handler-level) and `tests/test_plugin.py` (registration / schema).

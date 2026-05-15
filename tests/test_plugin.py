@@ -288,27 +288,18 @@ def test_upload_media_tool_description_is_link_only_not_current_chat_delivery(mo
     assert "MEDIA:/absolute/local/path" in description
 
 
-def test_clawchat_skill_uses_plugin_tools_not_shell_commands():
-    skill = (Path(__file__).resolve().parents[1] / "skills" / "clawchat" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
+def test_plugin_does_not_register_clawchat_skill(monkeypatch, tmp_path):
+    module = _load_plugin_module()
+    skill = tmp_path / "skills" / "clawchat" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: clawchat\n---\n", encoding="utf-8")
+    monkeypatch.setattr(module, "_plugin_dir", lambda: tmp_path)
+    ctx = _PlatformCtx()
 
-    assert "Do not use execute" in skill
-    assert "clawchat_list_account_friends" in skill
-    assert '"$PY"' not in skill
-    assert "python -" not in skill
-    assert "-m clawchat_gateway" not in skill
+    module.register(ctx)
 
+    assert ctx.skills == {}
 
-def test_clawchat_skill_distinguishes_media_delivery_from_media_link_uploads():
-    skill = (Path(__file__).resolve().parents[1] / "skills" / "clawchat" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
-
-    assert "Send Media In Current Chat" in skill
-    assert "MEDIA:/absolute/local/path" in skill
-    assert "Do not call `clawchat_upload_media_file` just to send an attachment" in skill
-    assert "Do not write `MEDIA:https://" in skill
 
 
 def test_plugin_tool_handlers_return_json_strings_for_hermes_v012(monkeypatch):

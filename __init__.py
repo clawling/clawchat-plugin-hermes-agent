@@ -297,11 +297,3 @@ def register(ctx) -> None:
     _register_cli_commands(ctx)
     _register_commands(ctx)
     ctx.register_hook("pre_gateway_dispatch", _clawchat_pre_gateway_dispatch)
-
-    skill = _plugin_dir() / "skills" / "clawchat" / "SKILL.md"
-    if skill.exists():
-        ctx.register_skill(
-            "clawchat",
-            skill,
-            description="Activate and operate the ClawChat Hermes gateway integration.",
-        )

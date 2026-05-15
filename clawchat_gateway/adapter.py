@@ -83,9 +83,8 @@ _ACTIVATION_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 _HERMES_STREAM_CURSOR_RE = re.compile(r"[ \t]*▉\Z")
-_CLAWCHAT_SKILL_PROMPT = (
-    "The user may be activating or configuring ClawChat. Use the installed "
-    "clawchat skill instructions. Activation is handled by the "
+_CLAWCHAT_ACTIVATION_PROMPT = (
+    "The user may be activating or configuring ClawChat. Activation is handled by the "
     "`/clawchat-activate CODE` slash command, `hermes clawchat activate CODE`, "
     "or `hermes gateway setup`; do not use a ClawChat activation tool. If no "
     "code is present, ask for the ClawChat activation code."
@@ -335,8 +334,6 @@ class ClawChatAdapter(BasePlatformAdapter):
             reply_to_text=reply_to_text,
         )
         channel_prompt = self._compose_channel_prompt(inbound)
-        if self._should_attach_activation_skill(inbound.text):
-            event.auto_skill = "clawchat"
         if channel_prompt:
             event.channel_prompt = channel_prompt
         logger.info(
@@ -355,7 +352,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             inbound.sender_id,
         )
 
-    def _should_attach_activation_skill(self, text: str) -> bool:
+    def _has_activation_intent(self, text: str) -> bool:
         if not text:
             return False
         normalized = text.strip()
@@ -369,8 +366,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             group_prompt = build_group_channel_prompt()
             if group_prompt:
                 prompts.append(group_prompt)
-        if self._should_attach_activation_skill(inbound.text):
-            prompts.append(_CLAWCHAT_SKILL_PROMPT)
+        if self._has_activation_intent(inbound.text):
+            prompts.append(_CLAWCHAT_ACTIVATION_PROMPT)
         return "\n\n".join(prompts) or None
 
     async def _download_inbound_media(self, inbound: InboundMessage) -> list[Any]:

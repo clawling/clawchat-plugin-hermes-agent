@@ -12,7 +12,7 @@ Implements `ClawChatAdapter`, a `BasePlatformAdapter` subclass that bridges herm
 | `_TOOL_FENCE_BLOCK_RE`, `_TOOL_FENCE_OPEN_RE` | compiled regex | Strip ```` ```tool ... ``` ```` fenced tool blocks. |
 | `_TOOL_PROGRESS_LINE_RE` | compiled regex | Detect tool-progress ticker lines (used by `_should_suppress_tool_progress`). |
 | `_ACTIVATION_INTENT_RE` | compiled regex | Match activation intent: `clawchat`, `claw chat`, `激活码`, `activate`, `activation`, `invite code`. |
-| `_CLAWCHAT_SKILL_PROMPT` | str | Injected `channel_prompt` that nudges the LLM toward the `clawchat` skill when activation intent is detected. |
+| `_CLAWCHAT_ACTIVATION_PROMPT` | str | Injected `channel_prompt` that tells the LLM how ClawChat activation is handled when activation intent is detected. |
 
 `build_group_channel_prompt()` is imported from `group_context.py` and used only for inbound group messages. The resulting `channel_prompt` is a Hermes ephemeral system prompt path, not a ClawChat WebSocket field.
 
@@ -74,8 +74,8 @@ class ClawChatAdapter(BasePlatformAdapter):
 |---|---|
 | `async _on_state_change(state: ConnectionState)` | Log-only. |
 | `async _on_message(frame: dict)` | Ignore `interaction.submit`, parse message downlinks via `parse_inbound_message`, skip if filtered, then delegate to `_handle_inbound`. The WebSocket connection should only call this for `message.send` / `message.reply`. |
-| `async _handle_inbound(inbound: InboundMessage)` | Resolve `reply_preview`, download media, build `MessageEvent`, attach group-only covenant `channel_prompt` and activation `auto_skill` / prompt when applicable, then `await self.handle_message(event)`. |
-| `_should_attach_activation_skill(text) -> bool` | `True` iff `_ACTIVATION_INTENT_RE` matches. |
+| `async _handle_inbound(inbound: InboundMessage)` | Resolve `reply_preview`, download media, build `MessageEvent`, attach group-only covenant `channel_prompt` and activation prompt when applicable, then `await self.handle_message(event)`. |
+| `_has_activation_intent(text) -> bool` | `True` iff `_ACTIVATION_INTENT_RE` matches. |
 | `_compose_channel_prompt(inbound)` | Build the per-event `channel_prompt`: group covenant for `chat_type == "group"`, activation prompt for activation intent, joined with a blank line when both apply. Direct non-activation messages return `None`. |
 | `async _download_inbound_media(inbound)` | Thin wrapper around `media_runtime.download_inbound_media`. |
 

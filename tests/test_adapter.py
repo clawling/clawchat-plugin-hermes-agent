@@ -92,7 +92,7 @@ async def test_on_message_builds_message_event():
     }
 
 
-async def test_on_message_attaches_clawchat_skill_for_activation_intent():
+async def test_on_message_attaches_activation_prompt_without_skill_for_activation_intent():
     adapter = _make_adapter()
     inbound = InboundMessage(
         chat_id="u1",
@@ -106,7 +106,7 @@ async def test_on_message_attaches_clawchat_skill_for_activation_intent():
     await adapter._handle_inbound(inbound)
 
     event = adapter.handled[0]
-    assert event.auto_skill == "clawchat"
+    assert event.auto_skill is None
     assert "/clawchat-activate CODE" in event.channel_prompt
 
 

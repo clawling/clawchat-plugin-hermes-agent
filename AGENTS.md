@@ -9,7 +9,6 @@ Always read the relevant doc before changing a feature, and update it after. Whe
 - `README.md`, `install.md`, `.e2e/dev_install.md` — install/quick-start, env vars, user-visible flows
 - `plugin.yaml` — manifest (`requires_env`, `provides_tools`, `provides_hooks`); must match what `register(ctx)` actually registers
 - `docs/` per-module references — index at `docs/README.md`; one doc per `clawchat_gateway/*.py` module, plus `docs/architecture.md` (boot sequence, data flow, design choices, env vars) and `docs/clawchat-protocol.md` (wire-protocol spec; `docs/protocol.md` is the Python builder API)
-- `skills/clawchat/SKILL.md` — activation/profile/avatar flows surfaced to the LLM (must stay consistent with the tool `description` fields in `clawchat_gateway/plugin_tools.py`)
 - This `AGENTS.md` — only the orientation, command quick-reference, and env-var summary below; deep-dive material lives in `docs/`
 
 Code and docs must not drift.
