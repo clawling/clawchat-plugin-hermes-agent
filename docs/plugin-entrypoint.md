@@ -78,6 +78,14 @@ Tool schemas, descriptions, JSON-string result shaping, and handlers live in `cl
 
 This exposes `hermes clawchat activate CODE [--base-url URL] [--no-restart]`. The command shares the same activation helper as the slash command and prints concise CLI status lines.
 
+Hermes Agent v0.12.0 stores this registration but does not add general plugin CLI commands to the top-level `hermes` argparse tree. For that host version, use the repo-root compatibility script instead:
+
+```bash
+python "${HERMES_HOME:-$HOME/.hermes}/plugins/clawchat/clawchat_cli.py" activate CODE
+```
+
+That script reuses `clawchat_gateway.cli.setup_clawchat_cli` and `handle_clawchat_cli`, so persistence and restart behavior stay identical.
+
 ### Slash command registration
 
 `_register_commands(ctx)` is a no-op on older Hermes builds. When `ctx.register_command` is available, it imports `clawchat_gateway.commands` and registers:

@@ -37,8 +37,10 @@ Hermes registers six ClawChat tools:
 ```bash
 # Activate (one-time)
 hermes gateway setup
-# or, for scriptable activation:
+# or, for scriptable activation on Hermes builds that expose plugin CLI commands:
 hermes clawchat activate <CODE>
+# or, for Hermes v0.12.0 command-line activation:
+python "${HERMES_HOME:-$HOME/.hermes}/plugins/clawchat/clawchat_cli.py" activate <CODE>
 # or, inside a Hermes session:
 /clawchat-activate <CODE>
 
@@ -63,13 +65,19 @@ hermes gateway setup
 
 `hermes gateway setup` is the preferred interactive flow on Hermes builds that expose plugin platform setup functions. It prompts for the ClawChat activation code and optional API base URL, saves the platform config, and then lets Hermes finish its normal gateway service flow: restart if the service is already running, start if it is installed but stopped, or install/start the service if needed.
 
-For non-interactive installs, use the plugin CLI command registered by Hermes:
+For non-interactive installs on Hermes builds that expose plugin CLI commands, use:
 
 ```bash
 hermes clawchat activate <CODE>
 ```
 
-That command writes `CLAWCHAT_TOKEN` and `CLAWCHAT_REFRESH_TOKEN` to `$HERMES_HOME/.env` and stores non-secret platform settings under `platforms.clawchat.extra` in `config.yaml`.
+Hermes Agent v0.12.0 registers plugin CLI commands internally but does not expose general plugin commands through the top-level `hermes` parser. On v0.12.0, run the compatibility entrypoint with the Hermes Python environment instead:
+
+```bash
+python "${HERMES_HOME:-$HOME/.hermes}/plugins/clawchat/clawchat_cli.py" activate <CODE>
+```
+
+Both command-line activation paths write `CLAWCHAT_TOKEN` and `CLAWCHAT_REFRESH_TOKEN` to `$HERMES_HOME/.env` and store non-secret platform settings under `platforms.clawchat.extra` in `config.yaml`.
 
 Group chats default to `group_mode: all`, so every inbound group message is eligible for a reply. Set `CLAWCHAT_GROUP_MODE=mention` or `platforms.clawchat.extra.group_mode: mention` to require an @mention. Group-only covenant guidance is injected through Hermes' per-event `channel_prompt`; direct chats do not receive that group covenant.
 
@@ -78,5 +86,5 @@ For Docker:
 ```bash
 docker exec hermes sh -lc 'HERMES_HOME=/opt/data /opt/hermes/.venv/bin/hermes plugins install clawling/hermes-clawchat --force'
 docker exec hermes sh -lc 'HERMES_HOME=/opt/data /opt/hermes/.venv/bin/hermes plugins enable clawchat'
-docker exec hermes sh -lc 'HERMES_HOME=/opt/data /opt/hermes/.venv/bin/hermes clawchat activate <CODE>'
+docker exec hermes sh -lc 'HERMES_HOME=/opt/data /opt/hermes/.venv/bin/python /opt/data/plugins/clawchat/clawchat_cli.py activate <CODE>'
 ```

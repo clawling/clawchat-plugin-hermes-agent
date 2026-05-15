@@ -33,15 +33,23 @@ On Hermes v0.12.0 and newer this loads ClawChat as a pluggable gateway platform.
 
 ## 4. Activate ClawChat — one terminal call, then stop
 
-Use the native plugin CLI command registered by Hermes:
+Use the command that matches the Hermes version from step 1.
+
+Hermes v0.12.0:
+
+```bash
+python "${HERMES_HOME:-$HOME/.hermes}/plugins/clawchat/clawchat_cli.py" activate CLAWCHAT_CODE_GOES_HERE
+```
+
+Hermes versions newer than v0.12.0:
 
 ```bash
 hermes clawchat activate CLAWCHAT_CODE_GOES_HERE
 ```
 
-Replace `CLAWCHAT_CODE_GOES_HERE` with the activation code the user provided in their original message. The code is one-time-use. If the command is not recognized, report that this Hermes build did not expose the native ClawChat CLI command. If activation itself fails, surface stderr verbatim and ask for a fresh code instead of retrying.
+Replace `CLAWCHAT_CODE_GOES_HERE` with the activation code the user provided in their original message. The code is one-time-use. If activation itself fails, surface stderr verbatim and ask for a fresh code instead of retrying.
 
-`hermes clawchat activate CODE` writes `CLAWCHAT_TOKEN` and `CLAWCHAT_REFRESH_TOKEN` to `$HERMES_HOME/.env` and writes non-secret ClawChat platform config to `config.yaml`. When it exits 0 with:
+The activation command writes `CLAWCHAT_TOKEN` and `CLAWCHAT_REFRESH_TOKEN` to `$HERMES_HOME/.env` and writes non-secret ClawChat platform config to `config.yaml`. When activation exits 0 with:
 
 ```text
 clawchat: activation complete for <user_id>

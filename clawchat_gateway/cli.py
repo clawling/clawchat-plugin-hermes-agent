@@ -3,8 +3,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 
-from clawchat_gateway.activate import activate_and_maybe_restart
 from clawchat_gateway.api_client import DEFAULT_BASE_URL
+
+activate_and_maybe_restart = None
 
 
 def setup_clawchat_cli(parser: argparse.ArgumentParser) -> None:
@@ -33,8 +34,12 @@ def handle_clawchat_cli(args: argparse.Namespace) -> int:
             print(f"clawchat: unknown command: {getattr(args, 'command', None) or ''}".rstrip())
         return 2
 
+    runner = activate_and_maybe_restart
+    if runner is None:
+        from clawchat_gateway.activate import activate_and_maybe_restart as runner
+
     payload = asyncio.run(
-        activate_and_maybe_restart(
+        runner(
             args.code,
             base_url=args.base_url,
             restart=not args.no_restart,
