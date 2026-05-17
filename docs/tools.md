@@ -35,7 +35,7 @@ All handlers are `async`, return `dict[str, Any]`, and never raise. Each catches
 |---|---|---|---|
 | `get_account_profile()` | — | `client.get_my_profile()` (`GET /v1/users/me`) | — |
 | `get_user_profile(user_id)` | `user_id: str` | `client.get_user_info(user_id.strip())` (`GET /v1/users/{id}`) | `userId` required and non-blank. |
-| `list_account_friends(page=None, page_size=None)` | optional ints | `client.list_friends(page, page_size)` (`GET /v1/friends`) | `page >= 1` (default 1); `1 <= page_size <= 100` (default 20). |
+| `list_account_friends(page=None, page_size=None)` | optional ints | `client.list_friends(page, page_size)` (`GET /v1/friendships`) | `page >= 1` (default 1); `1 <= page_size <= 100` (default 20). The backend request is unpaginated; these args are retained for existing tool/CLI callers. |
 | `search_users(q=None, limit=None)` | optional `q`, optional int | `client.search_users(q=q or "", limit=limit)` (`GET /v1/users/search`) | `1 <= limit <= 100` when provided. |
 | `list_moments(before=None, limit=None)` | optional ints | `client.list_moments(before=before, limit=limit)` (`GET /v1/moments`) | `before >= 1` when provided; `1 <= limit <= 100` when provided. |
 | `create_moment(text=None, images=None)` | optional text, optional image URL list | `client.create_moment(text=text, images=images)` (`POST /v1/moments`) | `text` must be a string when provided; `images` must be a list of strings when provided; at least one of `text` / `images` is required. |

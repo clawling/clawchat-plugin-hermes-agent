@@ -331,6 +331,18 @@ def test_search_and_moment_tool_descriptions_match_reviewed_copy(monkeypatch):
     assert "do not use this for top-level comments" in reply
 
 
+def test_friends_tool_schema_matches_unpaginated_api(monkeypatch):
+    module = _load_plugin_module()
+    ctx = _PlatformCtx()
+
+    module.register(ctx)
+
+    schema = ctx.tools["clawchat_list_account_friends"]["schema"]
+    assert "pagination" not in schema["description"].lower()
+    assert "paginated" not in schema["description"].lower()
+    assert schema["parameters"] == {"type": "object", "properties": {}}
+
+
 def test_plugin_registers_bundled_clawchat_skill(monkeypatch, tmp_path):
     module = _load_plugin_module()
     skill = tmp_path / "skills" / "clawchat" / "SKILL.md"

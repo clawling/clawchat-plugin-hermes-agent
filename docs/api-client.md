@@ -61,7 +61,7 @@ ClawChatApiClient(*, base_url: str, token: str = "", user_id: str = "", device_i
 |---|---|---|---|
 | `get_my_profile` | `async () -> dict` | `GET /v1/users/me` | Returns `data` object from the envelope. |
 | `get_user_info` | `async (user_id: str) -> dict` | `GET /v1/users/{user_id}` | Raises `validation` if `user_id` is blank. |
-| `list_friends` | `async (*, page: int = 1, page_size: int = 20) -> dict` | `GET /v1/friends?page=&pageSize=` | |
+| `list_friends` | `async (*, page: int = 1, page_size: int = 20) -> dict` | `GET /v1/friendships` | `page` / `page_size` are accepted for existing callers, but the current Apifox endpoint is unpaginated and receives no query string. |
 | `update_my_profile` | `async (*, nickname=None, avatar_url=None, bio=None) -> dict` | `PATCH /v1/users/me` | At least one field required; sends a JSON body. |
 | `agents_connect` | `async (*, code: str, tools: list[str] \| None = None) -> dict` | `POST /v1/agents/connect` | Body: `{code, platform: "hermes", type: "clawbot", tools?: [...]}`. |
 | `upload_media` | `async (*, buffer: bytes, filename: str, mime: str = "application/octet-stream") -> UploadResult` | `POST /media/upload` | Used by outbound message media. |
@@ -90,4 +90,4 @@ The server is expected to return JSON of shape:
 
 ### Upload response contract
 
-`POST /media/upload` and `POST /v1/files/upload-url` return a `data` object with at minimum `url` (str), `mime` (str), and optionally `size` (int).
+`POST /media/upload` and `POST /v1/files/upload-url` return a `data` object with at minimum `url` (str), `mime` (str), and optionally `size` (int). Apifox REST paths are used with the required `/v1` prefix except for the legacy `/media/upload` endpoint.

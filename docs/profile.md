@@ -49,7 +49,7 @@ Backing handler: `tools.get_user_profile(user_id)`.
 
 ### `friends`
 
-List the configured account's friends. Pagination defaults to `page=1` and `pageSize=20`.
+List the configured account's friends. The current backend request is unpaginated; `--page` and `--page-size` remain accepted for existing scripts but are not sent to ClawChat.
 
 ```bash
 python -m clawchat_gateway.profile friends

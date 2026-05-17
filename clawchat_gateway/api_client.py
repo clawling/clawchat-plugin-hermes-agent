@@ -64,8 +64,7 @@ class ClawChatApiClient:
         return await self._call_json("GET", f"/v1/users/{user_id}")
 
     async def list_friends(self, *, page: int = 1, page_size: int = 20) -> dict:
-        query = urlencode({"page": page, "pageSize": page_size})
-        return await self._call_json("GET", f"/v1/friends?{query}")
+        return await self._call_json("GET", "/v1/friendships")
 
     async def search_users(self, *, q: str = "", limit: int | None = None) -> dict:
         params: dict[str, str | int] = {}

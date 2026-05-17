@@ -101,6 +101,7 @@ Uses a local `BaseHTTPRequestHandler` fixture (`api_server`) to verify:
 - `upload_media` sends multipart with a Bearer token to `/media/upload`.
 - `upload_avatar` uses `/v1/files/upload-url`.
 - `update_my_profile` PATCHes `/v1/users/me`.
+- tool-surface API client paths match the Apifox ClawChat user paths with the required `/v1` prefix, except `/media/upload`.
 - Constructor validation rejects a non-http scheme.
 
 ### `tests/test_config.py`
@@ -218,9 +219,9 @@ Matrix of `parse_inbound_message` edge cases:
 
 Handler-level coverage for account/media/search/moment tools:
 
-- happy paths for profile fetch, user fetch, friends pagination, profile update, avatar upload, and media upload.
+- happy paths for profile fetch, user fetch, friends listing, profile update, avatar upload, and media upload.
 - config errors for missing config, token, or user id.
-- validation errors for empty user ids, invalid pagination, empty updates, relative/missing/oversized upload paths.
+- validation errors for empty user ids, legacy invalid pagination args, empty updates, relative/missing/oversized upload paths.
 - API error mapping for `auth`, `api`, `transport`, and unexpected exceptions.
 - validation tests assert the fake client was not called.
 

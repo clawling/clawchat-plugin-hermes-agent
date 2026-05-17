@@ -258,17 +258,11 @@ def register_tools(ctx) -> None:
         {
             "name": "clawchat_list_account_friends",
             "description": _direct_tool_description(
-                "List friends/contacts of the agent's connected ClawChat account (the configured ClawChat account), paginated (page=1, pageSize=20 by default). "
+                "List friends/contacts of the agent's connected ClawChat account (the configured ClawChat account). "
                 "These are the agent's ClawChat-platform contacts. "
-                "TRIGGER — invoke when the user asks for this ClawChat account's friends, contacts, friend list, or asks to show more friends with pagination."
+                "TRIGGER — invoke when the user asks for this ClawChat account's friends, contacts, or friend list."
             ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "page": {"type": "integer", "minimum": 1, "description": "1-based page number for the agent's connected ClawChat account friends (default 1)"},
-                    "pageSize": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Page size 1..100 for the agent's ClawChat-platform contacts (default 20)"},
-                },
-            },
+            "parameters": {"type": "object", "properties": {}},
         },
         handle_clawchat_list_account_friends,
         is_async=True,

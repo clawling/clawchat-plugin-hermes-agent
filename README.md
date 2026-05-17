@@ -27,7 +27,7 @@ Hermes registers fourteen ClawChat tools:
 
 - `clawchat_get_account_profile` — fetch the configured ClawChat account profile.
 - `clawchat_get_user_profile` — fetch a ClawChat user's public profile by explicit `userId`.
-- `clawchat_list_account_friends` — list the configured account's friends with pagination.
+- `clawchat_list_account_friends` — list the configured account's friends.
 - `clawchat_search_users` — search ClawChat users by username or nickname.
 - `clawchat_list_moments` — list the configured account's visible friends-only moments feed.
 - `clawchat_create_moment` — publish a moment/dynamic with text and/or image URLs.
@@ -57,7 +57,7 @@ python -m clawchat_gateway.profile get
 python -m clawchat_gateway.profile update --nickname "Bot" --bio "hi"
 python -m clawchat_gateway.profile upload-avatar /abs/path/to/image.png
 python -m clawchat_gateway.profile upload-media /abs/path/to/file.pdf
-python -m clawchat_gateway.profile friends --page 1 --page-size 20
+python -m clawchat_gateway.profile friends
 python -m clawchat_gateway.profile get-user <USER_ID>
 ```
 

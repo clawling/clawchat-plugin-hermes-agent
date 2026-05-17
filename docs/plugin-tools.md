@@ -7,7 +7,7 @@ Hermes-facing tool registration and JSON-string result adapters for the ClawChat
 | Function | Purpose |
 |---|---|
 | `_tool_result(payload)` | Serialize a tool payload with `json.dumps(..., ensure_ascii=False)` for Hermes v0.12-compatible string results. |
-| `_optional_int_arg(value)` | Normalize optional pagination args from schema input before passing them to `clawchat_gateway.tools`. |
+| `_optional_int_arg(value)` | Normalize optional integer args from schema input before passing them to `clawchat_gateway.tools`. |
 | `_direct_tool_description(description)` | Append the direct-tool boundary that tells the LLM not to fall back to `execute`, shell scripts, curl, or direct HTTP calls. |
 
 ## Handlers
@@ -18,7 +18,7 @@ Each handler is `async`, takes `(args: dict, **kw)`, logs `task_id`, and returns
 |---|---|---|
 | `handle_clawchat_get_account_profile` | — | `clawchat_gateway.tools.get_account_profile` |
 | `handle_clawchat_get_user_profile` | `userId` | `clawchat_gateway.tools.get_user_profile` |
-| `handle_clawchat_list_account_friends` | optional `page`, optional `pageSize` | `clawchat_gateway.tools.list_account_friends` |
+| `handle_clawchat_list_account_friends` | — | `clawchat_gateway.tools.list_account_friends` |
 | `handle_clawchat_search_users` | optional `q`, optional `limit` | `clawchat_gateway.tools.search_users` |
 | `handle_clawchat_list_moments` | optional `before`, optional `limit` | `clawchat_gateway.tools.list_moments` |
 | `handle_clawchat_create_moment` | optional `text`, optional `images` (>=1) | `clawchat_gateway.tools.create_moment` |
@@ -37,7 +37,7 @@ Each handler is `async`, takes `(args: dict, **kw)`, logs `task_id`, and returns
 
 - `clawchat_get_account_profile` — fetch the configured account profile.
 - `clawchat_get_user_profile` — fetch a public profile by explicit `userId`.
-- `clawchat_list_account_friends` — list account friends with pagination.
+- `clawchat_list_account_friends` — list account friends.
 - `clawchat_search_users` — search ClawChat users by username or nickname.
 - `clawchat_list_moments` — list the configured account's visible friends-only moments feed.
 - `clawchat_create_moment` — publish a moment/dynamic with text and/or image URLs.

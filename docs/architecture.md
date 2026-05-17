@@ -14,7 +14,7 @@ The package `clawchat_gateway` is also pip-installable (`pyproject.toml` → `[p
 4. `clawchat_gateway.plugin_tools.register_tools(ctx)` registers fourteen account/profile/media/search/moment tools:
    - `clawchat_get_account_profile` — fetch the configured account profile.
    - `clawchat_get_user_profile` — fetch a public profile by explicit `userId`.
-   - `clawchat_list_account_friends` — list friends with pagination.
+   - `clawchat_list_account_friends` — list friends.
    - `clawchat_search_users` — search users by username or nickname.
    - `clawchat_list_moments` / `clawchat_create_moment` / `clawchat_delete_moment` — view and manage moments/dynamics.
    - `clawchat_toggle_moment_reaction` — add or remove an emoji reaction.

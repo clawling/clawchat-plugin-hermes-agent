@@ -139,6 +139,45 @@ def api_server():
         thread.join()
 
 
+class _RecordingClient(ClawChatApiClient):
+    def __init__(self):
+        super().__init__(base_url="http://api.example.test", token="token-bob", device_id="device-1")
+        self.calls = []
+
+    async def _call_json(self, method, path, *, body=None, extra_headers=None):
+        self.calls.append((method, path))
+        if path in {"/media/upload", "/v1/files/upload-url"}:
+            return {"url": "https://cdn/x", "mime": "application/octet-stream", "size": 1}
+        return {}
+
+
+@pytest.mark.asyncio
+async def test_api_client_paths_match_apifox_with_required_v1_prefixes():
+    client = _RecordingClient()
+    cases = [
+        ("get_my_profile", lambda: client.get_my_profile(), ("GET", "/v1/users/me")),
+        ("get_user_info", lambda: client.get_user_info("u1"), ("GET", "/v1/users/u1")),
+        ("list_friends", lambda: client.list_friends(page=2, page_size=50), ("GET", "/v1/friendships")),
+        ("search_users", lambda: client.search_users(q="alice", limit=20), ("GET", "/v1/users/search?q=alice&limit=20")),
+        ("list_moments", lambda: client.list_moments(before=123, limit=30), ("GET", "/v1/moments?before=123&limit=30")),
+        ("create_moment", lambda: client.create_moment(text="hello", images=["https://cdn/a.png"]), ("POST", "/v1/moments")),
+        ("delete_moment", lambda: client.delete_moment(123), ("DELETE", "/v1/moments/123")),
+        ("toggle_moment_reaction", lambda: client.toggle_moment_reaction(moment_id=123, emoji="like"), ("POST", "/v1/moments/123/reactions")),
+        ("create_moment_comment", lambda: client.create_moment_comment(moment_id=123, text="nice"), ("POST", "/v1/moments/123/comments")),
+        ("reply_moment_comment", lambda: client.reply_moment_comment(moment_id=123, reply_to_comment_id=456, text="yes"), ("POST", "/v1/moments/123/comments")),
+        ("delete_moment_comment", lambda: client.delete_moment_comment(moment_id=123, comment_id=456), ("DELETE", "/v1/moments/123/comments/456")),
+        ("update_my_profile", lambda: client.update_my_profile(nickname="Hermes"), ("PATCH", "/v1/users/me")),
+        ("agents_connect", lambda: client.agents_connect(code="INV-123"), ("POST", "/v1/agents/connect")),
+        ("upload_media", lambda: client.upload_media(buffer=b"hi", filename="x.png", mime="image/png"), ("POST", "/media/upload")),
+        ("upload_avatar", lambda: client.upload_avatar(buffer=b"hi", filename="avatar.png", mime="image/png"), ("POST", "/v1/files/upload-url")),
+    ]
+
+    for name, call, expected in cases:
+        client.calls.clear()
+        await call()
+        assert client.calls == [expected], name
+
+
 @pytest.mark.asyncio
 async def test_agents_connect_posts_fixed_body(api_server):
     client = ClawChatApiClient(base_url=f"http://127.0.0.1:{api_server.server_port}", token="")
