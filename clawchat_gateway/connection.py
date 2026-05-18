@@ -45,6 +45,7 @@ class _QueuedFrame:
     event_name: str
     trace_id: str
     chat_id: str
+    expected_message_id: str | None = None
     ack_future: asyncio.Future[dict[str, Any]] | None = None
     ack_timeout_task: asyncio.Task[None] | None = None
 
@@ -54,6 +55,7 @@ class _PendingAck:
     event_name: str
     trace_id: str
     chat_id: str
+    expected_message_id: str | None
     future: asyncio.Future[dict[str, Any]]
     timeout_task: asyncio.Task[None]
 
@@ -495,11 +497,7 @@ class ClawChatConnection:
             body = message.get("body")
             body_keys = sorted(body.keys()) if isinstance(body, dict) else []
             body_len = len(body) if isinstance(body, (str, list, dict)) else 0
-            inbound_msg_id = (
-                payload.get("message_id")
-                or message.get("message_id")
-                or message.get("id")
-            )
+            inbound_msg_id = payload.get("message_id")
             logger.info(
                 "clawchat ws dispatch %s chat_id=%s sender_id=%s message_id=%s trace_id=%s fragments=%d payload_keys=%s message_keys=%s body_type=%s body_keys=%s body_len=%d",
                 frame.get("event"),
@@ -854,6 +852,10 @@ class ClawChatConnection:
         event_name = str(frame.get("event") or frame.get("type") or "unknown")
         trace_id = str(frame.get("trace_id") or frame.get("id") or "")
         chat_id = str(frame.get("chat_id") or "")
+        expected_message_id = None
+        payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+        if isinstance(payload.get("message_id"), str):
+            expected_message_id = payload["message_id"]
         ack_future = None
         if wait_for_ack and event_name in ACKABLE_EVENTS:
             ack_future = asyncio.get_running_loop().create_future()
@@ -862,6 +864,7 @@ class ClawChatConnection:
             event_name=event_name,
             trace_id=trace_id,
             chat_id=chat_id,
+            expected_message_id=expected_message_id,
             ack_future=ack_future,
         )
 
@@ -971,6 +974,7 @@ class ClawChatConnection:
             event_name=queued.event_name,
             trace_id=queued.trace_id,
             chat_id=queued.chat_id,
+            expected_message_id=queued.expected_message_id,
             future=queued.ack_future,
             timeout_task=timeout_task,
         )
@@ -998,6 +1002,15 @@ class ClawChatConnection:
         pending.timeout_task.cancel()
         payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
         message_id = payload.get("message_id") if isinstance(payload.get("message_id"), str) else None
+        if pending.expected_message_id and message_id != pending.expected_message_id:
+            if not pending.future.done():
+                pending.future.set_exception(
+                    RuntimeError(
+                        "ack message_id mismatch: "
+                        f"expected {pending.expected_message_id} got {message_id}"
+                    )
+                )
+            return
         logger.info(
             format_ws_log(
                 event="ack_received",

@@ -93,7 +93,16 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_name_created
   ON tool_calls(tool_name, created_at);
 """
 
-MIGRATIONS = [(1, "initial_schema", INITIAL_SCHEMA)]
+MESSAGE_ID_DEDUP_SCHEMA = """
+CREATE UNIQUE INDEX IF NOT EXISTS ux_clawchat_messages_message_once
+  ON clawchat_messages(account_id, direction, kind, message_id)
+  WHERE kind = 'message' AND message_id IS NOT NULL;
+"""
+
+MIGRATIONS = [
+    (1, "initial_schema", INITIAL_SCHEMA),
+    (2, "message_id_dedup", MESSAGE_ID_DEDUP_SCHEMA),
+]
 
 _store: ClawChatStore | None = None
 _store_lock = threading.Lock()
@@ -240,6 +249,104 @@ class ClawChatStore:
             return int(cursor.lastrowid)
 
         return self._write("insert_message", write)
+
+    def claim_message_once(
+        self,
+        *,
+        platform: str,
+        account_id: str,
+        kind: str,
+        direction: str,
+        event_type: str,
+        trace_id: str | None = None,
+        chat_id: str | None = None,
+        message_id: str | None = None,
+        text: str | None = None,
+        raw: Any = None,
+        created_at: int | None = None,
+    ) -> bool | None:
+        if not message_id:
+            return None
+        created = created_at if created_at is not None else _now_ms()
+        self.initialize()
+        if self._disabled:
+            return None
+        try:
+            conn = sqlite3.connect(self.db_path)
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO clawchat_messages(
+                      platform, account_id, kind, direction, event_type, trace_id,
+                      chat_id, message_id, text, raw_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        platform,
+                        account_id,
+                        kind,
+                        direction,
+                        event_type,
+                        trace_id,
+                        chat_id,
+                        message_id,
+                        text,
+                        json_dumps(raw),
+                        created,
+                    ),
+                )
+                conn.commit()
+                return True
+            except sqlite3.IntegrityError:
+                conn.rollback()
+                return False
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "clawchat database write failed operation=%s",
+                "claim_message_once",
+                exc_info=True,
+            )
+            return None
+
+    def update_message_by_identity(
+        self,
+        *,
+        account_id: str,
+        kind: str,
+        direction: str,
+        message_id: str,
+        event_type: str,
+        trace_id: str | None = None,
+        chat_id: str | None = None,
+        text: str | None = None,
+        raw: Any = None,
+    ) -> None:
+        def write(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                """
+                UPDATE clawchat_messages
+                SET event_type = ?, trace_id = ?, chat_id = ?, text = ?, raw_json = ?
+                WHERE account_id = ?
+                  AND kind = ?
+                  AND direction = ?
+                  AND message_id = ?
+                """,
+                (
+                    event_type,
+                    trace_id,
+                    chat_id,
+                    text,
+                    json_dumps(raw),
+                    account_id,
+                    kind,
+                    direction,
+                    message_id,
+                ),
+            )
+
+        self._write("update_message_by_identity", write)
 
     def start_connection(
         self,
