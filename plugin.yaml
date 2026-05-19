@@ -4,9 +4,6 @@ kind: platform
 version: 0.5.1
 description: "ClawChat gateway integration for Hermes Agent."
 author: NewBase
-requires_env:
-  - CLAWCHAT_TOKEN
-  - CLAWCHAT_REFRESH_TOKEN
 provides_hooks:
   - pre_gateway_dispatch
 provides_tools:

@@ -158,7 +158,7 @@ def _register_platform(ctx) -> bool:
         check_fn=_check_clawchat_platform_requirements,
         validate_config=_validate_clawchat_platform_config,
         is_connected=_validate_clawchat_platform_config,
-        required_env=["CLAWCHAT_TOKEN", "CLAWCHAT_REFRESH_TOKEN"],
+        required_env=[],
         install_hint=(
             "Activate ClawChat with hermes gateway setup, hermes clawchat activate CODE, "
             "or /clawchat-activate CODE."

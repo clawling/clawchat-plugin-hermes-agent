@@ -73,6 +73,8 @@ hermes gateway setup
 
 `hermes gateway setup` is the preferred interactive flow on Hermes builds that expose plugin platform setup functions. It prompts for the ClawChat activation code and optional API base URL, saves the platform config, and then lets Hermes finish its normal gateway service flow: restart if the service is already running, start if it is installed but stopped, or install/start the service if needed.
 
+The plugin install step itself does not request `CLAWCHAT_TOKEN` or `CLAWCHAT_REFRESH_TOKEN`; those credentials do not exist until activation exchanges the code.
+
 For non-interactive installs on Hermes builds that expose plugin CLI commands, use:
 
 ```bash
