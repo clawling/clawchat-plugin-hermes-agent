@@ -666,6 +666,7 @@ class ClawChatConnection:
 
     async def _maybe_finish_handshake(self, frame: dict[str, Any]) -> None:
         if self._pending_connect_id and is_hello_ok(frame, self._pending_connect_id):
+            await self._set_state(ConnectionState.READY)
             if self._hello_wait is not None and not self._hello_wait.done():
                 self._hello_wait.set_result(True)
             return
