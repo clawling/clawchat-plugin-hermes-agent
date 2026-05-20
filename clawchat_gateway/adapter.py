@@ -20,7 +20,11 @@ from gateway.platforms.base import (
 )
 
 from clawchat_gateway.config import ClawChatConfig
-from clawchat_gateway.connection import ClawChatConnection, ConnectionState
+from clawchat_gateway.connection import (
+    HANDSHAKE_TIMEOUT_SECONDS,
+    ClawChatConnection,
+    ConnectionState,
+)
 from clawchat_gateway.group_context import build_group_channel_prompt
 from clawchat_gateway.inbound import InboundMessage, parse_inbound_message
 from clawchat_gateway.media_runtime import (
@@ -109,6 +113,7 @@ class _ActiveRun:
     last_text: str = ""
     reply_to_message_id: str | None = None
     sequence: int = -1
+    delivery_degraded: bool = False
 
 
 def check_clawchat_requirements(platform_config: Any) -> bool:
@@ -155,7 +160,12 @@ class ClawChatAdapter(BasePlatformAdapter):
 
     async def connect(self) -> bool:
         await self._connection.start()
-        return True
+        ready = await self._connection.wait_until_ready(
+            timeout=HANDSHAKE_TIMEOUT_SECONDS + 1.0,
+        )
+        if not ready:
+            logger.warning("clawchat connect returned before websocket ready")
+        return ready
 
     async def disconnect(self) -> None:
         await self._connection.stop()
@@ -173,7 +183,8 @@ class ClawChatAdapter(BasePlatformAdapter):
                 chat_id=chat_id,
                 chat_type=chat_type,
                 active=True,
-            )
+            ),
+            queue_when_unready=False,
         )
         logger.info("clawchat typing active sent chat_id=%s chat_type=%s", chat_id, chat_type)
 
@@ -187,7 +198,8 @@ class ClawChatAdapter(BasePlatformAdapter):
                 chat_id=chat_id,
                 chat_type=chat_type,
                 active=False,
-            )
+            ),
+            queue_when_unready=False,
         )
         logger.info("clawchat typing inactive sent chat_id=%s chat_type=%s", chat_id, chat_type)
 
@@ -524,11 +536,11 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._active_runs_by_id[message_id] = run
         self._active_chat_runs[chat_id] = message_id
 
-        await self._connection.send_frame(created_frame)
+        await self._send_best_effort(created_frame, run)
         if visible_content:
             run.last_text, delta = compute_delta(run.last_text, visible_content)
             run.sequence += 1
-            await self._connection.send_frame(
+            await self._send_best_effort(
                 build_message_add_event(
                     chat_id=chat_id,
                     chat_type=chat_type,
@@ -536,7 +548,8 @@ class ClawChatAdapter(BasePlatformAdapter):
                     full_text=run.last_text,
                     delta=delta,
                     sequence=run.sequence,
-                )
+                ),
+                run,
             )
             logger.info(
                 "clawchat stream delta queued chat_id=%s message_id=%s delta_len=%d",
@@ -577,7 +590,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         visible_content = self._filter_output_content(content or "")
         full_text, delta = compute_delta(run.last_text, visible_content)
         if delta:
-            await self._connection.send_frame(
+            await self._send_best_effort(
                 build_message_add_event(
                     chat_id=chat_id,
                     chat_type=run.chat_type,
@@ -585,7 +598,8 @@ class ClawChatAdapter(BasePlatformAdapter):
                     full_text=full_text,
                     delta=delta,
                     sequence=run.sequence + 1,
-                )
+                ),
+                run,
             )
             run.sequence += 1
             run.last_text = full_text
@@ -633,7 +647,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         full_text, delta = compute_delta(run.last_text, visible_final_text)
         if delta:
             run.sequence += 1
-            await self._connection.send_frame(
+            await self._send_best_effort(
                 build_message_add_event(
                     chat_id=chat_id,
                     chat_type=run.chat_type,
@@ -641,7 +655,8 @@ class ClawChatAdapter(BasePlatformAdapter):
                     full_text=full_text,
                     delta=delta,
                     sequence=run.sequence,
-                )
+                ),
+                run,
             )
             run.last_text = full_text
 
@@ -652,7 +667,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             fragments=await self._build_fragments(run.last_text),
             sequence=run.sequence,
         )
-        await self._connection.send_frame(frame)
+        await self._send_best_effort(frame, run)
         self._update_message_record(
             kind="message",
             direction="outbound",
@@ -671,6 +686,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             content=final_text or "",
             raw=frame,
         )
+        if run.delivery_degraded:
+            await self._send_stream_fallback_reply(run)
         logger.info(
             "clawchat stream done queued chat_id=%s message_id=%s",
             chat_id,
@@ -708,7 +725,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             sequence=max(run.sequence, 0),
             reason=error,
         )
-        await self._connection.send_frame(frame)
+        await self._send_best_effort(frame, run)
         self._record_message(
             kind="error",
             direction="outbound",
@@ -724,6 +741,27 @@ class ClawChatAdapter(BasePlatformAdapter):
             chat_id,
             run.message_id,
         )
+
+    async def _send_best_effort(
+        self,
+        frame: dict[str, Any],
+        run: _ActiveRun | None = None,
+    ) -> bool:
+        sent = await self._connection.send_frame(frame, queue_when_unready=False)
+        if run is not None and not sent:
+            run.delivery_degraded = True
+        return sent
+
+    async def _send_stream_fallback_reply(self, run: _ActiveRun) -> None:
+        frame = build_message_reply_event(
+            chat_id=run.chat_id,
+            chat_type=run.chat_type,
+            message_id=run.message_id,
+            fragments=await self._build_fragments(run.last_text),
+            reply_to_message_id=run.reply_to_message_id,
+            include_message_id=True,
+        )
+        await self._connection.send_frame(frame, wait_for_ack=True)
 
     async def send_image(
         self,

@@ -109,6 +109,7 @@ class ClawChatConnection:
         self._supervisor_task: asyncio.Task[None] | None = None
         self._read_task: asyncio.Task[None] | None = None
         self._hello_wait: asyncio.Future[bool] | None = None
+        self._ready_event = asyncio.Event()
         self._pending_connect_id: str | None = None
         self._send_queue: deque[_QueuedFrame] = deque()
         self._flushing_send_queue = False
@@ -148,7 +149,13 @@ class ClawChatConnection:
                 pass
             self._supervisor_task = None
 
-    async def send_frame(self, frame: dict[str, Any], *, wait_for_ack: bool = False) -> None:
+    async def send_frame(
+        self,
+        frame: dict[str, Any],
+        *,
+        wait_for_ack: bool = False,
+        queue_when_unready: bool = True,
+    ) -> bool:
         text = encode_frame(frame)
         queued = self._queued_frame(frame, text, wait_for_ack=wait_for_ack)
         if (
@@ -177,24 +184,44 @@ class ClawChatConnection:
                 await self._ws.send(text)
                 self._start_ack_timer_if_needed(queued)
             except Exception:
+                if not queue_when_unready:
+                    self._log_send_dropped(queued, reason="send_failed")
+                    return False
                 self._enqueue_frame(queued, front=True, log_queued=False)
                 self._log_send_failed(queued)
                 raise
             if queued.ack_future is not None:
                 await queued.ack_future
-            return
+            return True
+        if not queue_when_unready:
+            self._log_send_dropped(queued, reason="not_ready")
+            return False
         self._enqueue_frame(queued)
         if queued.ack_future is not None:
             await queued.ack_future
+        return True
 
     @property
     def is_ready(self) -> bool:
         return self._state == ConnectionState.READY
 
+    async def wait_until_ready(self, *, timeout: float) -> bool:
+        if self.is_ready:
+            return True
+        try:
+            await asyncio.wait_for(self._ready_event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return False
+        return self.is_ready
+
     async def _set_state(self, state: ConnectionState) -> None:
         if self._state == state:
             return
         self._state = state
+        if state == ConnectionState.READY:
+            self._ready_event.set()
+        else:
+            self._ready_event.clear()
         if self._on_state_change is None:
             return
         try:
@@ -931,6 +958,25 @@ class ClawChatConnection:
                     ("event_name", queued.event_name),
                     ("trace_id", queued.trace_id),
                     ("chat_id", queued.chat_id),
+                    ("queue_size", len(self._send_queue)),
+                ],
+            )
+        )
+
+    def _log_send_dropped(self, queued: _QueuedFrame, *, reason: str) -> None:
+        logger.info(
+            format_ws_log(
+                event="send_dropped",
+                account_id=self._account_id,
+                attempt=self._attempt,
+                reconnect_count=self._reconnect_count,
+                state=self._state.value,
+                action="drop",
+                fields=[
+                    ("event_name", queued.event_name),
+                    ("trace_id", queued.trace_id),
+                    ("chat_id", queued.chat_id),
+                    ("reason", reason),
                     ("queue_size", len(self._send_queue)),
                 ],
             )
