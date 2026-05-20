@@ -7,12 +7,14 @@ import sqlite3
 import stat
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
 logger = logging.getLogger(__name__)
 
 DB_FILENAME = "clawchat.sqlite"
+BOOTSTRAP_CLAIM_STALE_AFTER_MS = 10 * 60 * 1000
 
 _T = TypeVar("_T")
 
@@ -99,9 +101,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_clawchat_messages_message_once
   WHERE kind = 'message' AND message_id IS NOT NULL;
 """
 
+ACTIVATION_BOOTSTRAP_SCHEMA = """
+ALTER TABLE activations ADD COLUMN conversation_id TEXT;
+ALTER TABLE activations ADD COLUMN owner_id TEXT;
+ALTER TABLE activations ADD COLUMN bootstrap_sent INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE activations ADD COLUMN bootstrap_claimed_at INTEGER;
+"""
+
 MIGRATIONS = [
     (1, "initial_schema", INITIAL_SCHEMA),
     (2, "message_id_dedup", MESSAGE_ID_DEDUP_SCHEMA),
+    (3, "activation_bootstrap", ACTIVATION_BOOTSTRAP_SCHEMA),
 ]
 
 _store: ClawChatStore | None = None
@@ -120,6 +130,13 @@ def json_dumps(value: Any) -> str | None:
     if value is None:
         return None
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+@dataclass(frozen=True)
+class ActivationBootstrapClaim:
+    conversation_id: str
+    owner_id: str | None
+    claimed_at: int
 
 
 class ClawChatStore:
@@ -168,12 +185,16 @@ class ClawChatStore:
         platform: str,
         account_id: str,
         user_id: str | None,
+        conversation_id: str,
+        owner_id: str | None,
         access_token: str | None,
         refresh_token: str | None,
         activated_at: int | None = None,
         login_method: str | None = None,
         updated_at: int | None = None,
     ) -> None:
+        if not conversation_id:
+            raise ValueError("conversation_id is required")
         now = _now_ms()
         activated = activated_at if activated_at is not None else now
         updated = updated_at if updated_at is not None else activated
@@ -183,15 +204,20 @@ class ClawChatStore:
                 """
                 INSERT INTO activations(
                   platform, account_id, user_id, access_token, refresh_token,
-                  activated_at, login_method, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                  activated_at, login_method, updated_at, conversation_id, owner_id,
+                  bootstrap_sent, bootstrap_claimed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
                 ON CONFLICT(platform, account_id) DO UPDATE SET
                   user_id = excluded.user_id,
                   access_token = excluded.access_token,
                   refresh_token = excluded.refresh_token,
                   activated_at = excluded.activated_at,
                   login_method = excluded.login_method,
-                  updated_at = excluded.updated_at
+                  updated_at = excluded.updated_at,
+                  conversation_id = excluded.conversation_id,
+                  owner_id = excluded.owner_id,
+                  bootstrap_sent = 0,
+                  bootstrap_claimed_at = NULL
                 """,
                 (
                     platform,
@@ -202,10 +228,151 @@ class ClawChatStore:
                     activated,
                     login_method,
                     updated,
+                    conversation_id,
+                    owner_id,
                 ),
             )
 
         self._write("upsert_activation", write)
+
+    def claim_pending_activation_bootstrap(
+        self,
+        *,
+        platform: str,
+        account_id: str,
+        claimed_at: int | None = None,
+        stale_after_ms: int = BOOTSTRAP_CLAIM_STALE_AFTER_MS,
+    ) -> ActivationBootstrapClaim | None:
+        claimed = claimed_at if claimed_at is not None else _now_ms()
+        stale_before = claimed - max(0, stale_after_ms)
+        self.initialize()
+        if self._disabled:
+            return None
+        try:
+            conn = sqlite3.connect(self.db_path)
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    """
+                    SELECT conversation_id, owner_id
+                    FROM activations
+                    WHERE platform = ?
+                      AND account_id = ?
+                      AND conversation_id IS NOT NULL
+                      AND conversation_id != ''
+                      AND bootstrap_sent = 0
+                      AND (
+                        bootstrap_claimed_at IS NULL
+                        OR bootstrap_claimed_at < ?
+                      )
+                    """,
+                    (platform, account_id, stale_before),
+                ).fetchone()
+                if row is None:
+                    conn.rollback()
+                    return None
+                conversation_id, owner_id = row
+                cursor = conn.execute(
+                    """
+                    UPDATE activations
+                    SET bootstrap_claimed_at = ?, updated_at = ?
+                    WHERE platform = ?
+                      AND account_id = ?
+                      AND conversation_id = ?
+                      AND bootstrap_sent = 0
+                      AND (
+                        bootstrap_claimed_at IS NULL
+                        OR bootstrap_claimed_at < ?
+                      )
+                    """,
+                    (claimed, claimed, platform, account_id, conversation_id, stale_before),
+                )
+                if cursor.rowcount != 1:
+                    conn.rollback()
+                    return None
+                conn.commit()
+                return ActivationBootstrapClaim(
+                    conversation_id=str(conversation_id),
+                    owner_id=str(owner_id) if owner_id is not None else None,
+                    claimed_at=claimed,
+                )
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "clawchat database write failed operation=%s",
+                "claim_pending_activation_bootstrap",
+                exc_info=True,
+            )
+            return None
+
+    def release_activation_bootstrap_claim(
+        self,
+        *,
+        platform: str,
+        account_id: str,
+        conversation_id: str,
+        claimed_at: int,
+        released_at: int | None = None,
+    ) -> bool | None:
+        if not conversation_id:
+            return False
+        released = released_at if released_at is not None else _now_ms()
+
+        def write(conn: sqlite3.Connection) -> bool:
+            cursor = conn.execute(
+                """
+                UPDATE activations
+                SET bootstrap_claimed_at = NULL, updated_at = ?
+                WHERE platform = ?
+                  AND account_id = ?
+                  AND conversation_id = ?
+                  AND bootstrap_sent = 0
+                  AND bootstrap_claimed_at = ?
+                """,
+                (released, platform, account_id, conversation_id, claimed_at),
+            )
+            return cursor.rowcount == 1
+
+        return self._write("release_activation_bootstrap_claim", write)
+
+    def mark_activation_bootstrap_sent(
+        self,
+        *,
+        platform: str,
+        account_id: str,
+        conversation_id: str,
+        claimed_at: int | None = None,
+        sent_at: int | None = None,
+    ) -> bool | None:
+        if not conversation_id:
+            return False
+        sent = sent_at if sent_at is not None else _now_ms()
+
+        def write(conn: sqlite3.Connection) -> bool:
+            claim_filter = (
+                "AND bootstrap_claimed_at IS NOT NULL"
+                if claimed_at is None
+                else "AND bootstrap_claimed_at = ?"
+            )
+            params = [sent, platform, account_id, conversation_id]
+            if claimed_at is not None:
+                params.append(claimed_at)
+            cursor = conn.execute(
+                f"""
+                UPDATE activations
+                SET bootstrap_sent = 1, updated_at = ?
+                WHERE platform = ?
+                  AND account_id = ?
+                  AND conversation_id = ?
+                  AND bootstrap_sent = 0
+                  {claim_filter}
+                """,
+                tuple(params),
+            )
+            return cursor.rowcount == 1
+
+        return self._write("mark_activation_bootstrap_sent", write)
 
     def insert_message(
         self,

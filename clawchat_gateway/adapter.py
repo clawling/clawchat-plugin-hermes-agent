@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -95,6 +96,17 @@ _CLAWCHAT_ACTIVATION_PROMPT = (
     "or `hermes gateway setup`; do not use a ClawChat activation tool. If no "
     "code is present, ask for the ClawChat activation code."
 )
+_CLAWCHAT_ACTIVATION_BOOTSTRAP_PROMPT = (
+    "ClawChat activation bootstrap: You are now connected to this ClawChat direct conversation.\n\n"
+    "Please do both:\n"
+    "1. Send a brief, friendly greeting to the user in this ClawChat direct conversation.\n"
+    "2. If you have local profile information for yourself, such as display name, bio, or avatar, "
+    "update the connected ClawChat account profile using the available ClawChat tools. Use "
+    "`clawchat_update_account_profile` for display name/bio/avatar URL, and use "
+    "`clawchat_upload_avatar_image` first if the avatar is only available as a local image path. "
+    "If you do not have local profile information, skip profile updates and only greet the user.\n\n"
+    "Do not ask the user for profile information just for this bootstrap."
+)
 
 
 def _clawchat_platform():
@@ -152,6 +164,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._completed_run_ids: set[str] = set()
         self._completed_run_order: deque[str] = deque()
         self._auth_failed = False
+        self._activation_bootstrap_tasks: set[asyncio.Task[None]] = set()
         try:
             self._store = get_clawchat_store()
         except Exception:  # noqa: BLE001
@@ -218,7 +231,94 @@ class ClawChatAdapter(BasePlatformAdapter):
     async def _on_state_change(self, state: ConnectionState) -> None:
         if state == ConnectionState.AUTH_FAILED:
             self._auth_failed = True
+        if state == ConnectionState.READY:
+            self._schedule_activation_bootstrap()
         logger.info("clawchat state -> %s", state.value)
+
+    def _schedule_activation_bootstrap(self) -> None:
+        if self._store is None:
+            return
+        task = asyncio.create_task(
+            self._dispatch_activation_bootstrap(),
+            name="clawchat-activation-bootstrap",
+        )
+        self._activation_bootstrap_tasks.add(task)
+        task.add_done_callback(self._activation_bootstrap_task_done)
+
+    def _activation_bootstrap_task_done(self, task: asyncio.Task[None]) -> None:
+        self._activation_bootstrap_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat activation bootstrap dispatch failed", exc_info=True)
+
+    async def _dispatch_activation_bootstrap(self) -> None:
+        if self._store is None:
+            return
+        claim = self._store.claim_pending_activation_bootstrap(
+            platform="hermes",
+            account_id="default",
+        )
+        if claim is None:
+            return
+        conversation_id = str(getattr(claim, "conversation_id", "") or "")
+        if not conversation_id:
+            return
+        owner_id = str(getattr(claim, "owner_id", "") or "")
+        claimed_at = getattr(claim, "claimed_at", None)
+        inbound = InboundMessage(
+            chat_id=conversation_id,
+            chat_type="direct",
+            sender_id=owner_id,
+            sender_name="",
+            text=_CLAWCHAT_ACTIVATION_BOOTSTRAP_PROMPT,
+            raw_message={
+                "synthetic": True,
+                "bootstrap": True,
+                "conversation_id": conversation_id,
+                "owner_id": owner_id,
+            },
+        )
+        try:
+            await self._handle_inbound(inbound)
+        except asyncio.CancelledError:
+            self._release_activation_bootstrap_claim(
+                conversation_id=conversation_id,
+                claimed_at=claimed_at,
+            )
+            raise
+        except Exception:
+            self._release_activation_bootstrap_claim(
+                conversation_id=conversation_id,
+                claimed_at=claimed_at,
+            )
+            raise
+        self._store.mark_activation_bootstrap_sent(
+            platform="hermes",
+            account_id="default",
+            conversation_id=conversation_id,
+            claimed_at=claimed_at,
+        )
+
+    def _release_activation_bootstrap_claim(
+        self,
+        *,
+        conversation_id: str,
+        claimed_at: Any,
+    ) -> None:
+        if self._store is None or claimed_at is None:
+            return
+        try:
+            self._store.release_activation_bootstrap_claim(
+                platform="hermes",
+                account_id="default",
+                conversation_id=conversation_id,
+                claimed_at=int(claimed_at),
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat activation bootstrap claim release failed", exc_info=True)
 
     def _trace_inbound_frame(self, frame: dict[str, Any]) -> None:
         """Pre-parse trace for inbound message.send frames.
@@ -411,7 +511,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             group_prompt = build_group_channel_prompt()
             if group_prompt:
                 prompts.append(group_prompt)
-        if self._has_activation_intent(inbound.text):
+        raw_message = inbound.raw_message if isinstance(inbound.raw_message, dict) else {}
+        if not raw_message.get("bootstrap") and self._has_activation_intent(inbound.text):
             prompts.append(_CLAWCHAT_ACTIVATION_PROMPT)
         return "\n\n".join(prompts) or None
 
