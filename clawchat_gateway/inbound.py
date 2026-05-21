@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from clawchat_gateway.config import ClawChatConfig
+from clawchat_gateway.config import ClawChatConfig, effective_group_mode
 
 
 @dataclass(frozen=True)
@@ -82,7 +82,10 @@ def parse_inbound_message(
     if chat_type not in {"direct", "group"}:
         return None
 
-    if chat_type == "group" and config.group_mode == "mention":
+    if (
+        chat_type == "group"
+        and effective_group_mode(config, envelope.get("chat_id") or "") == "mention"
+    ):
         mentions = context.get("mentions") or []
         if not any(
             mention.get("id") == config.user_id
