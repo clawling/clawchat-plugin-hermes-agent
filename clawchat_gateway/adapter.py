@@ -20,6 +20,7 @@ from gateway.platforms.base import (
     SendResult,
 )
 
+from clawchat_gateway.api_client import ClawChatApiClient, ClawChatApiError
 from clawchat_gateway.config import ClawChatConfig
 from clawchat_gateway.connection import (
     HANDSHAKE_TIMEOUT_SECONDS,
@@ -53,6 +54,7 @@ TYPING_REFRESH_SECONDS = 10.0
 INBOUND_RATE_WINDOW_SECONDS = 30.0
 INBOUND_RATE_WARN_THRESHOLD = 5
 COMPLETED_RUN_CACHE_MAX = 1024
+RECONNECT_REFRESH_LIMIT = 20
 
 _THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
 _THINK_CONTENT_RE = re.compile(r"<think\b[^>]*>(.*?)</think>", re.IGNORECASE | re.DOTALL)
@@ -155,6 +157,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._clawchat_config,
             on_message=self._on_message,
             on_state_change=self._on_state_change,
+            on_signal=self._on_signal,
         )
         self._active_runs_by_id: dict[str, _ActiveRun] = {}
         self._active_chat_runs: dict[str, str] = {}
@@ -165,6 +168,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._completed_run_order: deque[str] = deque()
         self._auth_failed = False
         self._activation_bootstrap_tasks: set[asyncio.Task[None]] = set()
+        self._conversation_refresh_tasks: set[asyncio.Task[None]] = set()
+        self._conversation_metadata_versions: dict[str, int] = {}
         try:
             self._store = get_clawchat_store()
         except Exception:  # noqa: BLE001
@@ -181,6 +186,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         return ready
 
     async def disconnect(self) -> None:
+        await self._cancel_activation_bootstrap_tasks()
+        await self._cancel_conversation_refresh_tasks()
         await self._connection.stop()
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
@@ -233,7 +240,279 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._auth_failed = True
         if state == ConnectionState.READY:
             self._schedule_activation_bootstrap()
+            await self._schedule_reconnect_conversation_refresh()
         logger.info("clawchat state -> %s", state.value)
+
+    async def _on_signal(self, frame: dict[str, Any]) -> None:
+        if frame.get("event") != "chat.metadata.invalidated":
+            return
+        await self._handle_metadata_invalidated(frame)
+
+    async def _schedule_reconnect_conversation_refresh(self) -> None:
+        if self._store is None:
+            return
+        await self._cancel_conversation_refresh_tasks()
+        task = asyncio.create_task(
+            self._refresh_recent_conversations_after_ready(),
+            name="clawchat-conversation-refresh",
+        )
+        self._conversation_refresh_tasks.add(task)
+        task.add_done_callback(self._conversation_refresh_task_done)
+
+    async def _cancel_conversation_refresh_tasks(self) -> None:
+        tasks = list(self._conversation_refresh_tasks)
+        if not tasks:
+            return
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for task in tasks:
+            self._conversation_refresh_tasks.discard(task)
+
+    def _conversation_refresh_task_done(self, task: asyncio.Task[None]) -> None:
+        self._conversation_refresh_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat reconnect conversation refresh failed", exc_info=True)
+
+    async def _refresh_recent_conversations_after_ready(self) -> None:
+        if self._store is None:
+            return
+        ids: list[str] = []
+        try:
+            activation_id = self._store.get_activation_conversation(
+                platform="hermes",
+                account_id="default",
+            )
+            if activation_id:
+                ids.append(str(activation_id))
+            cached_ids = self._store.list_cached_conversation_ids(
+                platform="clawchat",
+                account_id=self._account_id(),
+                limit=RECONNECT_REFRESH_LIMIT * 2,
+            )
+            cached_seen: set[str] = set()
+            for cached_id in cached_ids:
+                if not cached_id or cached_id in cached_seen or cached_id in ids:
+                    continue
+                cached_seen.add(cached_id)
+                ids.append(str(cached_id))
+                if len(cached_seen) >= RECONNECT_REFRESH_LIMIT:
+                    break
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat reconnect conversation list failed", exc_info=True)
+            return
+        seen: set[str] = set()
+        for conversation_id in ids:
+            if not conversation_id or conversation_id in seen:
+                continue
+            seen.add(conversation_id)
+            await self._refresh_conversation_metadata(conversation_id)
+
+    async def _handle_metadata_invalidated(self, frame: dict[str, Any]) -> None:
+        payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+        conversation_id = self._signal_conversation_id(frame, payload)
+        if not conversation_id:
+            logger.warning("clawchat metadata invalidation missing chat_id trace_id=%s", frame.get("trace_id"))
+            return
+        version = payload.get("version") or payload.get("metadata_version") or payload.get("metadataVersion")
+        if isinstance(version, int):
+            current_version = self._conversation_metadata_versions.get(conversation_id)
+            if current_version is not None and version <= current_version:
+                logger.info(
+                    "clawchat metadata invalidation stale chat_id=%s version=%s current=%s",
+                    conversation_id,
+                    version,
+                    current_version,
+                )
+                return
+        await self._refresh_conversation_metadata(
+            conversation_id,
+            signal_version=version if isinstance(version, int) else None,
+        )
+
+    def _signal_conversation_id(self, frame: dict[str, Any], payload: dict[str, Any]) -> str | None:
+        for value in (
+            payload.get("chat_id"),
+            payload.get("conversation_id"),
+            payload.get("conversationId"),
+            frame.get("chat_id"),
+        ):
+            if isinstance(value, str) and value:
+                return value
+        return None
+
+    async def _refresh_conversation_metadata(
+        self,
+        conversation_id: str,
+        *,
+        signal_version: int | None = None,
+    ) -> None:
+        client = ClawChatApiClient(
+            base_url=self._clawchat_config.base_url,
+            token=self._clawchat_config.token,
+            user_id=self._clawchat_config.user_id,
+        )
+        try:
+            result = await client.get_conversation(conversation_id)
+        except ClawChatApiError as exc:
+            if exc.status in (404, 410) or exc.code in (404, 410):
+                self._delete_conversation_cache(conversation_id)
+                self._conversation_metadata_versions.pop(conversation_id, None)
+                return
+            logger.warning(
+                "clawchat metadata refresh failed chat_id=%s status=%s error=%s",
+                conversation_id,
+                exc.status,
+                exc,
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "clawchat metadata refresh failed chat_id=%s error=%s",
+                conversation_id,
+                exc,
+            )
+            return
+        if not self._cache_conversation_details(result):
+            return
+        if signal_version is not None:
+            self._conversation_metadata_versions[conversation_id] = signal_version
+
+    def _delete_conversation_cache(self, conversation_id: str) -> None:
+        if self._store is None:
+            return
+        try:
+            self._store.delete_conversation_cache(
+                platform="clawchat",
+                account_id=self._account_id(),
+                conversation_id=conversation_id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat conversation cache delete failed", exc_info=True)
+
+    def _cache_conversation_details(self, result: dict[str, Any]) -> bool:
+        if self._store is None:
+            return False
+        detail = result.get("conversation") if isinstance(result.get("conversation"), dict) else result
+        if not isinstance(detail, dict):
+            return False
+        conversation_id = self._conversation_id(detail)
+        if not conversation_id:
+            return False
+        metadata_version = self._metadata_version(detail)
+        participants_raw = detail.get("participants")
+        members_raw = participants_raw if isinstance(participants_raw, list) else detail.get("members")
+        users_raw = detail.get("users") or detail.get("participants") or []
+        members = [
+            member
+            for item in members_raw or []
+            if isinstance(item, dict)
+            for member in [self._member_from_raw(item)]
+            if member
+        ]
+        user_profiles = [
+            profile
+            for item in users_raw or []
+            if isinstance(item, dict)
+            for profile in [self._profile_from_raw(item)]
+            if profile
+        ]
+        members_complete = bool(
+            isinstance(members_raw, list)
+            and (
+                isinstance(participants_raw, list)
+                or detail.get("members_complete") is True
+                or detail.get("participants_complete") is True
+            )
+        )
+        try:
+            self._store.upsert_conversation_details(
+                platform="clawchat",
+                account_id=self._account_id(),
+                conversation_id=conversation_id,
+                conversation_type=self._conversation_type(detail),
+                metadata_version=metadata_version,
+                last_seen_at=self._last_seen_at(detail),
+                raw=detail,
+                group_profile=detail.get("group") if isinstance(detail.get("group"), dict) else None,
+                user_profiles=user_profiles,
+                members=members,
+                members_complete=members_complete,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat conversation cache upsert failed", exc_info=True)
+            return False
+        if metadata_version is not None:
+            self._conversation_metadata_versions[conversation_id] = metadata_version
+        return True
+
+    def _account_id(self) -> str:
+        return str(self._clawchat_config.user_id or "")
+
+    def _conversation_id(self, value: dict[str, Any]) -> str | None:
+        raw = value.get("conversation_id") or value.get("conversationId") or value.get("id")
+        return str(raw) if raw else None
+
+    def _conversation_type(self, value: dict[str, Any]) -> str | None:
+        raw = value.get("conversation_type") or value.get("conversationType") or value.get("type")
+        return str(raw) if raw else None
+
+    def _metadata_version(self, value: dict[str, Any]) -> int | None:
+        raw = value.get("metadata_version") or value.get("metadataVersion")
+        return raw if isinstance(raw, int) else None
+
+    def _last_seen_at(self, value: dict[str, Any]) -> int | None:
+        for key in ("last_seen_at", "lastSeenAt", "updated_at", "created_at"):
+            raw = value.get(key)
+            if isinstance(raw, int):
+                return raw
+        return None
+
+    def _profile_from_raw(self, raw: dict[str, Any]) -> dict[str, Any] | None:
+        user_id = raw.get("user_id") or raw.get("userId") or raw.get("id")
+        if not user_id:
+            return None
+        profile = {"user_id": str(user_id), "raw": raw}
+        for source, target in (
+            ("nickname", "nickname"),
+            ("avatar_url", "avatar_url"),
+            ("avatarUrl", "avatar_url"),
+            ("bio", "bio"),
+        ):
+            if source in raw and raw[source] is not None:
+                profile[target] = raw[source]
+        return profile
+
+    def _member_from_raw(self, raw: dict[str, Any]) -> dict[str, Any] | None:
+        user_id = raw.get("user_id") or raw.get("userId") or raw.get("id")
+        if not user_id:
+            return None
+        return {"user_id": str(user_id), "role": raw.get("role"), "raw": raw}
+
+    def _upsert_minimal_conversation(
+        self,
+        *,
+        conversation_id: str | None,
+        conversation_type: str | None,
+        last_seen_at: int | None,
+    ) -> None:
+        if self._store is None or not conversation_id:
+            return
+        try:
+            self._store.upsert_conversation_summary(
+                platform="clawchat",
+                account_id=self._account_id(),
+                conversation_id=conversation_id,
+                conversation_type=conversation_type,
+                last_seen_at=last_seen_at if last_seen_at is not None else int(time.time() * 1000),
+                raw=None,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat minimal conversation cache upsert failed")
 
     def _schedule_activation_bootstrap(self) -> None:
         if self._store is None:
@@ -253,6 +532,16 @@ class ClawChatAdapter(BasePlatformAdapter):
             task.result()
         except Exception:  # noqa: BLE001
             logger.warning("clawchat activation bootstrap dispatch failed", exc_info=True)
+
+    async def _cancel_activation_bootstrap_tasks(self) -> None:
+        tasks = list(self._activation_bootstrap_tasks)
+        if not tasks:
+            return
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for task in tasks:
+            self._activation_bootstrap_tasks.discard(task)
 
     async def _dispatch_activation_bootstrap(self) -> None:
         if self._store is None:
@@ -430,6 +719,11 @@ class ClawChatAdapter(BasePlatformAdapter):
             len(inbound.text),
             len(inbound.media_urls),
         )
+        self._upsert_minimal_conversation(
+            conversation_id=inbound.chat_id,
+            conversation_type=inbound.chat_type,
+            last_seen_at=frame.get("emitted_at") if isinstance(frame.get("emitted_at"), int) else None,
+        )
         if event_name in {"message.send", "message.reply"}:
             claimed = self._claim_message_once(
                 kind="message",
@@ -569,6 +863,11 @@ class ClawChatAdapter(BasePlatformAdapter):
                 reply_to_message_id=reply_to,
                 include_message_id=True,
             )
+            self._upsert_minimal_conversation(
+                conversation_id=chat_id,
+                conversation_type=chat_type,
+                last_seen_at=frame.get("emitted_at") if isinstance(frame.get("emitted_at"), int) else None,
+            )
             claimed = self._claim_outbound_message(
                 event_type="message.reply",
                 trace_id=frame.get("trace_id") or frame.get("id"),
@@ -585,10 +884,28 @@ class ClawChatAdapter(BasePlatformAdapter):
                     error="clawchat outbound message claim failed",
                     message_id=message_id,
                 )
-            await self._connection.send_frame(
+            sent = await self._connection.send_frame(
                 frame,
                 wait_for_ack=True,
             )
+            if not sent:
+                error = "clawchat static reply dropped"
+                self._update_message_record(
+                    kind="message",
+                    direction="outbound",
+                    event_type="message.failed",
+                    trace_id=frame.get("trace_id") or frame.get("id"),
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=error,
+                    raw=frame,
+                )
+                logger.warning(
+                    "clawchat send static reply dropped chat_id=%s message_id=%s",
+                    chat_id,
+                    message_id,
+                )
+                return SendResult(success=False, error=error, message_id=message_id)
             self._record_thinking_if_present(
                 event_type="message.reply",
                 trace_id=frame.get("trace_id") or frame.get("id"),
@@ -609,6 +926,11 @@ class ClawChatAdapter(BasePlatformAdapter):
             chat_id=chat_id,
             chat_type=chat_type,
             message_id=message_id,
+        )
+        self._upsert_minimal_conversation(
+            conversation_id=chat_id,
+            conversation_type=chat_type,
+            last_seen_at=created_frame.get("emitted_at") if isinstance(created_frame.get("emitted_at"), int) else None,
         )
         claimed = self._claim_outbound_message(
             event_type="message.created",

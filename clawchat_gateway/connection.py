@@ -78,6 +78,7 @@ class ConnectionState(str, enum.Enum):
 
 OnMessage = Callable[[dict[str, Any]], Awaitable[None]]
 OnStateChange = Callable[[ConnectionState], Awaitable[None]]
+OnSignal = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 class ClawChatConnection:
@@ -87,11 +88,13 @@ class ClawChatConnection:
         *,
         on_message: OnMessage,
         on_state_change: OnStateChange | None = None,
+        on_signal: OnSignal | None = None,
         account_id: str = "default",
     ) -> None:
         self._cfg = config
         self._on_message = on_message
         self._on_state_change = on_state_change
+        self._on_signal = on_signal
         self._account_id = account_id
         self._state = ConnectionState.DISCONNECTED
         self._ws: Any = None
@@ -111,6 +114,8 @@ class ClawChatConnection:
         self._hello_wait: asyncio.Future[bool] | None = None
         self._ready_event = asyncio.Event()
         self._pending_connect_id: str | None = None
+        self._hello_resolved_device_id: str | None = None
+        self._hello_delivery_mode: str | None = None
         self._send_queue: deque[_QueuedFrame] = deque()
         self._flushing_send_queue = False
         self._pending_acks: dict[str, _PendingAck] = {}
@@ -132,6 +137,8 @@ class ClawChatConnection:
         self._stopping = True
         self._cancel_stable_ready_reset()
         await self._set_state(ConnectionState.CLOSED)
+        self._reject_pending_acks(RuntimeError("connection stopped"))
+        self._reject_queued_ack_waiters(RuntimeError("connection stopped"), clear_queue=True)
         if self._read_task is not None:
             self._read_task.cancel()
         if self._hello_wait is not None and not self._hello_wait.done():
@@ -158,6 +165,9 @@ class ClawChatConnection:
     ) -> bool:
         text = encode_frame(frame)
         queued = self._queued_frame(frame, text, wait_for_ack=wait_for_ack)
+        if self._stopping or self._state == ConnectionState.CLOSED:
+            self._log_send_dropped(queued, reason="stopped")
+            return False
         if (
             self._state == ConnectionState.READY
             and self._ws is not None
@@ -320,11 +330,6 @@ class ClawChatConnection:
         try:
             ws = await _ws_connect(
                 self._cfg.websocket_url,
-                additional_headers={
-                    "Authorization": f"Bearer {self._cfg.token}",
-                    "X-Device-Id": get_device_id(),
-                },
-                subprotocols=["clawchat.v1", f"bearer.{self._cfg.token}"],
                 ping_interval=self._cfg.heartbeat_interval_ms / 1000.0,
                 ping_timeout=self._cfg.heartbeat_timeout_ms / 1000.0,
             )
@@ -336,6 +341,8 @@ class ClawChatConnection:
             raise
         self._ws = ws
         self._pending_connect_id = None
+        self._hello_resolved_device_id = None
+        self._hello_delivery_mode = None
         await self._set_state(ConnectionState.HANDSHAKING)
 
         self._hello_wait = loop.create_future()
@@ -351,6 +358,8 @@ class ClawChatConnection:
             self._record_connection(
                 "mark_connection_ready",
                 self._connection_row_id,
+                resolved_device_id=self._hello_resolved_device_id,
+                delivery_mode=self._hello_delivery_mode,
             )
             self._schedule_stable_ready_reset()
             elapsed_ms = int((loop.time() - handshake_started_at) * 1000)
@@ -387,6 +396,8 @@ class ClawChatConnection:
                 pass
             self._ws = None
             self._read_task = None
+            if not self._stopping and not self._auth_failed:
+                self._reject_pending_acks(RuntimeError("connection disconnected"))
             if self._auth_failed:
                 self._finish_current_connection(ConnectionState.AUTH_FAILED.value)
             elif self._stopping:
@@ -500,6 +511,43 @@ class ClawChatConnection:
                 )
             )
             return
+        if self._state == ConnectionState.READY and ftype in (None, "event") and frame.get("event") == "chat.metadata.invalidated":
+            logger.info(
+                format_ws_log(
+                    event="inbound_control",
+                    account_id=self._account_id,
+                    attempt=self._attempt,
+                    reconnect_count=self._reconnect_count,
+                    state=ConnectionState.READY.value,
+                    action="signal",
+                    fields=[
+                        ("event_name", frame.get("event")),
+                        ("trace_id", frame.get("trace_id") or frame.get("id")),
+                        ("chat_id", frame.get("chat_id")),
+                    ],
+                )
+            )
+            on_signal = getattr(self, "_on_signal", None)
+            if on_signal is not None:
+                await on_signal(frame)
+            return
+        if self._state == ConnectionState.READY and ftype in (None, "event") and frame.get("event") in {"presence.snapshot", "presence.update"}:
+            logger.info(
+                format_ws_log(
+                    event="inbound_control",
+                    account_id=self._account_id,
+                    attempt=self._attempt,
+                    reconnect_count=self._reconnect_count,
+                    state=ConnectionState.READY.value,
+                    action="presence",
+                    fields=[
+                        ("event_name", frame.get("event")),
+                        ("trace_id", frame.get("trace_id") or frame.get("id")),
+                        ("chat_id", frame.get("chat_id")),
+                    ],
+                )
+            )
+            return
         if self._state == ConnectionState.READY and ftype in (None, "event") and frame.get("event") in {"message.send", "message.reply"}:
             sender = frame.get("sender") if isinstance(frame.get("sender"), dict) else {}
             logger.info(
@@ -558,8 +606,11 @@ class ClawChatConnection:
             )
             self._handle_ack(frame)
             return
+        if self._state == ConnectionState.READY and ftype in (None, "event") and frame.get("event") == "message.error":
+            self._handle_message_error(frame)
+            return
         if self._state == ConnectionState.READY and ftype in (None, "event") and frame.get("event") == "ping":
-            trace_id = str(frame.get("trace_id") or frame.get("id") or "")
+            trace_id = frame.get("trace_id")
             logger.info(
                 format_ws_log(
                     event="protocol_ping_received",
@@ -572,7 +623,12 @@ class ClawChatConnection:
                 )
             )
             if self._ws is not None:
-                await self._ws.send(encode_frame(build_pong_event(trace_id=trace_id)))
+                emitted_at = frame.get("emitted_at")
+                if not isinstance(trace_id, str) or not trace_id:
+                    return
+                if type(emitted_at) is not int:
+                    return
+                await self._ws.send(encode_frame(build_pong_event(trace_id=trace_id, emitted_at=emitted_at)))
             return
         if self._state == ConnectionState.READY and ftype in (None, "event") and frame.get("event") == "pong":
             logger.info(
@@ -642,7 +698,11 @@ class ClawChatConnection:
             token=self._cfg.token,
             nonce=nonce,
             device_id=get_device_id(),
-            capabilities={"multi_device": True, "device_replay": True},
+            capabilities={
+                "multi_device": True,
+                "device_replay": True,
+                "chat_meta_events": True,
+            },
         )
         await self._ws.send(encode_frame(connect_req))
         self._record_connection(
@@ -666,6 +726,11 @@ class ClawChatConnection:
 
     async def _maybe_finish_handshake(self, frame: dict[str, Any]) -> None:
         if self._pending_connect_id and is_hello_ok(frame, self._pending_connect_id):
+            payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+            device_id = payload.get("device_id")
+            delivery_mode = payload.get("delivery_mode")
+            self._hello_resolved_device_id = device_id if isinstance(device_id, str) else None
+            self._hello_delivery_mode = delivery_mode if isinstance(delivery_mode, str) else None
             await self._set_state(ConnectionState.READY)
             if self._hello_wait is not None and not self._hello_wait.done():
                 self._hello_wait.set_result(True)
@@ -1076,6 +1141,78 @@ class ClawChatConnection:
         )
         if not pending.future.done():
             pending.future.set_result(frame)
+
+    def _handle_message_error(self, frame: dict[str, Any]) -> None:
+        trace_id = str(frame.get("trace_id") or frame.get("id") or "")
+        chat_id = str(frame.get("chat_id") or "")
+        payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+        message_id = payload.get("message_id") if isinstance(payload.get("message_id"), str) else None
+        pending = self._pending_acks.pop(trace_id, None)
+        if pending is None:
+            logger.info(
+                format_ws_log(
+                    event="message_error_unmatched",
+                    account_id=self._account_id,
+                    attempt=self._attempt,
+                    reconnect_count=self._reconnect_count,
+                    state=self._state.value,
+                    action="ignore",
+                    fields=[
+                        ("trace_id", trace_id),
+                        ("chat_id", chat_id),
+                        ("message_id", message_id),
+                    ],
+                )
+            )
+            return
+        pending.timeout_task.cancel()
+        reason = self._message_error_reason(payload)
+        logger.info(
+            format_ws_log(
+                event="message_error_received",
+                account_id=self._account_id,
+                attempt=self._attempt,
+                reconnect_count=self._reconnect_count,
+                state=self._state.value,
+                action="reject_ack",
+                fields=[
+                    ("event_name", pending.event_name),
+                    ("trace_id", trace_id),
+                    ("chat_id", pending.chat_id or chat_id),
+                    ("message_id", message_id),
+                    ("reason", reason),
+                ],
+            )
+        )
+        if not pending.future.done():
+            pending.future.set_exception(RuntimeError(f"message.error: {reason}"))
+
+    def _message_error_reason(self, payload: dict[str, Any]) -> str:
+        for key in ("reason", "error", "message", "code"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return self._sanitize_secret_text(value.strip()) or "unknown"
+        return "unknown"
+
+    def _reject_pending_acks(self, exc: Exception) -> None:
+        pending_acks = list(self._pending_acks.values())
+        self._pending_acks.clear()
+        for pending in pending_acks:
+            pending.timeout_task.cancel()
+            if not pending.future.done():
+                pending.future.set_exception(exc)
+
+    def _reject_queued_ack_waiters(self, exc: Exception, *, clear_queue: bool = False) -> None:
+        retained: deque[_QueuedFrame] = deque()
+        for queued in self._send_queue:
+            if queued.ack_timeout_task is not None:
+                queued.ack_timeout_task.cancel()
+            if queued.ack_future is not None and not queued.ack_future.done():
+                queued.ack_future.set_exception(exc)
+            if not clear_queue or queued.ack_future is None:
+                retained.append(queued)
+        if clear_queue:
+            self._send_queue = retained
 
     async def _handle_heartbeat_timeout(self) -> None:
         logger.info(

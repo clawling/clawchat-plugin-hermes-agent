@@ -171,6 +171,39 @@ async def handle_clawchat_list_moments(args, **kw):
     return _tool_result(result)
 
 
+async def handle_clawchat_list_conversations(args, **kw):
+    task_id = kw.get("task_id") or "default"
+    logger.info("clawchat_list_conversations start task_id=%s", task_id)
+    from clawchat_gateway import tools
+
+    result = await _recorded_tool_call(
+        "clawchat_list_conversations",
+        args,
+        _account_id_from_kwargs(kw),
+        lambda: tools.list_conversations(
+            before=args.get("before"),
+            limit=_optional_int_arg(args.get("limit")),
+        ),
+    )
+    logger.info("clawchat_list_conversations done task_id=%s", task_id)
+    return _tool_result(result)
+
+
+async def handle_clawchat_get_conversation(args, **kw):
+    task_id = kw.get("task_id") or "default"
+    logger.info("clawchat_get_conversation start task_id=%s", task_id)
+    from clawchat_gateway import tools
+
+    result = await _recorded_tool_call(
+        "clawchat_get_conversation",
+        args,
+        _account_id_from_kwargs(kw),
+        lambda: tools.get_conversation(args.get("conversationId")),
+    )
+    logger.info("clawchat_get_conversation done task_id=%s", task_id)
+    return _tool_result(result)
+
+
 async def handle_clawchat_create_moment(args, **kw):
     task_id = kw.get("task_id") or "default"
     logger.info("clawchat_create_moment start task_id=%s", task_id)
@@ -451,6 +484,54 @@ def register_tools(ctx) -> None:
         is_async=True,
         description="List ClawChat Moments",
         emoji="📰",
+    )
+
+    ctx.register_tool(
+        "clawchat_list_conversations",
+        "clawchat",
+        {
+            "name": "clawchat_list_conversations",
+            "description": _direct_tool_description(
+                "List conversations visible to the agent's connected ClawChat account. "
+                "TRIGGER - invoke when the user asks to view, browse, or choose from ClawChat conversations. "
+                "This is read-only; do not use it to create, leave, dissolve, update, or change conversation membership."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "before": {"type": "string", "description": "Cursor timestamp; return conversations before this value"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Max conversations (default 20)"},
+                },
+            },
+        },
+        handle_clawchat_list_conversations,
+        is_async=True,
+        description="List ClawChat Conversations",
+        emoji="💬",
+    )
+
+    ctx.register_tool(
+        "clawchat_get_conversation",
+        "clawchat",
+        {
+            "name": "clawchat_get_conversation",
+            "description": _direct_tool_description(
+                "Fetch a ClawChat conversation by conversationId. "
+                "TRIGGER - invoke when the user asks to inspect a specific ClawChat conversation and provides a concrete conversationId. "
+                "This is read-only; do not use it to create, leave, dissolve, update, or change conversation membership."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "conversationId": {"type": "string", "description": "Explicit ClawChat conversation id to fetch"},
+                },
+                "required": ["conversationId"],
+            },
+        },
+        handle_clawchat_get_conversation,
+        is_async=True,
+        description="Get ClawChat Conversation",
+        emoji="🧾",
     )
 
     ctx.register_tool(

@@ -6,6 +6,7 @@ import asyncio
 import json
 import uuid
 from dataclasses import dataclass
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -35,6 +36,8 @@ class UploadResult:
     url: str
     size: int
     mime: str
+    kind: str | None = None
+    name: str | None = None
 
 
 class ClawChatApiClient:
@@ -85,6 +88,26 @@ class ClawChatApiClient:
         query = urlencode(params)
         path = f"/v1/moments?{query}" if query else "/v1/moments"
         return await self._call_json("GET", path)
+
+    async def list_conversations(
+        self,
+        *,
+        before: str | None = None,
+        limit: int | None = None,
+    ) -> dict:
+        params: dict[str, str | int] = {}
+        if before is not None:
+            params["before"] = before
+        if limit is not None:
+            params["limit"] = limit
+        query = urlencode(params)
+        path = f"/v1/conversations?{query}" if query else "/v1/conversations"
+        return await self._call_json("GET", path)
+
+    async def get_conversation(self, conversation_id: str) -> dict:
+        if not conversation_id.strip():
+            raise ClawChatApiError("validation", "conversation_id is required")
+        return await self._call_json("GET", f"/v1/conversations/{conversation_id}")
 
     async def create_moment(
         self,
@@ -190,7 +213,13 @@ class ClawChatApiClient:
         filename: str,
         mime: str = "application/octet-stream",
     ) -> UploadResult:
-        return await self._upload("/media/upload", buffer=buffer, filename=filename, mime=mime)
+        return await self._upload(
+            "/media/upload",
+            buffer=buffer,
+            filename=filename,
+            mime=mime,
+            required_fields=("kind", "url", "name", "mime", "size"),
+        )
 
     async def upload_avatar(
         self,
@@ -200,7 +229,11 @@ class ClawChatApiClient:
         mime: str = "application/octet-stream",
     ) -> UploadResult:
         return await self._upload(
-            "/v1/files/upload-url", buffer=buffer, filename=filename, mime=mime
+            "/v1/files/upload-url",
+            buffer=buffer,
+            filename=filename,
+            mime=mime,
+            required_fields=("url", "mime", "size"),
         )
 
     async def _upload(
@@ -210,6 +243,7 @@ class ClawChatApiClient:
         buffer: bytes,
         filename: str,
         mime: str,
+        required_fields: tuple[str, ...],
     ) -> UploadResult:
         boundary = f"----clawchat-{uuid.uuid4().hex}"
         body = (
@@ -223,10 +257,19 @@ class ClawChatApiClient:
             body=body,
             extra_headers={"content-type": f"multipart/form-data; boundary={boundary}"},
         )
+        for field in required_fields:
+            if field not in payload:
+                raise ClawChatApiError(
+                    "transport",
+                    f"invalid upload response: missing {field}",
+                    path=path,
+                )
         return UploadResult(
             url=str(payload["url"]),
-            size=int(payload.get("size", len(buffer))),
+            size=int(payload["size"]),
             mime=str(payload["mime"]),
+            kind=str(payload["kind"]) if "kind" in payload else None,
+            name=str(payload["name"]) if "name" in payload else None,
         )
 
     async def _call_json(
@@ -262,6 +305,20 @@ class ClawChatApiClient:
             with urlopen(request, timeout=DEFAULT_REQUEST_TIMEOUT) as response:
                 status = getattr(response, "status", 200)
                 raw = response.read().decode("utf-8")
+        except HTTPError as exc:
+            status = exc.code
+            try:
+                payload = json.loads(exc.read().decode("utf-8"))
+            except Exception:
+                payload = None
+            if isinstance(payload, dict):
+                code = payload.get("code")
+                message = str(payload.get("msg") or payload.get("message") or exc.reason)
+            else:
+                code = None
+                message = str(exc.reason or exc)
+            kind = "auth" if status in (401, 403) else "api"
+            raise ClawChatApiError(kind, message, status=status, path=path, code=code) from exc
         except Exception as exc:
             raise ClawChatApiError("transport", str(exc), path=path) from exc
 

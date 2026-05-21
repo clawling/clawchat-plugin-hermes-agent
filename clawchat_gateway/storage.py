@@ -108,10 +108,66 @@ ALTER TABLE activations ADD COLUMN bootstrap_sent INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE activations ADD COLUMN bootstrap_claimed_at INTEGER;
 """
 
+CONVERSATION_CACHE_SCHEMA = """
+ALTER TABLE connections ADD COLUMN resolved_device_id TEXT;
+ALTER TABLE connections ADD COLUMN delivery_mode TEXT;
+
+CREATE TABLE IF NOT EXISTS clawchat_conversations (
+  platform TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  conversation_type TEXT,
+  metadata_version INTEGER,
+  last_seen_at INTEGER,
+  last_refreshed_at INTEGER,
+  raw_json TEXT,
+  PRIMARY KEY (platform, account_id, conversation_id)
+);
+
+CREATE TABLE IF NOT EXISTS clawchat_user_profiles (
+  platform TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  nickname TEXT,
+  avatar_url TEXT,
+  bio TEXT,
+  raw_json TEXT,
+  last_refreshed_at INTEGER,
+  PRIMARY KEY (platform, account_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS clawchat_group_profiles (
+  platform TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  title TEXT,
+  description TEXT,
+  metadata_version INTEGER,
+  raw_json TEXT,
+  last_refreshed_at INTEGER,
+  PRIMARY KEY (platform, account_id, conversation_id)
+);
+
+CREATE TABLE IF NOT EXISTS clawchat_conversation_members (
+  platform TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  role TEXT,
+  raw_json TEXT,
+  last_seen_at INTEGER,
+  PRIMARY KEY (platform, account_id, conversation_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_clawchat_conversations_seen
+  ON clawchat_conversations(platform, account_id, last_seen_at);
+"""
+
 MIGRATIONS = [
     (1, "initial_schema", INITIAL_SCHEMA),
     (2, "message_id_dedup", MESSAGE_ID_DEDUP_SCHEMA),
     (3, "activation_bootstrap", ACTIVATION_BOOTSTRAP_SCHEMA),
+    (4, "conversation_cache", CONVERSATION_CACHE_SCHEMA),
 ]
 
 _store: ClawChatStore | None = None
@@ -232,8 +288,258 @@ class ClawChatStore:
                     owner_id,
                 ),
             )
+            conn.execute(
+                """
+                INSERT INTO clawchat_conversations(platform, account_id, conversation_id)
+                VALUES (?, ?, ?)
+                ON CONFLICT(platform, account_id, conversation_id) DO NOTHING
+                """,
+                (platform, account_id, conversation_id),
+            )
 
         self._write("upsert_activation", write)
+
+    def upsert_conversation_summary(
+        self,
+        *,
+        platform: str,
+        account_id: str,
+        conversation_id: str,
+        conversation_type: str | None = None,
+        last_seen_at: int | None = None,
+        raw: Any = None,
+    ) -> None:
+        def write(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                """
+                INSERT INTO clawchat_conversations(
+                  platform, account_id, conversation_id, conversation_type, last_seen_at, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(platform, account_id, conversation_id) DO UPDATE SET
+                  conversation_type = COALESCE(excluded.conversation_type, conversation_type),
+                  last_seen_at = COALESCE(excluded.last_seen_at, last_seen_at),
+                  raw_json = COALESCE(excluded.raw_json, raw_json)
+                """,
+                (
+                    platform,
+                    account_id,
+                    conversation_id,
+                    conversation_type,
+                    last_seen_at,
+                    json_dumps(raw),
+                ),
+            )
+
+        self._write("upsert_conversation_summary", write)
+
+    def upsert_conversation_details(
+        self,
+        *,
+        platform: str,
+        account_id: str,
+        conversation_id: str,
+        conversation_type: str | None = None,
+        metadata_version: int | None = None,
+        last_seen_at: int | None = None,
+        last_refreshed_at: int | None = None,
+        raw: Any = None,
+        group_profile: dict[str, Any] | None = None,
+        user_profiles: list[dict[str, Any]] | None = None,
+        members: list[dict[str, Any]] | None = None,
+        members_complete: bool = False,
+    ) -> None:
+        def write(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                """
+                INSERT INTO clawchat_conversations(
+                  platform, account_id, conversation_id, conversation_type, metadata_version,
+                  last_seen_at, last_refreshed_at, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(platform, account_id, conversation_id) DO UPDATE SET
+                  conversation_type = COALESCE(excluded.conversation_type, conversation_type),
+                  metadata_version = COALESCE(excluded.metadata_version, metadata_version),
+                  last_seen_at = COALESCE(excluded.last_seen_at, last_seen_at),
+                  last_refreshed_at = COALESCE(excluded.last_refreshed_at, last_refreshed_at),
+                  raw_json = COALESCE(excluded.raw_json, raw_json)
+                """,
+                (
+                    platform,
+                    account_id,
+                    conversation_id,
+                    conversation_type,
+                    metadata_version,
+                    last_seen_at,
+                    last_refreshed_at,
+                    json_dumps(raw),
+                ),
+            )
+            if group_profile is not None:
+                conn.execute(
+                    """
+                    INSERT INTO clawchat_group_profiles(
+                      platform, account_id, conversation_id, title, description,
+                      metadata_version, raw_json, last_refreshed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(platform, account_id, conversation_id) DO UPDATE SET
+                      title = COALESCE(excluded.title, title),
+                      description = COALESCE(excluded.description, description),
+                      metadata_version = COALESCE(excluded.metadata_version, metadata_version),
+                      raw_json = COALESCE(excluded.raw_json, raw_json),
+                      last_refreshed_at = COALESCE(excluded.last_refreshed_at, last_refreshed_at)
+                    """,
+                    (
+                        platform,
+                        account_id,
+                        conversation_id,
+                        group_profile.get("title"),
+                        group_profile.get("description"),
+                        group_profile.get("metadata_version"),
+                        json_dumps(group_profile.get("raw", group_profile)),
+                        group_profile.get("last_refreshed_at", last_refreshed_at),
+                    ),
+                )
+            for profile in user_profiles or []:
+                user_id = profile.get("user_id")
+                if not user_id:
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO clawchat_user_profiles(
+                      platform, account_id, user_id, nickname, avatar_url, bio,
+                      raw_json, last_refreshed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(platform, account_id, user_id) DO UPDATE SET
+                      nickname = COALESCE(excluded.nickname, nickname),
+                      avatar_url = COALESCE(excluded.avatar_url, avatar_url),
+                      bio = COALESCE(excluded.bio, bio),
+                      raw_json = COALESCE(excluded.raw_json, raw_json),
+                      last_refreshed_at = COALESCE(excluded.last_refreshed_at, last_refreshed_at)
+                    """,
+                    (
+                        platform,
+                        account_id,
+                        user_id,
+                        profile.get("nickname"),
+                        profile.get("avatar_url"),
+                        profile.get("bio"),
+                        json_dumps(profile.get("raw", profile)),
+                        profile.get("last_refreshed_at", last_refreshed_at),
+                    ),
+                )
+            if members_complete:
+                conn.execute(
+                    """
+                    DELETE FROM clawchat_conversation_members
+                    WHERE platform = ? AND account_id = ? AND conversation_id = ?
+                    """,
+                    (platform, account_id, conversation_id),
+                )
+                for member in members or []:
+                    user_id = member.get("user_id")
+                    if not user_id:
+                        continue
+                    conn.execute(
+                        """
+                        INSERT INTO clawchat_conversation_members(
+                          platform, account_id, conversation_id, user_id, role, raw_json, last_seen_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            platform,
+                            account_id,
+                            conversation_id,
+                            user_id,
+                            member.get("role"),
+                            json_dumps(member.get("raw", member)),
+                            member.get("last_seen_at"),
+                        ),
+                    )
+
+        self._write("upsert_conversation_details", write)
+
+    def delete_conversation_cache(
+        self,
+        *,
+        platform: str,
+        account_id: str,
+        conversation_id: str,
+    ) -> None:
+        def write(conn: sqlite3.Connection) -> None:
+            params = (platform, account_id, conversation_id)
+            conn.execute(
+                """
+                DELETE FROM clawchat_conversation_members
+                WHERE platform = ? AND account_id = ? AND conversation_id = ?
+                """,
+                params,
+            )
+            conn.execute(
+                """
+                DELETE FROM clawchat_group_profiles
+                WHERE platform = ? AND account_id = ? AND conversation_id = ?
+                """,
+                params,
+            )
+            conn.execute(
+                """
+                DELETE FROM clawchat_conversations
+                WHERE platform = ? AND account_id = ? AND conversation_id = ?
+                """,
+                params,
+            )
+
+        self._write("delete_conversation_cache", write)
+
+    def list_cached_conversation_ids(
+        self,
+        *,
+        platform: str,
+        account_id: str,
+        limit: int,
+    ) -> list[str]:
+        self.initialize()
+        if self._disabled:
+            return []
+        conn = sqlite3.connect(self.db_path)
+        try:
+            rows = conn.execute(
+                """
+                SELECT conversation_id
+                FROM clawchat_conversations
+                WHERE platform = ? AND account_id = ?
+                ORDER BY last_seen_at DESC, conversation_id ASC
+                LIMIT ?
+                """,
+                (platform, account_id, max(0, limit)),
+            ).fetchall()
+            return [str(row[0]) for row in rows]
+        finally:
+            conn.close()
+
+    def get_activation_conversation(
+        self,
+        *,
+        platform: str,
+        account_id: str,
+    ) -> str | None:
+        self.initialize()
+        if self._disabled:
+            return None
+        conn = sqlite3.connect(self.db_path)
+        try:
+            row = conn.execute(
+                """
+                SELECT conversation_id
+                FROM activations
+                WHERE platform = ? AND account_id = ?
+                """,
+                (platform, account_id),
+            ).fetchone()
+            if row is None or row[0] is None:
+                return None
+            return str(row[0])
+        finally:
+            conn.close()
 
     def claim_pending_activation_bootstrap(
         self,
@@ -576,6 +882,8 @@ class ClawChatStore:
         connection_id: int | None,
         *,
         ready_at: int | None = None,
+        resolved_device_id: str | None = None,
+        delivery_mode: str | None = None,
     ) -> None:
         if connection_id is None:
             return
@@ -585,10 +893,10 @@ class ClawChatStore:
             conn.execute(
                 """
                 UPDATE connections
-                SET state = ?, ready_at = ?, updated_at = ?
+                SET state = ?, ready_at = ?, resolved_device_id = ?, delivery_mode = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                ("ready", ready, ready, connection_id),
+                ("ready", ready, resolved_device_id, delivery_mode, ready, connection_id),
             )
 
         self._write("mark_connection_ready", write)

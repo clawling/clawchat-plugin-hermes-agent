@@ -250,12 +250,12 @@ def build_typing_update_event(
     }
 
 
-def build_pong_event(*, trace_id: str) -> dict[str, Any]:
+def build_pong_event(*, trace_id: str, emitted_at: int) -> dict[str, Any]:
     return {
         "version": "2",
         "event": "pong",
         "trace_id": trace_id,
-        "emitted_at": current_time_ms(),
+        "emitted_at": emitted_at,
         "payload": {},
     }
 
