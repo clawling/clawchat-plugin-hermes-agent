@@ -81,6 +81,7 @@ class ClawChatConfig:
     token: str = ""
     refresh_token: str = ""
     user_id: str = ""
+    owner_user_id: str = ""
     reply_mode: str = "stream"
     group_mode: str = "all"
     groups: dict[str, dict[str, str]] = field(default_factory=dict)
@@ -132,6 +133,8 @@ class ClawChatConfig:
             or _get_config_value(extra, "refresh_token", ""),
             user_id=_get_env("CLAWCHAT_USER_ID")
             or _get_config_value(extra, "user_id", ""),
+            owner_user_id=_get_env("CLAWCHAT_OWNER_USER_ID")
+            or _get_config_value(extra, "owner_user_id", ""),
             reply_mode=_get_env("CLAWCHAT_REPLY_MODE")
             or _get_config_value(extra, "reply_mode", "stream"),
             group_mode=_read_group_mode(

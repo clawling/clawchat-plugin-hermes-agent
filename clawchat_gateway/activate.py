@@ -57,6 +57,7 @@ def persist_activation(
     *,
     access_token: str,
     user_id: str,
+    owner_user_id: str,
     refresh_token: str | None,
     base_url: str,
 ) -> dict[str, Any]:
@@ -70,6 +71,7 @@ def persist_activation(
     extra.pop("token", None)
     extra.pop("refresh_token", None)
     extra["user_id"] = user_id
+    extra["owner_user_id"] = owner_user_id
     extra["reply_mode"] = "stream"
     extra["show_tools_output"] = False
     extra["show_think_output"] = False
@@ -97,6 +99,7 @@ def persist_activation(
         "config_path": str(config_path),
         "env_path": str(env_path),
         "user_id": user_id,
+        "owner_user_id": owner_user_id,
         "base_url": extra["base_url"],
         "websocket_url": extra["websocket_url"],
         "token": "***",
@@ -116,6 +119,7 @@ async def activate(code: str, *, base_url: str) -> dict[str, Any]:
     payload = persist_activation(
         access_token=str(result["access_token"]),
         user_id=user_id,
+        owner_user_id=owner_id,
         refresh_token=result.get("refresh_token"),
         base_url=base_url,
     )
@@ -125,10 +129,7 @@ async def activate(code: str, *, base_url: str) -> dict[str, Any]:
             account_id="default",
             user_id=user_id,
             conversation_id=conversation_id,
-            owner_id=owner_id,
-            access_token=str(result["access_token"]),
-            refresh_token=result.get("refresh_token"),
-            login_method="unknown",
+            owner_user_id=owner_id,
         )
     except Exception:  # noqa: BLE001
         logger.warning("clawchat activation database persistence failed")

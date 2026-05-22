@@ -35,6 +35,7 @@ from clawchat_gateway.media_runtime import (
     upload_outbound_media,
 )
 from clawchat_gateway.plugin_prompts import mode_prompt
+from clawchat_gateway.profile_sync import relation_for_sender
 from clawchat_gateway.protocol import (
     build_message_add_event,
     build_message_created_event,
@@ -87,17 +88,7 @@ _STREAMING_CURSOR_RE = re.compile(r"\s*[▀-▟]+\s*\Z")
 
 _APPROVE_COMMAND_RE = re.compile(r"(?<!\w)/approve(?!\w)", re.IGNORECASE)
 _DENY_COMMAND_RE = re.compile(r"(?<!\w)/(?:deny|reject)(?!\w)", re.IGNORECASE)
-_ACTIVATION_INTENT_RE = re.compile(
-    r"(clawchat|claw\s*chat|激活码|激活|activate|activation|invite\s*code)",
-    re.IGNORECASE,
-)
 _HERMES_STREAM_CURSOR_RE = re.compile(r"[ \t]*▉\Z")
-_CLAWCHAT_ACTIVATION_PROMPT = (
-    "The user may be activating or configuring ClawChat. Activation is handled by the "
-    "`/clawchat-activate CODE` slash command, `hermes clawchat activate CODE`, "
-    "or `hermes gateway setup`; do not use a ClawChat activation tool. If no "
-    "code is present, ask for the ClawChat activation code."
-)
 _CLAWCHAT_ACTIVATION_BOOTSTRAP_PROMPT = (
     "ClawChat activation bootstrap: You are now connected to this ClawChat direct conversation.\n\n"
     "Please do both:\n"
@@ -169,6 +160,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._auth_failed = False
         self._activation_bootstrap_tasks: set[asyncio.Task[None]] = set()
         self._conversation_refresh_tasks: set[asyncio.Task[None]] = set()
+        self._profile_sync_tasks: set[asyncio.Task[None]] = set()
         self._conversation_metadata_versions: dict[str, int] = {}
         try:
             self._store = get_clawchat_store()
@@ -188,6 +180,7 @@ class ClawChatAdapter(BasePlatformAdapter):
     async def disconnect(self) -> None:
         await self._cancel_activation_bootstrap_tasks()
         await self._cancel_conversation_refresh_tasks()
+        await self._cancel_profile_sync_tasks()
         await self._connection.stop()
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
@@ -329,10 +322,36 @@ class ClawChatAdapter(BasePlatformAdapter):
                     current_version,
                 )
                 return
-        await self._refresh_conversation_metadata(
-            conversation_id,
-            signal_version=version if isinstance(version, int) else None,
-        )
+        scopes = self._signal_scopes(payload)
+        signal_version = version if isinstance(version, int) else None
+        needs_behavior = self._scope_needs_behavior(scopes)
+        needs_conversation = self._scope_needs_conversation(scopes)
+        required_results: list[bool] = []
+        if needs_behavior:
+            required_results.append(await self._refresh_agent_behavior(conversation_id))
+        if needs_conversation:
+            required_results.append(
+                await self._refresh_conversation_metadata(
+                    conversation_id,
+                    advance_version=not needs_behavior,
+                )
+            )
+        if required_results and all(required_results) and signal_version is not None:
+            self._conversation_metadata_versions[conversation_id] = signal_version
+
+    def _signal_scopes(self, payload: dict[str, Any]) -> list[str]:
+        raw = payload.get("scope")
+        if isinstance(raw, str):
+            return [raw]
+        if isinstance(raw, list):
+            return [item for item in raw if isinstance(item, str)]
+        return []
+
+    def _scope_needs_behavior(self, scopes: list[str]) -> bool:
+        return "behavior" in scopes
+
+    def _scope_needs_conversation(self, scopes: list[str]) -> bool:
+        return not scopes or any(scope != "behavior" for scope in scopes)
 
     def _signal_conversation_id(self, frame: dict[str, Any], payload: dict[str, Any]) -> str | None:
         for value in (
@@ -350,7 +369,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         conversation_id: str,
         *,
         signal_version: int | None = None,
-    ) -> None:
+        advance_version: bool = True,
+    ) -> bool:
         client = ClawChatApiClient(
             base_url=self._clawchat_config.base_url,
             token=self._clawchat_config.token,
@@ -362,25 +382,49 @@ class ClawChatAdapter(BasePlatformAdapter):
             if exc.status in (404, 410) or exc.code in (404, 410):
                 self._delete_conversation_cache(conversation_id)
                 self._conversation_metadata_versions.pop(conversation_id, None)
-                return
+                return False
             logger.warning(
                 "clawchat metadata refresh failed chat_id=%s status=%s error=%s",
                 conversation_id,
                 exc.status,
                 exc,
             )
-            return
+            return False
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "clawchat metadata refresh failed chat_id=%s error=%s",
                 conversation_id,
                 exc,
             )
-            return
-        if not self._cache_conversation_details(result):
-            return
-        if signal_version is not None:
-            self._conversation_metadata_versions[conversation_id] = signal_version
+            return False
+        if not self._cache_conversation_details(result, advance_version=advance_version):
+            return False
+        return True
+
+    async def _refresh_agent_behavior(self, conversation_id: str) -> bool:
+        agent_user_id = self._clawchat_config.user_id
+        if not agent_user_id:
+            logger.warning(
+                "clawchat behavior refresh skipped chat_id=%s reason=missing_agent_user_id",
+                conversation_id,
+            )
+            return False
+        client = ClawChatApiClient(
+            base_url=self._clawchat_config.base_url,
+            token=self._clawchat_config.token,
+            user_id=self._clawchat_config.user_id,
+        )
+        try:
+            result = await client.get_agent_detail(agent_user_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "clawchat behavior refresh failed chat_id=%s agent_user_id=%s error=%s",
+                conversation_id,
+                agent_user_id,
+                exc,
+            )
+            return False
+        return self._cache_agent_profile(result, agent_user_id=agent_user_id)
 
     def _delete_conversation_cache(self, conversation_id: str) -> None:
         if self._store is None:
@@ -394,7 +438,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         except Exception:  # noqa: BLE001
             logger.warning("clawchat conversation cache delete failed", exc_info=True)
 
-    def _cache_conversation_details(self, result: dict[str, Any]) -> bool:
+    def _cache_conversation_details(self, result: dict[str, Any], *, advance_version: bool = True) -> bool:
         if self._store is None:
             return False
         detail = result.get("conversation") if isinstance(result.get("conversation"), dict) else result
@@ -421,6 +465,11 @@ class ClawChatAdapter(BasePlatformAdapter):
             for profile in [self._profile_from_raw(item)]
             if profile
         ]
+        for profile in user_profiles:
+            profile["relation"] = self._sender_relation(
+                str(profile.get("user_id") or ""),
+                profile_type=profile.get("profile_type"),
+            )
         members_complete = bool(
             isinstance(members_raw, list)
             and (
@@ -438,7 +487,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 metadata_version=metadata_version,
                 last_seen_at=self._last_seen_at(detail),
                 raw=detail,
-                group_profile=detail.get("group") if isinstance(detail.get("group"), dict) else None,
+                group_profile=self._group_profile_from_conversation(detail),
                 user_profiles=user_profiles,
                 members=members,
                 members_complete=members_complete,
@@ -446,8 +495,71 @@ class ClawChatAdapter(BasePlatformAdapter):
         except Exception:  # noqa: BLE001
             logger.warning("clawchat conversation cache upsert failed", exc_info=True)
             return False
-        if metadata_version is not None:
+        if advance_version and metadata_version is not None:
             self._conversation_metadata_versions[conversation_id] = metadata_version
+        return True
+
+    def _cache_agent_profile(self, result: dict[str, Any], *, agent_user_id: str) -> bool:
+        if self._store is None:
+            return False
+        detail = result.get("agent") if isinstance(result.get("agent"), dict) else result
+        if not isinstance(detail, dict):
+            return False
+        profile_id = str(detail.get("user_id") or detail.get("userId") or detail.get("id") or agent_user_id)
+        refreshed_at = self._last_seen_at(detail) or int(time.time() * 1000)
+        try:
+            kwargs = {
+                "platform": "clawchat",
+                "account_id": self._account_id(),
+                "profile_kind": "agent",
+                "profile_id": profile_id,
+                "profile_type": str(detail.get("type") or "agent"),
+                "raw": detail,
+                "last_refreshed_at": refreshed_at,
+            }
+            if "behavior" in detail:
+                kwargs["behavior"] = detail["behavior"]
+            metadata_version = self._metadata_version(detail)
+            if metadata_version is not None:
+                kwargs["metadata_version"] = metadata_version
+            self._store.upsert_profile(
+                **kwargs,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat agent profile cache upsert failed", exc_info=True)
+            return False
+        return True
+
+    def _cache_user_profile(self, result: dict[str, Any], *, user_id: str) -> bool:
+        if self._store is None:
+            return False
+        detail = result.get("user") if isinstance(result.get("user"), dict) else result
+        if not isinstance(detail, dict):
+            return False
+        profile = self._profile_from_raw({**detail, "id": detail.get("id") or user_id})
+        if profile is None:
+            return False
+        profile_type = profile.get("profile_type")
+        refreshed_at = self._last_seen_at(detail) or int(time.time() * 1000)
+        try:
+            kwargs = {
+                "platform": "clawchat",
+                "account_id": self._account_id(),
+                "profile_kind": "user",
+                "profile_id": str(profile["user_id"]),
+                "relation": self._sender_relation(str(profile["user_id"]), profile_type=profile_type),
+                "raw": detail,
+                "last_refreshed_at": refreshed_at,
+            }
+            if "profile_type" in profile:
+                kwargs["profile_type"] = profile["profile_type"]
+            for key in ("nickname", "avatar_url", "bio"):
+                if key in profile:
+                    kwargs[key] = profile[key]
+            self._store.upsert_profile(**kwargs)
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat user profile cache upsert failed", exc_info=True)
+            return False
         return True
 
     def _account_id(self) -> str:
@@ -472,18 +584,33 @@ class ClawChatAdapter(BasePlatformAdapter):
                 return raw
         return None
 
+    def _group_profile_from_conversation(self, detail: dict[str, Any]) -> dict[str, Any] | None:
+        group = detail.get("group") if isinstance(detail.get("group"), dict) else None
+        source = dict(group or {})
+        for key in ("title", "description", "metadata_version", "metadataVersion"):
+            if key in detail and key not in source:
+                source[key] = detail[key]
+        if "metadataVersion" in source and "metadata_version" not in source:
+            source["metadata_version"] = source["metadataVersion"]
+        if not any(key in source for key in ("title", "description", "metadata_version")):
+            return None
+        source["raw"] = source.get("raw", group or detail)
+        return source
+
     def _profile_from_raw(self, raw: dict[str, Any]) -> dict[str, Any] | None:
         user_id = raw.get("user_id") or raw.get("userId") or raw.get("id")
         if not user_id:
             return None
         profile = {"user_id": str(user_id), "raw": raw}
         for source, target in (
+            ("type", "profile_type"),
+            ("profile_type", "profile_type"),
             ("nickname", "nickname"),
             ("avatar_url", "avatar_url"),
             ("avatarUrl", "avatar_url"),
             ("bio", "bio"),
         ):
-            if source in raw and raw[source] is not None:
+            if source in raw:
                 profile[target] = raw[source]
         return profile
 
@@ -493,17 +620,25 @@ class ClawChatAdapter(BasePlatformAdapter):
             return None
         return {"user_id": str(user_id), "role": raw.get("role"), "raw": raw}
 
+    def _sender_relation(self, sender_id: str, *, profile_type: Any = None) -> str:
+        return relation_for_sender(
+            sender_id,
+            agent_user_id=self._clawchat_config.user_id,
+            owner_user_id=self._clawchat_config.owner_user_id,
+            profile_type=profile_type if isinstance(profile_type, str) else None,
+        )
+
     def _upsert_minimal_conversation(
         self,
         *,
         conversation_id: str | None,
         conversation_type: str | None,
         last_seen_at: int | None,
-    ) -> None:
+    ) -> bool:
         if self._store is None or not conversation_id:
-            return
+            return False
         try:
-            self._store.upsert_conversation_summary(
+            created = self._store.upsert_conversation_summary(
                 platform="clawchat",
                 account_id=self._account_id(),
                 conversation_id=conversation_id,
@@ -511,8 +646,85 @@ class ClawChatAdapter(BasePlatformAdapter):
                 last_seen_at=last_seen_at if last_seen_at is not None else int(time.time() * 1000),
                 raw=None,
             )
+            return bool(created)
         except Exception:  # noqa: BLE001
             logger.warning("clawchat minimal conversation cache upsert failed")
+            return False
+
+    def _upsert_minimal_sender_profile(self, inbound: InboundMessage) -> bool:
+        if self._store is None or not inbound.sender_id:
+            return False
+        try:
+            created = self._store.upsert_minimal_profile(
+                platform="clawchat",
+                account_id=self._account_id(),
+                profile_kind="user",
+                profile_id=inbound.sender_id,
+                relation=self._sender_relation(inbound.sender_id),
+                nickname=inbound.sender_name or None,
+                now_ms=int(time.time() * 1000),
+            )
+            return bool(created)
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat minimal user profile cache upsert failed")
+            return False
+
+    def _upsert_minimal_group_profile(self, inbound: InboundMessage) -> bool:
+        if self._store is None or inbound.chat_type != "group" or not inbound.chat_id:
+            return False
+        try:
+            created = self._store.upsert_minimal_profile(
+                platform="clawchat",
+                account_id=self._account_id(),
+                profile_kind="group",
+                profile_id=inbound.chat_id,
+                now_ms=int(time.time() * 1000),
+            )
+            return bool(created)
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat minimal group profile cache upsert failed")
+            return False
+
+    def _schedule_profile_sync(self, coro: Any) -> None:
+        task = asyncio.create_task(coro, name="clawchat-profile-sync")
+        self._profile_sync_tasks.add(task)
+        task.add_done_callback(self._profile_sync_task_done)
+
+    def _profile_sync_task_done(self, task: asyncio.Task[None]) -> None:
+        self._profile_sync_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat profile sync task failed", exc_info=True)
+
+    async def _cancel_profile_sync_tasks(self) -> None:
+        tasks = list(self._profile_sync_tasks)
+        if not tasks:
+            return
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for task in tasks:
+            self._profile_sync_tasks.discard(task)
+
+    async def _refresh_user_profile(self, user_id: str) -> bool:
+        client = ClawChatApiClient(
+            base_url=self._clawchat_config.base_url,
+            token=self._clawchat_config.token,
+            user_id=self._clawchat_config.user_id,
+        )
+        try:
+            result = await client.get_user_info(user_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "clawchat user profile refresh failed user_id=%s error=%s",
+                user_id,
+                exc,
+            )
+            return False
+        return self._cache_user_profile(result, user_id=user_id)
 
     def _schedule_activation_bootstrap(self) -> None:
         if self._store is None:
@@ -555,19 +767,19 @@ class ClawChatAdapter(BasePlatformAdapter):
         conversation_id = str(getattr(claim, "conversation_id", "") or "")
         if not conversation_id:
             return
-        owner_id = str(getattr(claim, "owner_id", "") or "")
+        owner_user_id = str(getattr(claim, "owner_user_id", "") or "")
         claimed_at = getattr(claim, "claimed_at", None)
         inbound = InboundMessage(
             chat_id=conversation_id,
             chat_type="direct",
-            sender_id=owner_id,
+            sender_id=owner_user_id,
             sender_name="",
             text=_CLAWCHAT_ACTIVATION_BOOTSTRAP_PROMPT,
             raw_message={
                 "synthetic": True,
                 "bootstrap": True,
                 "conversation_id": conversation_id,
-                "owner_id": owner_id,
+                "owner_user_id": owner_user_id,
             },
         )
         try:
@@ -719,11 +931,19 @@ class ClawChatAdapter(BasePlatformAdapter):
             len(inbound.text),
             len(inbound.media_urls),
         )
-        self._upsert_minimal_conversation(
+        new_conversation = self._upsert_minimal_conversation(
             conversation_id=inbound.chat_id,
             conversation_type=inbound.chat_type,
             last_seen_at=frame.get("emitted_at") if isinstance(frame.get("emitted_at"), int) else None,
         )
+        new_sender = self._upsert_minimal_sender_profile(inbound)
+        new_group = self._upsert_minimal_group_profile(inbound)
+        if new_conversation:
+            self._schedule_profile_sync(self._refresh_conversation_metadata(inbound.chat_id))
+        elif new_group:
+            self._schedule_profile_sync(self._refresh_conversation_metadata(inbound.chat_id))
+        if new_sender:
+            self._schedule_profile_sync(self._refresh_user_profile(inbound.sender_id))
         if event_name in {"message.send", "message.reply"}:
             claimed = self._claim_message_once(
                 kind="message",
@@ -791,20 +1011,120 @@ class ClawChatAdapter(BasePlatformAdapter):
             inbound.sender_id,
         )
 
-    def _has_activation_intent(self, text: str) -> bool:
-        if not text:
-            return False
-        normalized = text.strip()
-        if not _ACTIVATION_INTENT_RE.search(normalized):
-            return False
-        return True
-
     def _compose_channel_prompt(self, inbound: InboundMessage) -> str | None:
         prompts = [mode_prompt(inbound.chat_type)]
-        raw_message = inbound.raw_message if isinstance(inbound.raw_message, dict) else {}
-        if not raw_message.get("bootstrap") and self._has_activation_intent(inbound.text):
-            prompts.append(_CLAWCHAT_ACTIVATION_PROMPT)
+        behavior = self._cached_agent_behavior()
+        if behavior:
+            prompts.append(f"## Current ClawChat Behavior\n{behavior}")
+        if inbound.chat_type == "group":
+            group_profile = self._get_cached_profile("group", inbound.chat_id)
+            group_section = self._format_group_profile(group_profile)
+            if group_section:
+                prompts.append(group_section)
+        else:
+            user_profile = self._get_cached_profile("user", inbound.sender_id)
+            user_section = self._format_user_profile(user_profile)
+            if user_section:
+                prompts.append(user_section)
+        prompts.append(self._format_current_turn(inbound))
         return "\n\n".join(prompts) or None
+
+    def _get_cached_profile(self, profile_kind: str, profile_id: str) -> dict[str, Any] | None:
+        if self._store is None or not profile_id:
+            return None
+        try:
+            return self._store.get_profile(
+                platform="clawchat",
+                account_id=self._account_id(),
+                profile_kind=profile_kind,
+                profile_id=profile_id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat profile cache read failed", exc_info=True)
+            return None
+
+    def _cached_agent_behavior(self) -> str | None:
+        profile = self._get_cached_profile("agent", self._clawchat_config.user_id)
+        behavior = profile.get("behavior") if isinstance(profile, dict) else None
+        if isinstance(behavior, str) and behavior.strip():
+            return behavior.strip()
+        return None
+
+    def _format_user_profile(self, profile: dict[str, Any] | None) -> str | None:
+        if not profile:
+            return None
+        fields = self._format_fields(
+            (
+                ("profile_id", profile.get("profile_id")),
+                ("profile_type", profile.get("profile_type")),
+                ("relation", profile.get("relation")),
+                ("nickname", profile.get("nickname")),
+                ("avatar_url", profile.get("avatar_url")),
+                ("bio", profile.get("bio")),
+            )
+        )
+        return "## Current ClawChat User Profile\n" + fields if fields else None
+
+    def _format_group_profile(self, profile: dict[str, Any] | None) -> str | None:
+        if not profile:
+            return None
+        fields = self._format_fields(
+            (
+                ("profile_id", profile.get("profile_id")),
+                ("title", profile.get("title")),
+                ("description", profile.get("description")),
+                ("metadata_version", profile.get("metadata_version")),
+            )
+        )
+        return "## Current ClawChat Group Profile\n" + fields if fields else None
+
+    def _format_current_turn(self, inbound: InboundMessage) -> str:
+        sender_profile = self._get_cached_profile("user", inbound.sender_id)
+        sender_profile_type = ""
+        if isinstance(sender_profile, dict) and sender_profile.get("profile_type") is not None:
+            sender_profile_type = str(sender_profile.get("profile_type"))
+        sender_relation = self._sender_relation(
+            inbound.sender_id,
+            profile_type=sender_profile_type or None,
+        )
+        chat_type = inbound.chat_type
+        if inbound.chat_type != "group":
+            chat_type = "owner_dm" if sender_relation == "owner" else "dm"
+        fields = self._format_fields(
+            (
+                ("chat_type", chat_type),
+                ("sender_id", inbound.sender_id),
+                ("sender_relation", sender_relation),
+                ("sender_profile_type", sender_profile_type),
+                ("sender_is_owner", "true" if sender_relation == "owner" else "false"),
+                ("peer_id", inbound.sender_id),
+                ("group_id", inbound.chat_id if inbound.chat_type == "group" else ""),
+            ),
+            include_empty=True,
+        )
+        return "## Current ClawChat Turn\n" + fields
+
+    def _format_fields(
+        self,
+        fields: tuple[tuple[str, Any], ...],
+        *,
+        include_empty: bool = False,
+    ) -> str:
+        lines: list[str] = []
+        for key, value in fields:
+            if value is None:
+                if not include_empty:
+                    continue
+                value = ""
+            text = str(value)
+            if not text and not include_empty:
+                continue
+            text = self._escape_prompt_field(text)
+            lines.append(f"{key}: {text}")
+        return "\n".join(lines)
+
+    def _escape_prompt_field(self, value: str) -> str:
+        return value.replace("\\", "\\\\").replace("\r", "\\r").replace("\n", "\\n")
 
     async def _download_inbound_media(self, inbound: InboundMessage) -> list[Any]:
         if not inbound.media_urls:
