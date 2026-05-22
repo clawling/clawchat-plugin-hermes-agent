@@ -421,10 +421,10 @@ class ClawChatAdapter(BasePlatformAdapter):
         return True
 
     async def _refresh_agent_behavior(self, conversation_id: str) -> bool:
-        agent_user_id = self._clawchat_config.user_id
-        if not agent_user_id:
+        agent_id = self._clawchat_config.agent_id
+        if not agent_id:
             logger.warning(
-                "clawchat behavior refresh skipped chat_id=%s reason=missing_agent_user_id",
+                "clawchat behavior refresh skipped chat_id=%s reason=missing_agent_id",
                 conversation_id,
             )
             return False
@@ -434,16 +434,16 @@ class ClawChatAdapter(BasePlatformAdapter):
             user_id=self._clawchat_config.user_id,
         )
         try:
-            result = await client.get_agent_detail(agent_user_id)
+            result = await client.get_agent_detail(agent_id)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "clawchat behavior refresh failed chat_id=%s agent_user_id=%s error=%s",
+                "clawchat behavior refresh failed chat_id=%s agent_id=%s error=%s",
                 conversation_id,
-                agent_user_id,
+                agent_id,
                 exc,
             )
             return False
-        return self._cache_agent_profile(result, agent_user_id=agent_user_id)
+        return self._cache_agent_profile(result, agent_user_id=self._clawchat_config.user_id)
 
     def _delete_conversation_cache(self, conversation_id: str) -> None:
         if self._store is None:
@@ -1091,10 +1091,18 @@ class ClawChatAdapter(BasePlatformAdapter):
             return None
 
     def _cached_agent_behavior(self) -> str | None:
-        profile = self._get_cached_profile("agent", self._clawchat_config.user_id)
-        behavior = profile.get("behavior") if isinstance(profile, dict) else None
-        if isinstance(behavior, str) and behavior.strip():
-            return behavior.strip()
+        seen: set[str] = set()
+        for profile_id in (
+            self._clawchat_config.user_id,
+            self._clawchat_config.agent_id,
+        ):
+            if not profile_id or profile_id in seen:
+                continue
+            seen.add(profile_id)
+            profile = self._get_cached_profile("agent", profile_id)
+            behavior = profile.get("behavior") if isinstance(profile, dict) else None
+            if isinstance(behavior, str) and behavior.strip():
+                return behavior.strip()
         return None
 
     def _format_user_profile(self, profile: dict[str, Any] | None) -> str | None:

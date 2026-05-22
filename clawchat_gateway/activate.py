@@ -58,6 +58,7 @@ def persist_activation(
     access_token: str,
     user_id: str,
     owner_user_id: str,
+    agent_id: str = "",
     refresh_token: str | None,
     base_url: str,
 ) -> dict[str, Any]:
@@ -71,6 +72,10 @@ def persist_activation(
     extra.pop("token", None)
     extra.pop("refresh_token", None)
     extra["user_id"] = user_id
+    if agent_id:
+        extra["agent_id"] = agent_id
+    else:
+        extra.pop("agent_id", None)
     extra["owner_user_id"] = owner_user_id
     extra["reply_mode"] = "stream"
     extra["show_tools_output"] = False
@@ -99,6 +104,7 @@ def persist_activation(
         "config_path": str(config_path),
         "env_path": str(env_path),
         "user_id": user_id,
+        "agent_id": agent_id,
         "owner_user_id": owner_user_id,
         "base_url": extra["base_url"],
         "websocket_url": extra["websocket_url"],
@@ -113,12 +119,14 @@ async def activate(code: str, *, base_url: str) -> dict[str, Any]:
     client = ClawChatApiClient(base_url=base_url.rstrip("/"), token="", user_id="")
     result = await client.agents_connect(code=code)
     agent = result["agent"]
+    agent_id = str(agent.get("id") or "")
     user_id = str(agent["user_id"])
     owner_id = str(agent["owner_id"])
     conversation_id = str(result["conversation"]["id"])
     payload = persist_activation(
         access_token=str(result["access_token"]),
         user_id=user_id,
+        agent_id=agent_id,
         owner_user_id=owner_id,
         refresh_token=result.get("refresh_token"),
         base_url=base_url,

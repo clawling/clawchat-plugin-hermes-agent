@@ -114,28 +114,35 @@ async def ensure_group_profile_for_chat(
 async def refresh_agent_behavior_profile(
     store: Any,
     client: Any,
+    *,
+    agent_id: str,
     agent_user_id: str,
     now_ms: int,
-    *,
     platform: str = DEFAULT_PLATFORM,
     account_id: str | None = None,
 ) -> bool:
-    if not agent_user_id:
+    if not agent_id:
         return False
     resolved_account_id = account_id or agent_user_id or DEFAULT_ACCOUNT_ID
     try:
-        result = await client.get_agent_detail(agent_user_id)
+        result = await client.get_agent_detail(agent_id)
     except Exception:  # noqa: BLE001
         logger.warning(
-            "clawchat agent behavior refresh failed agent_user_id=%s",
-            agent_user_id,
+            "clawchat agent behavior refresh failed agent_id=%s",
+            agent_id,
             exc_info=True,
         )
         return False
     detail = result.get("agent") if isinstance(result.get("agent"), dict) else result
     if not isinstance(detail, dict):
         return False
-    profile_id = str(detail.get("user_id") or detail.get("userId") or detail.get("id") or agent_user_id)
+    profile_id = str(
+        detail.get("user_id")
+        or detail.get("userId")
+        or agent_user_id
+        or detail.get("id")
+        or agent_id
+    )
     kwargs = {
         "platform": platform,
         "account_id": resolved_account_id,

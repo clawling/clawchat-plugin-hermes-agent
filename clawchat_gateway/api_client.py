@@ -109,13 +109,13 @@ class ClawChatApiClient:
             raise ClawChatApiError("validation", "conversation_id is required")
         return await self._call_json("GET", f"/v1/conversations/{conversation_id}")
 
-    async def get_agent_detail(self, agent_user_id: str) -> dict:
-        if not agent_user_id.strip():
-            raise ClawChatApiError("validation", "agent_user_id is required")
-        return await self._call_json("GET", f"/v1/agents/{agent_user_id}")
+    async def get_agent_detail(self, agent_id: str) -> dict:
+        if not agent_id.strip():
+            raise ClawChatApiError("validation", "agent_id is required")
+        return await self._call_json("GET", f"/v1/agents/{agent_id}")
 
-    async def get_agent(self, agent_user_id: str) -> dict:
-        return await self.get_agent_detail(agent_user_id)
+    async def get_agent(self, agent_id: str) -> dict:
+        return await self.get_agent_detail(agent_id)
 
     async def create_moment(
         self,

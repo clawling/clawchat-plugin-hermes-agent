@@ -1,3 +1,5 @@
+import base64
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -58,6 +60,20 @@ def _get_config_value(data: dict[str, Any], key: str, default: Any = None) -> An
     return default
 
 
+def _jwt_claim(token: str, claim: str) -> str:
+    parts = token.split(".")
+    if len(parts) < 2:
+        return ""
+    payload = parts[1]
+    payload += "=" * (-len(payload) % 4)
+    try:
+        data = json.loads(base64.urlsafe_b64decode(payload.encode()).decode())
+    except Exception:
+        return ""
+    value = data.get(claim) if isinstance(data, dict) else None
+    return value.strip() if isinstance(value, str) else ""
+
+
 def _read_group_mode(value: Any) -> str:
     return "mention" if value == "mention" else "all"
 
@@ -81,6 +97,7 @@ class ClawChatConfig:
     token: str = ""
     refresh_token: str = ""
     user_id: str = ""
+    agent_id: str = ""
     owner_user_id: str = ""
     reply_mode: str = "stream"
     group_mode: str = "all"
@@ -123,16 +140,20 @@ class ClawChatConfig:
                 show_tools_output,
             )
         )
+        token = _get_env("CLAWCHAT_TOKEN") or extra.get("token") or ""
         return cls(
             websocket_url=_get_env("CLAWCHAT_WEBSOCKET_URL", "CLAWCHAT_WS_URL")
             or _get_config_value(extra, "websocket_url", ""),
             base_url=_get_env("CLAWCHAT_BASE_URL")
             or _get_config_value(extra, "base_url", ""),
-            token=_get_env("CLAWCHAT_TOKEN") or extra.get("token") or "",
+            token=token,
             refresh_token=_get_env("CLAWCHAT_REFRESH_TOKEN")
             or _get_config_value(extra, "refresh_token", ""),
             user_id=_get_env("CLAWCHAT_USER_ID")
             or _get_config_value(extra, "user_id", ""),
+            agent_id=_get_env("CLAWCHAT_AGENT_ID")
+            or _get_config_value(extra, "agent_id", "")
+            or _jwt_claim(token, "aid"),
             owner_user_id=_get_env("CLAWCHAT_OWNER_USER_ID")
             or _get_config_value(extra, "owner_user_id", ""),
             reply_mode=_get_env("CLAWCHAT_REPLY_MODE")
