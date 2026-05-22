@@ -11,4 +11,4 @@ def format_group_covenant_prompt(covenant: str) -> str | None:
 
 
 def build_group_channel_prompt() -> str | None:
-    return group_prompt()
+    return group_prompt() or None

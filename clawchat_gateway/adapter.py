@@ -66,8 +66,11 @@ DEBUG_EVENT_TEXT_END = "----- END CLAWCHAT DEBUG EVENT TEXT -----"
 SILENT_RESPONSE_TOKEN = "<clawchat:silent/>"
 EMPTY_RESPONSE_TOKEN = '""'
 GROUP_BATCH_REPLY_GUIDANCE = (
-    "Reply only if useful. To stay silent, output exactly \"\" and nothing else. "
-    "Any other final text will be sent to the group."
+    "Treat this batch as addressed to you only when it clearly asks for your participation. Mentions of other "
+    "people are not requests for you. If it is unrelated, addressed to someone else, only mentions someone else, "
+    "you lack permission, cannot answer safely or accurately, have no useful contribution, or would rather not answer, return exactly \"\" "
+    "and nothing else. Do not explain your silence. Reply only when your response is clearly useful to the group. "
+    "A response fully wrapped in matching Chinese or ASCII parentheses （like this） or (like this) is also treated as silent."
 )
 GROUP_BATCH_MENTION_REPLY_GUIDANCE = (
     "You were directly addressed in this group batch. Reply by default, including when the message contains only a mention. "
@@ -1788,7 +1791,12 @@ class ClawChatAdapter(BasePlatformAdapter):
         return filtered
 
     def _is_noop_response_text(self, content: str) -> bool:
-        return content.strip() in {SILENT_RESPONSE_TOKEN, EMPTY_RESPONSE_TOKEN}
+        text = content.strip()
+        return (
+            text in {SILENT_RESPONSE_TOKEN, EMPTY_RESPONSE_TOKEN}
+            or (text.startswith("（") and text.endswith("）"))
+            or (text.startswith("(") and text.endswith(")"))
+        )
 
     def _is_pure_silent_response(self, fragments: list[dict[str, Any]]) -> bool:
         return (
