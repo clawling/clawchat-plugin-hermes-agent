@@ -1161,8 +1161,13 @@ class ClawChatAdapter(BasePlatformAdapter):
     def _format_current_turn(self, inbound: InboundMessage) -> str:
         sender_profile = self._get_cached_profile("user", inbound.sender_id)
         sender_profile_type = ""
+        sender_name = inbound.sender_name
         if isinstance(sender_profile, dict) and sender_profile.get("profile_type") is not None:
             sender_profile_type = str(sender_profile.get("profile_type"))
+        if (not sender_name or sender_name == inbound.sender_id) and isinstance(sender_profile, dict):
+            cached_nickname = sender_profile.get("nickname")
+            if isinstance(cached_nickname, str) and cached_nickname and cached_nickname != inbound.sender_id:
+                sender_name = cached_nickname
         sender_relation = self._sender_relation(
             inbound.sender_id,
             profile_type=sender_profile_type or None,
@@ -1173,7 +1178,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         field_items: list[tuple[str, Any]] = [
             ("chat_type", chat_type),
             ("sender_id", inbound.sender_id),
-            ("sender_name", inbound.sender_name),
+            ("sender_name", sender_name),
             ("sender_relation", sender_relation),
             ("sender_profile_type", sender_profile_type),
             ("sender_is_owner", "true" if sender_relation == "owner" else "false"),
