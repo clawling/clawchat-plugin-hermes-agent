@@ -61,6 +61,8 @@ RECONNECT_REFRESH_LIMIT = 20
 DEBUG_PROMPT_INJECTION_ENV = "CLAWCHAT_DEBUG_PROMPT_INJECTION"
 DEBUG_PROMPT_INJECTION_BEGIN = "----- BEGIN CLAWCHAT DEBUG PROMPT INJECTION -----"
 DEBUG_PROMPT_INJECTION_END = "----- END CLAWCHAT DEBUG PROMPT INJECTION -----"
+DEBUG_EVENT_TEXT_BEGIN = "----- BEGIN CLAWCHAT DEBUG EVENT TEXT -----"
+DEBUG_EVENT_TEXT_END = "----- END CLAWCHAT DEBUG EVENT TEXT -----"
 
 _THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
 _THINK_CONTENT_RE = re.compile(r"<think\b[^>]*>(.*?)</think>", re.IGNORECASE | re.DOTALL)
@@ -1071,14 +1073,17 @@ class ClawChatAdapter(BasePlatformAdapter):
         if channel_prompt:
             event.channel_prompt = channel_prompt
             if _debug_prompt_injection_enabled():
-                logger.info(
-                    "clawchat prompt injection debug chat_id=%s chat_type=%s sender_id=%s\n%s\n%s\n%s",
+                logger.warning(
+                    "clawchat prompt injection debug chat_id=%s chat_type=%s sender_id=%s\n%s\n%s\n%s\n%s\n%s\n%s",
                     inbound.chat_id,
                     inbound.chat_type,
                     inbound.sender_id,
                     DEBUG_PROMPT_INJECTION_BEGIN,
                     channel_prompt,
                     DEBUG_PROMPT_INJECTION_END,
+                    DEBUG_EVENT_TEXT_BEGIN,
+                    event.text,
+                    DEBUG_EVENT_TEXT_END,
                 )
         logger.info(
             "clawchat dispatch to hermes chat_id=%s user_id=%s text_len=%d media=%d downloaded=%d reply_to=%s",
