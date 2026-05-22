@@ -20,13 +20,14 @@ class ClawChatPrompts(TypedDict):
     group: str
 
 
-_PROMPT_NAMES: tuple[PromptName, ...] = ("platform", "user", "group")
+_REQUIRED_PROMPT_NAMES: tuple[PromptName, ...] = ("platform",)
+_OPTIONAL_PROMPT_NAMES: tuple[PromptName, ...] = ("user", "group")
 
 
 def _load_clawchat_prompts_from_dir(prompts_root: Any) -> ClawChatPrompts:
     prompts: dict[PromptName, str] = {}
 
-    for name in _PROMPT_NAMES:
+    for name in _REQUIRED_PROMPT_NAMES:
         path = prompts_root.joinpath(f"{name}.md")
         try:
             text = path.read_text(encoding="utf-8").strip()
@@ -36,6 +37,14 @@ def _load_clawchat_prompts_from_dir(prompts_root: Any) -> ClawChatPrompts:
             ) from exc
         if not text:
             raise RuntimeError(f"missing or empty ClawChat prompt: {name} ({path})")
+        prompts[name] = text
+
+    for name in _OPTIONAL_PROMPT_NAMES:
+        path = prompts_root.joinpath(f"{name}.md")
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            text = ""
         prompts[name] = text
 
     return {

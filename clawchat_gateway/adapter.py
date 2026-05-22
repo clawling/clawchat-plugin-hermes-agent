@@ -9,7 +9,7 @@ import re
 import time
 from collections import deque
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 from urllib.parse import urlparse
 
@@ -177,7 +177,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._profile_sync_tasks: set[asyncio.Task[None]] = set()
         self._conversation_metadata_versions: dict[str, int] = {}
         self._group_message_coalescer = GroupMessageCoalescer(
-            window_seconds=10.0,
+            idle_seconds=10.0,
+            max_wait_seconds=30.0,
             dispatch=self._handle_inbound,
         )
         try:
@@ -713,6 +714,15 @@ class ClawChatAdapter(BasePlatformAdapter):
             return True
         return profile.get("last_refreshed_at") is None
 
+    def _resolve_sender_name(self, inbound: InboundMessage) -> str:
+        if inbound.sender_name and inbound.sender_name != inbound.sender_id:
+            return inbound.sender_name
+        sender_profile = self._get_cached_profile("user", inbound.sender_id)
+        cached_nickname = sender_profile.get("nickname") if isinstance(sender_profile, dict) else None
+        if isinstance(cached_nickname, str) and cached_nickname and cached_nickname != inbound.sender_id:
+            return cached_nickname
+        return inbound.sender_name or inbound.sender_id
+
     def _upsert_minimal_group_profile(self, inbound: InboundMessage) -> bool:
         if self._store is None or inbound.chat_type != "group" or not inbound.chat_id:
             return False
@@ -988,6 +998,9 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._schedule_profile_sync(self._refresh_conversation_metadata(inbound.chat_id))
         if new_sender or self._sender_profile_needs_refresh(inbound.sender_id):
             self._schedule_profile_sync(self._refresh_user_profile(inbound.sender_id))
+        resolved_sender_name = self._resolve_sender_name(inbound)
+        if resolved_sender_name != inbound.sender_name:
+            inbound = replace(inbound, sender_name=resolved_sender_name)
         if event_name in {"message.send", "message.reply"}:
             claimed = self._claim_message_once(
                 kind="message",
@@ -1084,7 +1097,10 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
 
     def _compose_channel_prompt(self, inbound: InboundMessage) -> str | None:
-        prompts = [mode_prompt(inbound.chat_type)]
+        prompts = []
+        base_prompt = mode_prompt(inbound.chat_type)
+        if base_prompt:
+            prompts.append(base_prompt)
         behavior = self._cached_agent_behavior()
         if behavior:
             prompts.append(f"## Current ClawChat Behavior\n{behavior}")
@@ -1150,7 +1166,6 @@ class ClawChatAdapter(BasePlatformAdapter):
             return None
         fields = self._format_fields(
             (
-                ("profile_id", profile.get("profile_id")),
                 ("title", profile.get("title")),
                 ("description", profile.get("description")),
                 ("metadata_version", profile.get("metadata_version")),
@@ -1159,6 +1174,24 @@ class ClawChatAdapter(BasePlatformAdapter):
         return "## Current ClawChat Group Profile\n" + fields if fields else None
 
     def _format_current_turn(self, inbound: InboundMessage) -> str:
+        is_group_batch = (
+            inbound.chat_type == "group"
+            and isinstance(inbound.raw_message, dict)
+            and inbound.raw_message.get("clawchat_group_batch") is True
+        )
+        if is_group_batch:
+            mentioned_user_ids = ",".join(inbound.mentioned_user_ids) or "-"
+            fields = self._format_fields(
+                (
+                    ("chat_type", "group"),
+                    ("group_id", inbound.chat_id),
+                    ("was_mentioned", str(inbound.was_mentioned).lower()),
+                    ("mentioned_user_ids", mentioned_user_ids),
+                ),
+                include_empty=True,
+            )
+            return "## Current ClawChat Group Batch\n" + fields
+
         sender_profile = self._get_cached_profile("user", inbound.sender_id)
         sender_profile_type = ""
         sender_name = inbound.sender_name

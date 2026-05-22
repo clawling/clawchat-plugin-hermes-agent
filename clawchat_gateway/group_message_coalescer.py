@@ -11,21 +11,20 @@ from clawchat_gateway.inbound import InboundMessage
 logger = logging.getLogger("clawchat_gateway.group_message_coalescer")
 
 
-def _message_id(message: InboundMessage) -> str:
-    raw = message.raw_message if isinstance(message.raw_message, dict) else {}
-    payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
-    value = payload.get("message_id")
-    return value if isinstance(value, str) and value else "-"
-
-
-def format_coalesced_group_text(messages: list[InboundMessage], *, window_seconds: float) -> str:
-    seconds = int(window_seconds)
-    header = f"ClawChat group batch ({len(messages)} {'message' if len(messages) == 1 else 'messages'}, {seconds}s window):"
+def format_coalesced_group_text(
+    messages: list[InboundMessage],
+    *,
+    idle_seconds: float,
+    max_wait_seconds: float,
+) -> str:
+    idle = int(idle_seconds)
+    max_wait = int(max_wait_seconds)
+    header = f"ClawChat group batch ({len(messages)} {'message' if len(messages) == 1 else 'messages'}, {idle}s idle, {max_wait}s max):"
     lines = [header]
     for index, message in enumerate(messages, start=1):
         sender_name = message.sender_name or message.sender_id
         body = message.text or "(empty message)"
-        lines.append(f"{index}. [{_message_id(message)}] {sender_name} ({message.sender_id}): {body}")
+        lines.append(f"{index}. {sender_name} ({message.sender_id}): {body}")
     return "\n".join(lines)
 
 
@@ -33,29 +32,42 @@ class GroupMessageCoalescer:
     def __init__(
         self,
         *,
-        window_seconds: float,
+        idle_seconds: float,
+        max_wait_seconds: float,
         dispatch: Callable[[InboundMessage], Awaitable[None]],
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         log: logging.Logger = logger,
     ) -> None:
-        self._window_seconds = window_seconds
+        self._idle_seconds = idle_seconds
+        self._max_wait_seconds = max_wait_seconds
         self._dispatch = dispatch
         self._sleep = sleep
         self._log = log
         self._pending: dict[str, list[InboundMessage]] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._max_wait_tasks: dict[str, asyncio.Task[None]] = {}
 
     def enqueue(self, message: InboundMessage) -> None:
         batch = self._pending.setdefault(message.chat_id, [])
         batch.append(message)
-        if message.chat_id not in self._tasks:
-            self._tasks[message.chat_id] = asyncio.create_task(
-                self._flush_later(message.chat_id),
-                name=f"clawchat-group-coalesce-{message.chat_id}",
+        self._reset_idle_task(message.chat_id)
+        if message.chat_id not in self._max_wait_tasks:
+            self._max_wait_tasks[message.chat_id] = asyncio.create_task(
+                self._flush_after_max_wait(message.chat_id),
+                name=f"clawchat-group-coalesce-max-{message.chat_id}",
             )
 
+    def _reset_idle_task(self, chat_id: str) -> None:
+        task = self._tasks.pop(chat_id, None)
+        if task is not None:
+            task.cancel()
+        self._tasks[chat_id] = asyncio.create_task(
+            self._flush_after_idle(chat_id),
+            name=f"clawchat-group-coalesce-idle-{chat_id}",
+        )
+
     async def cancel(self) -> None:
-        tasks = list(self._tasks.values())
+        tasks = list(self._tasks.values()) + list(self._max_wait_tasks.values())
         for task in tasks:
             task.cancel()
         if tasks:
@@ -68,18 +80,24 @@ class GroupMessageCoalescer:
             )
         self._pending.clear()
         self._tasks.clear()
+        self._max_wait_tasks.clear()
 
     async def flush_now(self, chat_id: str) -> None:
         task = self._tasks.pop(chat_id, None)
         if task is not None:
             task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        max_wait_task = self._max_wait_tasks.pop(chat_id, None)
+        if max_wait_task is not None:
+            max_wait_task.cancel()
+        tasks = [item for item in (task, max_wait_task) if item is not None]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         await self.flush(chat_id)
 
-    async def _flush_later(self, chat_id: str) -> None:
+    async def _flush_after_idle(self, chat_id: str) -> None:
         task = asyncio.current_task()
         try:
-            await self._sleep(self._window_seconds)
+            await self._sleep(self._idle_seconds)
             await self.flush(chat_id)
         except asyncio.CancelledError:
             raise
@@ -93,6 +111,23 @@ class GroupMessageCoalescer:
             if self._tasks.get(chat_id) is task:
                 self._tasks.pop(chat_id, None)
 
+    async def _flush_after_max_wait(self, chat_id: str) -> None:
+        task = asyncio.current_task()
+        try:
+            await self._sleep(self._max_wait_seconds)
+            await self.flush(chat_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._log.warning(
+                "clawchat group batch dispatch failed chat_id=%s",
+                chat_id,
+                exc_info=True,
+            )
+        finally:
+            if self._max_wait_tasks.get(chat_id) is task:
+                self._max_wait_tasks.pop(chat_id, None)
+
     async def flush(self, chat_id: str) -> None:
         batch = self._pending.pop(chat_id, [])
         if not batch:
@@ -100,6 +135,14 @@ class GroupMessageCoalescer:
         task = asyncio.current_task()
         if self._tasks.get(chat_id) is task:
             self._tasks.pop(chat_id, None)
+        elif chat_id in self._tasks:
+            idle_task = self._tasks.pop(chat_id)
+            idle_task.cancel()
+        if self._max_wait_tasks.get(chat_id) is task:
+            self._max_wait_tasks.pop(chat_id, None)
+        elif chat_id in self._max_wait_tasks:
+            max_wait_task = self._max_wait_tasks.pop(chat_id)
+            max_wait_task.cancel()
         latest = batch[-1]
         mentioned_user_ids = []
         seen_mention_ids = set()
@@ -114,7 +157,11 @@ class GroupMessageCoalescer:
         }
         merged = replace(
             latest,
-            text=format_coalesced_group_text(batch, window_seconds=self._window_seconds),
+            text=format_coalesced_group_text(
+                batch,
+                idle_seconds=self._idle_seconds,
+                max_wait_seconds=self._max_wait_seconds,
+            ),
             raw_message=merged_raw,
             media_urls=[url for message in batch for url in message.media_urls],
             media_types=[kind for message in batch for kind in message.media_types],
