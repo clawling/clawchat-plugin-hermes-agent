@@ -432,8 +432,8 @@ class ClawChatStore:
         profile_kind: str,
         profile_id: str,
         relation: str | None = None,
-        profile_type: str | None = None,
-        nickname: str | None = None,
+        profile_type: Any = _UNSET,
+        nickname: Any = _UNSET,
         now_ms: int | None = None,
     ) -> bool | None:
         return self.upsert_profile(
@@ -897,6 +897,31 @@ class ClawChatStore:
             row = conn.execute(
                 """
                 SELECT conversation_id
+                FROM activations
+                WHERE platform = ? AND account_id = ?
+                """,
+                (platform, account_id),
+            ).fetchone()
+            if row is None or row[0] is None:
+                return None
+            return str(row[0])
+        finally:
+            conn.close()
+
+    def get_activation_owner_user_id(
+        self,
+        *,
+        platform: str,
+        account_id: str,
+    ) -> str | None:
+        self.initialize()
+        if self._disabled:
+            return None
+        conn = sqlite3.connect(self.db_path)
+        try:
+            row = conn.execute(
+                """
+                SELECT owner_user_id
                 FROM activations
                 WHERE platform = ? AND account_id = ?
                 """,

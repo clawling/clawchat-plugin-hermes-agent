@@ -643,9 +643,26 @@ class ClawChatAdapter(BasePlatformAdapter):
         return relation_for_sender(
             sender_id,
             agent_user_id=self._clawchat_config.user_id,
-            owner_user_id=self._clawchat_config.owner_user_id,
+            owner_user_id=self._owner_user_id(),
             profile_type=profile_type if isinstance(profile_type, str) else None,
         )
+
+    def _owner_user_id(self) -> str:
+        if self._clawchat_config.owner_user_id:
+            return self._clawchat_config.owner_user_id
+        if self._store is None:
+            return ""
+        try:
+            owner_user_id = self._store.get_activation_owner_user_id(
+                platform="hermes",
+                account_id="default",
+            )
+        except AttributeError:
+            return ""
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat activation owner cache read failed", exc_info=True)
+            return ""
+        return str(owner_user_id or "")
 
     def _upsert_minimal_conversation(
         self,
@@ -674,19 +691,27 @@ class ClawChatAdapter(BasePlatformAdapter):
         if self._store is None or not inbound.sender_id:
             return False
         try:
-            created = self._store.upsert_minimal_profile(
-                platform="clawchat",
-                account_id=self._account_id(),
-                profile_kind="user",
-                profile_id=inbound.sender_id,
-                relation=self._sender_relation(inbound.sender_id),
-                nickname=inbound.sender_name or None,
-                now_ms=int(time.time() * 1000),
-            )
+            kwargs = {
+                "platform": "clawchat",
+                "account_id": self._account_id(),
+                "profile_kind": "user",
+                "profile_id": inbound.sender_id,
+                "relation": self._sender_relation(inbound.sender_id),
+                "now_ms": int(time.time() * 1000),
+            }
+            if inbound.sender_name and inbound.sender_name != inbound.sender_id:
+                kwargs["nickname"] = inbound.sender_name
+            created = self._store.upsert_minimal_profile(**kwargs)
             return bool(created)
         except Exception:  # noqa: BLE001
             logger.warning("clawchat minimal user profile cache upsert failed")
             return False
+
+    def _sender_profile_needs_refresh(self, sender_id: str) -> bool:
+        profile = self._get_cached_profile("user", sender_id)
+        if not isinstance(profile, dict):
+            return True
+        return profile.get("last_refreshed_at") is None
 
     def _upsert_minimal_group_profile(self, inbound: InboundMessage) -> bool:
         if self._store is None or inbound.chat_type != "group" or not inbound.chat_id:
@@ -961,7 +986,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._schedule_profile_sync(self._refresh_conversation_metadata(inbound.chat_id))
         elif new_group:
             self._schedule_profile_sync(self._refresh_conversation_metadata(inbound.chat_id))
-        if new_sender:
+        if new_sender or self._sender_profile_needs_refresh(inbound.sender_id):
             self._schedule_profile_sync(self._refresh_user_profile(inbound.sender_id))
         if event_name in {"message.send", "message.reply"}:
             claimed = self._claim_message_once(
