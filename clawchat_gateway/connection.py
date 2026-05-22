@@ -397,6 +397,7 @@ class ClawChatConnection:
             self._ws = None
             self._read_task = None
             if not self._stopping and not self._auth_failed:
+                await self._set_state(ConnectionState.DISCONNECTED)
                 self._reject_pending_acks(RuntimeError("connection disconnected"))
             if self._auth_failed:
                 self._finish_current_connection(ConnectionState.AUTH_FAILED.value)
