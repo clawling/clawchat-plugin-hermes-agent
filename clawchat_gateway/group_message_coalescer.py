@@ -74,6 +74,14 @@ class GroupMessageCoalescer:
         try:
             await self._sleep(self._window_seconds)
             await self.flush(chat_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._log.warning(
+                "clawchat group batch dispatch failed chat_id=%s",
+                chat_id,
+                exc_info=True,
+            )
         finally:
             if self._tasks.get(chat_id) is task:
                 self._tasks.pop(chat_id, None)

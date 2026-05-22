@@ -193,8 +193,8 @@ class ClawChatAdapter(BasePlatformAdapter):
     async def disconnect(self) -> None:
         await self._cancel_activation_bootstrap_tasks()
         await self._cancel_conversation_refresh_tasks()
-        await self._group_message_coalescer.cancel()
         await self._connection.stop()
+        await self._group_message_coalescer.cancel()
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         return {"name": chat_id, "type": "direct", "chat_id": chat_id}
