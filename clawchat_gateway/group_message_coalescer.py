@@ -4,11 +4,27 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Any
 
 from clawchat_gateway.inbound import InboundMessage
 
 logger = logging.getLogger("clawchat_gateway.group_message_coalescer")
+
+
+def _message_time(message: InboundMessage) -> str:
+    raw = message.raw_message if isinstance(message.raw_message, dict) else {}
+    emitted_at = raw.get("emitted_at")
+    if isinstance(emitted_at, (int, float)):
+        try:
+            return (
+                datetime.fromtimestamp(emitted_at / 1000, UTC)
+                .isoformat(timespec="milliseconds")
+                .replace("+00:00", "Z")
+            )
+        except (OverflowError, OSError, ValueError):
+            pass
+    return "unknown-time"
 
 
 def format_coalesced_group_text(
@@ -21,10 +37,10 @@ def format_coalesced_group_text(
     max_wait = int(max_wait_seconds)
     header = f"ClawChat group batch ({len(messages)} {'message' if len(messages) == 1 else 'messages'}, {idle}s idle, {max_wait}s max):"
     lines = [header]
-    for index, message in enumerate(messages, start=1):
+    for message in messages:
         sender_name = message.sender_name or message.sender_id
         body = message.text or "(empty message)"
-        lines.append(f"{index}. {sender_name} ({message.sender_id}): {body}")
+        lines.append(f"{_message_time(message)} {sender_name} ({message.sender_id}): {body}")
     return "\n".join(lines)
 
 
