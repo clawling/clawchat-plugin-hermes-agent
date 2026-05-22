@@ -64,8 +64,9 @@ DEBUG_PROMPT_INJECTION_END = "----- END CLAWCHAT DEBUG PROMPT INJECTION -----"
 DEBUG_EVENT_TEXT_BEGIN = "----- BEGIN CLAWCHAT DEBUG EVENT TEXT -----"
 DEBUG_EVENT_TEXT_END = "----- END CLAWCHAT DEBUG EVENT TEXT -----"
 SILENT_RESPONSE_TOKEN = "<clawchat:silent/>"
+EMPTY_RESPONSE_TOKEN = '""'
 GROUP_BATCH_REPLY_GUIDANCE = (
-    "Reply only if useful. To stay silent, output exactly silent_response and nothing else. "
+    "Reply only if useful. To stay silent, output exactly \"\" and nothing else. "
     "Any other final text will be sent to the group."
 )
 GROUP_BATCH_MENTION_REPLY_GUIDANCE = (
@@ -1227,7 +1228,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 ("allowed_actions", "reply,stay_silent"),
             ]
             if not inbound.was_mentioned:
-                field_items.append(("silent_response", SILENT_RESPONSE_TOKEN))
+                field_items.append(("empty_response", EMPTY_RESPONSE_TOKEN))
             field_items.append(("reply_guidance", reply_guidance))
             fields = self._format_fields(tuple(field_items), include_empty=True)
             return "## Current ClawChat Group Batch\n" + fields
@@ -1495,7 +1496,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             return SendResult(success=True, message_id=run.message_id)
 
         visible_content = self._filter_output_content(content or "")
-        if finalize and not run.last_text and self._is_silent_response_text(visible_content):
+        if finalize and not run.last_text and self._is_noop_response_text(visible_content):
             self._discard_run(run)
             self._remember_completed_run(run.message_id)
             logger.info(
@@ -1561,7 +1562,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
 
         visible_final_text = self._filter_output_content(final_text or "")
-        if not run.last_text and self._is_silent_response_text(visible_final_text):
+        if not run.last_text and self._is_noop_response_text(visible_final_text):
             logger.info("clawchat silent response final suppressed chat_id=%s message_id=%s", chat_id, run.message_id)
             return
         full_text, delta = compute_delta(run.last_text, visible_final_text)
@@ -1786,14 +1787,14 @@ class ClawChatAdapter(BasePlatformAdapter):
         filtered = _STREAMING_CURSOR_RE.sub("", filtered)
         return filtered
 
-    def _is_silent_response_text(self, content: str) -> bool:
-        return content.strip() == SILENT_RESPONSE_TOKEN
+    def _is_noop_response_text(self, content: str) -> bool:
+        return content.strip() in {SILENT_RESPONSE_TOKEN, EMPTY_RESPONSE_TOKEN}
 
     def _is_pure_silent_response(self, fragments: list[dict[str, Any]]) -> bool:
         return (
             len(fragments) == 1
             and fragments[0].get("kind") == "text"
-            and self._is_silent_response_text(str(fragments[0].get("text") or ""))
+            and self._is_noop_response_text(str(fragments[0].get("text") or ""))
         )
 
     def _should_suppress_tool_progress(self, content: str) -> bool:
