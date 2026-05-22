@@ -751,6 +751,15 @@ class ClawChatAdapter(BasePlatformAdapter):
                 return
         if inbound.chat_type == "group":
             self._group_message_coalescer.enqueue(inbound)
+            if inbound.was_mentioned:
+                logger.info(
+                    "clawchat flushing group batch immediately chat_id=%s sender_id=%s text_len=%d reason=agent_mention",
+                    inbound.chat_id,
+                    inbound.sender_id,
+                    len(inbound.text),
+                )
+                await self._group_message_coalescer.flush_now(inbound.chat_id)
+                return
             logger.info(
                 "clawchat queued group batch chat_id=%s sender_id=%s text_len=%d",
                 inbound.chat_id,
@@ -816,6 +825,17 @@ class ClawChatAdapter(BasePlatformAdapter):
 
     def _compose_channel_prompt(self, inbound: InboundMessage) -> str | None:
         prompts = [mode_prompt(inbound.chat_type)]
+        if inbound.chat_type == "group":
+            mentioned_user_ids = ",".join(inbound.mentioned_user_ids) or "-"
+            prompts.append(
+                "\n".join(
+                    [
+                        "Current ClawChat Turn:",
+                        f"was_mentioned: {str(inbound.was_mentioned).lower()}",
+                        f"mentioned_user_ids: {mentioned_user_ids}",
+                    ]
+                )
+            )
         raw_message = inbound.raw_message if isinstance(inbound.raw_message, dict) else {}
         if not raw_message.get("bootstrap") and self._has_activation_intent(inbound.text):
             prompts.append(_CLAWCHAT_ACTIVATION_PROMPT)

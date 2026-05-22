@@ -69,6 +69,13 @@ class GroupMessageCoalescer:
         self._pending.clear()
         self._tasks.clear()
 
+    async def flush_now(self, chat_id: str) -> None:
+        task = self._tasks.get(chat_id)
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await self.flush(chat_id)
+
     async def _flush_later(self, chat_id: str) -> None:
         task = asyncio.current_task()
         try:
@@ -94,6 +101,13 @@ class GroupMessageCoalescer:
         if self._tasks.get(chat_id) is task:
             self._tasks.pop(chat_id, None)
         latest = batch[-1]
+        mentioned_user_ids = []
+        seen_mention_ids = set()
+        for message in batch:
+            for user_id in message.mentioned_user_ids:
+                if user_id not in seen_mention_ids:
+                    mentioned_user_ids.append(user_id)
+                    seen_mention_ids.add(user_id)
         merged_raw: dict[str, Any] = {
             "clawchat_group_batch": True,
             "messages": [message.raw_message for message in batch],
@@ -104,5 +118,7 @@ class GroupMessageCoalescer:
             raw_message=merged_raw,
             media_urls=[url for message in batch for url in message.media_urls],
             media_types=[kind for message in batch for kind in message.media_types],
+            was_mentioned=any(message.was_mentioned for message in batch),
+            mentioned_user_ids=mentioned_user_ids,
         )
         await self._dispatch(merged)
