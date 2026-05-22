@@ -15,6 +15,9 @@ test = ["pytest>=8", "pytest-asyncio>=0.23", "pytest-cov>=4"]
 [tool.setuptools]
 include-package-data = true
 
+[tool.setuptools.package-data]
+clawchat_gateway = ["prompts/*.md"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["clawchat_gateway*"]

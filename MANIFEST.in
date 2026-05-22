@@ -1,1 +1,2 @@
 recursive-include prompts *.md
+recursive-include clawchat_gateway/prompts *.md

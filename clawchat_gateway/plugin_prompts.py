@@ -1,5 +1,6 @@
+from importlib.resources import files
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import Any, Literal, TypedDict
 
 
 __all__ = [
@@ -22,12 +23,11 @@ class ClawChatPrompts(TypedDict):
 _PROMPT_NAMES: tuple[PromptName, ...] = ("platform", "user", "group")
 
 
-def load_clawchat_prompts_from_root(plugin_root: Path) -> ClawChatPrompts:
+def _load_clawchat_prompts_from_dir(prompts_root: Any) -> ClawChatPrompts:
     prompts: dict[PromptName, str] = {}
-    prompts_root = plugin_root / "prompts"
 
     for name in _PROMPT_NAMES:
-        path = prompts_root / f"{name}.md"
+        path = prompts_root.joinpath(f"{name}.md")
         try:
             text = path.read_text(encoding="utf-8").strip()
         except OSError as exc:
@@ -45,8 +45,13 @@ def load_clawchat_prompts_from_root(plugin_root: Path) -> ClawChatPrompts:
     }
 
 
-_PLUGIN_ROOT = Path(__file__).resolve().parent.parent
-_PROMPTS = load_clawchat_prompts_from_root(_PLUGIN_ROOT)
+def load_clawchat_prompts_from_root(plugin_root: Path) -> ClawChatPrompts:
+    return _load_clawchat_prompts_from_dir(plugin_root / "prompts")
+
+
+_PROMPTS = _load_clawchat_prompts_from_dir(
+    files("clawchat_gateway").joinpath("prompts")
+)
 
 
 def platform_prompt() -> str:
