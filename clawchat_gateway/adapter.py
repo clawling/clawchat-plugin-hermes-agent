@@ -63,6 +63,15 @@ DEBUG_PROMPT_INJECTION_BEGIN = "----- BEGIN CLAWCHAT DEBUG PROMPT INJECTION ----
 DEBUG_PROMPT_INJECTION_END = "----- END CLAWCHAT DEBUG PROMPT INJECTION -----"
 DEBUG_EVENT_TEXT_BEGIN = "----- BEGIN CLAWCHAT DEBUG EVENT TEXT -----"
 DEBUG_EVENT_TEXT_END = "----- END CLAWCHAT DEBUG EVENT TEXT -----"
+SILENT_RESPONSE_TOKEN = "<clawchat:silent/>"
+GROUP_BATCH_REPLY_GUIDANCE = (
+    "Reply only if useful. To stay silent, output exactly silent_response and nothing else. "
+    "Any other final text will be sent to the group."
+)
+GROUP_BATCH_MENTION_REPLY_GUIDANCE = (
+    "You were directly addressed in this group batch. Reply by default, including when the message contains only a mention. "
+    "Use stay_silent only if the group description/rules explicitly forbid replying."
+)
 
 _THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
 _THINK_CONTENT_RE = re.compile(r"<think\b[^>]*>(.*?)</think>", re.IGNORECASE | re.DOTALL)
@@ -1203,15 +1212,24 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
         if is_group_batch:
             mentioned_user_ids = ",".join(inbound.mentioned_user_ids) or "-"
-            fields = self._format_fields(
-                (
-                    ("chat_type", "group"),
-                    ("group_id", inbound.chat_id),
-                    ("was_mentioned", str(inbound.was_mentioned).lower()),
-                    ("mentioned_user_ids", mentioned_user_ids),
-                ),
-                include_empty=True,
+            reply_policy = "directly_addressed" if inbound.was_mentioned else "decide_whether_to_reply"
+            reply_guidance = (
+                GROUP_BATCH_MENTION_REPLY_GUIDANCE
+                if inbound.was_mentioned
+                else GROUP_BATCH_REPLY_GUIDANCE
             )
+            field_items: list[tuple[str, Any]] = [
+                ("chat_type", "group"),
+                ("group_id", inbound.chat_id),
+                ("was_mentioned", str(inbound.was_mentioned).lower()),
+                ("mentioned_user_ids", mentioned_user_ids),
+                ("reply_policy", reply_policy),
+                ("allowed_actions", "reply,stay_silent"),
+            ]
+            if not inbound.was_mentioned:
+                field_items.append(("silent_response", SILENT_RESPONSE_TOKEN))
+            field_items.append(("reply_guidance", reply_guidance))
+            fields = self._format_fields(tuple(field_items), include_empty=True)
             return "## Current ClawChat Group Batch\n" + fields
 
         sender_profile = self._get_cached_profile("user", inbound.sender_id)
@@ -1306,6 +1324,9 @@ class ClawChatAdapter(BasePlatformAdapter):
             return SendResult(success=True)
         visible_content = self._filter_output_content(content or "")
         fragments = await self._build_fragments(visible_content, metadata, kwargs)
+        if self._is_pure_silent_response(fragments):
+            logger.info("clawchat silent response suppressed chat_id=%s chat_type=%s", chat_id, chat_type)
+            return SendResult(success=True)
         message_id = new_frame_id("msg")
         logger.info(
             "clawchat send start chat_id=%s chat_type=%s mode=%s text_len=%d fragments=%d reply_to=%s",
@@ -1530,6 +1551,9 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
 
         visible_final_text = self._filter_output_content(final_text or "")
+        if not run.last_text and self._is_silent_response_text(visible_final_text):
+            logger.info("clawchat silent response final suppressed chat_id=%s message_id=%s", chat_id, run.message_id)
+            return
         full_text, delta = compute_delta(run.last_text, visible_final_text)
         if delta:
             run.sequence += 1
@@ -1751,6 +1775,16 @@ class ClawChatAdapter(BasePlatformAdapter):
         filtered = _HERMES_STREAM_CURSOR_RE.sub("", filtered)
         filtered = _STREAMING_CURSOR_RE.sub("", filtered)
         return filtered
+
+    def _is_silent_response_text(self, content: str) -> bool:
+        return content.strip() == SILENT_RESPONSE_TOKEN
+
+    def _is_pure_silent_response(self, fragments: list[dict[str, Any]]) -> bool:
+        return (
+            len(fragments) == 1
+            and fragments[0].get("kind") == "text"
+            and self._is_silent_response_text(str(fragments[0].get("text") or ""))
+        )
 
     def _should_suppress_tool_progress(self, content: str) -> bool:
         if self._clawchat_config.show_tool_progress:
