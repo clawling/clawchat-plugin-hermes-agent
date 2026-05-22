@@ -177,7 +177,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._profile_sync_tasks: set[asyncio.Task[None]] = set()
         self._conversation_metadata_versions: dict[str, int] = {}
         self._group_message_coalescer = GroupMessageCoalescer(
-            window_seconds=5.0,
+            window_seconds=10.0,
             dispatch=self._handle_inbound,
         )
         try:
