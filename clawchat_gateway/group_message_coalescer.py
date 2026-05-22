@@ -70,16 +70,21 @@ class GroupMessageCoalescer:
         self._tasks.clear()
 
     async def _flush_later(self, chat_id: str) -> None:
+        task = asyncio.current_task()
         try:
             await self._sleep(self._window_seconds)
             await self.flush(chat_id)
         finally:
-            self._tasks.pop(chat_id, None)
+            if self._tasks.get(chat_id) is task:
+                self._tasks.pop(chat_id, None)
 
     async def flush(self, chat_id: str) -> None:
         batch = self._pending.pop(chat_id, [])
         if not batch:
             return
+        task = asyncio.current_task()
+        if self._tasks.get(chat_id) is task:
+            self._tasks.pop(chat_id, None)
         latest = batch[-1]
         merged_raw: dict[str, Any] = {
             "clawchat_group_batch": True,
