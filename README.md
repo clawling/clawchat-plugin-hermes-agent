@@ -96,8 +96,10 @@ eligible for a reply. Set `CLAWCHAT_GROUP_MODE=mention` or
 `platforms.clawchat.extra.group_mode: mention` to require an @mention for every
 group, or set `platforms.clawchat.extra.groups.<chat_id>.group_mode: mention`
 for one group. `groups["*"].group_mode` can provide a wildcard group default.
-Group-only covenant guidance is injected through Hermes' per-event
-`channel_prompt`; direct chats do not receive that group covenant.
+ClawChat prompt guidance is loaded from plugin prompt resources at startup.
+`prompts/group.md` is injected through Hermes' per-event `channel_prompt` for
+group turns, and `prompts/user.md` is injected the same way for direct/private
+turns.
 
 For Docker:
 
