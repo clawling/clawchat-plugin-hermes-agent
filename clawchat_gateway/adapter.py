@@ -27,6 +27,7 @@ from clawchat_gateway.connection import (
     ClawChatConnection,
     ConnectionState,
 )
+from clawchat_gateway.group_message_coalescer import GroupMessageCoalescer
 from clawchat_gateway.inbound import InboundMessage, parse_inbound_message
 from clawchat_gateway.media_runtime import (
     download_inbound_media,
@@ -170,6 +171,10 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._activation_bootstrap_tasks: set[asyncio.Task[None]] = set()
         self._conversation_refresh_tasks: set[asyncio.Task[None]] = set()
         self._conversation_metadata_versions: dict[str, int] = {}
+        self._group_message_coalescer = GroupMessageCoalescer(
+            window_seconds=5.0,
+            dispatch=self._handle_inbound,
+        )
         try:
             self._store = get_clawchat_store()
         except Exception:  # noqa: BLE001
@@ -188,6 +193,7 @@ class ClawChatAdapter(BasePlatformAdapter):
     async def disconnect(self) -> None:
         await self._cancel_activation_bootstrap_tasks()
         await self._cancel_conversation_refresh_tasks()
+        await self._group_message_coalescer.cancel()
         await self._connection.stop()
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
@@ -743,6 +749,15 @@ class ClawChatAdapter(BasePlatformAdapter):
                     event_name,
                 )
                 return
+        if inbound.chat_type == "group":
+            self._group_message_coalescer.enqueue(inbound)
+            logger.info(
+                "clawchat queued group batch chat_id=%s sender_id=%s text_len=%d",
+                inbound.chat_id,
+                inbound.sender_id,
+                len(inbound.text),
+            )
+            return
         await self._handle_inbound(inbound)
 
     async def _handle_inbound(self, inbound: InboundMessage) -> None:
