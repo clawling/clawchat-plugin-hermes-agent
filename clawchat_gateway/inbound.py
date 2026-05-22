@@ -17,6 +17,8 @@ class InboundMessage:
     reply_preview: dict[str, Any] | None = None
     media_urls: list[str] = field(default_factory=list)
     media_types: list[str] = field(default_factory=list)
+    was_mentioned: bool = False
+    mentioned_user_ids: list[str] = field(default_factory=list)
 
 
 def _as_dict(value: Any) -> dict[str, Any] | None:
@@ -63,6 +65,30 @@ def _fragment_text(fragment: dict[str, Any]) -> str | None:
     return None
 
 
+def _extract_mentioned_user_ids(mentions: Any) -> list[str]:
+    if not isinstance(mentions, list):
+        return []
+
+    mentioned_user_ids: list[str] = []
+    seen: set[str] = set()
+    for mention in mentions:
+        mention_id: str | None = None
+        if isinstance(mention, dict):
+            for key in ("user_id", "id"):
+                value = mention.get(key)
+                if isinstance(value, str) and value:
+                    mention_id = value
+                    break
+        elif isinstance(mention, str) and mention:
+            mention_id = mention
+
+        if mention_id is not None and mention_id not in seen:
+            seen.add(mention_id)
+            mentioned_user_ids.append(mention_id)
+
+    return mentioned_user_ids
+
+
 def parse_inbound_message(
     envelope: dict[str, Any], config: ClawChatConfig
 ) -> InboundMessage | None:
@@ -82,17 +108,15 @@ def parse_inbound_message(
     if chat_type not in {"direct", "group"}:
         return None
 
+    mentioned_user_ids = _extract_mentioned_user_ids(context.get("mentions"))
+    was_mentioned = config.user_id in mentioned_user_ids
+
     if (
         chat_type == "group"
         and effective_group_mode(config, envelope.get("chat_id") or "") == "mention"
+        and not was_mentioned
     ):
-        mentions = context.get("mentions") or []
-        if not any(
-            mention.get("id") == config.user_id
-            for mention in mentions
-            if isinstance(mention, dict)
-        ):
-            return None
+        return None
 
     fragments = _coerce_fragments(message)
     text_parts: list[str] = []
@@ -132,4 +156,6 @@ def parse_inbound_message(
         reply_preview=_as_dict(context.get("reply")),
         media_urls=media_urls,
         media_types=media_types,
+        was_mentioned=was_mentioned,
+        mentioned_user_ids=mentioned_user_ids,
     )

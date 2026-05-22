@@ -28,6 +28,7 @@ from clawchat_gateway.connection import (
     ClawChatConnection,
     ConnectionState,
 )
+from clawchat_gateway.group_message_coalescer import GroupMessageCoalescer
 from clawchat_gateway.inbound import InboundMessage, parse_inbound_message
 from clawchat_gateway.media_runtime import (
     download_inbound_media,
@@ -175,6 +176,10 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._conversation_refresh_tasks: set[asyncio.Task[None]] = set()
         self._profile_sync_tasks: set[asyncio.Task[None]] = set()
         self._conversation_metadata_versions: dict[str, int] = {}
+        self._group_message_coalescer = GroupMessageCoalescer(
+            window_seconds=5.0,
+            dispatch=self._handle_inbound,
+        )
         try:
             self._store = get_clawchat_store()
         except Exception:  # noqa: BLE001
@@ -195,6 +200,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         await self._cancel_conversation_refresh_tasks()
         await self._cancel_profile_sync_tasks()
         await self._connection.stop()
+        await self._group_message_coalescer.cancel()
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         return {"name": chat_id, "type": "direct", "chat_id": chat_id}
@@ -976,6 +982,24 @@ class ClawChatAdapter(BasePlatformAdapter):
                     event_name,
                 )
                 return
+        if inbound.chat_type == "group":
+            self._group_message_coalescer.enqueue(inbound)
+            if inbound.was_mentioned:
+                logger.info(
+                    "clawchat flushing group batch immediately chat_id=%s sender_id=%s text_len=%d reason=agent_mention",
+                    inbound.chat_id,
+                    inbound.sender_id,
+                    len(inbound.text),
+                )
+                await self._group_message_coalescer.flush_now(inbound.chat_id)
+                return
+            logger.info(
+                "clawchat queued group batch chat_id=%s sender_id=%s text_len=%d",
+                inbound.chat_id,
+                inbound.sender_id,
+                len(inbound.text),
+            )
+            return
         await self._handle_inbound(inbound)
 
     async def _handle_inbound(self, inbound: InboundMessage) -> None:
@@ -1113,18 +1137,24 @@ class ClawChatAdapter(BasePlatformAdapter):
         chat_type = inbound.chat_type
         if inbound.chat_type != "group":
             chat_type = "owner_dm" if sender_relation == "owner" else "dm"
-        fields = self._format_fields(
-            (
-                ("chat_type", chat_type),
-                ("sender_id", inbound.sender_id),
-                ("sender_relation", sender_relation),
-                ("sender_profile_type", sender_profile_type),
-                ("sender_is_owner", "true" if sender_relation == "owner" else "false"),
-                ("peer_id", inbound.sender_id),
-                ("group_id", inbound.chat_id if inbound.chat_type == "group" else ""),
-            ),
-            include_empty=True,
-        )
+        field_items: list[tuple[str, Any]] = [
+            ("chat_type", chat_type),
+            ("sender_id", inbound.sender_id),
+            ("sender_relation", sender_relation),
+            ("sender_profile_type", sender_profile_type),
+            ("sender_is_owner", "true" if sender_relation == "owner" else "false"),
+            ("peer_id", inbound.sender_id),
+            ("group_id", inbound.chat_id if inbound.chat_type == "group" else ""),
+        ]
+        if inbound.chat_type == "group":
+            mentioned_user_ids = ",".join(inbound.mentioned_user_ids) or "-"
+            field_items.extend(
+                [
+                    ("was_mentioned", str(inbound.was_mentioned).lower()),
+                    ("mentioned_user_ids", mentioned_user_ids),
+                ]
+            )
+        fields = self._format_fields(tuple(field_items), include_empty=True)
         return "## Current ClawChat Turn\n" + fields
 
     def _format_fields(
