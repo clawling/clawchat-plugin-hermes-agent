@@ -1148,6 +1148,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         field_items: list[tuple[str, Any]] = [
             ("chat_type", chat_type),
             ("sender_id", inbound.sender_id),
+            ("sender_name", inbound.sender_name),
             ("sender_relation", sender_relation),
             ("sender_profile_type", sender_profile_type),
             ("sender_is_owner", "true" if sender_relation == "owner" else "false"),
