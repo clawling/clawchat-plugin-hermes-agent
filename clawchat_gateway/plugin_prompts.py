@@ -2,6 +2,14 @@ from pathlib import Path
 from typing import Literal, TypedDict
 
 
+__all__ = [
+    "load_clawchat_prompts_from_root",
+    "platform_prompt",
+    "user_prompt",
+    "group_prompt",
+    "mode_prompt",
+]
+
 PromptName = Literal["platform", "user", "group"]
 
 
