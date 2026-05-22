@@ -70,7 +70,7 @@ class GroupMessageCoalescer:
         self._tasks.clear()
 
     async def flush_now(self, chat_id: str) -> None:
-        task = self._tasks.get(chat_id)
+        task = self._tasks.pop(chat_id, None)
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
