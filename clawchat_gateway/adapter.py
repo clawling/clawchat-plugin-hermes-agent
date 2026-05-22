@@ -725,6 +725,16 @@ class ClawChatAdapter(BasePlatformAdapter):
             return cached_nickname
         return inbound.sender_name or inbound.sender_id
 
+    def _sender_batch_identity(self, inbound: InboundMessage) -> tuple[str, str]:
+        sender_profile = self._get_cached_profile("user", inbound.sender_id)
+        profile_type = ""
+        if isinstance(sender_profile, dict) and sender_profile.get("profile_type") is not None:
+            profile_type = str(sender_profile.get("profile_type"))
+        relation = self._sender_relation(inbound.sender_id, profile_type=profile_type or None)
+        if not profile_type:
+            profile_type = "agent" if relation in {"self_agent", "peer_agent"} else "user"
+        return relation, profile_type
+
     def _upsert_minimal_group_profile(self, inbound: InboundMessage) -> bool:
         if self._store is None or inbound.chat_type != "group" or not inbound.chat_id:
             return False
@@ -1003,6 +1013,13 @@ class ClawChatAdapter(BasePlatformAdapter):
         resolved_sender_name = self._resolve_sender_name(inbound)
         if resolved_sender_name != inbound.sender_name:
             inbound = replace(inbound, sender_name=resolved_sender_name)
+        if inbound.chat_type == "group":
+            sender_relation, sender_profile_type = self._sender_batch_identity(inbound)
+            inbound = replace(
+                inbound,
+                sender_relation=sender_relation,
+                sender_profile_type=sender_profile_type,
+            )
         if event_name in {"message.send", "message.reply"}:
             claimed = self._claim_message_once(
                 kind="message",
@@ -1172,7 +1189,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         fields = self._format_fields(
             (
                 ("title", profile.get("title")),
-                ("description", profile.get("description")),
+                ("description/rules", profile.get("description")),
                 ("metadata_version", profile.get("metadata_version")),
             )
         )

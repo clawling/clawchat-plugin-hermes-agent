@@ -27,6 +27,23 @@ def _message_time(message: InboundMessage) -> str:
     return "unknown-time"
 
 
+def _message_relation(message: InboundMessage) -> str:
+    return message.sender_relation or "peer_user"
+
+
+def _message_profile_type(message: InboundMessage) -> str:
+    if message.sender_profile_type:
+        return message.sender_profile_type
+    if _message_relation(message) in {"self_agent", "peer_agent"}:
+        return "agent"
+    return "user"
+
+
+def _message_body(message: InboundMessage) -> str:
+    body = message.text or "(empty message)"
+    return "\n".join(f"  {line}" for line in body.splitlines() or [body])
+
+
 def format_coalesced_group_text(
     messages: list[InboundMessage],
     *,
@@ -39,8 +56,12 @@ def format_coalesced_group_text(
     lines = [header]
     for message in messages:
         sender_name = message.sender_name or message.sender_id
-        body = message.text or "(empty message)"
-        lines.append(f"{_message_time(message)} {sender_name} ({message.sender_id}): {body}")
+        lines.append(
+            f"{_message_time(message)} {sender_name} "
+            f"[relation={_message_relation(message)}, type={_message_profile_type(message)}] "
+            f"({message.sender_id}):"
+        )
+        lines.append(_message_body(message))
     return "\n".join(lines)
 
 

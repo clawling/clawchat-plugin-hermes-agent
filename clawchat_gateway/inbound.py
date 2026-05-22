@@ -19,6 +19,8 @@ class InboundMessage:
     media_types: list[str] = field(default_factory=list)
     was_mentioned: bool = False
     mentioned_user_ids: list[str] = field(default_factory=list)
+    sender_relation: str = ""
+    sender_profile_type: str = ""
 
 
 def _as_dict(value: Any) -> dict[str, Any] | None:
