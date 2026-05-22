@@ -27,7 +27,6 @@ from clawchat_gateway.connection import (
     ClawChatConnection,
     ConnectionState,
 )
-from clawchat_gateway.group_context import build_group_channel_prompt
 from clawchat_gateway.inbound import InboundMessage, parse_inbound_message
 from clawchat_gateway.media_runtime import (
     download_inbound_media,
@@ -35,6 +34,7 @@ from clawchat_gateway.media_runtime import (
     normalize_outbound_media_reference,
     upload_outbound_media,
 )
+from clawchat_gateway.plugin_prompts import mode_prompt
 from clawchat_gateway.protocol import (
     build_message_add_event,
     build_message_created_event,
@@ -800,11 +800,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         return True
 
     def _compose_channel_prompt(self, inbound: InboundMessage) -> str | None:
-        prompts: list[str] = []
-        if inbound.chat_type == "group":
-            group_prompt = build_group_channel_prompt()
-            if group_prompt:
-                prompts.append(group_prompt)
+        prompts = [mode_prompt(inbound.chat_type)]
         raw_message = inbound.raw_message if isinstance(inbound.raw_message, dict) else {}
         if not raw_message.get("bootstrap") and self._has_activation_intent(inbound.text):
             prompts.append(_CLAWCHAT_ACTIVATION_PROMPT)
