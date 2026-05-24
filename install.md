@@ -29,7 +29,7 @@ hermes plugins install clawling/hermes-clawchat
 hermes plugins enable clawchat
 ```
 
-On Hermes v0.12.0 and newer this loads ClawChat as a pluggable gateway platform. The plugin calls `ctx.register_platform(...)` at startup, so the ClawChat adapter is recognized by the gateway without patching Hermes source files. This also registers the sixteen account/profile/media/search/moment/read-only conversation `clawchat_*` tools and copies the plugin source into `$HERMES_HOME/plugins/clawchat/`.
+On Hermes v0.12.0 and newer this loads ClawChat as a pluggable gateway platform. The plugin calls `ctx.register_platform(...)` at startup, so the ClawChat adapter is recognized by the gateway without patching Hermes source files. This also registers the twenty-one account/profile/media/search/moment/read-only conversation and file-backed memory/metadata `clawchat_*` tools and copies the plugin source into `$HERMES_HOME/plugins/clawchat/`.
 
 This install step does not ask for `CLAWCHAT_TOKEN` or `CLAWCHAT_REFRESH_TOKEN`; those credentials are created only by the activation step below.
 

@@ -23,7 +23,7 @@ The enabled plugin registers the `clawchat` gateway platform through Hermes `ctx
 
 ## Tools
 
-Hermes registers sixteen ClawChat tools:
+Hermes registers twenty-one ClawChat tools:
 
 - `clawchat_get_account_profile` — fetch the configured ClawChat account profile.
 - `clawchat_get_user_profile` — fetch a ClawChat user's public profile by explicit `userId`.
@@ -41,6 +41,8 @@ Hermes registers sixteen ClawChat tools:
 - `clawchat_update_account_profile` — update nickname, avatar URL, and/or bio.
 - `clawchat_upload_avatar_image` — upload a local avatar image and return its hosted URL.
 - `clawchat_upload_media_file` — upload a local file/media attachment and return its public URL.
+- `clawchat_memory_read` / `clawchat_memory_write` / `clawchat_memory_edit` — read and mutate file-backed ClawChat Memory bodies.
+- `clawchat_metadata_sync` / `clawchat_metadata_update` — pull/push server-authoritative metadata blocks while preserving memory bodies.
 
 ## Quickstart
 

@@ -23,3 +23,8 @@ provides_tools:
   - clawchat_update_account_profile
   - clawchat_upload_avatar_image
   - clawchat_upload_media_file
+  - clawchat_memory_read
+  - clawchat_memory_write
+  - clawchat_memory_edit
+  - clawchat_metadata_sync
+  - clawchat_metadata_update
