@@ -733,63 +733,6 @@ class ClawChatStore:
                     json_dumps(raw),
                 ),
             )
-            if group_profile is not None:
-                self._upsert_profile_row(
-                    conn,
-                    platform=platform,
-                    account_id=account_id,
-                    profile_kind="group",
-                    profile_id=conversation_id,
-                    title=group_profile["title"] if "title" in group_profile else _UNSET,
-                    description=(
-                        group_profile["description"]
-                        if "description" in group_profile
-                        else _UNSET
-                    ),
-                    metadata_version=(
-                        group_profile["metadata_version"]
-                        if "metadata_version" in group_profile
-                        else metadata_version if metadata_version is not None else _UNSET
-                    ),
-                    raw=group_profile["raw"] if "raw" in group_profile else group_profile,
-                    last_seen_at=last_seen_at if last_seen_at is not None else _UNSET,
-                    last_refreshed_at=(
-                        group_profile["last_refreshed_at"]
-                        if "last_refreshed_at" in group_profile
-                        else last_refreshed_at if last_refreshed_at is not None else _UNSET
-                    ),
-                )
-            for profile in user_profiles or []:
-                user_id = profile.get("user_id")
-                if not user_id:
-                    continue
-                self._upsert_profile_row(
-                    conn,
-                    platform=platform,
-                    account_id=account_id,
-                    profile_kind="user",
-                    profile_id=str(user_id),
-                    relation=profile["relation"] if "relation" in profile else _UNSET,
-                    profile_type=(
-                        profile["profile_type"] if "profile_type" in profile else _UNSET
-                    ),
-                    nickname=profile["nickname"] if "nickname" in profile else _UNSET,
-                    avatar_url=(
-                        profile["avatar_url"] if "avatar_url" in profile else _UNSET
-                    ),
-                    bio=profile["bio"] if "bio" in profile else _UNSET,
-                    raw=profile["raw"] if "raw" in profile else profile,
-                    last_seen_at=(
-                        profile["last_seen_at"]
-                        if "last_seen_at" in profile
-                        else last_seen_at if last_seen_at is not None else _UNSET
-                    ),
-                    last_refreshed_at=(
-                        profile["last_refreshed_at"]
-                        if "last_refreshed_at" in profile
-                        else last_refreshed_at if last_refreshed_at is not None else _UNSET
-                    ),
-                )
             if members_complete:
                 conn.execute(
                     """
@@ -834,16 +777,6 @@ class ClawChatStore:
                 """
                 DELETE FROM clawchat_conversation_members
                 WHERE platform = ? AND account_id = ? AND conversation_id = ?
-                """,
-                params,
-            )
-            conn.execute(
-                """
-                DELETE FROM clawchat_profiles
-                WHERE platform = ?
-                  AND account_id = ?
-                  AND profile_kind = 'group'
-                  AND profile_id = ?
                 """,
                 params,
             )
