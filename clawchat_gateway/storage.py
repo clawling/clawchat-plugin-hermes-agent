@@ -17,7 +17,6 @@ DB_FILENAME = "clawchat.sqlite"
 BOOTSTRAP_CLAIM_STALE_AFTER_MS = 10 * 60 * 1000
 
 _T = TypeVar("_T")
-_UNSET = object()
 
 
 INITIAL_SCHEMA = """
@@ -125,30 +124,6 @@ CREATE TABLE IF NOT EXISTS clawchat_conversations (
   PRIMARY KEY (platform, account_id, conversation_id)
 );
 
-CREATE TABLE IF NOT EXISTS clawchat_user_profiles (
-  platform TEXT NOT NULL,
-  account_id TEXT NOT NULL,
-  user_id TEXT NOT NULL,
-  nickname TEXT,
-  avatar_url TEXT,
-  bio TEXT,
-  raw_json TEXT,
-  last_refreshed_at INTEGER,
-  PRIMARY KEY (platform, account_id, user_id)
-);
-
-CREATE TABLE IF NOT EXISTS clawchat_group_profiles (
-  platform TEXT NOT NULL,
-  account_id TEXT NOT NULL,
-  conversation_id TEXT NOT NULL,
-  title TEXT,
-  description TEXT,
-  metadata_version INTEGER,
-  raw_json TEXT,
-  last_refreshed_at INTEGER,
-  PRIMARY KEY (platform, account_id, conversation_id)
-);
-
 CREATE TABLE IF NOT EXISTS clawchat_conversation_members (
   platform TEXT NOT NULL,
   account_id TEXT NOT NULL,
@@ -164,35 +139,11 @@ CREATE INDEX IF NOT EXISTS idx_clawchat_conversations_seen
   ON clawchat_conversations(platform, account_id, last_seen_at);
 """
 
-UNIFIED_PROFILES_SCHEMA = """
+ACTIVATION_OWNER_USER_ID_SCHEMA = """
 ALTER TABLE activations ADD COLUMN owner_user_id TEXT;
 UPDATE activations
 SET owner_user_id = owner_id
 WHERE owner_user_id IS NULL AND owner_id IS NOT NULL;
-
-CREATE TABLE IF NOT EXISTS clawchat_profiles (
-  platform TEXT NOT NULL,
-  account_id TEXT NOT NULL,
-  profile_kind TEXT NOT NULL,
-  profile_id TEXT NOT NULL,
-  relation TEXT,
-  profile_type TEXT,
-  title TEXT,
-  description TEXT,
-  behavior TEXT,
-  nickname TEXT,
-  avatar_url TEXT,
-  bio TEXT,
-  metadata_version INTEGER,
-  raw_json TEXT,
-  created_at INTEGER NOT NULL,
-  last_seen_at INTEGER,
-  last_refreshed_at INTEGER,
-  PRIMARY KEY(platform, account_id, profile_kind, profile_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_clawchat_profiles_seen
-  ON clawchat_profiles(platform, account_id, profile_kind, last_seen_at);
 """
 
 MIGRATIONS = [
@@ -200,7 +151,7 @@ MIGRATIONS = [
     (2, "message_id_dedup", MESSAGE_ID_DEDUP_SCHEMA),
     (3, "activation_bootstrap", ACTIVATION_BOOTSTRAP_SCHEMA),
     (4, "conversation_cache", CONVERSATION_CACHE_SCHEMA),
-    (5, "unified_profiles", UNIFIED_PROFILES_SCHEMA),
+    (5, "activation_owner_user_id", ACTIVATION_OWNER_USER_ID_SCHEMA),
 ]
 
 _store: ClawChatStore | None = None
@@ -374,324 +325,6 @@ class ClawChatStore:
 
         return self._write("upsert_conversation_summary", write)
 
-    def upsert_profile(
-        self,
-        *,
-        platform: str,
-        account_id: str,
-        profile_kind: str,
-        profile_id: str,
-        relation: Any = _UNSET,
-        profile_type: Any = _UNSET,
-        title: Any = _UNSET,
-        description: Any = _UNSET,
-        behavior: Any = _UNSET,
-        nickname: Any = _UNSET,
-        avatar_url: Any = _UNSET,
-        bio: Any = _UNSET,
-        metadata_version: Any = _UNSET,
-        raw: Any = _UNSET,
-        created_at: int | None = None,
-        last_seen_at: Any = _UNSET,
-        last_refreshed_at: Any = _UNSET,
-    ) -> bool | None:
-        if not profile_kind:
-            raise ValueError("profile_kind is required")
-        if not profile_id:
-            raise ValueError("profile_id is required")
-
-        def write(conn: sqlite3.Connection) -> bool:
-            return self._upsert_profile_row(
-                conn,
-                platform=platform,
-                account_id=account_id,
-                profile_kind=profile_kind,
-                profile_id=profile_id,
-                relation=relation,
-                profile_type=profile_type,
-                title=title,
-                description=description,
-                behavior=behavior,
-                nickname=nickname,
-                avatar_url=avatar_url,
-                bio=bio,
-                metadata_version=metadata_version,
-                raw=raw,
-                created_at=created_at,
-                last_seen_at=last_seen_at,
-                last_refreshed_at=last_refreshed_at,
-            )
-
-        return self._write("upsert_profile", write)
-
-    def upsert_minimal_profile(
-        self,
-        *,
-        platform: str = "clawchat",
-        account_id: str,
-        profile_kind: str,
-        profile_id: str,
-        relation: str | None = None,
-        profile_type: Any = _UNSET,
-        nickname: Any = _UNSET,
-        now_ms: int | None = None,
-    ) -> bool | None:
-        return self.upsert_profile(
-            platform=platform,
-            account_id=account_id,
-            profile_kind=profile_kind,
-            profile_id=profile_id,
-            relation=relation,
-            profile_type=profile_type,
-            nickname=nickname,
-            created_at=now_ms,
-            last_seen_at=now_ms if now_ms is not None else _UNSET,
-        )
-
-    def upsert_agent_profile(
-        self,
-        *,
-        platform: str = "clawchat",
-        account_id: str,
-        profile_id: str,
-        behavior: Any = _UNSET,
-        raw: Any = _UNSET,
-        now_ms: int | None = None,
-    ) -> bool | None:
-        return self.upsert_profile(
-            platform=platform,
-            account_id=account_id,
-            profile_kind="agent",
-            profile_id=profile_id,
-            profile_type="agent",
-            behavior=behavior,
-            raw=raw,
-            created_at=now_ms,
-            last_refreshed_at=now_ms if now_ms is not None else _UNSET,
-        )
-
-    def upsert_group_profile(
-        self,
-        *,
-        platform: str = "clawchat",
-        account_id: str,
-        profile_id: str,
-        title: Any = _UNSET,
-        description: Any = _UNSET,
-        metadata_version: Any = _UNSET,
-        raw: Any = _UNSET,
-        now_ms: int | None = None,
-    ) -> bool | None:
-        return self.upsert_profile(
-            platform=platform,
-            account_id=account_id,
-            profile_kind="group",
-            profile_id=profile_id,
-            title=title,
-            description=description,
-            metadata_version=metadata_version,
-            raw=raw,
-            created_at=now_ms,
-            last_seen_at=now_ms if now_ms is not None else _UNSET,
-            last_refreshed_at=now_ms if now_ms is not None else _UNSET,
-        )
-
-    def upsert_user_profile(
-        self,
-        *,
-        platform: str = "clawchat",
-        account_id: str,
-        profile_id: str,
-        relation: Any = _UNSET,
-        profile_type: Any = _UNSET,
-        nickname: Any = _UNSET,
-        avatar_url: Any = _UNSET,
-        bio: Any = _UNSET,
-        raw: Any = _UNSET,
-        now_ms: int | None = None,
-    ) -> bool | None:
-        return self.upsert_profile(
-            platform=platform,
-            account_id=account_id,
-            profile_kind="user",
-            profile_id=profile_id,
-            relation=relation,
-            profile_type=profile_type,
-            nickname=nickname,
-            avatar_url=avatar_url,
-            bio=bio,
-            raw=raw,
-            created_at=now_ms,
-            last_seen_at=now_ms if now_ms is not None else _UNSET,
-            last_refreshed_at=now_ms if now_ms is not None else _UNSET,
-        )
-
-    def profile_exists(
-        self,
-        *,
-        platform: str,
-        account_id: str,
-        profile_kind: str,
-        profile_id: str,
-    ) -> bool:
-        return self.get_profile(
-            platform=platform,
-            account_id=account_id,
-            profile_kind=profile_kind,
-            profile_id=profile_id,
-        ) is not None
-
-    def get_profile(
-        self,
-        *,
-        platform: str,
-        account_id: str,
-        profile_kind: str,
-        profile_id: str,
-    ) -> dict[str, Any] | None:
-        self.initialize()
-        if self._disabled:
-            return None
-        conn = sqlite3.connect(self.db_path)
-        try:
-            row = conn.execute(
-                """
-                SELECT platform, account_id, profile_kind, profile_id, relation,
-                       profile_type, title, description, behavior, nickname,
-                       avatar_url, bio, metadata_version, raw_json, created_at,
-                       last_seen_at, last_refreshed_at
-                FROM clawchat_profiles
-                WHERE platform = ?
-                  AND account_id = ?
-                  AND profile_kind = ?
-                  AND profile_id = ?
-                """,
-                (platform, account_id, profile_kind, profile_id),
-            ).fetchone()
-        finally:
-            conn.close()
-        if row is None:
-            return None
-        keys = (
-            "platform",
-            "account_id",
-            "profile_kind",
-            "profile_id",
-            "relation",
-            "profile_type",
-            "title",
-            "description",
-            "behavior",
-            "nickname",
-            "avatar_url",
-            "bio",
-            "metadata_version",
-            "raw_json",
-            "created_at",
-            "last_seen_at",
-            "last_refreshed_at",
-        )
-        return dict(zip(keys, row, strict=True))
-
-    def _upsert_profile_row(
-        self,
-        conn: sqlite3.Connection,
-        *,
-        platform: str,
-        account_id: str,
-        profile_kind: str,
-        profile_id: str,
-        relation: Any = _UNSET,
-        profile_type: Any = _UNSET,
-        title: Any = _UNSET,
-        description: Any = _UNSET,
-        behavior: Any = _UNSET,
-        nickname: Any = _UNSET,
-        avatar_url: Any = _UNSET,
-        bio: Any = _UNSET,
-        metadata_version: Any = _UNSET,
-        raw: Any = _UNSET,
-        created_at: int | None = None,
-        last_seen_at: Any = _UNSET,
-        last_refreshed_at: Any = _UNSET,
-    ) -> bool:
-        exists = conn.execute(
-            """
-            SELECT 1
-            FROM clawchat_profiles
-            WHERE platform = ?
-              AND account_id = ?
-              AND profile_kind = ?
-              AND profile_id = ?
-            """,
-            (platform, account_id, profile_kind, profile_id),
-        ).fetchone() is not None
-        values = {
-            "relation": relation,
-            "profile_type": profile_type,
-            "title": title,
-            "description": description,
-            "behavior": behavior,
-            "nickname": nickname,
-            "avatar_url": avatar_url,
-            "bio": bio,
-            "metadata_version": metadata_version,
-            "raw_json": _UNSET if raw is _UNSET else json_dumps(raw),
-            "last_seen_at": last_seen_at,
-            "last_refreshed_at": last_refreshed_at,
-        }
-        if not exists:
-            conn.execute(
-                """
-                INSERT INTO clawchat_profiles(
-                  platform, account_id, profile_kind, profile_id, relation, profile_type,
-                  title, description, behavior, nickname, avatar_url, bio,
-                  metadata_version, raw_json, created_at, last_seen_at, last_refreshed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    platform,
-                    account_id,
-                    profile_kind,
-                    profile_id,
-                    None if relation is _UNSET else relation,
-                    None if profile_type is _UNSET else profile_type,
-                    None if title is _UNSET else title,
-                    None if description is _UNSET else description,
-                    None if behavior is _UNSET else behavior,
-                    None if nickname is _UNSET else nickname,
-                    None if avatar_url is _UNSET else avatar_url,
-                    None if bio is _UNSET else bio,
-                    None if metadata_version is _UNSET else metadata_version,
-                    None if raw is _UNSET else json_dumps(raw),
-                    created_at if created_at is not None else _now_ms(),
-                    None if last_seen_at is _UNSET else last_seen_at,
-                    None if last_refreshed_at is _UNSET else last_refreshed_at,
-                ),
-            )
-            return True
-        updates = [(column, value) for column, value in values.items() if value is not _UNSET]
-        if updates:
-            assignments = ", ".join(f"{column} = ?" for column, _value in updates)
-            conn.execute(
-                f"""
-                UPDATE clawchat_profiles
-                SET {assignments}
-                WHERE platform = ?
-                  AND account_id = ?
-                  AND profile_kind = ?
-                  AND profile_id = ?
-                """,
-                (
-                    *(value for _column, value in updates),
-                    platform,
-                    account_id,
-                    profile_kind,
-                    profile_id,
-                ),
-            )
-        return not exists
-
     def upsert_conversation_details(
         self,
         *,
@@ -703,8 +336,6 @@ class ClawChatStore:
         last_seen_at: int | None = None,
         last_refreshed_at: int | None = None,
         raw: Any = None,
-        group_profile: dict[str, Any] | None = None,
-        user_profiles: list[dict[str, Any]] | None = None,
         members: list[dict[str, Any]] | None = None,
         members_complete: bool = False,
     ) -> None:

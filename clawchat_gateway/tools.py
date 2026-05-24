@@ -173,22 +173,6 @@ def _cache_conversation_summaries(client: ClawChatApiClient, result: dict[str, A
         )
 
 
-def _profile_from_raw(raw: dict[str, Any]) -> dict[str, Any] | None:
-    user_id = raw.get("user_id") or raw.get("userId") or raw.get("id")
-    if not user_id:
-        return None
-    profile = {"user_id": str(user_id), "raw": raw}
-    for source, target in (
-        ("nickname", "nickname"),
-        ("avatar_url", "avatar_url"),
-        ("avatarUrl", "avatar_url"),
-        ("bio", "bio"),
-    ):
-        if source in raw and raw[source] is not None:
-            profile[target] = raw[source]
-    return profile
-
-
 def _member_from_raw(raw: dict[str, Any]) -> dict[str, Any] | None:
     user_id = raw.get("user_id") or raw.get("userId") or raw.get("id")
     if not user_id:
@@ -207,11 +191,7 @@ def _cache_conversation_details(client: ClawChatApiClient, result: dict[str, Any
         return
     participants_raw = detail.get("participants")
     members_raw = participants_raw if isinstance(participants_raw, list) else detail.get("members")
-    users_raw = detail.get("users") or detail.get("participants") or []
     members = [member for item in members_raw or [] if isinstance(item, dict) for member in [_member_from_raw(item)] if member]
-    user_profiles = [
-        profile for item in users_raw or [] if isinstance(item, dict) for profile in [_profile_from_raw(item)] if profile
-    ]
     members_complete = bool(
         isinstance(members_raw, list)
         and (
@@ -228,8 +208,6 @@ def _cache_conversation_details(client: ClawChatApiClient, result: dict[str, Any
         metadata_version=_metadata_version(detail),
         last_seen_at=_last_seen_at(detail),
         raw=detail,
-        group_profile=detail.get("group") if isinstance(detail.get("group"), dict) else None,
-        user_profiles=user_profiles,
         members=members,
         members_complete=members_complete,
     )
