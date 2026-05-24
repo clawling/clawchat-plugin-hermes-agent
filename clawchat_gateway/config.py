@@ -60,6 +60,51 @@ def _get_config_value(data: dict[str, Any], key: str, default: Any = None) -> An
     return default
 
 
+def _path_string(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        text = os.fspath(value).strip()
+    except TypeError:
+        return ""
+    if not text:
+        return ""
+    try:
+        return str(Path(text).expanduser())
+    except Exception:
+        return ""
+
+
+def _resolve_memory_root() -> str:
+    try:
+        import hermes_constants
+    except Exception:
+        hermes_constants = None
+    if hermes_constants is not None:
+        get_hermes_home = getattr(hermes_constants, "get_hermes_home", None)
+        if callable(get_hermes_home):
+            try:
+                home = _path_string(get_hermes_home())
+            except Exception:
+                home = ""
+            if home:
+                return home
+
+    try:
+        from hermes_cli.config import get_config_path
+    except Exception:
+        get_config_path = None
+    if get_config_path is not None:
+        try:
+            config_path = _path_string(get_config_path())
+        except Exception:
+            config_path = ""
+        if config_path:
+            return str(Path(config_path).parent)
+
+    return _path_string(os.environ.get("HERMES_HOME", ""))
+
+
 def _jwt_claim(token: str, claim: str) -> str:
     parts = token.split(".")
     if len(parts) < 2:
@@ -108,6 +153,7 @@ class ClawChatConfig:
     user_id: str = ""
     agent_id: str = ""
     owner_user_id: str = ""
+    memory_root: str = ""
     reply_mode: str = "stream"
     group_mode: str = "all"
     group_command_mode: str = "owner"
@@ -166,6 +212,7 @@ class ClawChatConfig:
             or _jwt_claim(token, "aid"),
             owner_user_id=_get_env("CLAWCHAT_OWNER_USER_ID")
             or _get_config_value(extra, "owner_user_id", ""),
+            memory_root=_resolve_memory_root(),
             reply_mode=_get_env("CLAWCHAT_REPLY_MODE")
             or _get_config_value(extra, "reply_mode", "stream"),
             group_mode=_read_group_mode(

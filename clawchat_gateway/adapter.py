@@ -10,6 +10,7 @@ import time
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -252,6 +253,11 @@ class ClawChatAdapter(BasePlatformAdapter):
     def __init__(self, platform_config: Any) -> None:
         super().__init__(platform_config, _clawchat_platform())
         self._clawchat_config = ClawChatConfig.from_platform_config(platform_config)
+        self._memory_root = (
+            Path(self._clawchat_config.memory_root)
+            if self._clawchat_config.memory_root
+            else None
+        )
         self._connection: Any = ClawChatConnection(
             self._clawchat_config,
             on_message=self._on_message,
