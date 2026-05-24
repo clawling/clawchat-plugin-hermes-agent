@@ -402,6 +402,7 @@ async def handle_clawchat_metadata_sync(args, **kw):
             str(args.get("targetType") or ""),
             str(args.get("targetId") or ""),
             direction=str(args.get("direction") or ""),
+            fields=args.get("fields") if isinstance(args.get("fields"), list) else None,
         ),
     )
     logger.info("clawchat_metadata_sync done task_id=%s", task_id)
@@ -571,13 +572,19 @@ def register_tools(ctx) -> None:
         {
             "name": "clawchat_metadata_sync",
             "description": _direct_tool_description(
-                "Pull server metadata into a ClawChat metadata block or push selected local metadata fields to the server, then refresh the local metadata block from the server response. Use explicit ids only. This does not modify the agent-authored body."
+                "Pull server metadata into a ClawChat metadata block or push explicit local metadata fields to the server, then refresh the local metadata block from the server response. Use explicit ids only. For direction=push, pass non-empty fields containing only pushable metadata field names. This does not modify the agent-authored body."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     **target_properties,
                     "direction": {"type": "string", "enum": ["pull", "push"]},
+                    "fields": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "description": "Required for direction=push. Push only these local metadata fields.",
+                    },
                 },
                 "required": ["targetType", "targetId", "direction"],
             },

@@ -36,8 +36,18 @@ def _config_error(message: str) -> dict[str, Any]:
     return {"error": "config", "message": message}
 
 
-def _validation_error(message: str) -> dict[str, Any]:
-    return {"error": "validation", "message": message}
+def _validation_error(message: str, *, code: str | None = None) -> dict[str, Any]:
+    result: dict[str, Any] = {"error": "validation", "message": message}
+    if code:
+        result["code"] = code
+    return result
+
+
+def _validation_error_from_exception(exc: ValueError) -> dict[str, Any]:
+    message = str(exc)
+    if message.startswith("missing_metadata_field:"):
+        return _validation_error(message, code="missing_metadata_field")
+    return _validation_error(message)
 
 
 def _api_error(err: ClawChatApiError) -> dict[str, Any]:
@@ -358,12 +368,18 @@ async def metadata_sync(
     target_id: str,
     *,
     direction: str,
+    fields: list[str] | None = None,
 ) -> dict[str, Any]:
     err = _target_error(target_type, target_id)
     if err is not None:
         return err
     if direction not in {"pull", "push"}:
         return _validation_error("direction must be pull or push")
+    if direction == "push":
+        if not isinstance(fields, list) or not fields:
+            return _validation_error("fields are required for metadata push")
+        if any(not isinstance(field, str) or not field for field in fields):
+            return _validation_error("fields must contain non-empty strings")
     root, err = _resolve_memory_root()
     if err is not None:
         return err
@@ -378,6 +394,7 @@ async def metadata_sync(
                 client,
                 target_type,
                 target_id,
+                fields=fields,
                 agent_id=cfg["agent_id"],
                 connected_user_id=cfg["user_id"],
             )
@@ -397,7 +414,7 @@ async def metadata_sync(
     except ClawChatApiError as exc:
         return _api_error(exc)
     except ValueError as exc:
-        return _validation_error(str(exc))
+        return _validation_error_from_exception(exc)
     except Exception as exc:  # noqa: BLE001
         return _unknown_error(exc)
 
@@ -433,7 +450,7 @@ async def metadata_update(
     except ClawChatApiError as exc:
         return _api_error(exc)
     except ValueError as exc:
-        return _validation_error(str(exc))
+        return _validation_error_from_exception(exc)
     except Exception as exc:  # noqa: BLE001
         return _unknown_error(exc)
 

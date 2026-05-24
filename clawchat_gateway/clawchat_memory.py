@@ -291,7 +291,7 @@ def write_clawchat_memory_body(
     existing = _normalize_line_endings(_read_existing_content(path))
     if mode == "append":
         if not content:
-            return
+            raise ValueError("append content must be non-empty")
         body = _append_body(_parse_clawchat_memory_content(existing)["body"], content)
     elif mode == "replace":
         body = content

@@ -90,18 +90,6 @@ def _resolve_memory_root() -> str:
             if home:
                 return home
 
-    try:
-        from hermes_cli.config import get_config_path
-    except Exception:
-        get_config_path = None
-    if get_config_path is not None:
-        try:
-            config_path = _path_string(get_config_path())
-        except Exception:
-            config_path = ""
-        if config_path:
-            return str(Path(config_path).parent)
-
     return _path_string(os.environ.get("HERMES_HOME", ""))
 
 

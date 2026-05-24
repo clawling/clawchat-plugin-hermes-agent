@@ -26,6 +26,11 @@ __all__ = [
 _OWNER_MUTABLE_FIELDS = ("nickname", "avatar_url", "bio")
 _USER_MUTABLE_FIELDS = ("nickname", "avatar_url", "bio")
 _GROUP_MUTABLE_FIELDS = ("title", "description")
+_MUTABLE_FIELDS_BY_TARGET = {
+    "owner": _OWNER_MUTABLE_FIELDS,
+    "user": _USER_MUTABLE_FIELDS,
+    "group": _GROUP_MUTABLE_FIELDS,
+}
 
 
 def _detail(result: dict[str, Any], key: str) -> dict[str, Any] | None:
@@ -225,24 +230,22 @@ async def pull_group_metadata(root: str | Path, client: Any, group_id: str) -> d
     }
 
 
-def _mutable_metadata(metadata: dict[str, str], fields: tuple[str, ...]) -> dict[str, str]:
-    return {field: metadata[field] for field in fields if field in metadata}
-
-
 async def push_metadata(
     root: str | Path,
     client: Any,
     target_type: str,
     target_id: str,
     *,
+    fields: list[str] | tuple[str, ...],
     agent_id: str = "",
     connected_user_id: str = "",
 ) -> dict[str, Any]:
     memory = read_clawchat_memory_file(root, target_type, target_id)
-    patch = _patch_for_target(
+    patch = _push_patch_for_target(
         target_type,
         target_id,
         memory.get("metadata") if isinstance(memory.get("metadata"), dict) else {},
+        fields=fields,
         agent_id=agent_id,
         connected_user_id=connected_user_id,
     )
@@ -257,6 +260,56 @@ async def push_metadata(
     )
 
 
+def _mutable_fields_for_target(
+    target_type: str,
+    target_id: str,
+    *,
+    agent_id: str,
+    connected_user_id: str,
+) -> tuple[str, ...]:
+    if target_type == "owner":
+        if target_id != "owner":
+            raise ValueError("owner target requires target_id='owner'")
+        if not agent_id:
+            raise ValueError("agent_id is required")
+    elif target_type == "user":
+        if target_id != connected_user_id:
+            raise ValueError("user metadata update is allowed only for the connected user")
+    elif target_type != "group":
+        raise ValueError(f"unsupported ClawChat metadata target_type: {target_type}")
+    return _MUTABLE_FIELDS_BY_TARGET[target_type]
+
+
+def _push_patch_for_target(
+    target_type: str,
+    target_id: str,
+    metadata: dict[str, str],
+    *,
+    fields: list[str] | tuple[str, ...],
+    agent_id: str,
+    connected_user_id: str,
+) -> dict[str, str]:
+    allowed = _mutable_fields_for_target(
+        target_type,
+        target_id,
+        agent_id=agent_id,
+        connected_user_id=connected_user_id,
+    )
+    if not fields:
+        raise ValueError("fields are required for metadata push")
+
+    patch: dict[str, str] = {}
+    for field in fields:
+        if not isinstance(field, str) or not field:
+            raise ValueError("fields must contain non-empty strings")
+        if field not in allowed:
+            raise ValueError(f"fields contain non-pushable metadata field: {field}")
+        if field not in metadata:
+            raise ValueError(f"missing_metadata_field: {field}")
+        patch[field] = metadata[field]
+    return patch
+
+
 def _patch_for_target(
     target_type: str,
     target_id: str,
@@ -265,19 +318,13 @@ def _patch_for_target(
     agent_id: str,
     connected_user_id: str,
 ) -> dict[str, str]:
-    if target_type == "owner":
-        if target_id != "owner":
-            raise ValueError("owner target requires target_id='owner'")
-        if not agent_id:
-            raise ValueError("agent_id is required")
-        return _mutable_metadata(metadata, _OWNER_MUTABLE_FIELDS)
-    if target_type == "user":
-        if target_id != connected_user_id:
-            raise ValueError("user metadata update is allowed only for the connected user")
-        return _mutable_metadata(metadata, _USER_MUTABLE_FIELDS)
-    if target_type == "group":
-        return _mutable_metadata(metadata, _GROUP_MUTABLE_FIELDS)
-    raise ValueError(f"unsupported ClawChat metadata target_type: {target_type}")
+    allowed = _mutable_fields_for_target(
+        target_type,
+        target_id,
+        agent_id=agent_id,
+        connected_user_id=connected_user_id,
+    )
+    return {field: metadata[field] for field in allowed if field in metadata}
 
 
 async def update_metadata(
