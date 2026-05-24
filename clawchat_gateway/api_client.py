@@ -117,6 +117,61 @@ class ClawChatApiClient:
     async def get_agent(self, agent_id: str) -> dict:
         return await self.get_agent_detail(agent_id)
 
+    async def patch_agent(
+        self,
+        agent_id: str,
+        *,
+        nickname: str | None = None,
+        avatar_url: str | None = None,
+        bio: str | None = None,
+    ) -> dict:
+        if not agent_id.strip():
+            raise ClawChatApiError("validation", "agent_id is required")
+        patch = {}
+        if nickname is not None:
+            patch["nickname"] = nickname
+        if avatar_url is not None:
+            patch["avatar_url"] = avatar_url
+        if bio is not None:
+            patch["bio"] = bio
+        if not patch:
+            raise ClawChatApiError(
+                "validation",
+                "at least one of nickname/avatar_url/bio is required",
+            )
+        return await self._call_json(
+            "PATCH",
+            f"/v1/agents/{agent_id}",
+            body=json.dumps(patch).encode("utf-8"),
+            extra_headers={"content-type": "application/json"},
+        )
+
+    async def patch_conversation(
+        self,
+        conversation_id: str,
+        *,
+        title: str | None = None,
+        description: str | None = None,
+    ) -> dict:
+        if not conversation_id.strip():
+            raise ClawChatApiError("validation", "conversation_id is required")
+        patch = {}
+        if title is not None:
+            patch["title"] = title
+        if description is not None:
+            patch["description"] = description
+        if not patch:
+            raise ClawChatApiError(
+                "validation",
+                "at least one of title/description is required",
+            )
+        return await self._call_json(
+            "PATCH",
+            f"/v1/conversations/{conversation_id}",
+            body=json.dumps(patch).encode("utf-8"),
+            extra_headers={"content-type": "application/json"},
+        )
+
     async def create_moment(
         self,
         *,
