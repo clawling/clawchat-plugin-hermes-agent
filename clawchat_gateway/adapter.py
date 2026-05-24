@@ -63,18 +63,28 @@ DEBUG_PROMPT_INJECTION_BEGIN = "----- BEGIN CLAWCHAT DEBUG PROMPT INJECTION ----
 DEBUG_PROMPT_INJECTION_END = "----- END CLAWCHAT DEBUG PROMPT INJECTION -----"
 DEBUG_EVENT_TEXT_BEGIN = "----- BEGIN CLAWCHAT DEBUG EVENT TEXT -----"
 DEBUG_EVENT_TEXT_END = "----- END CLAWCHAT DEBUG EVENT TEXT -----"
+DEBUG_HERMES_OUTPUT_BEGIN = "----- BEGIN CLAWCHAT DEBUG HERMES OUTPUT -----"
+DEBUG_HERMES_OUTPUT_END = "----- END CLAWCHAT DEBUG HERMES OUTPUT -----"
 SILENT_RESPONSE_TOKEN = "<clawchat:silent/>"
 EMPTY_RESPONSE_TOKEN = '""'
+CONVERSATION_SEMANTICS = """## ClawChat Conversation Semantics
+- chat_type=dm means a direct message.
+- chat_type=group means a group conversation.
+- sender_id identifies who sent the current direct message or each group [message].
+- sender_profile_type is the sender account type: user or agent.
+- sender_is_owner tells whether the sender is this agent's owner.
+- In group conversations, each [message] block has its own sender fields."""
 GROUP_BATCH_REPLY_GUIDANCE = (
-    "Treat this batch as addressed to you only when it clearly asks for your participation. Mentions of other "
-    "people are not requests for you. If it is unrelated, addressed to someone else, only mentions someone else, "
-    "you lack permission, cannot answer safely or accurately, have no useful contribution, or would rather not answer, return exactly \"\" "
-    "and nothing else. Do not explain your silence. Reply only when your response is clearly useful to the group. "
-    "A response fully wrapped in matching Chinese or ASCII parentheses （like this） or (like this) is also treated as silent."
+    "Reply only if one or more [message] blocks clearly ask for your participation, mention the current agent, "
+    "or your response is clearly useful to the group and allowed by the group profile/regulation. "
+    "Mentions of other people are not requests for you."
 )
 GROUP_BATCH_MENTION_REPLY_GUIDANCE = (
     "You were directly addressed in this group batch. Reply by default, including when the message contains only a mention. "
-    "Use stay_silent only if the group description/rules explicitly forbid replying."
+    "Stay silent only if the group profile/regulation explicitly forbids replying."
+)
+DIRECT_MESSAGE_REPLY_GUIDANCE = (
+    "Direct messages are normally addressed to you. Reply unless the agent behavior says this message should not be answered."
 )
 
 _THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
@@ -1132,13 +1142,10 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
 
     def _compose_channel_prompt(self, inbound: InboundMessage) -> str | None:
-        prompts = []
+        prompts = [CONVERSATION_SEMANTICS]
         base_prompt = mode_prompt(inbound.chat_type)
         if base_prompt:
             prompts.append(base_prompt)
-        behavior = self._cached_agent_behavior()
-        if behavior:
-            prompts.append(f"## Current ClawChat Behavior\n{behavior}")
         if inbound.chat_type == "group":
             group_profile = self._get_cached_profile("group", inbound.chat_id)
             group_section = self._format_group_profile(group_profile)
@@ -1150,6 +1157,10 @@ class ClawChatAdapter(BasePlatformAdapter):
             if user_section:
                 prompts.append(user_section)
         prompts.append(self._format_current_turn(inbound))
+        prompts.append(self._format_response_protocol(inbound))
+        behavior = self._cached_agent_behavior()
+        if behavior:
+            prompts.append(f"## ClawChat Agent Behavior\n{behavior}")
         return "\n\n".join(prompts) or None
 
     def _get_cached_profile(self, profile_kind: str, profile_id: str) -> dict[str, Any] | None:
@@ -1186,10 +1197,6 @@ class ClawChatAdapter(BasePlatformAdapter):
             return None
         fields = self._format_fields(
             (
-                ("profile_id", profile.get("profile_id")),
-                ("profile_type", profile.get("profile_type")),
-                ("relation", profile.get("relation")),
-                ("nickname", profile.get("nickname")),
                 ("avatar_url", profile.get("avatar_url")),
                 ("bio", profile.get("bio")),
             )
@@ -1206,38 +1213,19 @@ class ClawChatAdapter(BasePlatformAdapter):
                 ("metadata_version", profile.get("metadata_version")),
             )
         )
-        return "## Current ClawChat Group Profile\n" + fields if fields else None
+        return "## ClawChat Group Profile/Regulation\n" + fields if fields else None
 
     def _format_current_turn(self, inbound: InboundMessage) -> str:
-        is_group_batch = (
-            inbound.chat_type == "group"
-            and isinstance(inbound.raw_message, dict)
-            and inbound.raw_message.get("clawchat_group_batch") is True
-        )
-        if is_group_batch:
-            mentioned_user_ids = ",".join(inbound.mentioned_user_ids) or "-"
-            reply_policy = "directly_addressed" if inbound.was_mentioned else "decide_whether_to_reply"
-            reply_guidance = (
-                GROUP_BATCH_MENTION_REPLY_GUIDANCE
-                if inbound.was_mentioned
-                else GROUP_BATCH_REPLY_GUIDANCE
-            )
+        if inbound.chat_type == "group":
             field_items: list[tuple[str, Any]] = [
                 ("chat_type", "group"),
                 ("group_id", inbound.chat_id),
-                ("was_mentioned", str(inbound.was_mentioned).lower()),
-                ("mentioned_user_ids", mentioned_user_ids),
-                ("reply_policy", reply_policy),
-                ("allowed_actions", "reply,stay_silent"),
             ]
-            if not inbound.was_mentioned:
-                field_items.append(("empty_response", EMPTY_RESPONSE_TOKEN))
-            field_items.append(("reply_guidance", reply_guidance))
             fields = self._format_fields(tuple(field_items), include_empty=True)
-            return "## Current ClawChat Group Batch\n" + fields
+            return "## Current ClawChat Message Metadata\n" + fields
 
         sender_profile = self._get_cached_profile("user", inbound.sender_id)
-        sender_profile_type = ""
+        sender_profile_type = None
         sender_name = inbound.sender_name
         if isinstance(sender_profile, dict) and sender_profile.get("profile_type") is not None:
             sender_profile_type = str(sender_profile.get("profile_type"))
@@ -1249,29 +1237,40 @@ class ClawChatAdapter(BasePlatformAdapter):
             inbound.sender_id,
             profile_type=sender_profile_type or None,
         )
-        chat_type = inbound.chat_type
-        if inbound.chat_type != "group":
-            chat_type = "owner_dm" if sender_relation == "owner" else "dm"
+        if not sender_profile_type:
+            sender_profile_type = "agent" if sender_relation in {"self_agent", "peer_agent"} else "user"
         field_items: list[tuple[str, Any]] = [
-            ("chat_type", chat_type),
+            ("chat_type", "dm"),
             ("sender_id", inbound.sender_id),
             ("sender_name", sender_name),
-            ("sender_relation", sender_relation),
             ("sender_profile_type", sender_profile_type),
             ("sender_is_owner", "true" if sender_relation == "owner" else "false"),
-            ("peer_id", inbound.sender_id),
-            ("group_id", inbound.chat_id if inbound.chat_type == "group" else ""),
         ]
-        if inbound.chat_type == "group":
-            mentioned_user_ids = ",".join(inbound.mentioned_user_ids) or "-"
-            field_items.extend(
-                [
-                    ("was_mentioned", str(inbound.was_mentioned).lower()),
-                    ("mentioned_user_ids", mentioned_user_ids),
-                ]
-            )
         fields = self._format_fields(tuple(field_items), include_empty=True)
-        return "## Current ClawChat Turn\n" + fields
+        return "## Current ClawChat Message Metadata\n" + fields
+
+    def _format_response_protocol(self, inbound: InboundMessage) -> str:
+        if inbound.chat_type == "group":
+            reply_guidance = (
+                GROUP_BATCH_MENTION_REPLY_GUIDANCE
+                if inbound.was_mentioned
+                else GROUP_BATCH_REPLY_GUIDANCE
+            )
+            response_decision = "Decide whether this group input needs a reply from you."
+        else:
+            reply_guidance = DIRECT_MESSAGE_REPLY_GUIDANCE
+            response_decision = "Decide whether this direct message needs a reply from you."
+        fields = self._format_fields(
+            (
+                ("response_decision", response_decision),
+                ("allowed_outputs", "normal_reply OR exact_empty_response"),
+                ("exact_empty_response", EMPTY_RESPONSE_TOKEN),
+                ("reply_guidance", reply_guidance),
+                ("no_reply_protocol", 'If you choose not to reply, return exactly "" and nothing else.'),
+            ),
+            include_empty=True,
+        )
+        return "## ClawChat Response Protocol\n" + fields
 
     def _format_fields(
         self,
@@ -1294,6 +1293,27 @@ class ClawChatAdapter(BasePlatformAdapter):
 
     def _escape_prompt_field(self, value: str) -> str:
         return value.replace("\\", "\\\\").replace("\r", "\\r").replace("\n", "\\n")
+
+    def _debug_hermes_output(
+        self,
+        *,
+        phase: str,
+        chat_id: str,
+        message_id: str | None,
+        text: str,
+    ) -> None:
+        if not _debug_prompt_injection_enabled():
+            return
+        logger.warning(
+            "clawchat hermes output debug phase=%s chat_id=%s message_id=%s text_len=%d\n%s\n%s\n%s",
+            phase,
+            chat_id,
+            message_id or "-",
+            len(text),
+            DEBUG_HERMES_OUTPUT_BEGIN,
+            text,
+            DEBUG_HERMES_OUTPUT_END,
+        )
 
     async def _download_inbound_media(self, inbound: InboundMessage) -> list[Any]:
         if not inbound.media_urls:
@@ -1323,6 +1343,12 @@ class ClawChatAdapter(BasePlatformAdapter):
         **kwargs: Any,
     ) -> SendResult:
         chat_type = self._resolve_chat_type(metadata, kwargs)
+        self._debug_hermes_output(
+            phase="send",
+            chat_id=chat_id,
+            message_id=None,
+            text=content or "",
+        )
         if self._should_suppress_tool_progress(content or ""):
             logger.info("clawchat tool progress suppressed chat_id=%s text_len=%d", chat_id, len(content or ""))
             return SendResult(success=True)
@@ -1479,6 +1505,12 @@ class ClawChatAdapter(BasePlatformAdapter):
         **kwargs: Any,
     ) -> SendResult:
         run = self._resolve_active_run(chat_id=chat_id, message_id=message_id)
+        self._debug_hermes_output(
+            phase="edit_message",
+            chat_id=chat_id,
+            message_id=message_id,
+            text=content or "",
+        )
         if run is None:
             if message_id and message_id in self._completed_run_ids:
                 logger.info(
@@ -1541,6 +1573,12 @@ class ClawChatAdapter(BasePlatformAdapter):
         message_id: str | None = None,
     ) -> None:
         run = self._resolve_active_run(chat_id=chat_id, message_id=message_id)
+        self._debug_hermes_output(
+            phase="on_run_complete",
+            chat_id=chat_id,
+            message_id=message_id,
+            text=final_text or "",
+        )
         if run is None:
             if message_id and message_id in self._completed_run_ids:
                 logger.info(
@@ -1792,11 +1830,7 @@ class ClawChatAdapter(BasePlatformAdapter):
 
     def _is_noop_response_text(self, content: str) -> bool:
         text = content.strip()
-        return (
-            text in {SILENT_RESPONSE_TOKEN, EMPTY_RESPONSE_TOKEN}
-            or (text.startswith("（") and text.endswith("）"))
-            or (text.startswith("(") and text.endswith(")"))
-        )
+        return text == EMPTY_RESPONSE_TOKEN
 
     def _is_pure_silent_response(self, fragments: list[dict[str, Any]]) -> bool:
         return (

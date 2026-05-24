@@ -39,9 +39,20 @@ def _message_profile_type(message: InboundMessage) -> str:
     return "user"
 
 
+def _message_is_owner(message: InboundMessage) -> str:
+    return "true" if _message_relation(message) == "owner" else "false"
+
+
+def _message_mentions(message: InboundMessage) -> str:
+    return ",".join(message.mentioned_user_ids) or "-"
+
+
+def _message_field(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("\r", "\\r").replace("\n", "\\n")
+
+
 def _message_body(message: InboundMessage) -> str:
-    body = message.text or "(empty message)"
-    return "\n".join(f"  {line}" for line in body.splitlines() or [body])
+    return message.text or "(empty message)"
 
 
 def format_coalesced_group_text(
@@ -56,11 +67,16 @@ def format_coalesced_group_text(
     lines = [header]
     for message in messages:
         sender_name = message.sender_name or message.sender_id
-        lines.append(
-            f"{_message_time(message)} {sender_name} "
-            f"[relation={_message_relation(message)}, type={_message_profile_type(message)}] "
-            f"({message.sender_id}):"
-        )
+        if len(lines) > 1:
+            lines.append("")
+        lines.append("[message]")
+        lines.append(f"sender_id: {_message_field(message.sender_id)}")
+        lines.append(f"sender_name: {_message_field(sender_name)}")
+        lines.append(f"sender_profile_type: {_message_field(_message_profile_type(message))}")
+        lines.append(f"sender_is_owner: {_message_is_owner(message)}")
+        lines.append(f"mentions_current_agent: {'true' if message.was_mentioned else 'false'}")
+        lines.append(f"mentioned_user_ids: {_message_field(_message_mentions(message))}")
+        lines.append("text:")
         lines.append(_message_body(message))
     return "\n".join(lines)
 
