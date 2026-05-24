@@ -75,6 +75,10 @@ def _path_string(value: Any) -> str:
         return ""
 
 
+def _memory_root_from_home(home: str) -> str:
+    return str(Path(home) / "memories") if home else ""
+
+
 def _resolve_memory_root() -> str:
     try:
         import hermes_constants
@@ -88,9 +92,9 @@ def _resolve_memory_root() -> str:
             except Exception:
                 home = ""
             if home:
-                return home
+                return _memory_root_from_home(home)
 
-    return _path_string(os.environ.get("HERMES_HOME", ""))
+    return _memory_root_from_home(_path_string(os.environ.get("HERMES_HOME", "")))
 
 
 def _jwt_claim(token: str, claim: str) -> str:
