@@ -23,13 +23,26 @@ from gateway.platforms.base import (
 )
 
 from clawchat_gateway.api_client import ClawChatApiClient, ClawChatApiError
+from clawchat_gateway.clawchat_memory import (
+    METADATA_END,
+    METADATA_START,
+    read_clawchat_memory_file,
+)
+from clawchat_gateway.clawchat_metadata import (
+    pull_group_metadata,
+    pull_owner_metadata,
+    pull_user_metadata,
+)
 from clawchat_gateway.config import ClawChatConfig, effective_group_command_mode
 from clawchat_gateway.connection import (
     HANDSHAKE_TIMEOUT_SECONDS,
     ClawChatConnection,
     ConnectionState,
 )
-from clawchat_gateway.group_message_coalescer import GroupMessageCoalescer
+from clawchat_gateway.group_message_coalescer import (
+    GroupMessageCoalescer,
+    format_coalesced_group_text,
+)
 from clawchat_gateway.inbound import InboundMessage, parse_inbound_message
 from clawchat_gateway.media_runtime import (
     download_inbound_media,
@@ -77,16 +90,16 @@ CONVERSATION_SEMANTICS = """## ClawChat Conversation Semantics
 - In group conversations, each [message] block has its own sender fields."""
 GROUP_BATCH_REPLY_GUIDANCE = (
     'Hard no-reply rules: if mentioned_user_ids is not "-" and mentions_current_agent is false, return exactly "" and nothing else. '
-    'If the input is unrelated to ClawChat Agent Behavior, return exactly "" and nothing else. These rules override sender_is_owner, '
+    'If the input is unrelated to owner metadata, return exactly "" and nothing else. These rules override sender_is_owner, '
     "group usefulness, and general helpfulness. Reply only if mentions_current_agent is true, or there is no mention and the text "
     'explicitly asks this agent to participate. Otherwise return exactly "" and nothing else.'
 )
 GROUP_BATCH_MENTION_REPLY_GUIDANCE = (
     "You were directly addressed in this group batch. Reply by default, including when the message contains only a mention. "
-    "Stay silent only if the group profile/regulation explicitly forbids replying."
+    "Stay silent only if the group metadata explicitly forbids replying."
 )
 DIRECT_MESSAGE_REPLY_GUIDANCE = (
-    "Direct messages are normally addressed to you. Reply unless the agent behavior says this message should not be answered."
+    "Direct messages are normally addressed to you. Reply unless owner metadata says this message should not be answered."
 )
 CLAWCHAT_PLUGIN_SLASH_COMMANDS = {"clawchat-activate"}
 HERMES_BUILTIN_SLASH_COMMANDS = {
@@ -275,6 +288,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._activation_bootstrap_tasks: set[asyncio.Task[None]] = set()
         self._conversation_refresh_tasks: set[asyncio.Task[None]] = set()
         self._profile_sync_tasks: set[asyncio.Task[None]] = set()
+        self._owner_metadata_refresh_task: asyncio.Task[None] | None = None
         self._conversation_metadata_versions: dict[str, int] = {}
         self._group_message_coalescer = GroupMessageCoalescer(
             idle_seconds=10.0,
@@ -353,6 +367,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._auth_failed = True
         if state == ConnectionState.READY:
             self._schedule_activation_bootstrap()
+            self._schedule_owner_metadata_refresh()
             await self._schedule_reconnect_conversation_refresh()
         logger.info("clawchat state -> %s", state.value)
 
@@ -475,10 +490,10 @@ class ClawChatAdapter(BasePlatformAdapter):
 
     def _signal_conversation_id(self, frame: dict[str, Any], payload: dict[str, Any]) -> str | None:
         for value in (
+            frame.get("chat_id"),
             payload.get("chat_id"),
             payload.get("conversation_id"),
             payload.get("conversationId"),
-            frame.get("chat_id"),
         ):
             if isinstance(value, str) and value:
                 return value
@@ -491,16 +506,18 @@ class ClawChatAdapter(BasePlatformAdapter):
         signal_version: int | None = None,
         advance_version: bool = True,
     ) -> bool:
-        client = ClawChatApiClient(
-            base_url=self._clawchat_config.base_url,
-            token=self._clawchat_config.token,
-            user_id=self._clawchat_config.user_id,
-        )
+        root = self._metadata_memory_root("group", conversation_id)
+        if root is None:
+            return False
         try:
-            result = await client.get_conversation(conversation_id)
+            client = ClawChatApiClient(
+                base_url=self._clawchat_config.base_url,
+                token=self._clawchat_config.token,
+                user_id=self._clawchat_config.user_id,
+            )
+            result = await pull_group_metadata(root, client, conversation_id)
         except ClawChatApiError as exc:
             if exc.status in (404, 410) or exc.code in (404, 410):
-                self._delete_conversation_cache(conversation_id)
                 self._conversation_metadata_versions.pop(conversation_id, None)
                 return False
             logger.warning(
@@ -517,7 +534,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 exc,
             )
             return False
-        if not self._cache_conversation_details(result, advance_version=advance_version):
+        if not result.get("ok"):
             return False
         return True
 
@@ -529,13 +546,22 @@ class ClawChatAdapter(BasePlatformAdapter):
                 conversation_id,
             )
             return False
-        client = ClawChatApiClient(
-            base_url=self._clawchat_config.base_url,
-            token=self._clawchat_config.token,
-            user_id=self._clawchat_config.user_id,
-        )
+        root = self._metadata_memory_root("owner", "owner")
+        if root is None:
+            return False
         try:
-            result = await client.get_agent_detail(agent_id)
+            client = ClawChatApiClient(
+                base_url=self._clawchat_config.base_url,
+                token=self._clawchat_config.token,
+                user_id=self._clawchat_config.user_id,
+            )
+            result = await pull_owner_metadata(
+                root,
+                client,
+                agent_id,
+                agent_user_id=self._clawchat_config.user_id,
+                owner_user_id=self._owner_user_id(),
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "clawchat behavior refresh failed chat_id=%s agent_id=%s error=%s",
@@ -544,7 +570,17 @@ class ClawChatAdapter(BasePlatformAdapter):
                 exc,
             )
             return False
-        return self._cache_agent_profile(result, agent_user_id=self._clawchat_config.user_id)
+        return bool(result.get("ok"))
+
+    def _metadata_memory_root(self, target_type: str, target_id: str) -> Path | None:
+        if self._memory_root is None:
+            logger.warning(
+                "clawchat metadata refresh skipped target_type=%s target_id=%s reason=missing_memory_root",
+                target_type,
+                target_id,
+            )
+            return None
+        return self._memory_root
 
     def _delete_conversation_cache(self, conversation_id: str) -> None:
         if self._store is None:
@@ -817,14 +853,14 @@ class ClawChatAdapter(BasePlatformAdapter):
     def _resolve_sender_name(self, inbound: InboundMessage) -> str:
         if inbound.sender_name and inbound.sender_name != inbound.sender_id:
             return inbound.sender_name
-        sender_profile = self._get_cached_profile("user", inbound.sender_id)
-        cached_nickname = sender_profile.get("nickname") if isinstance(sender_profile, dict) else None
+        sender_metadata = self._sender_metadata(inbound)
+        cached_nickname = sender_metadata.get("nickname")
         if isinstance(cached_nickname, str) and cached_nickname and cached_nickname != inbound.sender_id:
             return cached_nickname
         return inbound.sender_name or inbound.sender_id
 
     def _sender_batch_identity(self, inbound: InboundMessage) -> tuple[str, str]:
-        sender_profile = self._get_cached_profile("user", inbound.sender_id)
+        sender_profile = self._sender_metadata(inbound)
         profile_type = ""
         if isinstance(sender_profile, dict) and sender_profile.get("profile_type") is not None:
             profile_type = str(sender_profile.get("profile_type"))
@@ -832,6 +868,11 @@ class ClawChatAdapter(BasePlatformAdapter):
         if not profile_type:
             profile_type = "agent" if relation in {"self_agent", "peer_agent"} else "user"
         return relation, profile_type
+
+    def _sender_metadata(self, inbound: InboundMessage) -> dict[str, str]:
+        if inbound.sender_id == self._owner_user_id():
+            return self._read_memory_metadata("owner", "owner")
+        return self._read_memory_metadata("user", inbound.sender_id)
 
     def _upsert_minimal_group_profile(self, inbound: InboundMessage) -> bool:
         if self._store is None or inbound.chat_type != "group" or not inbound.chat_id:
@@ -854,6 +895,25 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._profile_sync_tasks.add(task)
         task.add_done_callback(self._profile_sync_task_done)
 
+    def _schedule_owner_metadata_refresh(self) -> None:
+        if not self._clawchat_config.agent_id:
+            return
+        current = self._owner_metadata_refresh_task
+        if current is not None and not current.done():
+            current.cancel()
+        task = asyncio.create_task(
+            self._refresh_agent_behavior("ready"),
+            name="clawchat-owner-metadata-refresh",
+        )
+        self._owner_metadata_refresh_task = task
+        self._profile_sync_tasks.add(task)
+        task.add_done_callback(self._owner_metadata_refresh_done)
+
+    def _owner_metadata_refresh_done(self, task: asyncio.Task[None]) -> None:
+        if self._owner_metadata_refresh_task is task:
+            self._owner_metadata_refresh_task = None
+        self._profile_sync_task_done(task)
+
     def _profile_sync_task_done(self, task: asyncio.Task[None]) -> None:
         self._profile_sync_tasks.discard(task)
         if task.cancelled():
@@ -874,13 +934,24 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._profile_sync_tasks.discard(task)
 
     async def _refresh_user_profile(self, user_id: str) -> bool:
-        client = ClawChatApiClient(
-            base_url=self._clawchat_config.base_url,
-            token=self._clawchat_config.token,
-            user_id=self._clawchat_config.user_id,
-        )
+        if not user_id:
+            return False
+        if user_id == self._owner_user_id():
+            logger.info(
+                "clawchat user metadata refresh skipped user_id=%s reason=owner_uses_owner_metadata",
+                user_id,
+            )
+            return True
+        root = self._metadata_memory_root("user", user_id)
+        if root is None:
+            return False
         try:
-            result = await client.get_user_info(user_id)
+            client = ClawChatApiClient(
+                base_url=self._clawchat_config.base_url,
+                token=self._clawchat_config.token,
+                user_id=self._clawchat_config.user_id,
+            )
+            result = await pull_user_metadata(root, client, user_id)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "clawchat user profile refresh failed user_id=%s error=%s",
@@ -888,7 +959,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 exc,
             )
             return False
-        return self._cache_user_profile(result, user_id=user_id)
+        return bool(result.get("ok"))
 
     def _schedule_activation_bootstrap(self) -> None:
         if self._store is None:
@@ -1095,29 +1166,16 @@ class ClawChatAdapter(BasePlatformAdapter):
             len(inbound.text),
             len(inbound.media_urls),
         )
-        new_conversation = self._upsert_minimal_conversation(
+        self._upsert_minimal_conversation(
             conversation_id=inbound.chat_id,
             conversation_type=inbound.chat_type,
             last_seen_at=frame.get("emitted_at") if isinstance(frame.get("emitted_at"), int) else None,
         )
-        new_sender = self._upsert_minimal_sender_profile(inbound)
-        new_group = self._upsert_minimal_group_profile(inbound)
-        if new_conversation:
-            self._schedule_profile_sync(self._refresh_conversation_metadata(inbound.chat_id))
-        elif new_group:
-            self._schedule_profile_sync(self._refresh_conversation_metadata(inbound.chat_id))
-        if new_sender or self._sender_profile_needs_refresh(inbound.sender_id):
-            self._schedule_profile_sync(self._refresh_user_profile(inbound.sender_id))
-        resolved_sender_name = self._resolve_sender_name(inbound)
-        if resolved_sender_name != inbound.sender_name:
-            inbound = replace(inbound, sender_name=resolved_sender_name)
         if inbound.chat_type == "group":
-            sender_relation, sender_profile_type = self._sender_batch_identity(inbound)
-            inbound = replace(
-                inbound,
-                sender_relation=sender_relation,
-                sender_profile_type=sender_profile_type,
-            )
+            self._schedule_profile_sync(self._refresh_conversation_metadata(inbound.chat_id))
+        elif inbound.sender_id != self._owner_user_id():
+            self._schedule_profile_sync(self._refresh_user_profile(inbound.sender_id))
+        inbound = self._resolve_inbound_sender_context(inbound)
         if event_name in {"message.send", "message.reply"}:
             claimed = self._claim_message_once(
                 kind="message",
@@ -1185,6 +1243,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         await self._handle_inbound(inbound)
 
     async def _handle_inbound(self, inbound: InboundMessage) -> None:
+        inbound = self._refresh_group_batch_sender_context(inbound)
         reply_to_message_id, reply_to_text = self._extract_reply_fields(
             inbound.reply_preview
         )
@@ -1248,22 +1307,116 @@ class ClawChatAdapter(BasePlatformAdapter):
         base_prompt = mode_prompt(inbound.chat_type)
         if base_prompt:
             prompts.append(base_prompt)
+        owner_section = self._format_memory_metadata_section(
+            "Current ClawChat Owner Metadata",
+            "owner",
+            "owner",
+        )
+        if owner_section:
+            prompts.append(owner_section)
         if inbound.chat_type == "group":
-            group_profile = self._get_cached_profile("group", inbound.chat_id)
-            group_section = self._format_group_profile(group_profile)
+            group_section = self._format_memory_metadata_section(
+                "Current ClawChat Group Metadata",
+                "group",
+                inbound.chat_id,
+            )
             if group_section:
                 prompts.append(group_section)
-        else:
-            user_profile = self._get_cached_profile("user", inbound.sender_id)
-            user_section = self._format_user_profile(user_profile)
+        elif inbound.sender_id != self._owner_user_id():
+            user_section = self._format_memory_metadata_section(
+                "Current ClawChat User Metadata",
+                "user",
+                inbound.sender_id,
+            )
             if user_section:
                 prompts.append(user_section)
         prompts.append(self._format_current_turn(inbound))
         prompts.append(self._format_response_protocol(inbound))
-        behavior = self._cached_agent_behavior()
-        if behavior:
-            prompts.append(f"## ClawChat Agent Behavior\n{behavior}")
         return "\n\n".join(prompts) or None
+
+    def _resolve_inbound_sender_context(self, inbound: InboundMessage) -> InboundMessage:
+        resolved_sender_name = self._resolve_sender_name(inbound)
+        if resolved_sender_name != inbound.sender_name:
+            inbound = replace(inbound, sender_name=resolved_sender_name)
+        if inbound.chat_type != "group":
+            return inbound
+        sender_relation, sender_profile_type = self._sender_batch_identity(inbound)
+        return replace(
+            inbound,
+            sender_relation=sender_relation,
+            sender_profile_type=sender_profile_type,
+        )
+
+    def _refresh_group_batch_sender_context(self, inbound: InboundMessage) -> InboundMessage:
+        if inbound.chat_type != "group":
+            return inbound
+        raw = inbound.raw_message if isinstance(inbound.raw_message, dict) else {}
+        messages = raw.get("messages")
+        if raw.get("clawchat_group_batch") is not True or not isinstance(messages, list):
+            return inbound
+        resolved: list[InboundMessage] = []
+        for frame in messages:
+            if not isinstance(frame, dict):
+                continue
+            message = parse_inbound_message(frame, self._clawchat_config)
+            if message is None:
+                continue
+            resolved.append(self._resolve_inbound_sender_context(message))
+        if not resolved:
+            return inbound
+        return replace(
+            inbound,
+            text=format_coalesced_group_text(
+                resolved,
+                idle_seconds=getattr(self._group_message_coalescer, "_idle_seconds", 10.0),
+                max_wait_seconds=getattr(self._group_message_coalescer, "_max_wait_seconds", 30.0),
+            ),
+        )
+
+    def _format_memory_metadata_section(
+        self,
+        title: str,
+        target_type: str,
+        target_id: str,
+    ) -> str | None:
+        metadata = self._read_memory_metadata(target_type, target_id)
+        if not metadata:
+            return None
+        fields = self._format_fields(tuple(metadata.items()))
+        return f"## {title}\n{fields}" if fields else None
+
+    def _read_memory_metadata(self, target_type: str, target_id: str) -> dict[str, str]:
+        if self._memory_root is None or not target_id:
+            return {}
+        try:
+            memory = read_clawchat_memory_file(self._memory_root, target_type, target_id)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "clawchat metadata read failed target_type=%s target_id=%s",
+                target_type,
+                target_id,
+                exc_info=True,
+            )
+            return {}
+        metadata = memory.get("metadata") if isinstance(memory.get("metadata"), dict) else {}
+        if not metadata and self._memory_file_has_broken_metadata_block(memory):
+            logger.warning(
+                "clawchat metadata block invalid target_type=%s target_id=%s path=%s",
+                target_type,
+                target_id,
+                memory.get("path"),
+            )
+        return {str(key): str(value) for key, value in metadata.items()}
+
+    def _memory_file_has_broken_metadata_block(self, memory: dict[str, Any]) -> bool:
+        if not memory.get("exists"):
+            return False
+        content = memory.get("content")
+        if not isinstance(content, str):
+            return False
+        start = content.find(METADATA_START)
+        end = content.find(METADATA_END)
+        return start >= 0 and (end < 0 or end < start)
 
     def _get_cached_profile(self, profile_kind: str, profile_id: str) -> dict[str, Any] | None:
         if self._store is None or not profile_id:
@@ -1326,7 +1479,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             fields = self._format_fields(tuple(field_items), include_empty=True)
             return "## Current ClawChat Message Metadata\n" + fields
 
-        sender_profile = self._get_cached_profile("user", inbound.sender_id)
+        sender_profile = self._sender_metadata(inbound)
         sender_profile_type = None
         sender_name = inbound.sender_name
         if isinstance(sender_profile, dict) and sender_profile.get("profile_type") is not None:
