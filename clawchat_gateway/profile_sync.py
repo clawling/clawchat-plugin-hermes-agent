@@ -1,7 +1,14 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
+
+from clawchat_gateway.clawchat_metadata import (
+    pull_group_metadata,
+    pull_owner_metadata,
+    pull_user_metadata,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -9,11 +16,10 @@ DEFAULT_PLATFORM = "clawchat"
 DEFAULT_ACCOUNT_ID = "bot"
 
 
-def _first_present(*pairs: tuple[dict[str, Any], str]) -> Any:
-    for source, key in pairs:
-        if key in source:
-            return source[key]
-    raise KeyError
+def _missing_memory_root(memory_root: str | Path | None) -> bool:
+    return memory_root is None or (
+        isinstance(memory_root, str) and not memory_root.strip()
+    )
 
 
 def relation_for_sender(
@@ -42,41 +48,21 @@ async def ensure_user_profile_for_sender(
     *,
     platform: str = DEFAULT_PLATFORM,
     account_id: str | None = None,
+    memory_root: str | Path | None = None,
 ) -> bool:
     if not sender_id:
         return False
-    resolved_account_id = account_id or agent_user_id or DEFAULT_ACCOUNT_ID
-    created = bool(
-        store.upsert_minimal_profile(
-            platform=platform,
-            account_id=resolved_account_id,
-            profile_kind="user",
-            profile_id=sender_id,
-            relation=relation_for_sender(
-                sender_id,
-                agent_user_id=agent_user_id,
-                owner_user_id=owner_user_id,
-            ),
-            now_ms=now_ms,
-        )
-    )
-    if not created:
+    if owner_user_id and sender_id == owner_user_id:
+        return False
+    if _missing_memory_root(memory_root):
+        logger.warning("clawchat user metadata refresh skipped reason=missing memory root user_id=%s", sender_id)
         return False
     try:
-        result = await client.get_user_info(sender_id)
+        await pull_user_metadata(memory_root, client, sender_id)
     except Exception:  # noqa: BLE001
         logger.warning("clawchat user profile refresh failed user_id=%s", sender_id, exc_info=True)
         return False
-    return upsert_user_profile_from_result(
-        store,
-        result,
-        sender_id=sender_id,
-        agent_user_id=agent_user_id,
-        owner_user_id=owner_user_id,
-        now_ms=now_ms,
-        platform=platform,
-        account_id=resolved_account_id,
-    )
+    return True
 
 
 async def ensure_group_profile_for_chat(
@@ -87,19 +73,12 @@ async def ensure_group_profile_for_chat(
     *,
     platform: str = DEFAULT_PLATFORM,
     account_id: str = DEFAULT_ACCOUNT_ID,
+    memory_root: str | Path | None = None,
 ) -> bool:
     if not chat_id:
         return False
-    created = bool(
-        store.upsert_minimal_profile(
-            platform=platform,
-            account_id=account_id,
-            profile_kind="group",
-            profile_id=chat_id,
-            now_ms=now_ms,
-        )
-    )
-    if not created:
+    if _missing_memory_root(memory_root):
+        logger.warning("clawchat group metadata refresh skipped reason=missing memory root chat_id=%s", chat_id)
         return False
     return await refresh_group_profile(
         store,
@@ -108,6 +87,7 @@ async def ensure_group_profile_for_chat(
         now_ms,
         platform=platform,
         account_id=account_id,
+        memory_root=memory_root,
     )
 
 
@@ -120,12 +100,20 @@ async def refresh_agent_behavior_profile(
     now_ms: int,
     platform: str = DEFAULT_PLATFORM,
     account_id: str | None = None,
+    memory_root: str | Path | None = None,
 ) -> bool:
     if not agent_id:
         return False
-    resolved_account_id = account_id or agent_user_id or DEFAULT_ACCOUNT_ID
+    if _missing_memory_root(memory_root):
+        logger.warning("clawchat owner metadata refresh skipped reason=missing memory root agent_id=%s", agent_id)
+        return False
     try:
-        result = await client.get_agent_detail(agent_id)
+        await pull_owner_metadata(
+            memory_root,
+            client,
+            agent_id,
+            agent_user_id=agent_user_id,
+        )
     except Exception:  # noqa: BLE001
         logger.warning(
             "clawchat agent behavior refresh failed agent_id=%s",
@@ -133,26 +121,6 @@ async def refresh_agent_behavior_profile(
             exc_info=True,
         )
         return False
-    detail = result.get("agent") if isinstance(result.get("agent"), dict) else result
-    if not isinstance(detail, dict):
-        return False
-    profile_id = str(
-        detail.get("user_id")
-        or detail.get("userId")
-        or agent_user_id
-        or detail.get("id")
-        or agent_id
-    )
-    kwargs = {
-        "platform": platform,
-        "account_id": resolved_account_id,
-        "profile_id": profile_id,
-        "raw": detail,
-        "now_ms": now_ms,
-    }
-    if "behavior" in detail:
-        kwargs["behavior"] = detail["behavior"]
-    store.upsert_agent_profile(**kwargs)
     return True
 
 
@@ -164,103 +132,16 @@ async def refresh_group_profile(
     *,
     platform: str = DEFAULT_PLATFORM,
     account_id: str = DEFAULT_ACCOUNT_ID,
+    memory_root: str | Path | None = None,
 ) -> bool:
     if not chat_id:
         return False
+    if _missing_memory_root(memory_root):
+        logger.warning("clawchat group metadata refresh skipped reason=missing memory root chat_id=%s", chat_id)
+        return False
     try:
-        result = await client.get_conversation(chat_id)
+        await pull_group_metadata(memory_root, client, chat_id)
     except Exception:  # noqa: BLE001
-        logger.warning("clawchat group profile refresh failed chat_id=%s", chat_id, exc_info=True)
+        logger.warning("clawchat group metadata refresh failed chat_id=%s", chat_id, exc_info=True)
         return False
-    return upsert_group_profile_from_result(
-        store,
-        result,
-        chat_id=chat_id,
-        now_ms=now_ms,
-        platform=platform,
-        account_id=account_id,
-    )
-
-
-def upsert_group_profile_from_result(
-    store: Any,
-    result: dict[str, Any],
-    *,
-    chat_id: str,
-    now_ms: int,
-    platform: str = DEFAULT_PLATFORM,
-    account_id: str = DEFAULT_ACCOUNT_ID,
-) -> bool:
-    detail = result.get("conversation") if isinstance(result.get("conversation"), dict) else result
-    if not isinstance(detail, dict):
-        return False
-    profile_id = str(detail.get("conversation_id") or detail.get("conversationId") or detail.get("id") or chat_id)
-    group = detail.get("group") if isinstance(detail.get("group"), dict) else {}
-    metadata_version = detail.get("metadata_version") or detail.get("metadataVersion")
-    if not isinstance(metadata_version, int):
-        metadata_version = group.get("metadata_version") or group.get("metadataVersion")
-    kwargs = {
-        "platform": platform,
-        "account_id": account_id,
-        "profile_id": profile_id,
-        "raw": group or detail,
-        "now_ms": now_ms,
-    }
-    try:
-        kwargs["title"] = _first_present((detail, "title"), (group, "title"))
-    except KeyError:
-        pass
-    try:
-        kwargs["description"] = _first_present(
-            (detail, "description"),
-            (group, "description"),
-        )
-    except KeyError:
-        pass
-    if isinstance(metadata_version, int):
-        kwargs["metadata_version"] = metadata_version
-    store.upsert_group_profile(**kwargs)
-    return True
-
-
-def upsert_user_profile_from_result(
-    store: Any,
-    result: dict[str, Any],
-    *,
-    sender_id: str,
-    agent_user_id: str,
-    owner_user_id: str,
-    now_ms: int,
-    platform: str = DEFAULT_PLATFORM,
-    account_id: str | None = None,
-) -> bool:
-    detail = result.get("user") if isinstance(result.get("user"), dict) else result
-    if not isinstance(detail, dict):
-        return False
-    profile_id = str(detail.get("user_id") or detail.get("userId") or detail.get("id") or sender_id)
-    profile_type = detail.get("type") or detail.get("profile_type")
-    resolved_account_id = account_id or agent_user_id or DEFAULT_ACCOUNT_ID
-    kwargs = {
-        "platform": platform,
-        "account_id": resolved_account_id,
-        "profile_id": profile_id,
-        "relation": relation_for_sender(
-            profile_id,
-            agent_user_id=agent_user_id,
-            owner_user_id=owner_user_id,
-            profile_type=profile_type if isinstance(profile_type, str) else None,
-        ),
-        "raw": detail,
-        "now_ms": now_ms,
-    }
-    if isinstance(profile_type, str):
-        kwargs["profile_type"] = profile_type
-    for key in ("nickname", "bio"):
-        if key in detail:
-            kwargs[key] = detail[key]
-    if "avatar_url" in detail:
-        kwargs["avatar_url"] = detail["avatar_url"]
-    elif "avatarUrl" in detail:
-        kwargs["avatar_url"] = detail["avatarUrl"]
-    store.upsert_user_profile(**kwargs)
     return True
