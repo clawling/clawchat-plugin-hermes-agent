@@ -1796,7 +1796,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             filtered = _TOOL_TAG_OPEN_RE.sub("", filtered)
         filtered = _HERMES_STREAM_CURSOR_RE.sub("", filtered)
         filtered = _STREAMING_CURSOR_RE.sub("", filtered)
-        return filtered
+        return filtered.strip()
 
     def _is_noop_response_text(self, content: str) -> bool:
         text = content.strip()

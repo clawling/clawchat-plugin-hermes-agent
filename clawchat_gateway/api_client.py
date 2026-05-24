@@ -124,6 +124,7 @@ class ClawChatApiClient:
         nickname: str | None = None,
         avatar_url: str | None = None,
         bio: str | None = None,
+        behavior: str | None = None,
     ) -> dict:
         if not agent_id.strip():
             raise ClawChatApiError("validation", "agent_id is required")
@@ -134,10 +135,12 @@ class ClawChatApiClient:
             patch["avatar_url"] = avatar_url
         if bio is not None:
             patch["bio"] = bio
+        if behavior is not None:
+            patch["behavior"] = behavior
         if not patch:
             raise ClawChatApiError(
                 "validation",
-                "at least one of nickname/avatar_url/bio is required",
+                "at least one of nickname/avatar_url/bio/behavior is required",
             )
         return await self._call_json(
             "PATCH",

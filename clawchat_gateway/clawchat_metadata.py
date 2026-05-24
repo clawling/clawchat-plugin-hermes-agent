@@ -23,7 +23,7 @@ __all__ = [
     "update_metadata",
 ]
 
-_OWNER_MUTABLE_FIELDS = ("nickname", "avatar_url", "bio")
+_OWNER_MUTABLE_FIELDS = ("nickname", "avatar_url", "bio", "behavior")
 _USER_MUTABLE_FIELDS = ("nickname", "avatar_url", "bio")
 _GROUP_MUTABLE_FIELDS = ("title", "description")
 _MUTABLE_FIELDS_BY_TARGET = {
@@ -204,8 +204,12 @@ async def pull_group_metadata(root: str | Path, client: Any, group_id: str) -> d
     failures: list[dict[str, str]] = []
     for participant in _participants(result):
         user_id = _participant_user_id(participant)
-        metadata = user_metadata_from_profile({"user": participant}, user_id=user_id)
         try:
+            existing = read_clawchat_memory_file(root, "user", user_id)
+            if existing.get("exists"):
+                continue
+            profile = await client.get_user_info(user_id)
+            metadata = user_metadata_from_profile(profile, user_id=user_id)
             write_clawchat_metadata(root, "user", user_id, metadata)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
