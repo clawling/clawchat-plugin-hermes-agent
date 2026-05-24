@@ -329,6 +329,104 @@ async def handle_clawchat_update_account_profile(args, **kw):
     return _tool_result(result)
 
 
+async def handle_clawchat_memory_read(args, **kw):
+    task_id = kw.get("task_id") or "default"
+    logger.info("clawchat_memory_read start task_id=%s", task_id)
+    from clawchat_gateway import tools
+
+    result = await _recorded_tool_call(
+        "clawchat_memory_read",
+        args,
+        _account_id_from_kwargs(kw),
+        lambda: tools.memory_read(
+            str(args.get("targetType") or ""),
+            str(args.get("targetId") or ""),
+            offset=_optional_int_arg(args.get("offset")),
+            limit=_optional_int_arg(args.get("limit")),
+        ),
+    )
+    logger.info("clawchat_memory_read done task_id=%s", task_id)
+    return _tool_result(result)
+
+
+async def handle_clawchat_memory_write(args, **kw):
+    task_id = kw.get("task_id") or "default"
+    logger.info("clawchat_memory_write start task_id=%s", task_id)
+    from clawchat_gateway import tools
+
+    result = await _recorded_tool_call(
+        "clawchat_memory_write",
+        args,
+        _account_id_from_kwargs(kw),
+        lambda: tools.memory_write(
+            str(args.get("targetType") or ""),
+            str(args.get("targetId") or ""),
+            mode=str(args.get("mode") or ""),
+            content=args.get("content"),
+        ),
+    )
+    logger.info("clawchat_memory_write done task_id=%s", task_id)
+    return _tool_result(result)
+
+
+async def handle_clawchat_memory_edit(args, **kw):
+    task_id = kw.get("task_id") or "default"
+    logger.info("clawchat_memory_edit start task_id=%s", task_id)
+    from clawchat_gateway import tools
+
+    result = await _recorded_tool_call(
+        "clawchat_memory_edit",
+        args,
+        _account_id_from_kwargs(kw),
+        lambda: tools.memory_edit(
+            str(args.get("targetType") or ""),
+            str(args.get("targetId") or ""),
+            old_text=args.get("oldText"),
+            new_text=args.get("newText"),
+        ),
+    )
+    logger.info("clawchat_memory_edit done task_id=%s", task_id)
+    return _tool_result(result)
+
+
+async def handle_clawchat_metadata_sync(args, **kw):
+    task_id = kw.get("task_id") or "default"
+    logger.info("clawchat_metadata_sync start task_id=%s", task_id)
+    from clawchat_gateway import tools
+
+    result = await _recorded_tool_call(
+        "clawchat_metadata_sync",
+        args,
+        _account_id_from_kwargs(kw),
+        lambda: tools.metadata_sync(
+            str(args.get("targetType") or ""),
+            str(args.get("targetId") or ""),
+            direction=str(args.get("direction") or ""),
+        ),
+    )
+    logger.info("clawchat_metadata_sync done task_id=%s", task_id)
+    return _tool_result(result)
+
+
+async def handle_clawchat_metadata_update(args, **kw):
+    task_id = kw.get("task_id") or "default"
+    logger.info("clawchat_metadata_update start task_id=%s", task_id)
+    from clawchat_gateway import tools
+
+    result = await _recorded_tool_call(
+        "clawchat_metadata_update",
+        args,
+        _account_id_from_kwargs(kw),
+        lambda: tools.metadata_update(
+            str(args.get("targetType") or ""),
+            str(args.get("targetId") or ""),
+            patch=args.get("patch") if isinstance(args.get("patch"), dict) else {},
+        ),
+    )
+    logger.info("clawchat_metadata_update done task_id=%s", task_id)
+    return _tool_result(result)
+
+
 async def handle_clawchat_upload_avatar_image(args, **kw):
     task_id = kw.get("task_id") or "default"
     logger.info("clawchat_upload_avatar_image start task_id=%s", task_id)
@@ -371,6 +469,148 @@ def _direct_tool_description(description: str) -> str:
 
 
 def register_tools(ctx) -> None:
+    target_properties = {
+        "targetType": {
+            "type": "string",
+            "enum": ["owner", "user", "group"],
+            "description": "Target namespace: owner, user, or group.",
+        },
+        "targetId": {
+            "type": "string",
+            "description": "Required explicit target id. Use owner for owner targets; do not pass file paths.",
+        },
+    }
+    metadata_patch_schema = {
+        "type": "object",
+        "minProperties": 1,
+        "additionalProperties": False,
+        "properties": {
+            "nickname": {"type": "string"},
+            "avatar_url": {"type": "string"},
+            "bio": {"type": "string"},
+            "title": {"type": "string"},
+            "description": {"type": "string"},
+        },
+    }
+
+    ctx.register_tool(
+        "clawchat_memory_read",
+        "clawchat",
+        {
+            "name": "clawchat_memory_read",
+            "description": _direct_tool_description(
+                "Read a ClawChat memory Markdown file by explicit targetType and targetId. Use this when you need existing owner, user, or group memory content. Do not guess ids from names. This reads metadata and agent-authored body; it does not contact the ClawChat server."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    **target_properties,
+                    "offset": {"type": "integer", "minimum": 0, "description": "Content offset for bounded reads."},
+                    "limit": {"type": "integer", "minimum": 0, "description": "Maximum content characters to return."},
+                },
+                "required": ["targetType", "targetId"],
+            },
+        },
+        handle_clawchat_memory_read,
+        is_async=True,
+        description="Read ClawChat Memory",
+        emoji="M",
+    )
+
+    ctx.register_tool(
+        "clawchat_memory_write",
+        "clawchat",
+        {
+            "name": "clawchat_memory_write",
+            "description": _direct_tool_description(
+                "Append to or replace only the agent-authored body of a ClawChat memory Markdown file by explicit targetType and targetId. This never modifies the metadata block. Use append for adding new memory notes and replace only when intentionally rewriting the whole body."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    **target_properties,
+                    "mode": {"type": "string", "enum": ["append", "replace"]},
+                    "content": {"type": "string"},
+                },
+                "required": ["targetType", "targetId", "mode", "content"],
+            },
+        },
+        handle_clawchat_memory_write,
+        is_async=True,
+        description="Write ClawChat Memory",
+        emoji="M",
+    )
+
+    ctx.register_tool(
+        "clawchat_memory_edit",
+        "clawchat",
+        {
+            "name": "clawchat_memory_edit",
+            "description": _direct_tool_description(
+                "Replace exactly one existing text span in the agent-authored body of a ClawChat memory Markdown file. This never modifies the metadata block. The oldText must match exactly once; use read first when unsure."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    **target_properties,
+                    "oldText": {"type": "string", "minLength": 1},
+                    "newText": {"type": "string"},
+                },
+                "required": ["targetType", "targetId", "oldText", "newText"],
+            },
+        },
+        handle_clawchat_memory_edit,
+        is_async=True,
+        description="Edit ClawChat Memory",
+        emoji="M",
+    )
+
+    ctx.register_tool(
+        "clawchat_metadata_sync",
+        "clawchat",
+        {
+            "name": "clawchat_metadata_sync",
+            "description": _direct_tool_description(
+                "Pull server metadata into a ClawChat metadata block or push selected local metadata fields to the server, then refresh the local metadata block from the server response. Use explicit ids only. This does not modify the agent-authored body."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    **target_properties,
+                    "direction": {"type": "string", "enum": ["pull", "push"]},
+                },
+                "required": ["targetType", "targetId", "direction"],
+            },
+        },
+        handle_clawchat_metadata_sync,
+        is_async=True,
+        description="Sync ClawChat Metadata",
+        emoji="M",
+    )
+
+    ctx.register_tool(
+        "clawchat_metadata_update",
+        "clawchat",
+        {
+            "name": "clawchat_metadata_update",
+            "description": _direct_tool_description(
+                "Update ClawChat server metadata for an explicit owner, user, or group target, then refresh the local metadata block from the server response. This always pushes to the server first and does not modify the agent-authored body."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    **target_properties,
+                    "patch": metadata_patch_schema,
+                },
+                "required": ["targetType", "targetId", "patch"],
+            },
+        },
+        handle_clawchat_metadata_update,
+        is_async=True,
+        description="Update ClawChat Metadata",
+        emoji="M",
+    )
+
     ctx.register_tool(
         "clawchat_get_account_profile",
         "clawchat",

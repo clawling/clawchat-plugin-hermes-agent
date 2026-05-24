@@ -7,11 +7,25 @@ surface used by both Hermes tool registration and the profile CLI.
 from __future__ import annotations
 
 import mimetypes
+from types import SimpleNamespace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from clawchat_gateway.api_client import ClawChatApiClient, ClawChatApiError
+from clawchat_gateway.clawchat_memory import (
+    edit_clawchat_memory_body,
+    read_clawchat_memory_file,
+    write_clawchat_memory_body,
+)
+from clawchat_gateway.clawchat_metadata import (
+    pull_group_metadata,
+    pull_owner_metadata,
+    pull_user_metadata,
+    push_metadata,
+    update_metadata as update_clawchat_metadata,
+)
+from clawchat_gateway.config import ClawChatConfig
 from clawchat_gateway.profile import ProfileConfigError, load_profile_config
 from clawchat_gateway.storage import get_clawchat_store
 
@@ -58,6 +72,22 @@ def _build_client() -> tuple[ClawChatApiClient | None, dict[str, Any] | None]:
         ),
         None,
     )
+
+
+def _resolve_clawchat_config() -> dict[str, str]:
+    cfg = ClawChatConfig.from_platform_config(SimpleNamespace(extra={}))
+    return {
+        "agent_id": cfg.agent_id,
+        "user_id": cfg.user_id,
+        "owner_user_id": cfg.owner_user_id,
+    }
+
+
+def _resolve_memory_root() -> tuple[Path | None, dict[str, Any] | None]:
+    root = ClawChatConfig.from_platform_config(SimpleNamespace(extra={})).memory_root
+    if not root:
+        return None, _config_error("ClawChat memory root is not configured")
+    return Path(root), None
 
 
 def _validate_upload_path(file_path: str) -> tuple[Path | None, dict[str, Any] | None]:
@@ -211,6 +241,223 @@ def _delete_conversation_cache(client: ClawChatApiClient, conversation_id: str) 
         account_id=_account_id(client),
         conversation_id=conversation_id,
     )
+
+
+def _target_error(target_type: str, target_id: str) -> dict[str, Any] | None:
+    if target_type not in {"owner", "user", "group"}:
+        return _validation_error("targetType must be owner, user, or group")
+    if not isinstance(target_id, str) or not target_id:
+        return _validation_error("targetId is required")
+    if target_type == "owner" and target_id != "owner":
+        return _validation_error("owner target requires targetId='owner'")
+    return None
+
+
+def _pagination(value: Any, default: int, field: str) -> tuple[int | None, dict[str, Any] | None]:
+    if value is None:
+        return default, None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None, _validation_error(f"{field} must be an integer")
+    if parsed < 0:
+        return None, _validation_error(f"{field} must be >= 0")
+    return parsed, None
+
+
+def _metadata_patch_error(target_type: str, patch: Any) -> dict[str, Any] | None:
+    if not isinstance(patch, dict) or not patch:
+        return _validation_error("patch is required and must be non-empty")
+    allowed = {
+        "owner": {"nickname", "avatar_url", "bio"},
+        "user": {"nickname", "avatar_url", "bio"},
+        "group": {"title", "description"},
+    }.get(target_type, set())
+    forbidden = [key for key in patch if key not in allowed]
+    if forbidden:
+        return _validation_error(f"unsupported metadata patch fields: {', '.join(sorted(forbidden))}")
+    non_string = [key for key, value in patch.items() if not isinstance(value, str)]
+    if non_string:
+        return _validation_error(f"metadata patch values must be strings: {', '.join(sorted(non_string))}")
+    return None
+
+
+async def memory_read(
+    target_type: str,
+    target_id: str,
+    *,
+    offset: int | None = 0,
+    limit: int | None = 12000,
+) -> dict[str, Any]:
+    err = _target_error(target_type, target_id)
+    if err is not None:
+        return err
+    offset_value, err = _pagination(offset, 0, "offset")
+    if err is not None:
+        return err
+    limit_value, err = _pagination(limit, 12000, "limit")
+    if err is not None:
+        return err
+    root, err = _resolve_memory_root()
+    if err is not None:
+        return err
+    try:
+        memory = read_clawchat_memory_file(root, target_type, target_id)
+        content = memory["content"]
+        end = offset_value + limit_value
+        visible = content[offset_value:end]
+        return {
+            "targetType": target_type,
+            "targetId": target_id,
+            "exists": memory["exists"],
+            "content": visible,
+            "metadata": memory["metadata"],
+            "offset": offset_value,
+            "limit": limit_value,
+            "total": len(content),
+            "truncated": end < len(content),
+        }
+    except ValueError as exc:
+        return _validation_error(str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return _unknown_error(exc)
+
+
+async def memory_write(
+    target_type: str,
+    target_id: str,
+    *,
+    mode: str,
+    content: str,
+) -> dict[str, Any]:
+    err = _target_error(target_type, target_id)
+    if err is not None:
+        return err
+    if mode not in {"append", "replace"}:
+        return _validation_error("mode must be append or replace")
+    if not isinstance(content, str):
+        return _validation_error("content must be a string")
+    root, err = _resolve_memory_root()
+    if err is not None:
+        return err
+    try:
+        write_clawchat_memory_body(root, target_type, target_id, mode, content)
+        return {"ok": True, "targetType": target_type, "targetId": target_id}
+    except ValueError as exc:
+        return _validation_error(str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return _unknown_error(exc)
+
+
+async def memory_edit(
+    target_type: str,
+    target_id: str,
+    *,
+    old_text: str,
+    new_text: str,
+) -> dict[str, Any]:
+    err = _target_error(target_type, target_id)
+    if err is not None:
+        return err
+    if not isinstance(old_text, str) or not old_text:
+        return _validation_error("oldText is required")
+    if not isinstance(new_text, str):
+        return _validation_error("newText must be a string")
+    root, err = _resolve_memory_root()
+    if err is not None:
+        return err
+    try:
+        edit_clawchat_memory_body(root, target_type, target_id, old_text, new_text)
+        return {"ok": True, "targetType": target_type, "targetId": target_id}
+    except ValueError as exc:
+        return _validation_error(str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return _unknown_error(exc)
+
+
+async def metadata_sync(
+    target_type: str,
+    target_id: str,
+    *,
+    direction: str,
+) -> dict[str, Any]:
+    err = _target_error(target_type, target_id)
+    if err is not None:
+        return err
+    if direction not in {"pull", "push"}:
+        return _validation_error("direction must be pull or push")
+    root, err = _resolve_memory_root()
+    if err is not None:
+        return err
+    client, err = _build_client()
+    if err is not None:
+        return err
+    cfg = _resolve_clawchat_config()
+    try:
+        if direction == "push":
+            return await push_metadata(
+                root,
+                client,
+                target_type,
+                target_id,
+                agent_id=cfg["agent_id"],
+                connected_user_id=cfg["user_id"],
+            )
+        if target_type == "owner":
+            if not cfg["agent_id"]:
+                return _config_error("agent_id is required for owner metadata")
+            return await pull_owner_metadata(
+                root,
+                client,
+                cfg["agent_id"],
+                agent_user_id=cfg.get("user_id", ""),
+                owner_user_id=cfg.get("owner_user_id", ""),
+            )
+        if target_type == "user":
+            return await pull_user_metadata(root, client, target_id)
+        return await pull_group_metadata(root, client, target_id)
+    except ClawChatApiError as exc:
+        return _api_error(exc)
+    except ValueError as exc:
+        return _validation_error(str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return _unknown_error(exc)
+
+
+async def metadata_update(
+    target_type: str,
+    target_id: str,
+    patch: dict[str, Any],
+) -> dict[str, Any]:
+    err = _target_error(target_type, target_id)
+    if err is not None:
+        return err
+    err = _metadata_patch_error(target_type, patch)
+    if err is not None:
+        return err
+    root, err = _resolve_memory_root()
+    if err is not None:
+        return err
+    client, err = _build_client()
+    if err is not None:
+        return err
+    cfg = _resolve_clawchat_config()
+    try:
+        return await update_clawchat_metadata(
+            root,
+            client,
+            target_type,
+            target_id,
+            patch,
+            agent_id=cfg["agent_id"],
+            connected_user_id=cfg["user_id"],
+        )
+    except ClawChatApiError as exc:
+        return _api_error(exc)
+    except ValueError as exc:
+        return _validation_error(str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return _unknown_error(exc)
 
 
 async def get_account_profile() -> dict[str, Any]:
