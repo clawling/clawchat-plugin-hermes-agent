@@ -22,7 +22,7 @@ from gateway.platforms.base import (
 )
 
 from clawchat_gateway.api_client import ClawChatApiClient, ClawChatApiError
-from clawchat_gateway.config import ClawChatConfig
+from clawchat_gateway.config import ClawChatConfig, effective_group_command_mode
 from clawchat_gateway.connection import (
     HANDSHAKE_TIMEOUT_SECONDS,
     ClawChatConnection,
@@ -75,9 +75,10 @@ CONVERSATION_SEMANTICS = """## ClawChat Conversation Semantics
 - sender_is_owner tells whether the sender is this agent's owner.
 - In group conversations, each [message] block has its own sender fields."""
 GROUP_BATCH_REPLY_GUIDANCE = (
-    "Reply only if one or more [message] blocks clearly ask for your participation, mention the current agent, "
-    "or your response is clearly useful to the group and allowed by the group profile/regulation. "
-    "Mentions of other people are not requests for you."
+    'Hard no-reply rules: if mentioned_user_ids is not "-" and mentions_current_agent is false, return exactly "" and nothing else. '
+    'If the input is unrelated to ClawChat Agent Behavior, return exactly "" and nothing else. These rules override sender_is_owner, '
+    "group usefulness, and general helpfulness. Reply only if mentions_current_agent is true, or there is no mention and the text "
+    'explicitly asks this agent to participate. Otherwise return exactly "" and nothing else.'
 )
 GROUP_BATCH_MENTION_REPLY_GUIDANCE = (
     "You were directly addressed in this group batch. Reply by default, including when the message contains only a mention. "
@@ -86,6 +87,30 @@ GROUP_BATCH_MENTION_REPLY_GUIDANCE = (
 DIRECT_MESSAGE_REPLY_GUIDANCE = (
     "Direct messages are normally addressed to you. Reply unless the agent behavior says this message should not be answered."
 )
+CLAWCHAT_PLUGIN_SLASH_COMMANDS = {"clawchat-activate"}
+HERMES_BUILTIN_SLASH_COMMANDS = {
+    "new",
+    "reset",
+    "clear",
+    "help",
+    "model",
+    "status",
+    "tools",
+    "memory",
+    "settings",
+}
+HERMES_CONFIRM_SLASH_COMMANDS = {
+    "approve",
+    "deny",
+    "always",
+    "cancel",
+    "yes",
+    "no",
+    "ok",
+    "confirm",
+    "remember",
+    "nevermind",
+}
 
 _THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
 _THINK_CONTENT_RE = re.compile(r"<think\b[^>]*>(.*?)</think>", re.IGNORECASE | re.DOTALL)
@@ -146,6 +171,50 @@ def _debug_prompt_injection_enabled() -> bool:
         "yes",
         "on",
     }
+
+
+def _slash_command_name(text: str) -> str | None:
+    stripped = text.lstrip()
+    if not stripped.startswith("/"):
+        return None
+    token = stripped.split(maxsplit=1)[0]
+    name = token[1:].replace("_", "-").lower()
+    if not name or "/" in name:
+        return None
+    return name
+
+
+def _known_hermes_slash_command_name(name: str) -> bool:
+    if (
+        name in CLAWCHAT_PLUGIN_SLASH_COMMANDS
+        or name in HERMES_BUILTIN_SLASH_COMMANDS
+        or name in HERMES_CONFIRM_SLASH_COMMANDS
+    ):
+        return True
+    try:
+        from hermes_cli.commands import resolve_command
+    except Exception:
+        resolve_command = None
+    if resolve_command is not None:
+        try:
+            if resolve_command(name):
+                return True
+        except Exception:
+            pass
+    try:
+        from hermes_cli.plugins import get_plugin_commands
+    except Exception:
+        return False
+    try:
+        commands = get_plugin_commands()
+    except Exception:
+        return False
+    return any(str(command).replace("_", "-").lower() == name for command in commands)
+
+
+def _is_known_hermes_slash_command(text: str) -> bool:
+    name = _slash_command_name(text)
+    return bool(name and _known_hermes_slash_command_name(name))
 
 
 @dataclass
@@ -1063,6 +1132,33 @@ class ClawChatAdapter(BasePlatformAdapter):
                 )
                 return
         if inbound.chat_type == "group":
+            if _is_known_hermes_slash_command(inbound.text):
+                command_mode = effective_group_command_mode(
+                    self._clawchat_config,
+                    inbound.chat_id,
+                )
+                command_allowed = command_mode == "all" or (
+                    command_mode == "owner" and inbound.sender_relation == "owner"
+                )
+                if not command_allowed:
+                    logger.info(
+                        "clawchat group command dropped chat_id=%s sender_id=%s mode=%s owner=%s text_head=%r",
+                        inbound.chat_id,
+                        inbound.sender_id,
+                        command_mode,
+                        inbound.sender_relation == "owner",
+                        inbound.text[:80],
+                    )
+                    return
+                logger.info(
+                    "clawchat group command dispatching directly chat_id=%s sender_id=%s mode=%s text_head=%r",
+                    inbound.chat_id,
+                    inbound.sender_id,
+                    command_mode,
+                    inbound.text[:80],
+                )
+                await self._handle_inbound(inbound)
+                return
             self._group_message_coalescer.enqueue(inbound)
             if inbound.was_mentioned:
                 logger.info(

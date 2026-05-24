@@ -78,6 +78,10 @@ def _read_group_mode(value: Any) -> str:
     return "mention" if value == "mention" else "all"
 
 
+def _read_group_command_mode(value: Any) -> str:
+    return value if value in {"owner", "all", "off"} else "owner"
+
+
 def _read_groups(value: Any) -> dict[str, dict[str, str]]:
     if not isinstance(value, dict):
         return {}
@@ -86,7 +90,12 @@ def _read_groups(value: Any) -> dict[str, dict[str, str]]:
         if not isinstance(chat_id, str) or not chat_id:
             continue
         group = raw_group if isinstance(raw_group, dict) else {}
-        groups[chat_id] = {"group_mode": _read_group_mode(group.get("group_mode"))}
+        groups[chat_id] = {
+            "group_mode": _read_group_mode(group.get("group_mode")),
+            "group_command_mode": _read_group_command_mode(
+                group.get("group_command_mode")
+            ),
+        }
     return groups
 
 
@@ -101,6 +110,7 @@ class ClawChatConfig:
     owner_user_id: str = ""
     reply_mode: str = "stream"
     group_mode: str = "all"
+    group_command_mode: str = "owner"
     groups: dict[str, dict[str, str]] = field(default_factory=dict)
     stream_flush_interval_ms: int = 250
     stream_min_chunk_chars: int = 40
@@ -162,6 +172,10 @@ class ClawChatConfig:
                 _get_env("CLAWCHAT_GROUP_MODE")
                 or _get_config_value(extra, "group_mode", "all")
             ),
+            group_command_mode=_read_group_command_mode(
+                _get_env("CLAWCHAT_GROUP_COMMAND_MODE")
+                or _get_config_value(extra, "group_command_mode", "owner")
+            ),
             groups=_read_groups(_get_config_value(extra, "groups", {})),
             stream_flush_interval_ms=_get_config_value(stream, "flush_interval_ms", 250),
             stream_min_chunk_chars=_get_config_value(stream, "min_chunk_chars", 40),
@@ -215,3 +229,13 @@ def effective_group_mode(config: ClawChatConfig, chat_id: str) -> str:
     if wildcard is not None:
         return _read_group_mode(wildcard.get("group_mode"))
     return _read_group_mode(config.group_mode)
+
+
+def effective_group_command_mode(config: ClawChatConfig, chat_id: str) -> str:
+    exact = config.groups.get(chat_id)
+    if exact is not None:
+        return _read_group_command_mode(exact.get("group_command_mode"))
+    wildcard = config.groups.get("*")
+    if wildcard is not None:
+        return _read_group_command_mode(wildcard.get("group_command_mode"))
+    return _read_group_command_mode(config.group_command_mode)
