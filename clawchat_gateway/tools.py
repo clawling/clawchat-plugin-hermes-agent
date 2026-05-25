@@ -271,7 +271,7 @@ def _metadata_patch_error(target_type: str, patch: Any) -> dict[str, Any] | None
     if not isinstance(patch, dict) or not patch:
         return _validation_error("patch is required and must be non-empty")
     allowed = {
-        "owner": {"nickname", "avatar_url", "bio", "behavior"},
+        "owner": {"agent_behavior"},
         "user": {"nickname", "avatar_url", "bio"},
         "group": {"title", "description"},
     }.get(target_type, set())

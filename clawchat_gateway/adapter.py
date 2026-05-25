@@ -91,7 +91,7 @@ CONVERSATION_SEMANTICS = """## ClawChat Conversation Semantics
 - In group conversations, each [message] block has its own sender fields."""
 GROUP_BATCH_REPLY_GUIDANCE = (
     'Hard no-reply rules: if mentioned_user_ids is not "-" and mentions_current_agent is false, return exactly "" and nothing else. '
-    'If the input is unrelated to owner metadata, return exactly "" and nothing else. These rules override sender_is_owner, '
+    'If the input is unrelated to current agent behavior, return exactly "" and nothing else. These rules override sender_is_owner, '
     "group usefulness, and general helpfulness. Reply only if mentions_current_agent is true, or there is no mention and the text "
     'explicitly asks this agent to participate. Otherwise return exactly "" and nothing else.'
 )
@@ -100,7 +100,7 @@ GROUP_BATCH_MENTION_REPLY_GUIDANCE = (
     "Stay silent only if the group metadata explicitly forbids replying."
 )
 DIRECT_MESSAGE_REPLY_GUIDANCE = (
-    "Direct messages are normally addressed to you. Reply unless owner metadata says this message should not be answered."
+    "Direct messages are normally addressed to you. Reply unless current agent behavior says this message should not be answered."
 )
 CLAWCHAT_PLUGIN_SLASH_COMMANDS = {"clawchat-activate"}
 HERMES_BUILTIN_SLASH_COMMANDS = {
@@ -668,10 +668,19 @@ class ClawChatAdapter(BasePlatformAdapter):
         if inbound.sender_name and inbound.sender_name != inbound.sender_id:
             return inbound.sender_name
         sender_metadata = self._sender_metadata(inbound)
-        cached_nickname = sender_metadata.get("nickname")
+        cached_nickname = self._sender_metadata_nickname(inbound, sender_metadata)
         if isinstance(cached_nickname, str) and cached_nickname and cached_nickname != inbound.sender_id:
             return cached_nickname
         return inbound.sender_name or inbound.sender_id
+
+    def _sender_metadata_nickname(
+        self,
+        inbound: InboundMessage,
+        metadata: dict[str, str],
+    ) -> str | None:
+        if inbound.sender_id == self._owner_user_id():
+            return metadata.get("owner_nickname")
+        return metadata.get("nickname")
 
     def _sender_batch_identity(self, inbound: InboundMessage) -> tuple[str, str]:
         sender_profile = self._sender_metadata(inbound)
@@ -1105,13 +1114,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         base_prompt = mode_prompt(inbound.chat_type)
         if base_prompt:
             prompts.append(base_prompt)
-        owner_section = self._format_memory_metadata_section(
-            "Current ClawChat Owner Metadata",
-            "owner",
-            "owner",
-        )
-        if owner_section:
-            prompts.append(owner_section)
+        prompts.extend(self._format_owner_and_agent_metadata_sections())
         if inbound.chat_type == "group":
             group_section = self._format_memory_metadata_section(
                 "Current ClawChat Group Metadata",
@@ -1183,6 +1186,36 @@ class ClawChatAdapter(BasePlatformAdapter):
         fields = self._format_fields(tuple(metadata.items()))
         return f"## {title}\n{fields}" if fields else None
 
+    def _format_owner_and_agent_metadata_sections(self) -> list[str]:
+        metadata = self._read_memory_metadata("owner", "owner")
+        if not metadata:
+            return []
+        sections: list[str] = []
+        owner_metadata = self._pick_memory_metadata_fields(
+            metadata,
+            ("owner_id", "owner_nickname", "owner_avatar_url", "owner_bio"),
+        )
+        if owner_metadata:
+            fields = self._format_fields(tuple(owner_metadata.items()))
+            if fields:
+                sections.append(f"## Current ClawChat Owner Metadata\n{fields}")
+        agent_metadata = self._pick_memory_metadata_fields(
+            metadata,
+            ("agent_id", "agent_nickname", "agent_avatar_url", "agent_bio", "agent_behavior"),
+        )
+        if agent_metadata:
+            fields = self._format_fields(tuple(agent_metadata.items()))
+            if fields:
+                sections.append(f"## Current ClawChat Agent Metadata\n{fields}")
+        return sections
+
+    def _pick_memory_metadata_fields(
+        self,
+        metadata: dict[str, str],
+        fields: tuple[str, ...],
+    ) -> dict[str, str]:
+        return {field: metadata[field] for field in fields if field in metadata}
+
     def _read_memory_metadata(self, target_type: str, target_id: str) -> dict[str, str]:
         if self._memory_root is None or not target_id:
             return {}
@@ -1231,7 +1264,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         if isinstance(sender_profile, dict) and sender_profile.get("profile_type") is not None:
             sender_profile_type = str(sender_profile.get("profile_type"))
         if (not sender_name or sender_name == inbound.sender_id) and isinstance(sender_profile, dict):
-            cached_nickname = sender_profile.get("nickname")
+            cached_nickname = self._sender_metadata_nickname(inbound, sender_profile)
             if isinstance(cached_nickname, str) and cached_nickname and cached_nickname != inbound.sender_id:
                 sender_name = cached_nickname
         sender_relation = self._sender_relation(

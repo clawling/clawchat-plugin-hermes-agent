@@ -23,7 +23,7 @@ __all__ = [
     "update_metadata",
 ]
 
-_OWNER_MUTABLE_FIELDS = ("nickname", "avatar_url", "bio", "behavior")
+_OWNER_MUTABLE_FIELDS = ("agent_behavior",)
 _USER_MUTABLE_FIELDS = ("nickname", "avatar_url", "bio")
 _GROUP_MUTABLE_FIELDS = ("title", "description")
 _MUTABLE_FIELDS_BY_TARGET = {
@@ -93,11 +93,23 @@ def owner_metadata_from_agent(
     )
     if resolved_owner_id:
         metadata["owner_id"] = resolved_owner_id
-    _copy_present(metadata, "nickname", detail, "nickname")
-    _copy_present(metadata, "avatar_url", detail, "avatar_url", "avatarUrl")
-    _copy_present(metadata, "bio", detail, "bio")
-    _copy_present(metadata, "behavior", detail, "behavior")
+    _copy_present(metadata, "agent_nickname", detail, "nickname")
+    _copy_present(metadata, "agent_avatar_url", detail, "avatar_url", "avatarUrl")
+    _copy_present(metadata, "agent_bio", detail, "bio")
+    _copy_present(metadata, "agent_behavior", detail, "behavior")
     return metadata
+
+
+def add_owner_profile_metadata(
+    metadata: dict[str, str],
+    result: dict[str, Any],
+) -> None:
+    detail = _detail(result, "user")
+    if not isinstance(detail, dict):
+        return
+    _copy_present(metadata, "owner_nickname", detail, "nickname")
+    _copy_present(metadata, "owner_avatar_url", detail, "avatar_url", "avatarUrl")
+    _copy_present(metadata, "owner_bio", detail, "bio")
 
 
 def user_metadata_from_profile(result: dict[str, Any], *, user_id: str) -> dict[str, str]:
@@ -168,6 +180,9 @@ async def pull_owner_metadata(
         connected_user_id=connected_user_id,
         owner_user_id=owner_user_id,
     )
+    owner_id = metadata.get("owner_id", "")
+    if owner_id:
+        add_owner_profile_metadata(metadata, await client.get_user_info(owner_id))
     write_clawchat_metadata(root, "owner", "owner", metadata)
     return {"ok": True, "target_type": "owner", "target_id": "owner", "metadata": metadata}
 
@@ -342,11 +357,14 @@ async def update_metadata(
         raise ValueError("metadata patch is empty")
 
     if target_type == "owner":
-        result = await client.patch_agent(agent_id, **allowed_patch)
+        result = await client.patch_agent(agent_id, behavior=allowed_patch["agent_behavior"])
         metadata = owner_metadata_from_agent(
             result,
             connected_user_id=connected_user_id,
         )
+        owner_id = metadata.get("owner_id", "")
+        if owner_id:
+            add_owner_profile_metadata(metadata, await client.get_user_info(owner_id))
         write_clawchat_metadata(root, "owner", "owner", metadata)
     elif target_type == "user":
         result = await client.update_my_profile(**allowed_patch)

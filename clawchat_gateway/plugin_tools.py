@@ -489,7 +489,7 @@ def register_tools(ctx) -> None:
             "nickname": {"type": "string"},
             "avatar_url": {"type": "string"},
             "bio": {"type": "string"},
-            "behavior": {"type": "string"},
+            "agent_behavior": {"type": "string"},
             "title": {"type": "string"},
             "description": {"type": "string"},
         },
@@ -525,7 +525,7 @@ def register_tools(ctx) -> None:
         {
             "name": "clawchat_memory_write",
             "description": _direct_tool_description(
-                "Append to or replace only the agent-authored body of a ClawChat memory Markdown file by explicit targetType and targetId. This never modifies the metadata block. Do not use this to write or refresh ClawChat profile/metadata fields such as nickname, avatar_url, bio, profile_type, title, description, or behavior. When the user asks to refresh, sync, or update local ClawChat owner/user/group profile information, use clawchat_metadata_sync with direction=pull instead. Use append for new long-term memory notes and replace only when intentionally rewriting the whole body."
+                "Append to or replace only the agent-authored body of a ClawChat memory Markdown file by explicit targetType and targetId. This never modifies the metadata block. Do not use this to write or refresh ClawChat profile/metadata fields such as agent_nickname, agent_avatar_url, agent_bio, agent_behavior, owner_nickname, owner_avatar_url, owner_bio, nickname, avatar_url, bio, profile_type, title, or description. When the user asks to refresh, sync, or update local ClawChat current-agent/owner/user/group profile information, use clawchat_metadata_sync with direction=pull instead. Use append for new long-term memory notes and replace only when intentionally rewriting the whole body."
             ),
             "parameters": {
                 "type": "object",
@@ -549,7 +549,7 @@ def register_tools(ctx) -> None:
         {
             "name": "clawchat_memory_edit",
             "description": _direct_tool_description(
-                "Replace exactly one existing text span in the agent-authored body of a ClawChat memory Markdown file. This never modifies the metadata block. Do not use this to edit ClawChat profile/metadata fields such as nickname, avatar_url, bio, profile_type, title, description, or behavior. Use clawchat_metadata_sync or clawchat_metadata_update for metadata. The oldText must match exactly once; use read first when unsure."
+                "Replace exactly one existing text span in the agent-authored body of a ClawChat memory Markdown file. This never modifies the metadata block. Do not use this to edit ClawChat profile/metadata fields such as agent_nickname, agent_avatar_url, agent_bio, agent_behavior, owner_nickname, owner_avatar_url, owner_bio, nickname, avatar_url, bio, profile_type, title, or description. Use clawchat_metadata_sync or clawchat_metadata_update for metadata. The oldText must match exactly once; use read first when unsure."
             ),
             "parameters": {
                 "type": "object",
@@ -573,7 +573,7 @@ def register_tools(ctx) -> None:
         {
             "name": "clawchat_metadata_sync",
             "description": _direct_tool_description(
-                "Synchronize the ClawChat metadata block for an explicit owner, user, or group target. Use direction=pull when the user asks to refresh, sync, or update local ClawChat profile information, user information, group information, or owner behavior from the server; this fetches the authoritative server record and rewrites only the metadata block. Use direction=push only to push selected existing local metadata fields to the server, then refresh the metadata block from the server response. For direction=push, pass non-empty fields containing only pushable metadata field names. This does not modify the agent-authored body. Do not combine clawchat_get_user_profile with clawchat_memory_write to update local profile metadata."
+                "Synchronize the ClawChat metadata block for an explicit owner, user, or group target. Use direction=pull when the user asks to refresh, sync, or update local ClawChat current agent profile/behavior, owner profile information, user information, or group information from the server; this fetches the authoritative server record and rewrites only the metadata block. Use direction=push only to push selected existing local metadata fields to the server, then refresh the metadata block from the server response. For direction=push, pass non-empty fields containing only pushable metadata field names: owner supports agent_behavior only; user supports nickname/avatar_url/bio for the connected account only; group supports title/description. This does not modify the agent-authored body. Do not combine clawchat_get_user_profile with clawchat_memory_write to update local profile metadata."
             ),
             "parameters": {
                 "type": "object",
@@ -602,7 +602,7 @@ def register_tools(ctx) -> None:
         {
             "name": "clawchat_metadata_update",
             "description": _direct_tool_description(
-                "Update ClawChat server metadata for an explicit owner, connected user account, or group target, then refresh the local metadata block from the server response. Use this only when the user wants to change server-side metadata fields. To refresh local metadata from the server without changing the server, use clawchat_metadata_sync with direction=pull. This always pushes to the server first and does not modify the agent-authored body."
+                "Update ClawChat server metadata for an explicit owner, connected user account, or group target, then refresh the local metadata block from the server response. Use this only when the user wants to change server-side metadata fields: current agent behavior via owner target agent_behavior, connected-user nickname/avatar_url/bio, or group title/description. To refresh local metadata from the server without changing the server, use clawchat_metadata_sync with direction=pull. This always pushes to the server first and does not modify the agent-authored body."
             ),
             "parameters": {
                 "type": "object",
