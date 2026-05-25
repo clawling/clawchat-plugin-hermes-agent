@@ -54,6 +54,7 @@ from clawchat_gateway.media_runtime import (
 from clawchat_gateway.mention_message import (
     TERMINAL_REPLY_INSTRUCTION,
     build_mention_message_fragments,
+    mention_context_entries,
     mention_message_text,
     mention_user_ids,
     normalize_mention_targets,
@@ -1423,6 +1424,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             message_id=message_id,
             fragments=fragments,
             mentioned_user_ids=mentioned_ids,
+            mention_context=mention_context_entries(normalized_mentions),
             reply_to_message_id=reply_to_message_id,
             include_message_id=True,
         )

@@ -27,9 +27,9 @@ def normalize_mention_targets(mentions: Any) -> list[dict[str, str]]:
         raw_display = mention.get("display")
         display = raw_display.strip() if isinstance(raw_display, str) else ""
         if not display:
-            display = f"@{user_id}"
-        elif not display.startswith("@"):
-            display = f"@{display}"
+            display = user_id
+        elif display.startswith("@"):
+            display = display[1:]
         seen.add(user_id)
         normalized.append({"userId": user_id, "display": display})
     return normalized
@@ -54,7 +54,14 @@ def mention_user_ids(mentions: list[dict[str, str]]) -> list[str]:
     return [mention["userId"] for mention in mentions]
 
 
+def mention_context_entries(mentions: list[dict[str, str]]) -> list[dict[str, str]]:
+    return [
+        {"kind": "mention", "user_id": mention["userId"], "display": mention["display"]}
+        for mention in mentions
+    ]
+
+
 def mention_message_text(*, mentions: list[dict[str, str]], text: str | None = None) -> str:
-    mention_text = "".join(mention["display"] for mention in mentions)
+    mention_text = "".join(f"@{mention['display']}" for mention in mentions)
     trimmed_text = text.strip() if isinstance(text, str) else ""
     return f"{mention_text} {trimmed_text}".strip() if trimmed_text else mention_text

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextvars
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -11,6 +13,7 @@ DEFAULT_TERMINAL_SEND_TTL_SECONDS = 60.0
 class TerminalClawChatSendRecord:
     message_id: str
     expires_at: float
+    scope_id: str
 
 
 class ClawChatMentionSender(Protocol):
@@ -27,7 +30,19 @@ class ClawChatMentionSender(Protocol):
 
 
 _active_sender: ClawChatMentionSender | None = None
-_terminal_sends: dict[tuple[str, str], TerminalClawChatSendRecord] = {}
+_terminal_send_scope: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "clawchat_terminal_send_scope",
+    default=None,
+)
+_terminal_sends: dict[tuple[str, str, str], TerminalClawChatSendRecord] = {}
+
+
+def _current_terminal_send_scope(*, create: bool = False) -> str | None:
+    scope_id = _terminal_send_scope.get()
+    if scope_id is None and create:
+        scope_id = f"term-{uuid.uuid4()}"
+        _terminal_send_scope.set(scope_id)
+    return scope_id
 
 
 def set_clawchat_mention_sender(sender: ClawChatMentionSender) -> None:
@@ -67,10 +82,15 @@ def mark_terminal_clawchat_send(
     message_id: str,
     ttl_seconds: float = DEFAULT_TERMINAL_SEND_TTL_SECONDS,
     now: float | None = None,
+    scope_id: str | None = None,
 ) -> None:
-    _terminal_sends[(account_id, chat_id)] = TerminalClawChatSendRecord(
+    effective_scope = scope_id or _current_terminal_send_scope(create=True)
+    if effective_scope is None:
+        return
+    _terminal_sends[(account_id, chat_id, effective_scope)] = TerminalClawChatSendRecord(
         message_id=message_id,
         expires_at=(now if now is not None else time.time()) + ttl_seconds,
+        scope_id=effective_scope,
     )
 
 
@@ -79,8 +99,12 @@ def consume_terminal_clawchat_send(
     account_id: str,
     chat_id: str,
     now: float | None = None,
+    scope_id: str | None = None,
 ) -> TerminalClawChatSendRecord | None:
-    key = (account_id, chat_id)
+    effective_scope = scope_id or _current_terminal_send_scope()
+    if effective_scope is None:
+        return None
+    key = (account_id, chat_id, effective_scope)
     record = _terminal_sends.pop(key, None)
     if record is None:
         return None
@@ -91,3 +115,4 @@ def consume_terminal_clawchat_send(
 
 def clear_terminal_clawchat_sends_for_test() -> None:
     _terminal_sends.clear()
+    _terminal_send_scope.set(None)

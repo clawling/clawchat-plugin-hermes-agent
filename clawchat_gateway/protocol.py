@@ -210,10 +210,12 @@ def build_message_send_event(
     message_id: str,
     fragments: list[dict[str, Any]],
     mentioned_user_ids: list[str] | None = None,
+    mention_context: list[dict[str, Any]] | None = None,
     reply_to_message_id: str | None = None,
     include_message_id: bool = False,
 ) -> dict[str, Any]:
-    context: dict[str, Any] = {"mentions": mentioned_user_ids or [], "reply": None}
+    context_mentions: list[Any] = mention_context if mention_context is not None else (mentioned_user_ids or [])
+    context: dict[str, Any] = {"mentions": context_mentions, "reply": None}
     if reply_to_message_id:
         context["reply"] = {
             "reply_to_msg_id": reply_to_message_id,
