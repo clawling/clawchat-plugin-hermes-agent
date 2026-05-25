@@ -203,6 +203,39 @@ def build_message_reply_event(
     )
 
 
+def build_message_send_event(
+    *,
+    chat_id: str,
+    chat_type: str,
+    message_id: str,
+    fragments: list[dict[str, Any]],
+    mentioned_user_ids: list[str] | None = None,
+    reply_to_message_id: str | None = None,
+    include_message_id: bool = False,
+) -> dict[str, Any]:
+    context: dict[str, Any] = {"mentions": mentioned_user_ids or [], "reply": None}
+    if reply_to_message_id:
+        context["reply"] = {
+            "reply_to_msg_id": reply_to_message_id,
+            "reply_preview": None,
+        }
+    payload: dict[str, Any] = {
+        "message_mode": "normal",
+        "message": {
+            "body": {"fragments": fragments},
+            "context": context,
+        },
+    }
+    if include_message_id:
+        payload["message_id"] = message_id
+    return _message_envelope(
+        "message.send",
+        chat_id=chat_id,
+        chat_type=chat_type,
+        payload=payload,
+    )
+
+
 def build_message_failed_event(
     *,
     chat_id: str,

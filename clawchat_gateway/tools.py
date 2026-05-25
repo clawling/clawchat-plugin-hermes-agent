@@ -27,8 +27,10 @@ from clawchat_gateway.clawchat_metadata import (
     update_metadata as update_clawchat_metadata,
 )
 from clawchat_gateway.config import ClawChatConfig
+from clawchat_gateway.mention_message import normalize_mention_targets
 from clawchat_gateway.profile import ProfileConfigError, load_profile_config
 from clawchat_gateway.storage import get_clawchat_store
+from clawchat_gateway.terminal_send import send_clawchat_mention_message
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
@@ -595,6 +597,44 @@ async def get_conversation(conversation_id: str) -> dict[str, Any]:
             _delete_conversation_cache(client, conversation_id_value)
             _delete_group_memory(conversation_id_value)
         return _api_error(exc)
+    except Exception as exc:  # noqa: BLE001
+        return _unknown_error(exc)
+
+
+async def mention_message(
+    chat_id: Any,
+    *,
+    chat_type: Any = "group",
+    text: Any = None,
+    mentions: Any,
+    reply_to_message_id: Any = None,
+) -> dict[str, Any]:
+    if not isinstance(chat_id, str) or not chat_id.strip():
+        return _validation_error("chatId is required")
+    if chat_type not in {"direct", "group"}:
+        return _validation_error("chatType must be direct or group")
+    if text is not None and not isinstance(text, str):
+        return _validation_error("text must be a string when provided")
+    if reply_to_message_id is not None and not isinstance(reply_to_message_id, str):
+        return _validation_error("replyToMessageId must be a string when provided")
+    try:
+        normalized_mentions = normalize_mention_targets(mentions)
+    except ValueError as exc:
+        return _validation_error(str(exc))
+    try:
+        return await send_clawchat_mention_message(
+            chat_id=chat_id.strip(),
+            chat_type=chat_type,
+            text=text,
+            mentions=normalized_mentions,
+            reply_to_message_id=(
+                reply_to_message_id.strip()
+                if isinstance(reply_to_message_id, str) and reply_to_message_id.strip()
+                else None
+            ),
+        )
+    except RuntimeError as exc:
+        return _config_error(str(exc))
     except Exception as exc:  # noqa: BLE001
         return _unknown_error(exc)
 

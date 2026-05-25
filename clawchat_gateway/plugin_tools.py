@@ -204,6 +204,27 @@ async def handle_clawchat_get_conversation(args, **kw):
     return _tool_result(result)
 
 
+async def handle_clawchat_mention_message(args, **kw):
+    task_id = kw.get("task_id") or "default"
+    logger.info("clawchat_mention_message start task_id=%s", task_id)
+    from clawchat_gateway import tools
+
+    result = await _recorded_tool_call(
+        "clawchat_mention_message",
+        args,
+        _account_id_from_kwargs(kw),
+        lambda: tools.mention_message(
+            str(args.get("chatId") or ""),
+            chat_type=args.get("chatType") or "group",
+            text=args.get("text") if isinstance(args.get("text"), str) else None,
+            mentions=args.get("mentions"),
+            reply_to_message_id=args.get("replyToMessageId"),
+        ),
+    )
+    logger.info("clawchat_mention_message done task_id=%s", task_id)
+    return _tool_result(result)
+
+
 async def handle_clawchat_create_moment(args, **kw):
     task_id = kw.get("task_id") or "default"
     logger.info("clawchat_create_moment start task_id=%s", task_id)
@@ -782,6 +803,62 @@ def register_tools(ctx) -> None:
         is_async=True,
         description="Get ClawChat Conversation",
         emoji="🧾",
+    )
+
+    ctx.register_tool(
+        "clawchat_mention_message",
+        "clawchat",
+        {
+            "name": "clawchat_mention_message",
+            "description": _direct_tool_description(
+                "Send a real ClawChat mention message to a direct or group conversation. "
+                "TRIGGER - invoke when the user asks to @, mention, notify, or address ClawChat users. "
+                "Prefer current group context sender_id for the mentioned participant. "
+                "Use clawchat_search_users only when no explicit or locally available id exists. "
+                "Never guess userId from names, nicknames, or plain @name text. Plain @name is not a real mention. "
+                'After this tool succeeds, the mention message has already been sent; return exactly "" and do not send a normal follow-up reply.'
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "chatId": {"type": "string", "description": "Explicit ClawChat conversation id to send to."},
+                    "chatType": {
+                        "type": "string",
+                        "enum": ["direct", "group"],
+                        "description": "Conversation type. Defaults to group when omitted.",
+                    },
+                    "text": {"type": "string", "description": "Optional text after the mention fragments."},
+                    "mentions": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "userId": {
+                                    "type": "string",
+                                    "description": "Explicit ClawChat user id to mention. Do not infer from nickname.",
+                                },
+                                "display": {
+                                    "type": "string",
+                                    "description": "Optional visible mention label. @ is added if omitted.",
+                                },
+                            },
+                            "required": ["userId"],
+                        },
+                        "description": "Mention targets. At least one explicit userId is required.",
+                    },
+                    "replyToMessageId": {
+                        "type": "string",
+                        "description": "Optional ClawChat message id to attach as reply context.",
+                    },
+                },
+                "required": ["chatId", "mentions"],
+            },
+        },
+        handle_clawchat_mention_message,
+        is_async=True,
+        description="Send ClawChat Mention Message",
+        emoji="@",
     )
 
     ctx.register_tool(

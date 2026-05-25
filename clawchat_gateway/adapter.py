@@ -51,6 +51,13 @@ from clawchat_gateway.media_runtime import (
     normalize_outbound_media_reference,
     upload_outbound_media,
 )
+from clawchat_gateway.mention_message import (
+    TERMINAL_REPLY_INSTRUCTION,
+    build_mention_message_fragments,
+    mention_message_text,
+    mention_user_ids,
+    normalize_mention_targets,
+)
 from clawchat_gateway.plugin_prompts import mode_prompt
 from clawchat_gateway.profile_sync import relation_for_sender
 from clawchat_gateway.protocol import (
@@ -59,11 +66,18 @@ from clawchat_gateway.protocol import (
     build_message_done_event,
     build_message_failed_event,
     build_message_reply_event,
+    build_message_send_event,
     build_typing_update_event,
     new_frame_id,
 )
 from clawchat_gateway.storage import get_clawchat_store
 from clawchat_gateway.stream_buffer import compute_delta
+from clawchat_gateway.terminal_send import (
+    clear_clawchat_mention_sender,
+    consume_terminal_clawchat_send,
+    mark_terminal_clawchat_send,
+    set_clawchat_mention_sender,
+)
 
 logger = logging.getLogger("clawchat_gateway.adapter")
 inbound_trace = logging.getLogger("clawchat_gateway.inbound_trace")
@@ -317,6 +331,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         except Exception:  # noqa: BLE001
             self._store = None
             logger.warning("clawchat adapter database unavailable")
+        set_clawchat_mention_sender(self)
 
     async def connect(self) -> bool:
         await self._connection.start()
@@ -333,6 +348,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         await self._cancel_profile_sync_tasks()
         await self._connection.stop()
         await self._group_message_coalescer.cancel()
+        clear_clawchat_mention_sender(self)
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         return {"name": chat_id, "type": "direct", "chat_id": chat_id}
@@ -1385,6 +1401,102 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
         return downloaded
 
+    async def send_mention_message(
+        self,
+        *,
+        chat_id: str,
+        chat_type: str = "group",
+        text: str | None = None,
+        mentions: list[dict[str, Any]],
+        reply_to_message_id: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_mentions = normalize_mention_targets(mentions)
+        mentioned_ids = mention_user_ids(normalized_mentions)
+        fragments = build_mention_message_fragments(
+            mentions=normalized_mentions,
+            text=text,
+        )
+        message_id = new_frame_id("msg")
+        frame = build_message_send_event(
+            chat_id=chat_id,
+            chat_type=chat_type,
+            message_id=message_id,
+            fragments=fragments,
+            mentioned_user_ids=mentioned_ids,
+            reply_to_message_id=reply_to_message_id,
+            include_message_id=True,
+        )
+        visible_text = mention_message_text(mentions=normalized_mentions, text=text)
+        self._upsert_minimal_conversation(
+            conversation_id=chat_id,
+            conversation_type=chat_type,
+            last_seen_at=frame.get("emitted_at") if isinstance(frame.get("emitted_at"), int) else None,
+        )
+        claimed = self._claim_outbound_message(
+            event_type="message.send",
+            trace_id=frame.get("trace_id") or frame.get("id"),
+            chat_id=chat_id,
+            message_id=message_id,
+            text=visible_text,
+            raw=frame,
+        )
+        if claimed is False:
+            mark_terminal_clawchat_send(
+                account_id=self._terminal_account_id(),
+                chat_id=chat_id,
+                message_id=message_id,
+            )
+            return {
+                "sent": True,
+                "terminal": True,
+                "noFollowupReply": True,
+                "instruction": TERMINAL_REPLY_INSTRUCTION,
+                "messageId": message_id,
+                "mentions": mentioned_ids,
+            }
+        if claimed is None:
+            return {
+                "error": "runtime",
+                "message": "clawchat outbound message claim failed",
+                "messageId": message_id,
+            }
+
+        sent = await self._connection.send_frame(frame, wait_for_ack=True)
+        if not sent:
+            error = "clawchat mention message dropped"
+            self._update_message_record(
+                kind="message",
+                direction="outbound",
+                event_type="message.failed",
+                trace_id=frame.get("trace_id") or frame.get("id"),
+                chat_id=chat_id,
+                message_id=message_id,
+                text=error,
+                raw=frame,
+            )
+            return {"error": "transport", "message": error, "messageId": message_id}
+
+        mark_terminal_clawchat_send(
+            account_id=self._terminal_account_id(),
+            chat_id=chat_id,
+            message_id=message_id,
+        )
+        logger.info(
+            "clawchat mention message sent chat_id=%s chat_type=%s message_id=%s mentions=%d",
+            chat_id,
+            chat_type,
+            message_id,
+            len(mentioned_ids),
+        )
+        return {
+            "sent": True,
+            "terminal": True,
+            "noFollowupReply": True,
+            "instruction": TERMINAL_REPLY_INSTRUCTION,
+            "messageId": message_id,
+            "mentions": mentioned_ids,
+        }
+
     async def send(
         self,
         chat_id: str,
@@ -1400,6 +1512,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             message_id=None,
             text=content or "",
         )
+        if self._consume_terminal_send(chat_id, phase="send"):
+            return SendResult(success=True)
         if self._should_suppress_tool_progress(content or ""):
             logger.info("clawchat tool progress suppressed chat_id=%s text_len=%d", chat_id, len(content or ""))
             return SendResult(success=True)
@@ -1562,6 +1676,11 @@ class ClawChatAdapter(BasePlatformAdapter):
             message_id=message_id,
             text=content or "",
         )
+        if self._consume_terminal_send(chat_id, phase="edit_message"):
+            if run is not None:
+                self._discard_run(run)
+                self._remember_completed_run(run.message_id)
+            return SendResult(success=True, message_id=message_id)
         if run is None:
             if message_id and message_id in self._completed_run_ids:
                 logger.info(
@@ -1630,6 +1749,11 @@ class ClawChatAdapter(BasePlatformAdapter):
             message_id=message_id,
             text=final_text or "",
         )
+        if self._consume_terminal_send(chat_id, phase="on_run_complete"):
+            if run is not None:
+                self._discard_run(run)
+                self._remember_completed_run(run.message_id)
+            return
         if run is None:
             if message_id and message_id in self._completed_run_ids:
                 logger.info(
@@ -1816,6 +1940,24 @@ class ClawChatAdapter(BasePlatformAdapter):
         if isinstance(kwargs.get("chat_type"), str):
             return kwargs["chat_type"]
         return "direct"
+
+    def _terminal_account_id(self) -> str:
+        return "default"
+
+    def _consume_terminal_send(self, chat_id: str, *, phase: str) -> bool:
+        terminal = consume_terminal_clawchat_send(
+            account_id=self._terminal_account_id(),
+            chat_id=chat_id,
+        )
+        if terminal is None:
+            return False
+        logger.info(
+            "clawchat suppressing %s reply after terminal tool send chat_id=%s message_id=%s",
+            phase,
+            chat_id,
+            terminal.message_id,
+        )
+        return True
 
     def _map_source_chat_type(self, chat_type: str) -> str:
         if chat_type == "direct":

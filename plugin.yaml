@@ -14,6 +14,7 @@ provides_tools:
   - clawchat_list_moments
   - clawchat_list_conversations
   - clawchat_get_conversation
+  - clawchat_mention_message
   - clawchat_create_moment
   - clawchat_delete_moment
   - clawchat_toggle_moment_reaction
