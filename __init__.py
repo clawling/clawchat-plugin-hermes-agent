@@ -87,6 +87,21 @@ def _clawchat_platform_config_with_home_extra(config):
         return SimpleNamespace(extra=merged_extra)
 
 
+def _clawchat_env_enablement() -> dict | None:
+    home_channel = os.getenv("CLAWCHAT_HOME_CHANNEL", "").strip()
+    if not home_channel:
+        return None
+
+    home = {
+        "chat_id": home_channel,
+        "name": os.getenv("CLAWCHAT_HOME_CHANNEL_NAME", "").strip() or "ClawChat",
+    }
+    thread_id = os.getenv("CLAWCHAT_HOME_CHANNEL_THREAD_ID", "").strip()
+    if thread_id:
+        home["thread_id"] = thread_id
+    return {"home_channel": home}
+
+
 def _clawchat_dependencies_available() -> bool:
     try:
         import websockets  # noqa: F401
@@ -160,6 +175,7 @@ def _register_platform(ctx) -> bool:
         ),
         allowed_users_env="CLAWCHAT_ALLOWED_USERS",
         allow_all_env="CLAWCHAT_ALLOW_ALL_USERS",
+        env_enablement_fn=_clawchat_env_enablement,
         max_message_length=0,
         emoji="💬",
         platform_hint=platform_prompt(),
