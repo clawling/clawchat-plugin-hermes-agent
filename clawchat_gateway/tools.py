@@ -17,6 +17,7 @@ from clawchat_gateway.clawchat_memory import (
     delete_clawchat_memory_file,
     edit_clawchat_memory_body,
     read_clawchat_memory_file,
+    search_clawchat_memory,
     write_clawchat_memory_body,
 )
 from clawchat_gateway.clawchat_metadata import (
@@ -321,6 +322,39 @@ async def memory_read(
             "total": len(content),
             "truncated": end < len(content),
         }
+    except ValueError as exc:
+        return _validation_error(str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return _unknown_error(exc)
+
+
+async def memory_search(
+    query: str,
+    *,
+    target_types: list[str] | None = None,
+    max_results: int | None = 10,
+) -> dict[str, Any]:
+    if not isinstance(query, str) or not query.strip():
+        return _validation_error("query is required")
+    if target_types is not None:
+        if not isinstance(target_types, list) or not target_types:
+            return _validation_error("targetTypes must be a non-empty array")
+        if any(target_type not in {"owner", "user", "group"} for target_type in target_types):
+            return _validation_error("targetTypes must contain only owner, user, or group")
+    if max_results is None:
+        max_results = 10
+    if not isinstance(max_results, int) or max_results < 1 or max_results > 50:
+        return _validation_error("maxResults must be between 1 and 50")
+    root, err = _resolve_memory_root()
+    if err is not None:
+        return err
+    try:
+        return search_clawchat_memory(
+            root,
+            query,
+            target_types=target_types,
+            max_results=max_results,
+        )
     except ValueError as exc:
         return _validation_error(str(exc))
     except Exception as exc:  # noqa: BLE001

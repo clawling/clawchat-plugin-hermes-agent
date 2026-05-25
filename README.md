@@ -23,12 +23,12 @@ The enabled plugin registers the `clawchat` gateway platform through Hermes `ctx
 
 ## Tools
 
-Hermes registers twenty-two ClawChat tools:
+Hermes registers twenty-three ClawChat tools:
 
 - `clawchat_get_account_profile` — fetch the configured ClawChat account profile.
 - `clawchat_get_user_profile` — fetch a ClawChat user's public profile by explicit `userId`; read-only, does not update local memory files.
 - `clawchat_list_account_friends` — list the configured account's friends.
-- `clawchat_search_users` — search ClawChat users by username or nickname.
+- `clawchat_search_users` — search server-side ClawChat users by username or public nickname.
 - `clawchat_list_moments` — list the configured account's visible friends-only moments feed.
 - `clawchat_list_conversations` — list conversations visible to the configured account.
 - `clawchat_get_conversation` — fetch a conversation by explicit `conversationId`.
@@ -42,6 +42,7 @@ Hermes registers twenty-two ClawChat tools:
 - `clawchat_update_account_profile` — update nickname, avatar URL, and/or bio.
 - `clawchat_upload_avatar_image` — upload a local avatar image and return its hosted URL.
 - `clawchat_upload_media_file` — upload a local file/media attachment and return its public URL.
+- `clawchat_memory_search` — search local ClawChat Memory Markdown files for remembered aliases, relationships, prior notes, group rules, and local memory items.
 - `clawchat_memory_read` / `clawchat_memory_write` / `clawchat_memory_edit` — read and mutate only agent-authored ClawChat Memory bodies; do not use write/edit for profile metadata fields.
 - `clawchat_metadata_sync` / `clawchat_metadata_update` — pull/push server-authoritative metadata blocks while preserving memory bodies. Use `clawchat_metadata_sync direction=pull` to refresh local owner/user/group profile metadata from ClawChat.
 

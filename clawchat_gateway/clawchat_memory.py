@@ -13,6 +13,7 @@ __all__ = [
     "ensure_clawchat_memory_target_safe",
     "delete_clawchat_memory_file",
     "read_clawchat_memory_file",
+    "search_clawchat_memory",
     "write_clawchat_memory_body",
     "edit_clawchat_memory_body",
     "write_clawchat_metadata",
@@ -272,6 +273,96 @@ def read_clawchat_memory_file(root: str | Path, target_type: str, target_id: str
     content = _normalize_line_endings(path.read_text(encoding="utf-8"))
     parsed = _parse_clawchat_memory_content(content)
     return {**target, "exists": True, "content": content, **parsed}
+
+
+def _normalize_search_targets(target_types: list[str] | tuple[str, ...] | None) -> list[str]:
+    if target_types is None:
+        return ["owner", "user", "group"]
+    if not target_types:
+        raise ValueError("target_types must not be empty")
+    invalid = [target_type for target_type in target_types if target_type not in {"owner", "user", "group"}]
+    if invalid:
+        raise ValueError(f"unsupported ClawChat memory target_type: {', '.join(invalid)}")
+    return list(target_types)
+
+
+def _safe_search_targets(root: Path, target_type: str) -> list[tuple[str, str]]:
+    if target_type == "owner":
+        return [("owner", "owner")]
+    dirname = "users" if target_type == "user" else "groups"
+    directory = root / dirname
+    directory_stat = _lstat_if_exists(directory)
+    if directory_stat is None:
+        return []
+    if stat.S_ISLNK(directory_stat.st_mode):
+        raise ValueError(f"{dirname}/ must not be a symlink")
+    if not stat.S_ISDIR(directory_stat.st_mode):
+        raise ValueError(f"{dirname}/ must be a directory")
+    targets: list[tuple[str, str]] = []
+    for child in sorted(directory.iterdir(), key=lambda item: item.name):
+        if child.suffix != ".md":
+            continue
+        target_id = child.stem
+        _validate_file_id(target_id)
+        ensure_clawchat_memory_target_safe(root, target_type, target_id)
+        targets.append((target_type, target_id))
+    return targets
+
+
+def _first_matching_line(value: str, query_lower: str) -> str | None:
+    for line in _normalize_line_endings(value).split("\n"):
+        if query_lower in line.lower():
+            return line if len(line) <= 300 else f"{line[:297]}..."
+    return None
+
+
+def _build_search_match(target_type: str, target_id: str, memory: dict, query_lower: str) -> dict | None:
+    matched_fields: list[str] = []
+    snippets: list[str] = []
+    metadata_text = "\n".join(f"{key}: {value}" for key, value in memory["metadata"].items())
+    metadata_snippet = _first_matching_line(metadata_text, query_lower)
+    if metadata_snippet is not None:
+        matched_fields.append("metadata")
+        snippets.append(metadata_snippet)
+    body_snippet = _first_matching_line(memory["body"], query_lower)
+    if body_snippet is not None:
+        matched_fields.append("body")
+        if body_snippet not in snippets:
+            snippets.append(body_snippet)
+    if not matched_fields:
+        return None
+    return {
+        "targetType": target_type,
+        "targetId": target_id,
+        "matchedFields": matched_fields,
+        "snippets": snippets[:3],
+    }
+
+
+def search_clawchat_memory(
+    root: str | Path,
+    query: str,
+    *,
+    target_types: list[str] | tuple[str, ...] | None = None,
+    max_results: int = 10,
+) -> dict:
+    query = query.strip()
+    if not query:
+        raise ValueError("query is required")
+    if not isinstance(max_results, int) or max_results < 1 or max_results > 50:
+        raise ValueError("max_results must be between 1 and 50")
+    root_path = Path(root)
+    query_lower = query.lower()
+    matches: list[dict] = []
+    for target_type in _normalize_search_targets(target_types):
+        for candidate_type, candidate_id in _safe_search_targets(root_path, target_type):
+            memory = read_clawchat_memory_file(root_path, candidate_type, candidate_id)
+            if not memory["exists"]:
+                continue
+            match = _build_search_match(candidate_type, candidate_id, memory, query_lower)
+            if match is not None:
+                matches.append(match)
+    return {"query": query, "matches": matches[:max_results], "truncated": len(matches) > max_results}
 
 
 def delete_clawchat_memory_file(root: str | Path, target_type: str, target_id: str) -> None:

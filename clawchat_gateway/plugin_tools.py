@@ -370,6 +370,26 @@ async def handle_clawchat_memory_read(args, **kw):
     return _tool_result(result)
 
 
+async def handle_clawchat_memory_search(args, **kw):
+    task_id = kw.get("task_id") or "default"
+    logger.info("clawchat_memory_search start task_id=%s", task_id)
+    from clawchat_gateway import tools
+
+    max_results = _optional_int_arg(args.get("maxResults"))
+    result = await _recorded_tool_call(
+        "clawchat_memory_search",
+        args,
+        _account_id_from_kwargs(kw),
+        lambda: tools.memory_search(
+            str(args.get("query") or ""),
+            target_types=args.get("targetTypes") if isinstance(args.get("targetTypes"), list) else None,
+            max_results=10 if max_results is None else max_results,
+        ),
+    )
+    logger.info("clawchat_memory_search done task_id=%s", task_id)
+    return _tool_result(result)
+
+
 async def handle_clawchat_memory_write(args, **kw):
     task_id = kw.get("task_id") or "default"
     logger.info("clawchat_memory_write start task_id=%s", task_id)
@@ -517,12 +537,54 @@ def register_tools(ctx) -> None:
     }
 
     ctx.register_tool(
+        "clawchat_memory_search",
+        "clawchat",
+        {
+            "name": "clawchat_memory_search",
+            "description": _direct_tool_description(
+                "Search local ClawChat memory Markdown files by keyword across owner.md, users/*.md, and groups/*.md. "
+                "Use this when the user asks who/what a remembered person, alias, relationship, prior note, group rule, group context, or local ClawChat memory item is and no explicit targetId is known. "
+                "This searches local memory metadata and agent-authored Markdown body. It does not contact the ClawChat server. "
+                "Use this before answering unknown when the user provides a name, alias, phrase, or uncertain reference that may exist in local memory. "
+                "If exactly one relevant result is found, use clawchat_memory_read with the returned targetType and targetId when full context is needed. If multiple relevant results are found, summarize the candidates or ask the user to clarify."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Keyword to search in local ClawChat memory metadata and Markdown body.",
+                    },
+                    "targetTypes": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["owner", "user", "group"]},
+                        "minItems": 1,
+                        "description": "Optional target namespaces to search. Defaults to owner, user, and group.",
+                    },
+                    "maxResults": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 50,
+                        "description": "Maximum local memory matches to return. Default 10, max 50.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+        handle_clawchat_memory_search,
+        is_async=True,
+        description="Search ClawChat Memory",
+        emoji="M",
+    )
+
+    ctx.register_tool(
         "clawchat_memory_read",
         "clawchat",
         {
             "name": "clawchat_memory_read",
             "description": _direct_tool_description(
-                "Read a ClawChat memory Markdown file by explicit targetType and targetId. Use this when you need existing owner, user, or group memory content. Do not guess ids from names. This reads metadata and agent-authored body; it does not contact the ClawChat server."
+                "Read one local ClawChat memory Markdown file by explicit targetType and targetId. Use this only when the memory target is already known, such as owner, a concrete userId, a concrete groupId, the current sender_id, or a target returned by clawchat_memory_search. Do not guess targetId from names, nicknames, aliases, or plain text. If the user gives a name, alias, phrase, relationship, or uncertain reference, use clawchat_memory_search first. This reads metadata and agent-authored body; it does not contact the ClawChat server."
             ),
             "parameters": {
                 "type": "object",
@@ -546,7 +608,7 @@ def register_tools(ctx) -> None:
         {
             "name": "clawchat_memory_write",
             "description": _direct_tool_description(
-                "Append to or replace only the agent-authored body of a ClawChat memory Markdown file by explicit targetType and targetId. This never modifies the metadata block. Do not use this to write or refresh ClawChat profile/metadata fields such as agent_nickname, agent_avatar_url, agent_bio, agent_behavior, owner_nickname, owner_avatar_url, owner_bio, nickname, avatar_url, bio, profile_type, title, or description. When the user asks to refresh, sync, or update local ClawChat current-agent/owner/user/group profile information, use clawchat_metadata_sync with direction=pull instead. Use append for new long-term memory notes and replace only when intentionally rewriting the whole body."
+                "Append to or replace only the agent-authored body of a ClawChat memory Markdown file by explicit targetType and targetId. This never modifies the metadata block. Do not use this to write or refresh ClawChat profile/metadata fields such as agent_nickname, agent_avatar_url, agent_bio, agent_behavior, owner_nickname, owner_avatar_url, owner_bio, nickname, avatar_url, bio, profile_type, title, or description. When the user asks to refresh, sync, or update local ClawChat current-agent/owner/user/group profile information, use clawchat_metadata_sync with direction=pull instead. Do not use this to search memory. Use clawchat_memory_search to locate uncertain names, aliases, relationships, or prior notes before writing. Use append for new long-term memory notes and replace only when intentionally rewriting the whole body."
             ),
             "parameters": {
                 "type": "object",
@@ -570,7 +632,7 @@ def register_tools(ctx) -> None:
         {
             "name": "clawchat_memory_edit",
             "description": _direct_tool_description(
-                "Replace exactly one existing text span in the agent-authored body of a ClawChat memory Markdown file. This never modifies the metadata block. Do not use this to edit ClawChat profile/metadata fields such as agent_nickname, agent_avatar_url, agent_bio, agent_behavior, owner_nickname, owner_avatar_url, owner_bio, nickname, avatar_url, bio, profile_type, title, or description. Use clawchat_metadata_sync or clawchat_metadata_update for metadata. The oldText must match exactly once; use read first when unsure."
+                "Replace exactly one existing text span in the agent-authored body of a ClawChat memory Markdown file. This never modifies the metadata block. Do not use this to edit ClawChat profile/metadata fields such as agent_nickname, agent_avatar_url, agent_bio, agent_behavior, owner_nickname, owner_avatar_url, owner_bio, nickname, avatar_url, bio, profile_type, title, or description. Use clawchat_metadata_sync or clawchat_metadata_update for metadata. Do not use this to search memory. Use clawchat_memory_search to locate uncertain names, aliases, relationships, or prior notes before editing. The oldText must match exactly once; use read first when unsure."
             ),
             "parameters": {
                 "type": "object",
@@ -594,7 +656,7 @@ def register_tools(ctx) -> None:
         {
             "name": "clawchat_metadata_sync",
             "description": _direct_tool_description(
-                "Synchronize the ClawChat metadata block for an explicit owner, user, or group target. Use direction=pull when the user asks to refresh, sync, or update local ClawChat current agent profile/behavior, owner profile information, user information, or group information from the server; this fetches the authoritative server record and rewrites only the metadata block. Use direction=push only to push selected existing local metadata fields to the server, then refresh the metadata block from the server response. For direction=push, pass non-empty fields containing only pushable metadata field names: owner supports agent_behavior only; user supports nickname/avatar_url/bio for the connected account only; group supports title/description. This does not modify the agent-authored body. Do not combine clawchat_get_user_profile with clawchat_memory_write to update local profile metadata."
+                "Synchronize the ClawChat metadata block for an explicit owner, user, or group target. Use direction=pull when the user asks to refresh, sync, or update local ClawChat current agent profile/behavior, owner profile information, user information, or group information from the server; this fetches the authoritative server record and rewrites only the metadata block. Use direction=push only to push selected existing local metadata fields to the server, then refresh the metadata block from the server response. For direction=push, pass non-empty fields containing only pushable metadata field names: owner supports agent_behavior only; user supports nickname/avatar_url/bio for the connected account only; group supports title/description. This does not modify the agent-authored body. This synchronizes only the metadata block. It does not search or read agent-authored long-term memory body. For remembered aliases or local notes, use clawchat_memory_search or clawchat_memory_read. Do not combine clawchat_get_user_profile with clawchat_memory_write to update local profile metadata."
             ),
             "parameters": {
                 "type": "object",
@@ -667,10 +729,10 @@ def register_tools(ctx) -> None:
         {
             "name": "clawchat_get_user_profile",
             "description": _direct_tool_description(
-                "Fetch a ClawChat user's public profile by userId. "
-                "TRIGGER — invoke when the user asks to look up, view, or inspect a specific ClawChat user's public profile "
-                "and provides a concrete userId. Do not guess or infer userId from a nickname/display name. "
-                "This is a read-only lookup and does not update local ClawChat Memory files. "
+                "Fetch a ClawChat user's server-side public profile by explicit userId. "
+                "TRIGGER — invoke when the user asks to view or inspect a specific ClawChat user's public profile and provides a concrete userId, or after clawchat_search_users returns a userId. "
+                "Do not guess or infer userId from nickname, display name, alias, or local memory text. "
+                "This is a read-only lookup and server lookup. It does not read local ClawChat memory files and does not update local metadata. "
                 "When the user asks to refresh, sync, or update that user's local profile information, call clawchat_metadata_sync with targetType=user, that targetId, and direction=pull. "
                 "Use `clawchat_get_account_profile` for the agent's own connected ClawChat account unless an explicit userId is provided."
             ),
@@ -715,9 +777,10 @@ def register_tools(ctx) -> None:
         {
             "name": "clawchat_search_users",
             "description": _direct_tool_description(
-                "Search ClawChat users by username or nickname. "
-                "TRIGGER - invoke when the user asks to search, find, or look up ClawChat users by a typed query, name, username, or nickname, such as \"search ClawChat users named Alice\", \"查找用户 Alice\", or \"搜一下昵称 Alice\". "
-                "Empty q returns no users. Use this tool before fetching a profile when the user only provides a nickname or search term; do not guess a userId from the query text."
+                "Search ClawChat users by username or nickname. Search server-side ClawChat users in the ClawChat user directory. "
+                "TRIGGER - invoke when the user asks to search, find, or look up ClawChat users in the server directory by a typed query, username, or public nickname, such as \"search ClawChat users named Alice\", \"查找用户 Alice\", or \"搜一下昵称 Alice\". "
+                "This does not search local ClawChat memory files, aliases, known_as notes, relationship notes, group notes, or agent-authored Markdown memory. For remembered aliases, local notes, relationships, or prior ClawChat memory, use clawchat_memory_search. "
+                "Empty q returns no users. Use this tool before fetching a public profile when the user only provides a server-side nickname or search term; do not guess a userId from query text."
             ),
             "parameters": {
                 "type": "object",

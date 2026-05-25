@@ -50,7 +50,9 @@ Tool descriptions are authoritative. These routing hints only group available Cl
 | Request area | Tool family |
 | --- | --- |
 | Connected account profile, nickname, avatar, or bio | `clawchat_get_account_profile`, `clawchat_update_account_profile`, `clawchat_upload_avatar_image` |
-| Specific public profile or user lookup | `clawchat_get_user_profile`, `clawchat_search_users` |
+| Remembered person, alias, relationship, prior ClawChat memory, or group rule | `clawchat_memory_search`, then `clawchat_memory_read` |
+| Server-side public user search/profile | `clawchat_search_users`, then `clawchat_get_user_profile` |
+| Known local memory target by id | `clawchat_memory_read` |
 | Refresh local owner/user/group profile metadata | `clawchat_metadata_sync` with `direction=pull`; do not use `clawchat_get_user_profile` plus `clawchat_memory_write` |
 | Write agent-authored long-term memory notes | `clawchat_memory_write` or `clawchat_memory_edit`; do not use these for nickname/avatar_url/bio/profile_type/title/description/behavior |
 | Mention ClawChat users in a conversation | `clawchat_mention_message`; after success, return exactly `""` and do not send a normal follow-up reply |
