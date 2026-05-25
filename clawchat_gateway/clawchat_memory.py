@@ -11,6 +11,7 @@ from typing import Any
 __all__ = [
     "resolve_clawchat_memory_path",
     "ensure_clawchat_memory_target_safe",
+    "delete_clawchat_memory_file",
     "read_clawchat_memory_file",
     "write_clawchat_memory_body",
     "edit_clawchat_memory_body",
@@ -268,6 +269,14 @@ def read_clawchat_memory_file(root: str | Path, target_type: str, target_id: str
     content = _normalize_line_endings(path.read_text(encoding="utf-8"))
     parsed = _parse_clawchat_memory_content(content)
     return {**target, "exists": True, "content": content, **parsed}
+
+
+def delete_clawchat_memory_file(root: str | Path, target_type: str, target_id: str) -> None:
+    path = ensure_clawchat_memory_target_safe(root, target_type, target_id)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
 
 
 def _append_body(existing_body: str, content: str) -> str:

@@ -26,6 +26,7 @@ from clawchat_gateway.api_client import ClawChatApiClient, ClawChatApiError
 from clawchat_gateway.clawchat_memory import (
     METADATA_END,
     METADATA_START,
+    delete_clawchat_memory_file,
     read_clawchat_memory_file,
 )
 from clawchat_gateway.clawchat_metadata import (
@@ -499,6 +500,36 @@ class ClawChatAdapter(BasePlatformAdapter):
                 return value
         return None
 
+    def _is_conversation_not_found_error(self, exc: ClawChatApiError) -> bool:
+        if exc.status in (404, 410) or exc.code in (404, 410, 40401):
+            return True
+        return "conversation not found" in str(exc).lower()
+
+    def _delete_missing_conversation_metadata(self, root: Path, conversation_id: str) -> None:
+        try:
+            delete_clawchat_memory_file(root, "group", conversation_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "clawchat metadata file delete failed chat_id=%s error=%s",
+                conversation_id,
+                exc,
+            )
+        self._conversation_metadata_versions.pop(conversation_id, None)
+        if self._store is None:
+            return
+        try:
+            self._store.delete_conversation_cache(
+                platform="clawchat",
+                account_id=self._account_id(),
+                conversation_id=conversation_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "clawchat conversation cache delete failed chat_id=%s error=%s",
+                conversation_id,
+                exc,
+            )
+
     async def _refresh_conversation_metadata(
         self,
         conversation_id: str,
@@ -517,8 +548,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
             result = await pull_group_metadata(root, client, conversation_id)
         except ClawChatApiError as exc:
-            if exc.status in (404, 410) or exc.code in (404, 410):
-                self._conversation_metadata_versions.pop(conversation_id, None)
+            if self._is_conversation_not_found_error(exc):
+                self._delete_missing_conversation_metadata(root, conversation_id)
                 return False
             logger.warning(
                 "clawchat metadata refresh failed chat_id=%s status=%s error=%s",

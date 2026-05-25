@@ -14,6 +14,7 @@ from typing import Any
 
 from clawchat_gateway.api_client import ClawChatApiClient, ClawChatApiError
 from clawchat_gateway.clawchat_memory import (
+    delete_clawchat_memory_file,
     edit_clawchat_memory_body,
     read_clawchat_memory_file,
     write_clawchat_memory_body,
@@ -229,6 +230,19 @@ def _delete_conversation_cache(client: ClawChatApiClient, conversation_id: str) 
         account_id=_account_id(client),
         conversation_id=conversation_id,
     )
+
+
+def _delete_group_memory(conversation_id: str) -> None:
+    root, err = _resolve_memory_root()
+    if err is not None or root is None:
+        return
+    delete_clawchat_memory_file(root, "group", conversation_id)
+
+
+def _is_conversation_not_found(exc: ClawChatApiError) -> bool:
+    if exc.status in (404, 410) or exc.code in (404, 410, 40401):
+        return True
+    return "conversation not found" in str(exc).lower()
 
 
 def _target_error(target_type: str, target_id: str) -> dict[str, Any] | None:
@@ -577,8 +591,9 @@ async def get_conversation(conversation_id: str) -> dict[str, Any]:
         _cache_conversation_details(client, result)
         return result
     except ClawChatApiError as exc:
-        if exc.status in (404, 410) or exc.code in (404, 410):
+        if _is_conversation_not_found(exc):
             _delete_conversation_cache(client, conversation_id_value)
+            _delete_group_memory(conversation_id_value)
         return _api_error(exc)
     except Exception as exc:  # noqa: BLE001
         return _unknown_error(exc)
