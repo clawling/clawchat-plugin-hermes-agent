@@ -112,7 +112,7 @@ async def refresh_agent_behavior_profile(
             memory_root,
             client,
             agent_id,
-            agent_user_id=agent_user_id,
+            connected_user_id=agent_user_id,
         )
     except Exception:  # noqa: BLE001
         logger.warning(

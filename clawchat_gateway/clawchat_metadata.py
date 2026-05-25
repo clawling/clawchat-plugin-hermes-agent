@@ -67,8 +67,7 @@ def _copy_present(
 def owner_metadata_from_agent(
     result: dict[str, Any],
     *,
-    agent_id: str,
-    agent_user_id: str = "",
+    connected_user_id: str = "",
     owner_user_id: str = "",
 ) -> dict[str, str]:
     detail = _detail(result, "agent")
@@ -76,17 +75,14 @@ def owner_metadata_from_agent(
         return {}
     metadata: dict[str, str] = {}
     _copy_present(metadata, "updated_at", detail, "updated_at", "updatedAt")
-    metadata["agent_id"] = _first_string(detail, "id", "agent_id", "agentId", fallback=agent_id)
-    resolved_agent_user_id = _first_string(
+    resolved_agent_id = _first_string(
         detail,
         "user_id",
         "userId",
-        "agent_user_id",
-        "agentUserId",
-        fallback=agent_user_id,
+        fallback=connected_user_id,
     )
-    if resolved_agent_user_id:
-        metadata["agent_user_id"] = resolved_agent_user_id
+    if resolved_agent_id:
+        metadata["agent_id"] = resolved_agent_id
     resolved_owner_id = _first_string(
         detail,
         "owner_id",
@@ -110,7 +106,7 @@ def user_metadata_from_profile(result: dict[str, Any], *, user_id: str) -> dict[
         return {}
     metadata: dict[str, str] = {}
     _copy_present(metadata, "updated_at", detail, "updated_at", "updatedAt")
-    metadata["id"] = _first_string(detail, "id", "user_id", "userId", fallback=user_id)
+    metadata["id"] = user_id
     _copy_present(metadata, "nickname", detail, "nickname")
     _copy_present(metadata, "avatar_url", detail, "avatar_url", "avatarUrl")
     _copy_present(metadata, "bio", detail, "bio")
@@ -129,13 +125,7 @@ def group_metadata_from_conversation(
     group = detail.get("group") if isinstance(detail.get("group"), dict) else {}
     metadata: dict[str, str] = {}
     _copy_present(metadata, "updated_at", detail, "updated_at", "updatedAt")
-    metadata["id"] = _first_string(
-        detail,
-        "id",
-        "conversation_id",
-        "conversationId",
-        fallback=group_id,
-    )
+    metadata["id"] = group_id
     _copy_present(metadata, "type", detail, "type", "conversation_type", "conversationType")
     for field in ("title", "description"):
         if field in detail:
@@ -166,7 +156,7 @@ async def pull_owner_metadata(
     client: Any,
     agent_id: str,
     *,
-    agent_user_id: str = "",
+    connected_user_id: str = "",
     owner_user_id: str = "",
 ) -> dict[str, Any]:
     if not agent_id:
@@ -175,8 +165,7 @@ async def pull_owner_metadata(
     result = await client.get_agent_detail(agent_id)
     metadata = owner_metadata_from_agent(
         result,
-        agent_id=agent_id,
-        agent_user_id=agent_user_id,
+        connected_user_id=connected_user_id,
         owner_user_id=owner_user_id,
     )
     write_clawchat_metadata(root, "owner", "owner", metadata)
@@ -354,7 +343,10 @@ async def update_metadata(
 
     if target_type == "owner":
         result = await client.patch_agent(agent_id, **allowed_patch)
-        metadata = owner_metadata_from_agent(result, agent_id=agent_id)
+        metadata = owner_metadata_from_agent(
+            result,
+            connected_user_id=connected_user_id,
+        )
         write_clawchat_metadata(root, "owner", "owner", metadata)
     elif target_type == "user":
         result = await client.update_my_profile(**allowed_patch)

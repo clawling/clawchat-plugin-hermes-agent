@@ -25,7 +25,6 @@ _METADATA_FIELDS_BY_TARGET = {
     "owner": {
         "updated_at",
         "agent_id",
-        "agent_user_id",
         "owner_id",
         "nickname",
         "avatar_url",

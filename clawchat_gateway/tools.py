@@ -405,7 +405,7 @@ async def metadata_sync(
                 root,
                 client,
                 cfg["agent_id"],
-                agent_user_id=cfg.get("user_id", ""),
+                connected_user_id=cfg.get("user_id", ""),
                 owner_user_id=cfg.get("owner_user_id", ""),
             )
         if target_type == "user":

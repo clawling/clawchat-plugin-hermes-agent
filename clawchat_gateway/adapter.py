@@ -559,7 +559,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 root,
                 client,
                 agent_id,
-                agent_user_id=self._clawchat_config.user_id,
+                connected_user_id=self._clawchat_config.user_id,
                 owner_user_id=self._owner_user_id(),
             )
         except Exception as exc:  # noqa: BLE001
