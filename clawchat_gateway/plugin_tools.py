@@ -9,6 +9,19 @@ from clawchat_gateway.storage import get_clawchat_store
 logger = logging.getLogger(__name__)
 
 
+def _mention_user_ids_from_args(mentions) -> list[str]:
+    if not isinstance(mentions, list):
+        return []
+    user_ids: list[str] = []
+    for mention in mentions:
+        if not isinstance(mention, dict):
+            continue
+        user_id = mention.get("userId")
+        if isinstance(user_id, str) and user_id:
+            user_ids.append(user_id)
+    return user_ids
+
+
 def _tool_result(payload: dict) -> str:
     """Return a Hermes v0.12-compatible tool result string."""
     return json.dumps(payload, ensure_ascii=False)
@@ -206,7 +219,16 @@ async def handle_clawchat_get_conversation(args, **kw):
 
 async def handle_clawchat_mention_message(args, **kw):
     task_id = kw.get("task_id") or "default"
-    logger.info("clawchat_mention_message start task_id=%s", task_id)
+    mention_user_ids = _mention_user_ids_from_args(args.get("mentions"))
+    text = args.get("text") if isinstance(args.get("text"), str) else None
+    logger.warning(
+        "clawchat_mention_message start task_id=%s chat_id=%s chat_type=%s mentions=%s text_len=%d",
+        task_id,
+        args.get("chatId") or "",
+        args.get("chatType") or "group",
+        mention_user_ids,
+        len(text or ""),
+    )
     from clawchat_gateway import tools
 
     result = await _recorded_tool_call(
@@ -221,7 +243,14 @@ async def handle_clawchat_mention_message(args, **kw):
             reply_to_message_id=args.get("replyToMessageId"),
         ),
     )
-    logger.info("clawchat_mention_message done task_id=%s", task_id)
+    logger.warning(
+        "clawchat_mention_message done task_id=%s sent=%s message_id=%s error=%s mentions=%s",
+        task_id,
+        result.get("sent") if isinstance(result, dict) else None,
+        result.get("messageId") if isinstance(result, dict) else None,
+        result.get("error") if isinstance(result, dict) else None,
+        (result.get("mentions") or mention_user_ids) if isinstance(result, dict) else mention_user_ids,
+    )
     return _tool_result(result)
 
 
@@ -879,6 +908,7 @@ def register_tools(ctx) -> None:
                 "Prefer current group context sender_id for the mentioned participant. "
                 "Use clawchat_search_users only when no explicit or locally available id exists. "
                 "Never guess userId from names, nicknames, or plain @name text. Plain @name is not a real mention. "
+                "Pass the visible label as mentions[].display when known. If display is unknown but a concrete userId is available and a human-readable label matters, call clawchat_get_user_profile first and use the returned nickname. Otherwise let text start with @label so the adapter can lift it into the mention fragment; do not send duplicate @label as normal text. "
                 'After this tool succeeds, the mention message has already been sent; return exactly "" and do not send a normal follow-up reply.'
             ),
             "parameters": {
@@ -890,7 +920,10 @@ def register_tools(ctx) -> None:
                         "enum": ["direct", "group"],
                         "description": "Conversation type. Defaults to group when omitted.",
                     },
-                    "text": {"type": "string", "description": "Optional text after the mention fragments."},
+                    "text": {
+                        "type": "string",
+                        "description": "Optional text after the mention fragments. If this is only a visible @label for a mention target, the adapter uses it as that mention's display label and does not send duplicate text.",
+                    },
                     "mentions": {
                         "type": "array",
                         "minItems": 1,
@@ -903,7 +936,7 @@ def register_tools(ctx) -> None:
                                 },
                                 "display": {
                                     "type": "string",
-                                    "description": "Optional visible mention label. @ is added if omitted.",
+                                    "description": "Optional visible mention label without leading @. Use a reliable label from current context or clawchat_get_user_profile when human-readable display matters. Omit only when unknown; do not put userId here as a fallback.",
                                 },
                             },
                             "required": ["userId"],

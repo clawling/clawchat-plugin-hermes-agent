@@ -53,6 +53,7 @@ from clawchat_gateway.media_runtime import (
 )
 from clawchat_gateway.mention_message import (
     TERMINAL_REPLY_INSTRUCTION,
+    apply_text_mention_labels,
     build_mention_message_fragments,
     mention_context_entries,
     mention_message_text,
@@ -1412,10 +1413,11 @@ class ClawChatAdapter(BasePlatformAdapter):
         reply_to_message_id: str | None = None,
     ) -> dict[str, Any]:
         normalized_mentions = normalize_mention_targets(mentions)
+        normalized_mentions, remaining_text = apply_text_mention_labels(normalized_mentions, text)
         mentioned_ids = mention_user_ids(normalized_mentions)
         fragments = build_mention_message_fragments(
             mentions=normalized_mentions,
-            text=text,
+            text=remaining_text,
         )
         message_id = new_frame_id("msg")
         frame = build_message_send_event(
@@ -1428,7 +1430,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             reply_to_message_id=reply_to_message_id,
             include_message_id=True,
         )
-        visible_text = mention_message_text(mentions=normalized_mentions, text=text)
+        visible_text = mention_message_text(mentions=normalized_mentions, text=remaining_text)
         self._upsert_minimal_conversation(
             conversation_id=chat_id,
             conversation_type=chat_type,
@@ -1448,6 +1450,13 @@ class ClawChatAdapter(BasePlatformAdapter):
                 chat_id=chat_id,
                 message_id=message_id,
             )
+            logger.warning(
+                "clawchat mention message already claimed chat_id=%s chat_type=%s message_id=%s mentions=%s",
+                chat_id,
+                chat_type,
+                message_id,
+                mentioned_ids,
+            )
             return {
                 "sent": True,
                 "terminal": True,
@@ -1457,6 +1466,13 @@ class ClawChatAdapter(BasePlatformAdapter):
                 "mentions": mentioned_ids,
             }
         if claimed is None:
+            logger.warning(
+                "clawchat mention message claim failed chat_id=%s chat_type=%s message_id=%s mentions=%s",
+                chat_id,
+                chat_type,
+                message_id,
+                mentioned_ids,
+            )
             return {
                 "error": "runtime",
                 "message": "clawchat outbound message claim failed",
@@ -1466,6 +1482,13 @@ class ClawChatAdapter(BasePlatformAdapter):
         sent = await self._connection.send_frame(frame, wait_for_ack=True)
         if not sent:
             error = "clawchat mention message dropped"
+            logger.warning(
+                "clawchat mention message dropped chat_id=%s chat_type=%s message_id=%s mentions=%s",
+                chat_id,
+                chat_type,
+                message_id,
+                mentioned_ids,
+            )
             self._update_message_record(
                 kind="message",
                 direction="outbound",
@@ -1483,12 +1506,12 @@ class ClawChatAdapter(BasePlatformAdapter):
             chat_id=chat_id,
             message_id=message_id,
         )
-        logger.info(
-            "clawchat mention message sent chat_id=%s chat_type=%s message_id=%s mentions=%d",
+        logger.warning(
+            "clawchat mention message sent chat_id=%s chat_type=%s message_id=%s mentions=%s",
             chat_id,
             chat_type,
             message_id,
-            len(mentioned_ids),
+            mentioned_ids,
         )
         return {
             "sent": True,

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 TERMINAL_REPLY_INSTRUCTION = (
     'The mention message has already been sent to ClawChat. Return exactly "" '
     "and do not send a normal follow-up reply."
 )
+
+
+MENTION_LABEL_RE = re.compile(r"^@(?P<label>\S+)(?P<rest>(?:\s+.*)?)$", re.DOTALL)
 
 
 def normalize_mention_targets(mentions: Any) -> list[dict[str, str]]:
@@ -26,13 +30,37 @@ def normalize_mention_targets(mentions: Any) -> list[dict[str, str]]:
 
         raw_display = mention.get("display")
         display = raw_display.strip() if isinstance(raw_display, str) else ""
-        if not display:
-            display = user_id
-        elif display.startswith("@"):
+        if display.startswith("@"):
             display = display[1:]
         seen.add(user_id)
-        normalized.append({"userId": user_id, "display": display})
+        normalized_mention = {"userId": user_id}
+        if display:
+            normalized_mention["display"] = display
+        normalized.append(normalized_mention)
     return normalized
+
+
+def apply_text_mention_labels(
+    mentions: list[dict[str, str]],
+    text: str | None,
+) -> tuple[list[dict[str, str]], str]:
+    remaining = text.strip() if isinstance(text, str) else ""
+    if not remaining:
+        return mentions, ""
+
+    normalized = [dict(mention) for mention in mentions]
+    for mention in normalized:
+        if mention.get("display"):
+            continue
+        match = MENTION_LABEL_RE.match(remaining)
+        if not match:
+            break
+        label = match.group("label").strip()
+        if not label:
+            break
+        mention["display"] = label
+        remaining = (match.group("rest") or "").strip()
+    return normalized, remaining
 
 
 def build_mention_message_fragments(
@@ -40,13 +68,15 @@ def build_mention_message_fragments(
     mentions: list[dict[str, str]],
     text: str | None = None,
 ) -> list[dict[str, Any]]:
-    fragments: list[dict[str, Any]] = [
-        {"kind": "mention", "user_id": mention["userId"], "display": mention["display"]}
-        for mention in mentions
-    ]
-    trimmed_text = text.strip() if isinstance(text, str) else ""
-    if trimmed_text:
-        fragments.append({"kind": "text", "text": f" {trimmed_text}"})
+    normalized, remaining_text = apply_text_mention_labels(mentions, text)
+    fragments: list[dict[str, Any]] = []
+    for mention in normalized:
+        fragment = {"kind": "mention", "user_id": mention["userId"]}
+        if mention.get("display"):
+            fragment["display"] = mention["display"]
+        fragments.append(fragment)
+    if remaining_text:
+        fragments.append({"kind": "text", "text": f" {remaining_text}"})
     return fragments
 
 
@@ -55,13 +85,16 @@ def mention_user_ids(mentions: list[dict[str, str]]) -> list[str]:
 
 
 def mention_context_entries(mentions: list[dict[str, str]]) -> list[dict[str, str]]:
-    return [
-        {"kind": "mention", "user_id": mention["userId"], "display": mention["display"]}
-        for mention in mentions
-    ]
+    entries: list[dict[str, str]] = []
+    for mention in mentions:
+        entry = {"kind": "mention", "user_id": mention["userId"]}
+        if mention.get("display"):
+            entry["display"] = mention["display"]
+        entries.append(entry)
+    return entries
 
 
 def mention_message_text(*, mentions: list[dict[str, str]], text: str | None = None) -> str:
-    mention_text = "".join(f"@{mention['display']}" for mention in mentions)
-    trimmed_text = text.strip() if isinstance(text, str) else ""
-    return f"{mention_text} {trimmed_text}".strip() if trimmed_text else mention_text
+    normalized, remaining_text = apply_text_mention_labels(mentions, text)
+    mention_text = "".join(f"@{mention.get('display') or mention['userId']}" for mention in normalized)
+    return f"{mention_text} {remaining_text}".strip() if remaining_text else mention_text
