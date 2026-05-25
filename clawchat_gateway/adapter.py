@@ -1508,12 +1508,6 @@ class ClawChatAdapter(BasePlatformAdapter):
         **kwargs: Any,
     ) -> SendResult:
         chat_type = self._resolve_chat_type(metadata, kwargs)
-        self._debug_hermes_output(
-            phase="send",
-            chat_id=chat_id,
-            message_id=None,
-            text=content or "",
-        )
         if self._consume_terminal_send(chat_id, phase="send"):
             return SendResult(success=True)
         if self._should_suppress_tool_progress(content or ""):
@@ -1672,12 +1666,6 @@ class ClawChatAdapter(BasePlatformAdapter):
         **kwargs: Any,
     ) -> SendResult:
         run = self._resolve_active_run(chat_id=chat_id, message_id=message_id)
-        self._debug_hermes_output(
-            phase="edit_message",
-            chat_id=chat_id,
-            message_id=message_id,
-            text=content or "",
-        )
         if self._consume_terminal_send(chat_id, phase="edit_message"):
             if run is not None:
                 self._discard_run(run)
