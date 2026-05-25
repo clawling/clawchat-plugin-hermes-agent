@@ -151,6 +151,38 @@ def _create_clawchat_adapter(config):
     return ClawChatAdapter(_clawchat_platform_config_with_home_extra(config))
 
 
+def _patch_send_message_target_parser() -> None:
+    """Teach Hermes' built-in send_message tool ClawChat conversation ids.
+
+    Hermes keeps target parsing inside ``tools.send_message_tool``. Plugin
+    platforms can register adapters without changing Hermes source, but the
+    built-in parser must still recognize platform-specific explicit ids before
+    it reaches the registered adapter. Keep this patch narrowly scoped to
+    ``clawchat:cnv_...`` and delegate every other target to Hermes' original
+    parser.
+    """
+    try:
+        from tools import send_message_tool
+    except Exception as exc:
+        logger.debug("ClawChat could not patch send_message target parser: %s", exc)
+        return
+
+    original = getattr(send_message_tool, "_parse_target_ref", None)
+    if not callable(original) or getattr(original, "_clawchat_target_patch", False):
+        return
+
+    def _parse_target_ref_with_clawchat(platform_name: str, target_ref: str):
+        platform = str(platform_name or "").strip().lower()
+        target = str(target_ref or "").strip()
+        if platform == "clawchat" and target.startswith("cnv_"):
+            return target, None, True
+        return original(platform_name, target_ref)
+
+    _parse_target_ref_with_clawchat._clawchat_target_patch = True
+    _parse_target_ref_with_clawchat._clawchat_original = original
+    send_message_tool._parse_target_ref = _parse_target_ref_with_clawchat
+
+
 def _register_platform(ctx) -> bool:
     from clawchat_gateway.plugin_prompts import platform_prompt
 
@@ -180,6 +212,7 @@ def _register_platform(ctx) -> bool:
         emoji="💬",
         platform_hint=platform_prompt(),
     )
+    _patch_send_message_target_parser()
     logger.info("ClawChat registered Hermes platform via plugin registry")
     return True
 

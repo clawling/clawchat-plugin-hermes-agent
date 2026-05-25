@@ -49,6 +49,13 @@ def apply_text_mention_labels(
         return mentions, ""
 
     normalized = [dict(mention) for mention in mentions]
+    missing_display = [mention for mention in normalized if not mention.get("display")]
+    if len(normalized) == 1 and len(missing_display) == 1 and remaining.startswith("@"):
+        label = remaining[1:].strip()
+        if label:
+            missing_display[0]["display"] = label
+            return normalized, ""
+
     for mention in normalized:
         if mention.get("display"):
             continue

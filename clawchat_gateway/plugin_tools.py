@@ -908,7 +908,7 @@ def register_tools(ctx) -> None:
                 "Prefer current group context sender_id for the mentioned participant. "
                 "Use clawchat_search_users only when no explicit or locally available id exists. "
                 "Never guess userId from names, nicknames, or plain @name text. Plain @name is not a real mention. "
-                "Pass the visible label as mentions[].display when known. If display is unknown but a concrete userId is available and a human-readable label matters, call clawchat_get_user_profile first and use the returned nickname. Otherwise let text start with @label so the adapter can lift it into the mention fragment; do not send duplicate @label as normal text. "
+                "Pass the visible label as mentions[].display when known. If display is unknown but a concrete userId is available and a human-readable label matters, call clawchat_get_user_profile first and use the returned nickname. For a single mention, if text is only a visible @label, the adapter can lift everything after @ into the mention fragment display, including spaces; if you also need body text, pass mentions[].display explicitly and put only the body text in text. "
                 'After this tool succeeds, the mention message has already been sent; return exactly "" and do not send a normal follow-up reply.'
             ),
             "parameters": {
@@ -922,7 +922,7 @@ def register_tools(ctx) -> None:
                     },
                     "text": {
                         "type": "string",
-                        "description": "Optional text after the mention fragments. If this is only a visible @label for a mention target, the adapter uses it as that mention's display label and does not send duplicate text.",
+                        "description": "Optional text after the mention fragments. For a single mention without mentions[].display, if this value is only a visible @label, the adapter uses everything after @ as that mention's display label, including spaces, and sends no duplicate text. If you also need body text, pass mentions[].display explicitly and put only the body text here.",
                     },
                     "mentions": {
                         "type": "array",
