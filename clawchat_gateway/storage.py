@@ -447,6 +447,32 @@ class ClawChatStore:
         finally:
             conn.close()
 
+    def get_cached_conversation_type(
+        self,
+        *,
+        platform: str,
+        account_id: str,
+        conversation_id: str,
+    ) -> str | None:
+        self.initialize()
+        if self._disabled:
+            return None
+        conn = sqlite3.connect(self.db_path)
+        try:
+            row = conn.execute(
+                """
+                SELECT conversation_type
+                FROM clawchat_conversations
+                WHERE platform = ? AND account_id = ? AND conversation_id = ?
+                """,
+                (platform, account_id, conversation_id),
+            ).fetchone()
+            if row is None or row[0] not in {"direct", "group"}:
+                return None
+            return str(row[0])
+        finally:
+            conn.close()
+
     def get_activation_conversation(
         self,
         *,

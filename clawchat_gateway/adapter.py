@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import re
@@ -357,7 +358,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         return {"name": chat_id, "type": "direct", "chat_id": chat_id}
 
     async def send_typing(self, chat_id: str, metadata: Any = None) -> None:
-        chat_type = self._resolve_chat_type(metadata, {})
+        chat_type = self._resolve_chat_type(chat_id, metadata, {})
         if self._should_skip_typing(chat_id, active=True):
             logger.debug("clawchat typing active skipped chat_id=%s reason=already_active", chat_id)
             return
@@ -372,7 +373,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         logger.info("clawchat typing active sent chat_id=%s chat_type=%s", chat_id, chat_type)
 
     async def stop_typing(self, chat_id: str, metadata: Any = None) -> None:
-        chat_type = self._resolve_chat_type(metadata, {})
+        chat_type = self._resolve_chat_type(chat_id, metadata, {})
         if self._should_skip_typing(chat_id, active=False):
             logger.debug("clawchat typing inactive skipped chat_id=%s reason=already_inactive", chat_id)
             return
@@ -1540,7 +1541,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         metadata: Any = None,
         **kwargs: Any,
     ) -> SendResult:
-        chat_type = self._resolve_chat_type(metadata, kwargs)
+        chat_type = self._resolve_chat_type(chat_id, metadata, kwargs)
         if self._consume_terminal_send(chat_id, phase="send"):
             return SendResult(success=True)
         if self._should_suppress_tool_progress(content or ""):
@@ -1562,7 +1563,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             reply_to,
         )
 
-        if self._should_use_static_mode(fragments):
+        if self._should_use_static_mode(fragments, metadata):
             frame = build_message_reply_event(
                 chat_id=chat_id,
                 chat_type=chat_type,
@@ -1957,12 +1958,36 @@ class ClawChatAdapter(BasePlatformAdapter):
             metadata=merged_metadata,
         )
 
-    def _resolve_chat_type(self, metadata: Any, kwargs: dict[str, Any]) -> str:
+    def _resolve_chat_type(self, chat_id: str, metadata: Any, kwargs: dict[str, Any]) -> str:
         if isinstance(metadata, dict) and isinstance(metadata.get("chat_type"), str):
             return metadata["chat_type"]
         if isinstance(kwargs.get("chat_type"), str):
             return kwargs["chat_type"]
+        cached_type = self._cached_conversation_type(chat_id)
+        if cached_type is not None:
+            return cached_type
         return "direct"
+
+    def _cached_conversation_type(self, chat_id: str) -> str | None:
+        if self._store is None:
+            return None
+        get_cached = getattr(self._store, "get_cached_conversation_type", None)
+        if not callable(get_cached):
+            return None
+        try:
+            value = get_cached(
+                platform="clawchat",
+                account_id=self._account_id(),
+                conversation_id=chat_id,
+            )
+        except Exception:
+            logger.debug(
+                "clawchat cached conversation type lookup failed chat_id=%s",
+                chat_id,
+                exc_info=True,
+            )
+            return None
+        return value if value in {"direct", "group"} else None
 
     def _terminal_account_id(self) -> str:
         return "default"
@@ -2026,9 +2051,34 @@ class ClawChatAdapter(BasePlatformAdapter):
             return None
         return max(candidates, key=lambda run: run.started_order)
 
-    def _should_use_static_mode(self, fragments: list[dict[str, Any]]) -> bool:
+    def _should_use_static_mode(self, fragments: list[dict[str, Any]], metadata: Any = None) -> bool:
         has_media = any(fragment.get("kind") != "text" for fragment in fragments)
-        return self._clawchat_config.reply_mode != "stream" or has_media
+        return (
+            self._clawchat_config.reply_mode != "stream"
+            or has_media
+            or not self._is_managed_turn_response(metadata)
+        )
+
+    def _is_managed_turn_response(self, metadata: Any) -> bool:
+        if isinstance(metadata, dict) and metadata.get("notify") is True:
+            return True
+        return not self._is_send_message_tool_call()
+
+    def _is_send_message_tool_call(self) -> bool:
+        frame = inspect.currentframe()
+        try:
+            frame = frame.f_back if frame is not None else None
+            while frame is not None:
+                filename = frame.f_code.co_filename.replace("\\", "/")
+                if (
+                    frame.f_code.co_name == "_send_via_adapter"
+                    and filename.endswith("/tools/send_message_tool.py")
+                ):
+                    return True
+                frame = frame.f_back
+        finally:
+            del frame
+        return False
 
     def _filter_output_content(self, content: str) -> str:
         filtered = content
