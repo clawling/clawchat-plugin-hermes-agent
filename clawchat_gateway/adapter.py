@@ -295,7 +295,7 @@ def check_clawchat_requirements(platform_config: Any) -> bool:
 class ClawChatAdapter(BasePlatformAdapter):
     SUPPORTS_MESSAGE_EDITING = True
     REQUIRES_EDIT_FINALIZE = True
-    MAX_MESSAGE_LENGTH = 0
+    MAX_MESSAGE_LENGTH = 4000
 
     def __init__(self, platform_config: Any) -> None:
         super().__init__(platform_config, _clawchat_platform())
