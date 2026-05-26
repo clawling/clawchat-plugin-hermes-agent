@@ -1589,7 +1589,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         is_group = chat_type == "group"
         if self._consume_terminal_send(chat_id, phase="send"):
             return SendResult(success=True)
-        if self._should_suppress_tool_progress(content or "", force=is_group):
+        if self._should_suppress_tool_progress(content or ""):
             logger.info(
                 "clawchat tool progress suppressed chat_id=%s text_len=%d",
                 chat_id,
@@ -1612,8 +1612,6 @@ class ClawChatAdapter(BasePlatformAdapter):
                 )
         visible_content = self._filter_output_content(
             content or "",
-            force_hide_think=is_group,
-            force_hide_tools=is_group,
         )
         fragments = await self._build_fragments(visible_content, metadata, kwargs)
         if is_group and (content or "").strip() and self._is_empty_text_response(fragments):
@@ -1794,8 +1792,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
             return SendResult(success=False, error="no active run for message_id")
 
-        is_group = run.chat_type == "group"
-        if self._should_suppress_tool_progress(content or "", force=is_group) and not finalize:
+        if self._should_suppress_tool_progress(content or "") and not finalize:
             logger.info(
                 "clawchat tool progress edit suppressed chat_id=%s message_id=%s text_len=%d",
                 chat_id,
@@ -1806,8 +1803,6 @@ class ClawChatAdapter(BasePlatformAdapter):
 
         visible_content = self._filter_output_content(
             content or "",
-            force_hide_think=is_group,
-            force_hide_tools=is_group,
         )
         if self._is_noop_response_text(visible_content):
             self._discard_run(run)
@@ -1876,26 +1871,17 @@ class ClawChatAdapter(BasePlatformAdapter):
                 message_id,
             )
             return
-        is_group = run.chat_type == "group"
         self._discard_run(run)
         self._remember_completed_run(run.message_id)
         logger.info(
             "clawchat run complete chat_id=%s message_id=%s final_len=%d",
             chat_id,
             run.message_id,
-            len(
-                self._filter_output_content(
-                    final_text or "",
-                    force_hide_think=is_group,
-                    force_hide_tools=is_group,
-                )
-            ),
+            len(self._filter_output_content(final_text or "")),
         )
 
         visible_final_text = self._filter_output_content(
             final_text or "",
-            force_hide_think=is_group,
-            force_hide_tools=is_group,
         )
         if not run.last_text and self._is_noop_response_text(visible_final_text):
             logger.info("clawchat silent response final suppressed chat_id=%s message_id=%s", chat_id, run.message_id)
@@ -2192,18 +2178,12 @@ class ClawChatAdapter(BasePlatformAdapter):
             del frame
         return False
 
-    def _filter_output_content(
-        self,
-        content: str,
-        *,
-        force_hide_think: bool = False,
-        force_hide_tools: bool = False,
-    ) -> str:
+    def _filter_output_content(self, content: str) -> str:
         filtered = content
-        if force_hide_think or not self._clawchat_config.show_think_output:
+        if not self._clawchat_config.show_think_output:
             filtered = _THINK_BLOCK_RE.sub("", filtered)
             filtered = _THINK_OPEN_RE.sub("", filtered)
-        if force_hide_tools or not self._clawchat_config.show_tools_output:
+        if not self._clawchat_config.show_tools_output:
             filtered = _TOOL_FENCE_BLOCK_RE.sub("", filtered)
             filtered = _TOOL_FENCE_OPEN_RE.sub("", filtered)
             filtered = _TOOL_TAG_BLOCK_RE.sub("", filtered)
@@ -2230,8 +2210,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             and not str(fragments[0].get("text") or "").strip()
         )
 
-    def _should_suppress_tool_progress(self, content: str, *, force: bool = False) -> bool:
-        if self._clawchat_config.show_tool_progress and not force:
+    def _should_suppress_tool_progress(self, content: str) -> bool:
+        if self._clawchat_config.show_tool_progress:
             return False
         lines = [line for line in content.splitlines() if line.strip()]
         if not lines:
