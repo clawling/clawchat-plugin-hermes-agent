@@ -447,6 +447,49 @@ class ClawChatStore:
         finally:
             conn.close()
 
+    def list_cached_conversation_members(
+        self,
+        *,
+        platform: str,
+        account_id: str,
+        conversation_id: str,
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        if self._disabled:
+            return []
+        conn = sqlite3.connect(self.db_path)
+        try:
+            rows = conn.execute(
+                """
+                SELECT user_id, role, raw_json, last_seen_at
+                FROM clawchat_conversation_members
+                WHERE platform = ? AND account_id = ? AND conversation_id = ?
+                ORDER BY rowid
+                """,
+                (platform, account_id, conversation_id),
+            ).fetchall()
+            members: list[dict[str, Any]] = []
+            for user_id, role, raw_json, last_seen_at in rows:
+                if not user_id:
+                    continue
+                raw = None
+                if isinstance(raw_json, str) and raw_json:
+                    try:
+                        raw = json.loads(raw_json)
+                    except Exception:  # noqa: BLE001
+                        raw = None
+                members.append(
+                    {
+                        "user_id": str(user_id),
+                        "role": role if isinstance(role, str) else None,
+                        "raw": raw,
+                        "last_seen_at": last_seen_at if isinstance(last_seen_at, int) else None,
+                    }
+                )
+            return members
+        finally:
+            conn.close()
+
     def get_cached_conversation_type(
         self,
         *,

@@ -44,7 +44,19 @@ def _message_is_owner(message: InboundMessage) -> str:
 
 
 def _message_mentions(message: InboundMessage) -> str:
-    return ",".join(message.mentioned_user_ids) or "-"
+    mentions = message.mentioned_users or [{"id": user_id} for user_id in message.mentioned_user_ids]
+    if not mentions:
+        return "-"
+    values: list[str] = []
+    for mention in mentions:
+        user_id = mention.get("id")
+        if not user_id:
+            continue
+        display = mention.get("display")
+        safe_user_id = _message_field(user_id)
+        safe_display = _message_field(display) if display else ""
+        values.append(f"{safe_user_id}({safe_display})" if safe_display else safe_user_id)
+    return ",".join(values) or "-"
 
 
 def _message_field(value: str) -> str:
@@ -75,7 +87,7 @@ def format_coalesced_group_text(
         lines.append(f"sender_profile_type: {_message_field(_message_profile_type(message))}")
         lines.append(f"sender_is_owner: {_message_is_owner(message)}")
         lines.append(f"mentions_current_agent: {'true' if message.was_mentioned else 'false'}")
-        lines.append(f"mentioned_user_ids: {_message_field(_message_mentions(message))}")
+        lines.append(f"mentioned_users: {_message_mentions(message)}")
         lines.append("text:")
         lines.append(_message_body(message))
     return "\n".join(lines)
@@ -198,11 +210,19 @@ class GroupMessageCoalescer:
             max_wait_task.cancel()
         latest = batch[-1]
         mentioned_user_ids = []
+        mentioned_users: list[dict[str, str]] = []
         seen_mention_ids = set()
         for message in batch:
-            for user_id in message.mentioned_user_ids:
+            message_mentions = message.mentioned_users or [
+                {"id": user_id} for user_id in message.mentioned_user_ids
+            ]
+            for mention in message_mentions:
+                user_id = mention.get("id")
+                if not user_id:
+                    continue
                 if user_id not in seen_mention_ids:
                     mentioned_user_ids.append(user_id)
+                    mentioned_users.append(mention)
                     seen_mention_ids.add(user_id)
         merged_raw: dict[str, Any] = {
             "clawchat_group_batch": True,
@@ -220,5 +240,6 @@ class GroupMessageCoalescer:
             media_types=[kind for message in batch for kind in message.media_types],
             was_mentioned=any(message.was_mentioned for message in batch),
             mentioned_user_ids=mentioned_user_ids,
+            mentioned_users=mentioned_users,
         )
         await self._dispatch(merged)

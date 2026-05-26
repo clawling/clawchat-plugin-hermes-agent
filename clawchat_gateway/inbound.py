@@ -19,6 +19,7 @@ class InboundMessage:
     media_types: list[str] = field(default_factory=list)
     was_mentioned: bool = False
     mentioned_user_ids: list[str] = field(default_factory=list)
+    mentioned_users: list[dict[str, str]] = field(default_factory=list)
     sender_relation: str = ""
     sender_profile_type: str = ""
 
@@ -67,28 +68,62 @@ def _fragment_text(fragment: dict[str, Any]) -> str | None:
     return None
 
 
-def _extract_mentioned_user_ids(mentions: Any) -> list[str]:
+def _mention_id(mention: dict[str, Any]) -> str | None:
+    for key in ("user_id", "userId", "id"):
+        value = mention.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _mention_display(mention: dict[str, Any]) -> str | None:
+    for key in ("display", "label", "name", "nick_name", "nickname"):
+        value = mention.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().removeprefix("@")
+    return None
+
+
+def _extract_mentioned_users(mentions: Any) -> list[dict[str, str]]:
     if not isinstance(mentions, list):
         return []
 
-    mentioned_user_ids: list[str] = []
+    mentioned_users: list[dict[str, str]] = []
     seen: set[str] = set()
     for mention in mentions:
         mention_id: str | None = None
+        display: str | None = None
         if isinstance(mention, dict):
-            for key in ("user_id", "id"):
-                value = mention.get(key)
-                if isinstance(value, str) and value:
-                    mention_id = value
-                    break
+            mention_id = _mention_id(mention)
+            display = _mention_display(mention)
         elif isinstance(mention, str) and mention:
             mention_id = mention
 
         if mention_id is not None and mention_id not in seen:
             seen.add(mention_id)
-            mentioned_user_ids.append(mention_id)
+            item = {"id": mention_id}
+            if display:
+                item["display"] = display
+            mentioned_users.append(item)
 
-    return mentioned_user_ids
+    return mentioned_users
+
+
+def _mentioned_user_ids(mentions: list[dict[str, str]]) -> list[str]:
+    return [mention["id"] for mention in mentions if mention.get("id")]
+
+
+def _merge_mentioned_users(*sources: list[dict[str, str]]) -> list[dict[str, str]]:
+    merged: dict[str, dict[str, str]] = {}
+    for source in sources:
+        for mention in source:
+            mention_id = mention.get("id")
+            if not mention_id:
+                continue
+            existing = merged.get(mention_id)
+            if existing is None or (not existing.get("display") and mention.get("display")):
+                merged[mention_id] = mention
+    return list(merged.values())
 
 
 def parse_inbound_message(
@@ -110,7 +145,19 @@ def parse_inbound_message(
     if chat_type not in {"direct", "group"}:
         return None
 
-    mentioned_user_ids = _extract_mentioned_user_ids(context.get("mentions"))
+    context_mentioned_users = _extract_mentioned_users(context.get("mentions"))
+    fragment_mentioned_users: list[dict[str, str]] = []
+    for fragment in _coerce_fragments(message):
+        if isinstance(fragment, dict) and _fragment_kind(fragment) == "mention":
+            mention_id = _mention_id(fragment)
+            if mention_id:
+                item = {"id": mention_id}
+                display = _mention_display(fragment)
+                if display:
+                    item["display"] = display
+                fragment_mentioned_users.append(item)
+    mentioned_users = _merge_mentioned_users(fragment_mentioned_users, context_mentioned_users)
+    mentioned_user_ids = _mentioned_user_ids(mentioned_users)
     was_mentioned = config.user_id in mentioned_user_ids
 
     if (
@@ -132,6 +179,12 @@ def parse_inbound_message(
         text = _fragment_text(fragment)
         if kind in (None, "text") and text is not None:
             text_parts.append(text)
+            continue
+        if kind == "mention":
+            mention_id = _mention_id(fragment)
+            display = _mention_display(fragment)
+            if display or mention_id:
+                text_parts.append(f"@{display or mention_id}")
             continue
         if kind in {"image", "file", "audio", "video"} and isinstance(
             fragment.get("url"), str
@@ -160,4 +213,5 @@ def parse_inbound_message(
         media_types=media_types,
         was_mentioned=was_mentioned,
         mentioned_user_ids=mentioned_user_ids,
+        mentioned_users=mentioned_users,
     )
