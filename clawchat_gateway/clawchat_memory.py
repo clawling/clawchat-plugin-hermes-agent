@@ -52,6 +52,7 @@ _METADATA_FIELDS_BY_TARGET = {
         "description",
         "creator_id",
         "created_at",
+        "participant_ids",
     },
 }
 

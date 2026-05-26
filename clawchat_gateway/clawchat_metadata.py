@@ -146,6 +146,19 @@ def group_metadata_from_conversation(
             _copy_present(metadata, field, group, field)
     _copy_present(metadata, "creator_id", detail, "creator_id", "creatorId")
     _copy_present(metadata, "created_at", detail, "created_at", "createdAt")
+    participant_ids: list[str] = []
+    raw_participants = detail.get("participants")
+    if isinstance(raw_participants, list):
+        seen: set[str] = set()
+        for participant in raw_participants:
+            if not isinstance(participant, dict):
+                continue
+            user_id = _first_string(participant, "id", "user_id", "userId")
+            if user_id and user_id not in seen:
+                seen.add(user_id)
+                participant_ids.append(user_id)
+    if participant_ids:
+        metadata["participant_ids"] = ",".join(participant_ids)
     return metadata
 
 

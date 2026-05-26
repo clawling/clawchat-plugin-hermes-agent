@@ -46,6 +46,7 @@ from clawchat_gateway.group_message_coalescer import (
     format_coalesced_group_text,
 )
 from clawchat_gateway.inbound import InboundMessage, parse_inbound_message
+from clawchat_gateway.llm_context_debug import write_llm_context_snapshot
 from clawchat_gateway.media_runtime import (
     download_inbound_media,
     infer_media_kind_from_mime,
@@ -461,21 +462,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
             if activation_id:
                 ids.append(str(activation_id))
-            cached_ids = self._store.list_cached_conversation_ids(
-                platform="clawchat",
-                account_id=self._account_id(),
-                limit=RECONNECT_REFRESH_LIMIT * 2,
-            )
-            cached_seen: set[str] = set()
-            for cached_id in cached_ids:
-                if not cached_id or cached_id in cached_seen or cached_id in ids:
-                    continue
-                cached_seen.add(cached_id)
-                ids.append(str(cached_id))
-                if len(cached_seen) >= RECONNECT_REFRESH_LIMIT:
-                    break
         except Exception:  # noqa: BLE001
-            logger.warning("clawchat reconnect conversation list failed", exc_info=True)
+            logger.warning("clawchat activation conversation read failed", exc_info=True)
             return
         seen: set[str] = set()
         for conversation_id in ids:
@@ -558,20 +546,6 @@ class ClawChatAdapter(BasePlatformAdapter):
                 exc,
             )
         self._conversation_metadata_versions.pop(conversation_id, None)
-        if self._store is None:
-            return
-        try:
-            self._store.delete_conversation_cache(
-                platform="clawchat",
-                account_id=self._account_id(),
-                conversation_id=conversation_id,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "clawchat conversation cache delete failed chat_id=%s error=%s",
-                conversation_id,
-                exc,
-            )
 
     async def _refresh_conversation_metadata(
         self,
@@ -688,29 +662,6 @@ class ClawChatAdapter(BasePlatformAdapter):
             logger.warning("clawchat activation owner cache read failed", exc_info=True)
             return ""
         return str(owner_user_id or "")
-
-    def _upsert_minimal_conversation(
-        self,
-        *,
-        conversation_id: str | None,
-        conversation_type: str | None,
-        last_seen_at: int | None,
-    ) -> bool:
-        if self._store is None or not conversation_id:
-            return False
-        try:
-            created = self._store.upsert_conversation_summary(
-                platform="clawchat",
-                account_id=self._account_id(),
-                conversation_id=conversation_id,
-                conversation_type=conversation_type,
-                last_seen_at=last_seen_at if last_seen_at is not None else int(time.time() * 1000),
-                raw=None,
-            )
-            return bool(created)
-        except Exception:  # noqa: BLE001
-            logger.warning("clawchat minimal conversation cache upsert failed")
-            return False
 
     def _resolve_sender_name(self, inbound: InboundMessage) -> str:
         if inbound.sender_name and inbound.sender_name != inbound.sender_id:
@@ -1021,11 +972,6 @@ class ClawChatAdapter(BasePlatformAdapter):
             len(inbound.text),
             len(inbound.media_urls),
         )
-        self._upsert_minimal_conversation(
-            conversation_id=inbound.chat_id,
-            conversation_type=inbound.chat_type,
-            last_seen_at=frame.get("emitted_at") if isinstance(frame.get("emitted_at"), int) else None,
-        )
         if inbound.chat_type == "group":
             self._schedule_profile_sync(self._refresh_conversation_metadata(inbound.chat_id))
         elif inbound.sender_id != self._owner_user_id():
@@ -1098,6 +1044,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         await self._handle_inbound(inbound)
 
     async def _handle_inbound(self, inbound: InboundMessage) -> None:
+        if inbound.chat_type == "group":
+            await self._ensure_group_participants_metadata(inbound.chat_id)
         inbound = self._refresh_group_batch_sender_context(inbound)
         reply_to_message_id, reply_to_text = self._extract_reply_fields(
             inbound.reply_preview
@@ -1141,6 +1089,22 @@ class ClawChatAdapter(BasePlatformAdapter):
                     event.text,
                     DEBUG_EVENT_TEXT_END,
                 )
+        write_llm_context_snapshot(
+            visibility="host_event",
+            trace={
+                "messageId": inbound.raw_message.get("message_id") or "",
+                "chatId": inbound.chat_id,
+                "chatType": inbound.chat_type,
+                "senderId": inbound.sender_id,
+            },
+            input={
+                "injectedPrompt": channel_prompt or "",
+                "eventText": event.text,
+            },
+            warnings=[] if channel_prompt else [
+                "Hermes event did not include a ClawChat channel_prompt for this turn.",
+            ],
+        )
         logger.info(
             "clawchat dispatch to hermes chat_id=%s user_id=%s text_len=%d media=%d downloaded=%d reply_to=%s",
             inbound.chat_id,
@@ -1156,6 +1120,14 @@ class ClawChatAdapter(BasePlatformAdapter):
             inbound.chat_id,
             inbound.sender_id,
         )
+
+    async def _ensure_group_participants_metadata(self, group_id: str) -> None:
+        if not group_id:
+            return
+        metadata = self._read_memory_metadata("group", group_id)
+        if metadata.get("participant_ids"):
+            return
+        await self._refresh_conversation_metadata(group_id)
 
     def _compose_channel_prompt(self, inbound: InboundMessage) -> str | None:
         prompts = [CONVERSATION_SEMANTICS]
@@ -1262,29 +1234,25 @@ class ClawChatAdapter(BasePlatformAdapter):
     ) -> str | None:
         if not group_id:
             return None
-        list_members = getattr(self._store, "list_cached_conversation_members", None)
-        if not callable(list_members):
-            return None
-        members = list_members(
-            platform="clawchat",
-            account_id=self._account_id(),
-            conversation_id=group_id,
-        )
-        if not members:
+        group_metadata = self._read_memory_metadata("group", group_id)
+        participant_ids = [
+            value.strip()
+            for value in group_metadata.get("participant_ids", "").split(",")
+            if value.strip()
+        ]
+        if not participant_ids:
             return None
         owner_id = owner_metadata.get("owner_id") or self._owner_user_id()
         lines: list[str] = []
-        for member in members:
-            user_id = str(member.get("user_id") or "")
-            if not user_id:
-                continue
+        for user_id in participant_ids:
             metadata = self._read_memory_metadata("user", user_id)
             is_owner = bool(owner_id and user_id == owner_id)
-            name = (
-                owner_metadata.get("owner_nickname")
-                if is_owner
-                else metadata.get("nickname")
-            ) or metadata.get("nickname") or user_id
+            if is_owner:
+                name = owner_metadata.get("owner_nickname") or metadata.get("nickname") or user_id
+            elif user_id == self._clawchat_config.user_id:
+                name = owner_metadata.get("agent_nickname") or metadata.get("nickname") or user_id
+            else:
+                name = metadata.get("nickname") or user_id
             profile_type = metadata.get("profile_type") or (
                 "agent" if user_id == self._clawchat_config.user_id else "user"
             )
@@ -1445,6 +1413,25 @@ class ClawChatAdapter(BasePlatformAdapter):
         message_id: str | None,
         text: str,
     ) -> None:
+        write_llm_context_snapshot(
+            visibility="host_event",
+            trace={
+                "messageId": message_id or "",
+                "chatId": chat_id,
+                "phase": phase,
+            },
+            input={
+                "injectedPrompt": "",
+                "eventText": "",
+            },
+            output={
+                "rawModelOutput": text,
+                "finalAssistantText": text,
+                "adapterFilteredText": text,
+                "suppressed": False,
+                "suppressionReason": None,
+            },
+        )
         if not _debug_prompt_injection_enabled():
             return
         logger.warning(
@@ -1505,11 +1492,6 @@ class ClawChatAdapter(BasePlatformAdapter):
             include_message_id=True,
         )
         visible_text = mention_message_text(mentions=normalized_mentions, text=remaining_text)
-        self._upsert_minimal_conversation(
-            conversation_id=chat_id,
-            conversation_type=chat_type,
-            last_seen_at=frame.get("emitted_at") if isinstance(frame.get("emitted_at"), int) else None,
-        )
         claimed = self._claim_outbound_message(
             event_type="message.send",
             trace_id=frame.get("trace_id") or frame.get("id"),
@@ -1701,11 +1683,6 @@ class ClawChatAdapter(BasePlatformAdapter):
                 reply_to_message_id=reply_to,
                 include_message_id=True,
             )
-            self._upsert_minimal_conversation(
-                conversation_id=chat_id,
-                conversation_type=chat_type,
-                last_seen_at=frame.get("emitted_at") if isinstance(frame.get("emitted_at"), int) else None,
-            )
             claimed = self._claim_outbound_message(
                 event_type="message.reply",
                 trace_id=frame.get("trace_id") or frame.get("id"),
@@ -1764,11 +1741,6 @@ class ClawChatAdapter(BasePlatformAdapter):
             chat_id=chat_id,
             chat_type=chat_type,
             message_id=message_id,
-        )
-        self._upsert_minimal_conversation(
-            conversation_id=chat_id,
-            conversation_type=chat_type,
-            last_seen_at=created_frame.get("emitted_at") if isinstance(created_frame.get("emitted_at"), int) else None,
         )
         claimed = self._claim_outbound_message(
             event_type="message.created",
@@ -2130,31 +2102,19 @@ class ClawChatAdapter(BasePlatformAdapter):
             return metadata["chat_type"]
         if isinstance(kwargs.get("chat_type"), str):
             return kwargs["chat_type"]
-        cached_type = self._cached_conversation_type(chat_id)
-        if cached_type is not None:
-            return cached_type
+        if self._memory_group_exists(chat_id):
+            return "group"
         return "direct"
 
-    def _cached_conversation_type(self, chat_id: str) -> str | None:
-        if self._store is None:
-            return None
-        get_cached = getattr(self._store, "get_cached_conversation_type", None)
-        if not callable(get_cached):
-            return None
+    def _memory_group_exists(self, chat_id: str) -> bool:
+        if self._memory_root is None or not chat_id:
+            return False
         try:
-            value = get_cached(
-                platform="clawchat",
-                account_id=self._account_id(),
-                conversation_id=chat_id,
-            )
+            memory = read_clawchat_memory_file(self._memory_root, "group", chat_id)
         except Exception:
-            logger.debug(
-                "clawchat cached conversation type lookup failed chat_id=%s",
-                chat_id,
-                exc_info=True,
-            )
-            return None
-        return value if value in {"direct", "group"} else None
+            logger.debug("clawchat group metadata lookup failed chat_id=%s", chat_id, exc_info=True)
+            return False
+        return bool(memory.get("exists"))
 
     def _terminal_account_id(self) -> str:
         return "default"

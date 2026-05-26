@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import mimetypes
 from types import SimpleNamespace
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +29,6 @@ from clawchat_gateway.clawchat_metadata import (
 from clawchat_gateway.config import ClawChatConfig
 from clawchat_gateway.mention_message import normalize_mention_targets
 from clawchat_gateway.profile import ProfileConfigError, load_profile_config
-from clawchat_gateway.storage import get_clawchat_store
 from clawchat_gateway.terminal_send import send_clawchat_mention_message
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
@@ -126,113 +124,6 @@ def _validate_upload_path(file_path: str) -> tuple[Path | None, dict[str, Any] |
 
 def _infer_mime(path: Path) -> str:
     return mimetypes.guess_type(str(path))[0] or "application/octet-stream"
-
-
-def _account_id(client: ClawChatApiClient) -> str:
-    return str(getattr(client, "_user_id", ""))
-
-
-def _conversation_id(value: dict[str, Any]) -> str | None:
-    raw = value.get("conversation_id") or value.get("conversationId") or value.get("id")
-    return str(raw) if raw else None
-
-
-def _conversation_type(value: dict[str, Any]) -> str | None:
-    raw = value.get("conversation_type") or value.get("conversationType") or value.get("type")
-    return str(raw) if raw else None
-
-
-def _last_seen_at(value: dict[str, Any]) -> int | None:
-    for key in ("last_seen_at", "lastSeenAt", "updated_at", "created_at"):
-        if key not in value:
-            continue
-        raw = value[key]
-        if isinstance(raw, int):
-            return raw
-        if isinstance(raw, str):
-            try:
-                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-            except ValueError:
-                return None
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=UTC)
-            return int(parsed.timestamp() * 1000)
-    return None
-
-
-def _metadata_version(value: dict[str, Any]) -> int | None:
-    raw = value.get("metadata_version") or value.get("metadataVersion")
-    return raw if isinstance(raw, int) else None
-
-
-def _conversation_items(result: dict[str, Any]) -> list[dict[str, Any]]:
-    raw = result.get("items") or result.get("conversations") or []
-    return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
-
-
-def _cache_conversation_summaries(client: ClawChatApiClient, result: dict[str, Any]) -> None:
-    store = get_clawchat_store()
-    account_id = _account_id(client)
-    for item in _conversation_items(result):
-        conversation_id = _conversation_id(item)
-        if not conversation_id:
-            continue
-        store.upsert_conversation_summary(
-            platform="clawchat",
-            account_id=account_id,
-            conversation_id=conversation_id,
-            conversation_type=_conversation_type(item),
-            last_seen_at=_last_seen_at(item),
-            raw=item,
-        )
-
-
-def _member_from_raw(raw: dict[str, Any]) -> dict[str, Any] | None:
-    user_id = raw.get("user_id") or raw.get("userId") or raw.get("id")
-    if not user_id:
-        return None
-    return {
-        "user_id": str(user_id),
-        "role": raw.get("role"),
-        "raw": raw,
-    }
-
-
-def _cache_conversation_details(client: ClawChatApiClient, result: dict[str, Any]) -> None:
-    detail = result.get("conversation") if isinstance(result.get("conversation"), dict) else result
-    conversation_id = _conversation_id(detail)
-    if not conversation_id:
-        return
-    participants_raw = detail.get("participants")
-    members_raw = participants_raw if isinstance(participants_raw, list) else detail.get("members")
-    members = [member for item in members_raw or [] if isinstance(item, dict) for member in [_member_from_raw(item)] if member]
-    members_complete = bool(
-        isinstance(members_raw, list)
-        and (
-            isinstance(participants_raw, list)
-            or detail.get("members_complete") is True
-            or detail.get("participants_complete") is True
-        )
-    )
-    get_clawchat_store().upsert_conversation_details(
-        platform="clawchat",
-        account_id=_account_id(client),
-        conversation_id=conversation_id,
-        conversation_type=_conversation_type(detail),
-        metadata_version=_metadata_version(detail),
-        last_seen_at=_last_seen_at(detail),
-        raw=detail,
-        members=members,
-        members_complete=members_complete,
-    )
-
-
-def _delete_conversation_cache(client: ClawChatApiClient, conversation_id: str) -> None:
-    get_clawchat_store().delete_conversation_cache(
-        platform="clawchat",
-        account_id=_account_id(client),
-        conversation_id=conversation_id,
-    )
 
 
 def _delete_group_memory(conversation_id: str) -> None:
@@ -611,7 +502,6 @@ async def list_conversations(
         return err
     try:
         result = await client.list_conversations(before=before, limit=limit)
-        _cache_conversation_summaries(client, result)
         return result
     except ClawChatApiError as exc:
         return _api_error(exc)
@@ -629,11 +519,9 @@ async def get_conversation(conversation_id: str) -> dict[str, Any]:
         return err
     try:
         result = await client.get_conversation(conversation_id_value)
-        _cache_conversation_details(client, result)
         return result
     except ClawChatApiError as exc:
         if _is_conversation_not_found(exc):
-            _delete_conversation_cache(client, conversation_id_value)
             _delete_group_memory(conversation_id_value)
         return _api_error(exc)
     except Exception as exc:  # noqa: BLE001
