@@ -460,7 +460,12 @@ async def metadata_sync(
             )
         if target_type == "user":
             return await pull_user_metadata(root, client, target_id)
-        return await pull_group_metadata(root, client, target_id)
+        return await pull_group_metadata(
+            root,
+            client,
+            target_id,
+            skip_user_ids={cfg.get("user_id", ""), cfg.get("owner_user_id", "")},
+        )
     except ClawChatApiError as exc:
         return _api_error(exc)
     except ValueError as exc:

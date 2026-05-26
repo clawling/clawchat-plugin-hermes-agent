@@ -163,6 +163,12 @@ def _participants(result: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in raw if isinstance(item, dict)]
 
 
+def _normalize_skip_user_ids(skip_user_ids: set[str] | list[str] | tuple[str, ...] | None) -> set[str]:
+    if skip_user_ids is None:
+        return set()
+    return {user_id.strip() for user_id in skip_user_ids if isinstance(user_id, str) and user_id.strip()}
+
+
 async def pull_owner_metadata(
     root: str | Path,
     client: Any,
@@ -197,7 +203,13 @@ async def pull_user_metadata(root: str | Path, client: Any, user_id: str) -> dic
     return {"ok": True, "target_type": "user", "target_id": user_id, "metadata": metadata}
 
 
-async def pull_group_metadata(root: str | Path, client: Any, group_id: str) -> dict[str, Any]:
+async def pull_group_metadata(
+    root: str | Path,
+    client: Any,
+    group_id: str,
+    *,
+    skip_user_ids: set[str] | list[str] | tuple[str, ...] | None = None,
+) -> dict[str, Any]:
     if not group_id:
         raise ValueError("group_id is required")
     ensure_clawchat_memory_target_safe(root, "group", group_id)
@@ -206,8 +218,11 @@ async def pull_group_metadata(root: str | Path, client: Any, group_id: str) -> d
     write_clawchat_metadata(root, "group", group_id, group_metadata)
 
     failures: list[dict[str, str]] = []
+    skipped_user_ids = _normalize_skip_user_ids(skip_user_ids)
     for participant in _participants(result):
         user_id = _participant_user_id(participant)
+        if user_id in skipped_user_ids:
+            continue
         try:
             existing = read_clawchat_memory_file(root, "user", user_id)
             if existing.get("exists"):

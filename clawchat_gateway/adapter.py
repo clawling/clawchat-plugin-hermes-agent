@@ -580,7 +580,12 @@ class ClawChatAdapter(BasePlatformAdapter):
                 token=self._clawchat_config.token,
                 user_id=self._clawchat_config.user_id,
             )
-            result = await pull_group_metadata(root, client, conversation_id)
+            result = await pull_group_metadata(
+                root,
+                client,
+                conversation_id,
+                skip_user_ids={self._clawchat_config.user_id, self._owner_user_id()},
+            )
         except ClawChatApiError as exc:
             if self._is_conversation_not_found_error(exc):
                 self._delete_missing_conversation_metadata(root, conversation_id)

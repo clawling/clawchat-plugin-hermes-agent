@@ -73,6 +73,8 @@ async def ensure_group_profile_for_chat(
     *,
     platform: str = DEFAULT_PLATFORM,
     account_id: str = DEFAULT_ACCOUNT_ID,
+    agent_user_id: str = "",
+    owner_user_id: str = "",
     memory_root: str | Path | None = None,
 ) -> bool:
     if not chat_id:
@@ -87,6 +89,8 @@ async def ensure_group_profile_for_chat(
         now_ms,
         platform=platform,
         account_id=account_id,
+        agent_user_id=agent_user_id,
+        owner_user_id=owner_user_id,
         memory_root=memory_root,
     )
 
@@ -132,6 +136,8 @@ async def refresh_group_profile(
     *,
     platform: str = DEFAULT_PLATFORM,
     account_id: str = DEFAULT_ACCOUNT_ID,
+    agent_user_id: str = "",
+    owner_user_id: str = "",
     memory_root: str | Path | None = None,
 ) -> bool:
     if not chat_id:
@@ -140,7 +146,12 @@ async def refresh_group_profile(
         logger.warning("clawchat group metadata refresh skipped reason=missing memory root chat_id=%s", chat_id)
         return False
     try:
-        await pull_group_metadata(memory_root, client, chat_id)
+        await pull_group_metadata(
+            memory_root,
+            client,
+            chat_id,
+            skip_user_ids={agent_user_id, owner_user_id},
+        )
     except Exception:  # noqa: BLE001
         logger.warning("clawchat group metadata refresh failed chat_id=%s", chat_id, exc_info=True)
         return False
