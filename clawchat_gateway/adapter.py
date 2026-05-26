@@ -274,11 +274,6 @@ def _owner_attention_text(group_id: str, fallback_text: str) -> str:
     return f"ClawChat group {group_id} {GROUP_OWNER_ATTENTION_TITLE}."
 
 
-def _owner_failure_text(group_id: str, failure_text: str) -> str:
-    body = failure_text.strip() or "Hermes could not complete this reply."
-    return f"ClawChat group {group_id} reply failed.\n{body}"
-
-
 @dataclass
 class _ActiveRun:
     chat_id: str
@@ -1582,24 +1577,6 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
         return SendResult(success=True, message_id=message_id)
 
-    async def _send_owner_failure(self, *, group_id: str, failure_text: str) -> None:
-        owner_user_id = self._owner_user_id()
-        if not owner_user_id:
-            logger.error(
-                "clawchat group failure suppressed reason=missing_owner_user_id group=%s",
-                group_id,
-            )
-            return
-        message_id = new_frame_id("msg")
-        frame = build_message_reply_event(
-            chat_id=owner_user_id,
-            chat_type="direct",
-            message_id=message_id,
-            fragments=[{"kind": "text", "text": _owner_failure_text(group_id, failure_text)}],
-            include_message_id=True,
-        )
-        await self._connection.send_frame(frame, wait_for_ack=True)
-
     async def send(
         self,
         chat_id: str,
@@ -1639,6 +1616,13 @@ class ClawChatAdapter(BasePlatformAdapter):
             force_hide_tools=is_group,
         )
         fragments = await self._build_fragments(visible_content, metadata, kwargs)
+        if is_group and (content or "").strip() and self._is_empty_text_response(fragments):
+            logger.info(
+                "clawchat group hidden-only output suppressed chat_id=%s text_len=%d",
+                chat_id,
+                len(content or ""),
+            )
+            return SendResult(success=True)
         if self._is_pure_silent_response(fragments):
             logger.info("clawchat silent response suppressed chat_id=%s chat_type=%s", chat_id, chat_type)
             return SendResult(success=True)
@@ -1991,7 +1975,6 @@ class ClawChatAdapter(BasePlatformAdapter):
             return
         self._discard_run(run)
         if run.chat_type == "group":
-            await self._send_owner_failure(group_id=run.chat_id, failure_text=error)
             self._record_message(
                 kind="error",
                 direction="outbound",
@@ -2003,7 +1986,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 raw={"group_failure_routed_to_owner": True},
             )
             logger.info(
-                "clawchat group stream failure routed to owner chat_id=%s message_id=%s",
+                "clawchat group stream failure suppressed from ClawChat clients chat_id=%s message_id=%s",
                 chat_id,
                 run.message_id,
             )
@@ -2238,6 +2221,13 @@ class ClawChatAdapter(BasePlatformAdapter):
             len(fragments) == 1
             and fragments[0].get("kind") == "text"
             and self._is_noop_response_text(str(fragments[0].get("text") or ""))
+        )
+
+    def _is_empty_text_response(self, fragments: list[dict[str, Any]]) -> bool:
+        return (
+            len(fragments) == 1
+            and fragments[0].get("kind") == "text"
+            and not str(fragments[0].get("text") or "").strip()
         )
 
     def _should_suppress_tool_progress(self, content: str, *, force: bool = False) -> bool:
