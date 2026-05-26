@@ -909,7 +909,8 @@ def register_tools(ctx) -> None:
                 "Use clawchat_search_users only when no explicit or locally available id exists. "
                 "Never guess userId from names, nicknames, or plain @name text. Plain @name is not a real mention. "
                 "Pass the visible label as mentions[].display when known. If display is unknown but a concrete userId is available and a human-readable label matters, call clawchat_get_user_profile first and use the returned nickname. For a single mention, if text is only a visible @label, the adapter can lift everything after @ into the mention fragment display, including spaces; if you also need body text, pass mentions[].display explicitly and put only the body text in text. "
-                'After this tool succeeds, the mention message has already been sent; return exactly "" and do not send a normal follow-up reply.'
+                "After this tool succeeds, the mention message has already been sent to ClawChat. "
+                "The ClawChat adapter suppresses the same-turn normal follow-up reply."
             ),
             "parameters": {
                 "type": "object",

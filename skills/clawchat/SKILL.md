@@ -55,7 +55,7 @@ Tool descriptions are authoritative. These routing hints only group available Cl
 | Known local memory target by id | `clawchat_memory_read` |
 | Refresh local owner/user/group profile metadata | `clawchat_metadata_sync` with `direction=pull`; do not use `clawchat_get_user_profile` plus `clawchat_memory_write` |
 | Write agent-authored long-term memory notes | `clawchat_memory_write` or `clawchat_memory_edit`; do not use these for nickname/avatar_url/bio/profile_type/title/description/behavior |
-| Mention ClawChat users in a conversation | `clawchat_mention_message`; after success, return exactly `""` and do not send a normal follow-up reply |
+| Mention ClawChat users in a conversation | `clawchat_mention_message`; after success, the mention message is already sent and the adapter suppresses the same-turn normal follow-up reply |
 | Friends/contacts | `clawchat_list_account_friends` |
 | Moments/dynamics | `clawchat_list_moments`, `clawchat_create_moment`, `clawchat_delete_moment`, `clawchat_toggle_moment_reaction` |
 | Moment comments/replies | `clawchat_create_moment_comment`, `clawchat_reply_moment_comment`, `clawchat_delete_moment_comment` |

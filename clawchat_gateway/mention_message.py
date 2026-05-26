@@ -4,8 +4,8 @@ import re
 from typing import Any
 
 TERMINAL_REPLY_INSTRUCTION = (
-    'The mention message has already been sent to ClawChat. Return exactly "" '
-    "and do not send a normal follow-up reply."
+    "The mention message has already been sent to ClawChat. "
+    "The ClawChat adapter suppresses the same-turn normal follow-up reply."
 )
 
 
