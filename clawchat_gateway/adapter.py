@@ -1725,7 +1725,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             return SendResult(success=True, message_id=run.message_id)
 
         visible_content = self._filter_output_content(content or "")
-        if finalize and not run.last_text and self._is_noop_response_text(visible_content):
+        if self._is_noop_response_text(visible_content):
             self._discard_run(run)
             self._remember_completed_run(run.message_id)
             logger.info(
