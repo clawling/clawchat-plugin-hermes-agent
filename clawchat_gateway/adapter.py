@@ -1228,8 +1228,13 @@ class ClawChatAdapter(BasePlatformAdapter):
             "## ClawChat Agent Behavior\n"
             + self._escape_prompt_field(metadata.get("agent_behavior", ""))
         )
+        metadata_source = dict(metadata)
+        if not metadata_source.get("owner_id"):
+            owner_id = self._owner_user_id()
+            if owner_id:
+                metadata_source["owner_id"] = owner_id
         owner_metadata = self._pick_memory_metadata_fields(
-            metadata,
+            metadata_source,
             ("owner_id", "owner_nickname", "owner_avatar_url", "owner_bio"),
         )
         if owner_metadata:
