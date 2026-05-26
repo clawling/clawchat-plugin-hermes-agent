@@ -169,8 +169,26 @@ def parse_inbound_message(
 
     fragments = _coerce_fragments(message)
     text_parts: list[str] = []
+    last_text_part_is_inline = False
     media_urls: list[str] = []
     media_types: list[str] = []
+
+    def append_inline_text(value: str) -> None:
+        nonlocal last_text_part_is_inline
+        if not value:
+            return
+        if last_text_part_is_inline and text_parts:
+            text_parts[-1] += value
+        else:
+            text_parts.append(value)
+        last_text_part_is_inline = True
+
+    def append_block_text(value: str) -> None:
+        nonlocal last_text_part_is_inline
+        if not value:
+            return
+        text_parts.append(value)
+        last_text_part_is_inline = False
 
     for fragment in fragments:
         if not isinstance(fragment, dict):
@@ -178,13 +196,13 @@ def parse_inbound_message(
         kind = _fragment_kind(fragment)
         text = _fragment_text(fragment)
         if kind in (None, "text") and text is not None:
-            text_parts.append(text)
+            append_inline_text(text)
             continue
         if kind == "mention":
             mention_id = _mention_id(fragment)
             display = _mention_display(fragment)
             if display or mention_id:
-                text_parts.append(f"@{display or mention_id}")
+                append_inline_text(f"@{display or mention_id}")
             continue
         if kind in {"image", "file", "audio", "video"} and isinstance(
             fragment.get("url"), str
@@ -193,9 +211,9 @@ def parse_inbound_message(
             media_types.append(kind)
             label = fragment.get("name") or fragment["url"]
             if kind == "image":
-                text_parts.append(f"![{label}]({fragment['url']})")
+                append_block_text(f"![{label}]({fragment['url']})")
             else:
-                text_parts.append(f"[{label}]({fragment['url']})")
+                append_block_text(f"[{label}]({fragment['url']})")
 
     sender = _as_dict(envelope.get("sender") or {})
     if sender is None:
