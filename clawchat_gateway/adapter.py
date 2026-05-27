@@ -1695,7 +1695,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
         is_send_message_tool_call = self._is_send_message_tool_call()
         is_immediate_media_send = self._is_immediate_media_send(metadata, kwargs)
-        if is_send_message_tool_call or is_immediate_media_send:
+        is_stream_intermediate = self._is_stream_intermediate_output(content or "")
+        if is_send_message_tool_call or is_immediate_media_send or not is_stream_intermediate:
             fragments = await self._build_fragments(visible_content, metadata, kwargs)
             fragment_count = len(fragments)
             has_media = self._has_outbound_media(metadata, kwargs)
@@ -1737,7 +1738,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             metadata=dict(metadata) if isinstance(metadata, dict) else metadata,
             kwargs=dict(kwargs),
         )
-        if not is_send_message_tool_call and not is_immediate_media_send:
+        if is_stream_intermediate and not is_send_message_tool_call and not is_immediate_media_send:
             self._active_runs_by_id[message_id] = run
             self._active_chat_runs[chat_id] = message_id
             logger.info(
@@ -2211,6 +2212,9 @@ class ClawChatAdapter(BasePlatformAdapter):
             if isinstance(carrier, dict) and carrier.get(IMMEDIATE_MEDIA_SEND_METADATA_KEY) is True:
                 return True
         return False
+
+    def _is_stream_intermediate_output(self, content: str) -> bool:
+        return bool(_HERMES_STREAM_CURSOR_RE.search(content) or _STREAMING_CURSOR_RE.search(content))
 
     def _is_managed_turn_response(self, metadata: Any) -> bool:
         if isinstance(metadata, dict) and metadata.get("notify") is True:

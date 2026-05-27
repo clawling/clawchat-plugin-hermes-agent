@@ -287,13 +287,13 @@ async def test_adapter_run_complete_sends_one_final_complete_message(monkeypatch
 
     result = await adapter.send(
         "chat-1",
-        "draft",
+        "draft ▉",
         metadata={"notify": True, "chat_type": "direct"},
     )
     await adapter.edit_message(
         "chat-1",
         result.message_id,
-        "intermediate",
+        "intermediate ▉",
     )
 
     assert _sent_events(adapter) == []
@@ -311,6 +311,26 @@ async def test_adapter_run_complete_sends_one_final_complete_message(monkeypatch
         {"kind": "text", "text": "final response"}
     ]
     assert not STREAM_LIFECYCLE_EVENTS & set(_sent_events(adapter))
+
+
+@pytest.mark.asyncio
+async def test_non_stream_send_sends_complete_message_immediately(monkeypatch):
+    adapter = _adapter(monkeypatch)
+
+    result = await adapter.send(
+        "chat-1",
+        "final response",
+        metadata={"notify": True, "chat_type": "direct"},
+    )
+
+    assert result.success is True
+    assert result.message_id not in adapter._active_runs_by_id
+    assert _sent_events(adapter) == ["message.reply"]
+    frame = adapter._connection.frames[0][0]
+    assert frame["payload"]["message_id"] == result.message_id
+    assert frame["payload"]["message"]["body"]["fragments"] == [
+        {"kind": "text", "text": "final response"}
+    ]
 
 
 @pytest.mark.asyncio
@@ -520,7 +540,7 @@ async def test_on_run_complete_without_message_id_uses_latest_stream_run(monkeyp
 
     result = await adapter.send(
         "chat-1",
-        "hello",
+        "hello ▉",
         metadata={"notify": True, "chat_type": "direct"},
     )
 
@@ -542,7 +562,7 @@ async def test_duplicate_run_complete_after_finalize_is_idempotent(monkeypatch):
 
     result = await adapter.send(
         "chat-1",
-        "hello",
+        "hello ▉",
         metadata={"notify": True, "chat_type": "direct"},
     )
     final_result = await adapter.edit_message(
@@ -567,7 +587,7 @@ async def test_adapter_run_failed_does_not_emit_stream_lifecycle_frames(monkeypa
     adapter = _adapter(monkeypatch)
     result = await adapter.send(
         "chat-1",
-        "draft",
+        "draft ▉",
         metadata={"notify": True, "chat_type": "direct"},
     )
 
@@ -590,7 +610,7 @@ async def test_edit_buffers_without_transport_failure(monkeypatch):
     adapter = _adapter(monkeypatch)
     result = await adapter.send(
         "chat-1",
-        "draft",
+        "draft ▉",
         metadata={"notify": True, "chat_type": "direct"},
     )
     adapter._connection.send_results.append(False)
@@ -612,7 +632,7 @@ async def test_run_complete_send_failure_keeps_run_active_and_failed_visible(mon
     adapter = _adapter(monkeypatch)
     result = await adapter.send(
         "chat-1",
-        "draft",
+        "draft ▉",
         metadata={"notify": True, "chat_type": "direct"},
     )
     adapter._connection.send_results.append(False)
