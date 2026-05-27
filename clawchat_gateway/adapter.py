@@ -2496,6 +2496,18 @@ class ClawChatAdapter(BasePlatformAdapter):
                 for url in raw_kw_urls
                 if isinstance(url, str)
             )
+        raw_media_files = merged_kwargs.get("media_files") or []
+        if isinstance(raw_media_files, list):
+            for media_file in raw_media_files:
+                if isinstance(media_file, str):
+                    media_urls.append(normalize_outbound_media_reference(media_file))
+                    continue
+                if (
+                    isinstance(media_file, (list, tuple))
+                    and media_file
+                    and isinstance(media_file[0], str)
+                ):
+                    media_urls.append(normalize_outbound_media_reference(media_file[0]))
         return media_urls
 
     def _has_outbound_media(self, metadata: Any, kwargs: dict[str, Any] | None = None) -> bool:
@@ -2578,13 +2590,21 @@ class ClawChatAdapter(BasePlatformAdapter):
     ) -> list[dict[str, Any]]:
         if not media_urls:
             return []
+        media_local_roots = self._clawchat_config.media_local_roots
+        if kwargs.get("_clawchat_media_files_validated") is True:
+            local_roots = {
+                str(Path(url).expanduser().resolve().parent)
+                for url in media_urls
+                if urlparse(url).scheme not in {"http", "https"}
+            }
+            media_local_roots = tuple(sorted(local_roots)) or media_local_roots
 
         return await upload_outbound_media(
             media_urls,
             base_url=self._clawchat_config.base_url,
             websocket_url=self._clawchat_config.websocket_url,
             token=self._clawchat_config.token,
-            media_local_roots=self._clawchat_config.media_local_roots,
+            media_local_roots=media_local_roots,
         )
 
     def _infer_media_kind(

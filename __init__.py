@@ -183,6 +183,104 @@ def _patch_send_message_target_parser() -> None:
     send_message_tool._parse_target_ref = _parse_target_ref_with_clawchat
 
 
+async def _send_clawchat_media_via_live_adapter(
+    platform,
+    chat_id: str,
+    message: str,
+    *,
+    thread_id=None,
+    media_files=None,
+):
+    try:
+        from gateway.run import _gateway_runner_ref
+
+        runner = _gateway_runner_ref()
+    except Exception:
+        runner = None
+
+    adapter = None
+    if runner is not None:
+        try:
+            adapter = runner.adapters.get(platform)
+        except Exception:
+            adapter = None
+    if adapter is None:
+        return {
+            "error": (
+                "No live adapter for platform 'clawchat'. Is the gateway "
+                "running with this platform connected?"
+            )
+        }
+
+    metadata = {"_clawchat_immediate_media_send": True}
+    if thread_id:
+        metadata["thread_id"] = thread_id
+    try:
+        result = await adapter.send(
+            chat_id=chat_id,
+            content=message,
+            metadata=metadata,
+            media_files=media_files or [],
+            _clawchat_media_files_validated=True,
+        )
+    except Exception as exc:
+        return {"error": f"Plugin platform send failed: {exc}"}
+    if result.success:
+        return {"success": True, "message_id": result.message_id}
+    return {"error": f"Adapter send failed: {result.error}"}
+
+
+def _patch_send_message_media_delivery() -> None:
+    """Let Hermes' built-in send_message deliver ClawChat MEDIA attachments.
+
+    Hermes owns ``send_message`` and currently hard-codes native media branches
+    for built-in platforms before the generic plugin adapter path. Keep this
+    plugin patch scoped to ClawChat media sends so text-only delivery continues
+    through Hermes' original implementation.
+    """
+    try:
+        from tools import send_message_tool
+    except Exception as exc:
+        logger.debug("ClawChat could not patch send_message media delivery: %s", exc)
+        return
+
+    original = getattr(send_message_tool, "_send_to_platform", None)
+    if not callable(original) or getattr(original, "_clawchat_media_patch", False):
+        return
+
+    async def _send_to_platform_with_clawchat_media(
+        platform,
+        pconfig,
+        chat_id,
+        message,
+        thread_id=None,
+        media_files=None,
+        force_document=False,
+    ):
+        platform_name = getattr(platform, "value", str(platform))
+        if platform_name == "clawchat" and media_files:
+            return await _send_clawchat_media_via_live_adapter(
+                platform,
+                chat_id,
+                message,
+                thread_id=thread_id,
+                media_files=media_files,
+            )
+        return await original(
+            platform,
+            pconfig,
+            chat_id,
+            message,
+            thread_id=thread_id,
+            media_files=media_files,
+            force_document=force_document,
+        )
+
+    _send_to_platform_with_clawchat_media._clawchat_media_patch = True
+    _send_to_platform_with_clawchat_media._clawchat_original = original
+    send_message_tool._send_to_platform = _send_to_platform_with_clawchat_media
+
+
 def _register_platform(ctx) -> bool:
     from clawchat_gateway.plugin_prompts import platform_prompt
 
@@ -213,6 +311,7 @@ def _register_platform(ctx) -> bool:
         platform_hint=platform_prompt(),
     )
     _patch_send_message_target_parser()
+    _patch_send_message_media_delivery()
     logger.info("ClawChat registered Hermes platform via plugin registry")
     return True
 

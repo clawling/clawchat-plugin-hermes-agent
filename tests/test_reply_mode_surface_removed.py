@@ -4,6 +4,7 @@ import copy
 import importlib
 import sys
 from types import ModuleType, SimpleNamespace
+from pathlib import Path
 
 import pytest
 import yaml
@@ -222,6 +223,15 @@ def _sent_events(adapter):
     return [frame["event"] for frame, _kwargs in adapter._connection.frames]
 
 
+def _load_plugin_module():
+    plugin_path = Path(__file__).resolve().parents[1] / "__init__.py"
+    spec = importlib.util.spec_from_file_location("clawchat_tools_plugin", plugin_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec is not None and spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
 STREAM_LIFECYCLE_EVENTS = {
     "message.created",
     "message.add",
@@ -394,6 +404,113 @@ async def test_send_image_file_sends_complete_file_immediately(monkeypatch):
             "size": 3456,
             "name": "report.pdf",
         },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_send_message_media_files_send_complete_media_immediately(monkeypatch):
+    adapter = _adapter(monkeypatch)
+    uploaded_urls = []
+
+    async def fake_upload_outbound_media(urls, **kwargs):
+        uploaded_urls.append((list(urls), tuple(kwargs["media_local_roots"])))
+        return [
+            {
+                "kind": "file",
+                "url": "https://cdn/report.pdf",
+                "mime": "application/pdf",
+                "size": 3456,
+                "name": "report.pdf",
+            }
+        ]
+
+    monkeypatch.setattr(
+        "clawchat_gateway.adapter.upload_outbound_media",
+        fake_upload_outbound_media,
+    )
+
+    result = await adapter.send(
+        "chat-1",
+        "PDF",
+        metadata={
+            "chat_type": "direct",
+            "_clawchat_immediate_media_send": True,
+        },
+        media_files=[("/tmp/report.pdf", False)],
+        _clawchat_media_files_validated=True,
+    )
+
+    assert result.success is True
+    assert uploaded_urls == [(["/tmp/report.pdf"], (str(Path("/tmp").resolve()),))]
+    assert _sent_events(adapter) == ["message.reply"]
+    assert result.message_id not in adapter._active_runs_by_id
+    frame = adapter._connection.frames[0][0]
+    assert frame["payload"]["message"]["body"]["fragments"] == [
+        {"kind": "text", "text": "PDF"},
+        {
+            "kind": "file",
+            "url": "https://cdn/report.pdf",
+            "mime": "application/pdf",
+            "size": 3456,
+            "name": "report.pdf",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_plugin_patches_send_message_media_delivery_for_clawchat(monkeypatch):
+    module = _load_plugin_module()
+    tools_module = ModuleType("tools")
+    send_message_tool_module = ModuleType("tools.send_message_tool")
+
+    async def original_send_to_platform(*_args, **_kwargs):
+        return {"error": "original media whitelist"}
+
+    send_message_tool_module._send_to_platform = original_send_to_platform
+    tools_module.send_message_tool = send_message_tool_module
+    monkeypatch.setitem(sys.modules, "tools", tools_module)
+    monkeypatch.setitem(sys.modules, "tools.send_message_tool", send_message_tool_module)
+
+    class _Platform:
+        value = "clawchat"
+
+    platform = _Platform()
+
+    class _FakeAdapter:
+        def __init__(self):
+            self.calls = []
+
+        async def send(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(success=True, message_id="msg-1", error=None)
+
+    fake_adapter = _FakeAdapter()
+    gateway_run = ModuleType("gateway.run")
+    gateway_run._gateway_runner_ref = lambda: SimpleNamespace(adapters={platform: fake_adapter})
+    monkeypatch.setitem(sys.modules, "gateway.run", gateway_run)
+
+    module._patch_send_message_media_delivery()
+    result = await send_message_tool_module._send_to_platform(
+        platform,
+        SimpleNamespace(),
+        "chat-1",
+        "",
+        thread_id="thread-1",
+        media_files=[("/tmp/report.pdf", False)],
+    )
+
+    assert result == {"success": True, "message_id": "msg-1"}
+    assert fake_adapter.calls == [
+        {
+            "chat_id": "chat-1",
+            "content": "",
+            "metadata": {
+                "thread_id": "thread-1",
+                "_clawchat_immediate_media_send": True,
+            },
+            "media_files": [("/tmp/report.pdf", False)],
+            "_clawchat_media_files_validated": True,
+        }
     ]
 
 
