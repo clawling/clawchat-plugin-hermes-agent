@@ -1150,6 +1150,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         if base_prompt:
             prompts.append(base_prompt)
         prompts.append(CLAWCHAT_METADATA_GLOSSARY)
+        prompts.append(self._format_turn_metadata_section(inbound))
         owner_metadata = self._read_memory_metadata("owner", "owner")
         prompts.extend(self._format_owner_metadata_sections(owner_metadata))
         if inbound.chat_type == "group":
@@ -1230,6 +1231,17 @@ class ClawChatAdapter(BasePlatformAdapter):
             if fields:
                 sections.append(f"## ClawChat Agent Owner Metadata\n{fields}")
         return sections
+
+    def _format_turn_metadata_section(self, inbound: InboundMessage) -> str:
+        chat_type = "group" if inbound.chat_type == "group" else "dm"
+        fields = self._format_fields(
+            (
+                ("chat_type", chat_type),
+                ("chat_id", inbound.chat_id),
+            ),
+            include_empty=True,
+        )
+        return "## ClawChat Turn Metadata\n" + fields
 
     def _format_peer_profile_section(self, sender_id: str) -> str | None:
         metadata = self._read_memory_metadata("user", sender_id)
