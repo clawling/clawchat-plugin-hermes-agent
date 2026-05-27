@@ -488,27 +488,6 @@ async def list_moments(before: int | None = None, limit: int | None = None) -> d
         return _unknown_error(exc)
 
 
-async def list_conversations(
-    before: str | None = None,
-    limit: int | None = None,
-) -> dict[str, Any]:
-    if before is not None and not isinstance(before, str):
-        return _validation_error("before must be an ISO timestamp string")
-    if limit is not None and (not isinstance(limit, int) or not (1 <= limit <= 100)):
-        return _validation_error("limit must be an integer in 1..100")
-
-    client, err = _build_client()
-    if err is not None:
-        return err
-    try:
-        result = await client.list_conversations(before=before, limit=limit)
-        return result
-    except ClawChatApiError as exc:
-        return _api_error(exc)
-    except Exception as exc:  # noqa: BLE001
-        return _unknown_error(exc)
-
-
 async def get_conversation(conversation_id: str) -> dict[str, Any]:
     if not isinstance(conversation_id, str) or not conversation_id.strip():
         return _validation_error("conversationId is required")

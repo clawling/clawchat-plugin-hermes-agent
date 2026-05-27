@@ -89,21 +89,6 @@ class ClawChatApiClient:
         path = f"/v1/moments?{query}" if query else "/v1/moments"
         return await self._call_json("GET", path)
 
-    async def list_conversations(
-        self,
-        *,
-        before: str | None = None,
-        limit: int | None = None,
-    ) -> dict:
-        params: dict[str, str | int] = {}
-        if before is not None:
-            params["before"] = before
-        if limit is not None:
-            params["limit"] = limit
-        query = urlencode(params)
-        path = f"/v1/conversations?{query}" if query else "/v1/conversations"
-        return await self._call_json("GET", path)
-
     async def get_conversation(self, conversation_id: str) -> dict:
         if not conversation_id.strip():
             raise ClawChatApiError("validation", "conversation_id is required")
