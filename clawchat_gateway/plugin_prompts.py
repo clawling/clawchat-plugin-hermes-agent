@@ -8,20 +8,29 @@ __all__ = [
     "platform_prompt",
     "user_prompt",
     "group_prompt",
+    "default_owner_behavior_prompt",
+    "default_group_bio_prompt",
     "mode_prompt",
 ]
 
-PromptName = Literal["platform", "user", "group"]
+PromptName = Literal["platform", "user", "group", "default-owner-behavior", "default-group-bio"]
 
 
 class ClawChatPrompts(TypedDict):
     platform: str
     user: str
     group: str
+    default_owner_behavior: str
+    default_group_bio: str
 
 
 _REQUIRED_PROMPT_NAMES: tuple[PromptName, ...] = ("platform",)
-_OPTIONAL_PROMPT_NAMES: tuple[PromptName, ...] = ("user", "group")
+_OPTIONAL_PROMPT_NAMES: tuple[PromptName, ...] = (
+    "user",
+    "group",
+    "default-owner-behavior",
+    "default-group-bio",
+)
 
 
 def _load_clawchat_prompts_from_dir(prompts_root: Any) -> ClawChatPrompts:
@@ -51,6 +60,8 @@ def _load_clawchat_prompts_from_dir(prompts_root: Any) -> ClawChatPrompts:
         "platform": prompts["platform"],
         "user": prompts["user"],
         "group": prompts["group"],
+        "default_owner_behavior": prompts["default-owner-behavior"],
+        "default_group_bio": prompts["default-group-bio"],
     }
 
 
@@ -73,6 +84,14 @@ def user_prompt() -> str:
 
 def group_prompt() -> str:
     return _PROMPTS["group"]
+
+
+def default_owner_behavior_prompt() -> str:
+    return _PROMPTS["default_owner_behavior"]
+
+
+def default_group_bio_prompt() -> str:
+    return _PROMPTS["default_group_bio"]
 
 
 def mode_prompt(mode: str) -> str:

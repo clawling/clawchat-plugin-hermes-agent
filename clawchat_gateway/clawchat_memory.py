@@ -7,6 +7,11 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from clawchat_gateway.plugin_prompts import (
+    default_group_bio_prompt,
+    default_owner_behavior_prompt,
+)
+
 
 __all__ = [
     "resolve_clawchat_memory_path",
@@ -196,6 +201,16 @@ def _filter_metadata_for_target(target_type: str, metadata: dict[str, str]) -> d
     if allowed is None:
         raise ValueError(f"unsupported ClawChat memory target_type: {target_type}")
     return {key: value for key, value in metadata.items() if key in allowed}
+
+
+def _metadata_with_initial_defaults(target_type: str, exists: bool, metadata: dict[str, str]) -> dict[str, str]:
+    if exists:
+        return metadata
+    if target_type == "owner" and "agent_behavior" in metadata and not metadata["agent_behavior"].strip():
+        return {**metadata, "agent_behavior": default_owner_behavior_prompt()}
+    if target_type == "group" and "group_description" in metadata and not metadata["group_description"].strip():
+        return {**metadata, "group_description": default_group_bio_prompt()}
+    return metadata
 
 
 def _parse_clawchat_memory_content(content: str) -> dict[str, Any]:
@@ -433,6 +448,8 @@ def write_clawchat_metadata(
     metadata: dict[str, str],
 ) -> None:
     path = ensure_clawchat_memory_target_safe(root, target_type, target_id)
+    exists = path.exists()
     existing = _normalize_line_endings(_read_existing_content(path))
     filtered_metadata = _filter_metadata_for_target(target_type, metadata)
+    filtered_metadata = _metadata_with_initial_defaults(target_type, exists, filtered_metadata)
     _atomic_write(path, _replace_metadata_block(existing, filtered_metadata))
