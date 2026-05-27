@@ -5,6 +5,7 @@ import importlib
 import sys
 from types import ModuleType, SimpleNamespace
 
+import pytest
 import yaml
 
 from clawchat_gateway.config import ClawChatConfig
@@ -152,3 +153,164 @@ streaming:
 
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert config["streaming"] == {"enabled": False, "transport": "none"}
+
+
+class _FakeConnection:
+    def __init__(self):
+        self.frames = []
+
+    async def send_frame(self, frame, **kwargs):
+        self.frames.append((frame, kwargs))
+        return True
+
+
+class _FakeStore:
+    def __init__(self):
+        self.claimed = []
+        self.updated = []
+        self.inserted = []
+
+    def claim_message_once(self, **kwargs):
+        self.claimed.append(kwargs)
+        return True
+
+    def update_message_by_identity(self, **kwargs):
+        self.updated.append(kwargs)
+
+    def insert_message(self, **kwargs):
+        self.inserted.append(kwargs)
+
+
+def _load_adapter_class(monkeypatch):
+    gateway = ModuleType("gateway")
+    gateway_config = ModuleType("gateway.config")
+    gateway_platforms = ModuleType("gateway.platforms")
+    gateway_base = ModuleType("gateway.platforms.base")
+
+    class _Platform(str):
+        CLAWCHAT = "clawchat"
+
+    class _BasePlatformAdapter:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    class _MessageEvent:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class _MessageType:
+        TEXT = "text"
+
+    class _SendResult:
+        def __init__(self, success, error=None, message_id=None):
+            self.success = success
+            self.error = error
+            self.message_id = message_id
+
+    gateway_config.Platform = _Platform
+    gateway_base.BasePlatformAdapter = _BasePlatformAdapter
+    gateway_base.MessageEvent = _MessageEvent
+    gateway_base.MessageType = _MessageType
+    gateway_base.SendResult = _SendResult
+    gateway_platforms.base = gateway_base
+    gateway.config = gateway_config
+    gateway.platforms = gateway_platforms
+
+    monkeypatch.setitem(sys.modules, "gateway", gateway)
+    monkeypatch.setitem(sys.modules, "gateway.config", gateway_config)
+    monkeypatch.setitem(sys.modules, "gateway.platforms", gateway_platforms)
+    monkeypatch.setitem(sys.modules, "gateway.platforms.base", gateway_base)
+
+    import clawchat_gateway.adapter as adapter_module
+
+    return importlib.reload(adapter_module).ClawChatAdapter
+
+
+def _adapter(monkeypatch, extra=None):
+    ClawChatAdapter = _load_adapter_class(monkeypatch)
+    adapter = ClawChatAdapter.__new__(ClawChatAdapter)
+    adapter._clawchat_config = ClawChatConfig.from_platform_config(
+        SimpleNamespace(
+            extra={
+                "websocket_url": "wss://example.test/ws",
+                "token": "token",
+                "user_id": "usr_agent",
+                **(extra or {}),
+            }
+        )
+    )
+    adapter._connection = _FakeConnection()
+    adapter._store = _FakeStore()
+    adapter._memory_root = None
+    adapter._active_runs_by_id = {}
+    adapter._active_chat_runs = {}
+    adapter._completed_run_ids = set()
+    adapter._completed_run_order = []
+    adapter._run_counter = 0
+    return adapter
+
+
+def _sent_events(adapter):
+    return [frame["event"] for frame, _kwargs in adapter._connection.frames]
+
+
+@pytest.mark.asyncio
+async def test_adapter_uses_complete_messages_even_with_old_streaming_config(monkeypatch):
+    adapter = _adapter(
+        monkeypatch,
+        {
+            "reply_mode": "stream",
+            "stream": {"flush_interval_ms": 1},
+        }
+    )
+
+    result = await adapter.send(
+        "chat-1",
+        "first chunk",
+        reply_to="incoming-1",
+        metadata={"notify": True, "chat_type": "direct"},
+    )
+    await adapter.edit_message(
+        "chat-1",
+        result.message_id,
+        "first chunk and second chunk",
+        finalize=True,
+    )
+
+    assert result.success is True
+    assert "message.reply" in _sent_events(adapter)
+    assert not {"message.created", "message.add", "message.done"} & set(_sent_events(adapter))
+
+
+@pytest.mark.asyncio
+async def test_adapter_run_complete_does_not_emit_stream_lifecycle_frames(monkeypatch):
+    adapter = _adapter(monkeypatch, {"reply_mode": "stream"})
+
+    result = await adapter.send(
+        "chat-1",
+        "draft",
+        metadata={"notify": True, "chat_type": "direct"},
+    )
+    await adapter.on_run_complete(
+        "chat-1",
+        "final response",
+        message_id=result.message_id,
+    )
+
+    assert _sent_events(adapter).count("message.reply") >= 1
+    assert not {"message.created", "message.add", "message.done"} & set(_sent_events(adapter))
+
+
+@pytest.mark.asyncio
+async def test_adapter_does_not_require_clawchat_config_reply_mode_attribute(monkeypatch):
+    adapter = _adapter(monkeypatch, {"reply_mode": "stream"})
+    assert not hasattr(adapter._clawchat_config, "reply_mode")
+
+    result = await adapter.send(
+        "chat-1",
+        "complete response",
+        metadata={"notify": True, "chat_type": "direct"},
+    )
+
+    assert result.success is True
+    assert _sent_events(adapter) == ["message.reply"]

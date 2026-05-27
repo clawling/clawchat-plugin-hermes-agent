@@ -68,9 +68,6 @@ from clawchat_gateway.mention_message import (
 from clawchat_gateway.plugin_prompts import mode_prompt
 from clawchat_gateway.profile_sync import relation_for_sender
 from clawchat_gateway.protocol import (
-    build_message_add_event,
-    build_message_created_event,
-    build_message_done_event,
     build_message_failed_event,
     build_message_reply_event,
     build_message_send_event,
@@ -78,7 +75,6 @@ from clawchat_gateway.protocol import (
     new_frame_id,
 )
 from clawchat_gateway.storage import get_clawchat_store
-from clawchat_gateway.stream_buffer import compute_delta
 from clawchat_gateway.terminal_send import (
     clear_clawchat_mention_sender,
     consume_terminal_clawchat_send,
@@ -194,8 +190,7 @@ _TOOL_PROGRESS_LINE_RE = re.compile(
     r"(?:\.\.\.|: \"|\n)",
 )
 # Hermes streams append a typing-cursor block character to every intermediate
-# chunk's tail. Strip it so compute_delta's prefix check stays stable across
-# chunks (otherwise every delta degrades to the full accumulated text).
+# chunk's tail. Strip it so complete-message updates do not retain the cursor.
 _STREAMING_CURSOR_RE = re.compile(r"\s*[▀-▟]+\s*\Z")
 
 _APPROVE_COMMAND_RE = re.compile(r"(?<!\w)/approve(?!\w)", re.IGNORECASE)
@@ -1711,90 +1706,29 @@ class ClawChatAdapter(BasePlatformAdapter):
             return SendResult(success=True)
         message_id = new_frame_id("msg")
         logger.info(
-            "clawchat send start chat_id=%s chat_type=%s mode=%s text_len=%d fragments=%d reply_to=%s",
+            "clawchat send start chat_id=%s chat_type=%s mode=complete text_len=%d fragments=%d reply_to=%s",
             chat_id,
             chat_type,
-            self._clawchat_config.reply_mode,
             len(visible_content),
             len(fragments),
             reply_to,
         )
 
-        if self._should_use_static_mode(fragments, metadata):
-            frame = build_message_reply_event(
-                chat_id=chat_id,
-                chat_type=chat_type,
-                message_id=message_id,
-                fragments=fragments,
-                reply_to_message_id=reply_to,
-                include_message_id=True,
-            )
-            claimed = self._claim_outbound_message(
-                event_type="message.reply",
-                trace_id=frame.get("trace_id") or frame.get("id"),
-                chat_id=chat_id,
-                message_id=message_id,
-                text=visible_content,
-                raw=frame,
-            )
-            if claimed is False:
-                return SendResult(success=True, message_id=message_id)
-            if claimed is None:
-                return SendResult(
-                    success=False,
-                    error="clawchat outbound message claim failed",
-                    message_id=message_id,
-                )
-            sent = await self._connection.send_frame(
-                frame,
-                wait_for_ack=True,
-            )
-            if not sent:
-                error = "clawchat static reply dropped"
-                self._update_message_record(
-                    kind="message",
-                    direction="outbound",
-                    event_type="message.failed",
-                    trace_id=frame.get("trace_id") or frame.get("id"),
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    text=error,
-                    raw=frame,
-                )
-                logger.warning(
-                    "clawchat send static reply dropped chat_id=%s message_id=%s",
-                    chat_id,
-                    message_id,
-                )
-                return SendResult(success=False, error=error, message_id=message_id)
-            self._record_thinking_if_present(
-                event_type="message.reply",
-                trace_id=frame.get("trace_id") or frame.get("id"),
-                chat_id=chat_id,
-                message_id=message_id,
-                content=content or "",
-                raw=frame,
-            )
-            logger.info(
-                "clawchat send static reply queued chat_id=%s message_id=%s fragments=%d",
-                chat_id,
-                message_id,
-                len(fragments),
-            )
-            return SendResult(success=True, message_id=message_id)
-
-        created_frame = build_message_created_event(
+        frame = build_message_reply_event(
             chat_id=chat_id,
             chat_type=chat_type,
             message_id=message_id,
+            fragments=fragments,
+            reply_to_message_id=reply_to,
+            include_message_id=True,
         )
         claimed = self._claim_outbound_message(
-            event_type="message.created",
-            trace_id=created_frame.get("trace_id") or created_frame.get("id"),
+            event_type="message.reply",
+            trace_id=frame.get("trace_id") or frame.get("id"),
             chat_id=chat_id,
             message_id=message_id,
             text=visible_content,
-            raw=created_frame,
+            raw=frame,
         )
         if claimed is False:
             return SendResult(success=True, message_id=message_id)
@@ -1804,38 +1738,52 @@ class ClawChatAdapter(BasePlatformAdapter):
                 error="clawchat outbound message claim failed",
                 message_id=message_id,
             )
-
+        sent = await self._connection.send_frame(
+            frame,
+            wait_for_ack=True,
+        )
+        if not sent:
+            error = "clawchat complete reply dropped"
+            self._update_message_record(
+                kind="message",
+                direction="outbound",
+                event_type="message.failed",
+                trace_id=frame.get("trace_id") or frame.get("id"),
+                chat_id=chat_id,
+                message_id=message_id,
+                text=error,
+                raw=frame,
+            )
+            logger.warning(
+                "clawchat send complete reply dropped chat_id=%s message_id=%s",
+                chat_id,
+                message_id,
+            )
+            return SendResult(success=False, error=error, message_id=message_id)
+        self._record_thinking_if_present(
+            event_type="message.reply",
+            trace_id=frame.get("trace_id") or frame.get("id"),
+            chat_id=chat_id,
+            message_id=message_id,
+            content=content or "",
+            raw=frame,
+        )
         run = _ActiveRun(
             chat_id=chat_id,
             chat_type=chat_type,
             message_id=message_id,
             started_order=self._next_run_order(),
+            last_text=visible_content,
             reply_to_message_id=reply_to,
         )
         self._active_runs_by_id[message_id] = run
         self._active_chat_runs[chat_id] = message_id
-
-        await self._send_best_effort(created_frame, run)
-        if visible_content:
-            run.last_text, delta = compute_delta(run.last_text, visible_content)
-            run.sequence += 1
-            await self._send_best_effort(
-                build_message_add_event(
-                    chat_id=chat_id,
-                    chat_type=chat_type,
-                    message_id=message_id,
-                    full_text=run.last_text,
-                    delta=delta,
-                    sequence=run.sequence,
-                ),
-                run,
-            )
-            logger.info(
-                "clawchat stream delta queued chat_id=%s message_id=%s delta_len=%d",
-                chat_id,
-                message_id,
-                len(delta),
-            )
+        logger.info(
+            "clawchat send complete reply queued chat_id=%s message_id=%s fragments=%d",
+            chat_id,
+            message_id,
+            len(fragments),
+        )
         return SendResult(success=True, message_id=message_id)
 
     async def edit_message(
@@ -1908,21 +1856,19 @@ class ClawChatAdapter(BasePlatformAdapter):
                 )
             return SendResult(success=True, message_id=run.message_id)
 
-        full_text, delta = compute_delta(run.last_text, visible_content)
-        if delta:
-            await self._send_best_effort(
-                build_message_add_event(
-                    chat_id=chat_id,
-                    chat_type=run.chat_type,
-                    message_id=run.message_id,
-                    full_text=full_text,
-                    delta=delta,
-                    sequence=run.sequence + 1,
-                ),
-                run,
+        if visible_content != run.last_text:
+            frame = await self._send_complete_reply_update(
+                run=run,
+                visible_content=visible_content,
             )
-            run.sequence += 1
-            run.last_text = full_text
+            self._record_thinking_if_present(
+                event_type="message.reply",
+                trace_id=frame.get("trace_id") or frame.get("id"),
+                chat_id=chat_id,
+                message_id=run.message_id,
+                content=content or "",
+                raw=frame,
+            )
 
         if finalize:
             await self.on_run_complete(
@@ -1966,8 +1912,6 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
             return
         is_group = run.chat_type == "group"
-        self._discard_run(run)
-        self._remember_completed_run(run.message_id)
         logger.info(
             "clawchat run complete chat_id=%s message_id=%s final_len=%d",
             chat_id,
@@ -1990,54 +1934,27 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._is_noop_response_text(visible_final_text)
             or self._is_no_reply_token_prefix(visible_final_text)
         ):
+            self._discard_run(run)
+            self._remember_completed_run(run.message_id)
             logger.info("clawchat silent response final suppressed chat_id=%s message_id=%s", chat_id, run.message_id)
             return
-        full_text, delta = compute_delta(run.last_text, visible_final_text)
-        if delta:
-            run.sequence += 1
-            await self._send_best_effort(
-                build_message_add_event(
-                    chat_id=chat_id,
-                    chat_type=run.chat_type,
-                    message_id=run.message_id,
-                    full_text=full_text,
-                    delta=delta,
-                    sequence=run.sequence,
-                ),
-                run,
+        if visible_final_text != run.last_text:
+            frame = await self._send_complete_reply_update(
+                run=run,
+                visible_content=visible_final_text,
             )
-            run.last_text = full_text
-
-        frame = build_message_done_event(
-            chat_id=chat_id,
-            chat_type=run.chat_type,
-            message_id=run.message_id,
-            fragments=await self._build_fragments(run.last_text),
-            sequence=run.sequence,
-        )
-        await self._send_best_effort(frame, run)
-        self._update_message_record(
-            kind="message",
-            direction="outbound",
-            event_type="message.done",
-            trace_id=frame.get("trace_id") or frame.get("id"),
-            chat_id=chat_id,
-            message_id=run.message_id,
-            text=run.last_text,
-            raw=frame,
-        )
-        self._record_thinking_if_present(
-            event_type="message.done",
-            trace_id=frame.get("trace_id") or frame.get("id"),
-            chat_id=chat_id,
-            message_id=run.message_id,
-            content=final_text or "",
-            raw=frame,
-        )
-        if run.delivery_degraded:
-            await self._send_stream_fallback_reply(run)
+            self._record_thinking_if_present(
+                event_type="message.reply",
+                trace_id=frame.get("trace_id") or frame.get("id"),
+                chat_id=chat_id,
+                message_id=run.message_id,
+                content=final_text or "",
+                raw=frame,
+            )
+        self._discard_run(run)
+        self._remember_completed_run(run.message_id)
         logger.info(
-            "clawchat stream done queued chat_id=%s message_id=%s",
+            "clawchat complete reply finalized chat_id=%s message_id=%s",
             chat_id,
             run.message_id,
         )
@@ -2117,16 +2034,34 @@ class ClawChatAdapter(BasePlatformAdapter):
             run.delivery_degraded = True
         return sent
 
-    async def _send_stream_fallback_reply(self, run: _ActiveRun) -> None:
+    async def _send_complete_reply_update(
+        self,
+        *,
+        run: _ActiveRun,
+        visible_content: str,
+    ) -> dict[str, Any]:
         frame = build_message_reply_event(
             chat_id=run.chat_id,
             chat_type=run.chat_type,
             message_id=run.message_id,
-            fragments=await self._build_fragments(run.last_text),
+            fragments=await self._build_fragments(visible_content),
             reply_to_message_id=run.reply_to_message_id,
             include_message_id=True,
         )
         await self._connection.send_frame(frame, wait_for_ack=True)
+        self._update_message_record(
+            kind="message",
+            direction="outbound",
+            event_type="message.reply",
+            trace_id=frame.get("trace_id") or frame.get("id"),
+            chat_id=run.chat_id,
+            message_id=run.message_id,
+            text=visible_content,
+            raw=frame,
+        )
+        run.sequence += 1
+        run.last_text = visible_content
+        return frame
 
     async def send_image(
         self,
@@ -2244,12 +2179,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         return max(candidates, key=lambda run: run.started_order)
 
     def _should_use_static_mode(self, fragments: list[dict[str, Any]], metadata: Any = None) -> bool:
-        has_media = any(fragment.get("kind") != "text" for fragment in fragments)
-        return (
-            self._clawchat_config.reply_mode != "stream"
-            or has_media
-            or not self._is_managed_turn_response(metadata)
-        )
+        return True
 
     def _is_managed_turn_response(self, metadata: Any) -> bool:
         if isinstance(metadata, dict) and metadata.get("notify") is True:
