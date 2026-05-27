@@ -96,81 +96,6 @@ def _message_envelope(
     }
 
 
-def build_message_created_event(
-    *,
-    chat_id: str,
-    chat_type: str,
-    message_id: str,
-) -> dict[str, Any]:
-    return _message_envelope(
-        "message.created",
-        chat_id=chat_id,
-        chat_type=chat_type,
-        payload={"message_id": message_id},
-    )
-
-
-def build_message_add_event(
-    *,
-    chat_id: str,
-    chat_type: str,
-    message_id: str,
-    full_text: str,
-    delta: str,
-    sequence: int,
-) -> dict[str, Any]:
-    now_ms = current_time_ms()
-    return _message_envelope(
-        "message.add",
-        chat_id=chat_id,
-        chat_type=chat_type,
-        payload={
-            "message_id": message_id,
-            "sequence": sequence,
-            "mutation": {"type": "append", "target_fragment_index": None},
-            "fragments": [{"kind": "text", "text": full_text, "delta": delta}],
-            "streaming": {
-                "status": "streaming",
-                "sequence": sequence,
-                "mutation_policy": "append_text_only",
-                "started_at": None,
-                "completed_at": None,
-            },
-            "added_at": now_ms,
-        },
-        emitted_at=now_ms,
-    )
-
-
-def build_message_done_event(
-    *,
-    chat_id: str,
-    chat_type: str,
-    message_id: str,
-    fragments: list[dict[str, Any]],
-    sequence: int,
-) -> dict[str, Any]:
-    now_ms = current_time_ms()
-    return _message_envelope(
-        "message.done",
-        chat_id=chat_id,
-        chat_type=chat_type,
-        payload={
-            "message_id": message_id,
-            "fragments": fragments,
-            "streaming": {
-                "status": "done",
-                "sequence": sequence,
-                "mutation_policy": "append_text_only",
-                "started_at": None,
-                "completed_at": now_ms,
-            },
-            "completed_at": now_ms,
-        },
-        emitted_at=now_ms,
-    )
-
-
 def build_message_reply_event(
     *,
     chat_id: str,
@@ -233,37 +158,6 @@ def build_message_send_event(
         chat_id=chat_id,
         chat_type=chat_type,
         payload=payload,
-    )
-
-
-def build_message_failed_event(
-    *,
-    chat_id: str,
-    chat_type: str,
-    message_id: str,
-    sequence: int,
-    reason: str | None = None,
-) -> dict[str, Any]:
-    now_ms = current_time_ms()
-    reason_text = (reason or "").strip()
-    payload: dict[str, Any] = {
-        "message_id": message_id,
-        "fragments": ([{"kind": "text", "text": reason_text}] if reason_text else []),
-        "streaming": {
-            "status": "failed",
-            "sequence": sequence,
-            "mutation_policy": "append_text_only",
-            "started_at": None,
-            "completed_at": now_ms,
-        },
-        "completed_at": now_ms,
-    }
-    return _message_envelope(
-        "message.failed",
-        chat_id=chat_id,
-        chat_type=chat_type,
-        payload=payload,
-        emitted_at=now_ms,
     )
 
 

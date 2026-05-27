@@ -53,9 +53,6 @@ def configure_clawchat_display_defaults() -> bool:
     platforms = config.setdefault("platforms", {})
     clawchat = platforms.setdefault("clawchat", {})
     extra = clawchat.setdefault("extra", {})
-    if "reply_mode" in extra:
-        extra.pop("reply_mode", None)
-        changed = True
     for key in ("show_tools_output", "show_think_output"):
         if extra.get(key) is not False:
             extra[key] = False

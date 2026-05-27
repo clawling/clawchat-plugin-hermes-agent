@@ -33,18 +33,19 @@ def _load_activate(monkeypatch, tmp_path, raw_config):
     return importlib.reload(activate), saved_config, env_values
 
 
-def test_platform_config_ignores_reply_mode_surface(monkeypatch):
-    monkeypatch.setenv("CLAWCHAT_REPLY_MODE", "static")
+def test_platform_config_exposes_no_reply_mode_or_stream_tuning():
     platform_config = SimpleNamespace(
         extra={
             "websocket_url": "wss://example.test/ws",
-            "reply_mode": "stream",
         }
     )
 
     config = ClawChatConfig.from_platform_config(platform_config)
 
     assert not hasattr(config, "reply_mode")
+    assert not hasattr(config, "stream_flush_interval_ms")
+    assert not hasattr(config, "stream_min_chunk_chars")
+    assert not hasattr(config, "stream_max_buffer_chars")
 
 
 def test_persist_activation_does_not_create_reply_mode_or_streaming(monkeypatch, tmp_path):
@@ -68,41 +69,7 @@ def test_persist_activation_does_not_create_reply_mode_or_streaming(monkeypatch,
     }
 
 
-def test_persist_activation_removes_legacy_reply_mode_and_preserves_existing_streaming(monkeypatch, tmp_path):
-    activate, saved_config, _env_values = _load_activate(
-        monkeypatch,
-        tmp_path,
-        {
-            "platforms": {"clawchat": {"extra": {"reply_mode": "static"}}},
-            "streaming": {
-                "enabled": False,
-                "transport": "none",
-                "edit_interval": 9,
-                "buffer_threshold": 99,
-            },
-        },
-    )
-
-    activate.persist_activation(
-        access_token="token",
-        user_id="user",
-        owner_user_id="owner",
-        agent_id="",
-        refresh_token="refresh",
-        base_url="https://chat.example.test",
-    )
-
-    extra = saved_config["platforms"]["clawchat"]["extra"]
-    assert "reply_mode" not in extra
-    assert saved_config["streaming"] == {
-        "enabled": False,
-        "transport": "none",
-        "edit_interval": 9,
-        "buffer_threshold": 99,
-    }
-
-
-def test_runtime_defaults_remove_legacy_reply_mode_without_writing_streaming(monkeypatch, tmp_path):
+def test_runtime_defaults_write_display_defaults_without_streaming(monkeypatch, tmp_path):
     home = tmp_path / "hermes"
     config_path = home / "config.yaml"
     config_path.parent.mkdir()
@@ -110,8 +77,7 @@ def test_runtime_defaults_remove_legacy_reply_mode_without_writing_streaming(mon
         """
 platforms:
   clawchat:
-    extra:
-      reply_mode: static
+    extra: {}
 """.lstrip(),
         encoding="utf-8",
     )
@@ -122,7 +88,6 @@ platforms:
     assert changed is True
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     extra = config["platforms"]["clawchat"]["extra"]
-    assert "reply_mode" not in extra
     assert "streaming" not in config
     assert extra["show_tools_output"] is False
     assert extra["show_think_output"] is False
@@ -266,14 +231,8 @@ STREAM_LIFECYCLE_EVENTS = {
 
 
 @pytest.mark.asyncio
-async def test_adapter_uses_complete_messages_even_with_old_streaming_config(monkeypatch):
-    adapter = _adapter(
-        monkeypatch,
-        {
-            "reply_mode": "stream",
-            "stream": {"flush_interval_ms": 1},
-        }
-    )
+async def test_adapter_uses_complete_messages(monkeypatch):
+    adapter = _adapter(monkeypatch)
 
     result = await adapter.send(
         "chat-1",
@@ -295,7 +254,7 @@ async def test_adapter_uses_complete_messages_even_with_old_streaming_config(mon
 
 @pytest.mark.asyncio
 async def test_adapter_run_complete_does_not_emit_stream_lifecycle_frames(monkeypatch):
-    adapter = _adapter(monkeypatch, {"reply_mode": "stream"})
+    adapter = _adapter(monkeypatch)
 
     result = await adapter.send(
         "chat-1",
@@ -331,23 +290,8 @@ async def test_adapter_run_failed_does_not_emit_stream_lifecycle_frames(monkeypa
     assert not STREAM_LIFECYCLE_EVENTS & set(_sent_events(adapter))
     assert result.message_id not in adapter._active_runs_by_id
     assert result.message_id in adapter._completed_run_ids
-    assert adapter._store.inserted[-1]["event_type"] == "message.failed"
+    assert adapter._store.inserted[-1]["event_type"] == "message.error"
     assert adapter._store.inserted[-1]["text"] == "runtime failed"
-
-
-@pytest.mark.asyncio
-async def test_adapter_does_not_require_clawchat_config_reply_mode_attribute(monkeypatch):
-    adapter = _adapter(monkeypatch, {"reply_mode": "stream"})
-    assert not hasattr(adapter._clawchat_config, "reply_mode")
-
-    result = await adapter.send(
-        "chat-1",
-        "complete response",
-        metadata={"notify": True, "chat_type": "direct"},
-    )
-
-    assert result.success is True
-    assert _sent_events(adapter) == ["message.reply"]
 
 
 @pytest.mark.asyncio
@@ -369,7 +313,7 @@ async def test_edit_complete_reply_update_failure_is_visible(monkeypatch):
     assert edit_result.success is False
     assert edit_result.error == "clawchat complete reply update dropped"
     assert adapter._active_runs_by_id[result.message_id].last_text == "draft"
-    assert adapter._store.updated[-1]["event_type"] == "message.failed"
+    assert adapter._store.updated[-1]["event_type"] == "message.error"
     assert adapter._store.updated[-1]["text"] == "clawchat complete reply update dropped"
 
 
@@ -393,5 +337,5 @@ async def test_run_complete_update_failure_keeps_run_active_and_failed_visible(m
     assert complete_result.error == "clawchat complete reply update dropped"
     assert adapter._active_runs_by_id[result.message_id].last_text == "draft"
     assert result.message_id not in adapter._completed_run_ids
-    assert adapter._store.updated[-1]["event_type"] == "message.failed"
+    assert adapter._store.updated[-1]["event_type"] == "message.error"
     assert adapter._store.updated[-1]["text"] == "clawchat complete reply update dropped"

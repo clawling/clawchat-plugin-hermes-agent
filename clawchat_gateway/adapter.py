@@ -68,7 +68,6 @@ from clawchat_gateway.mention_message import (
 from clawchat_gateway.plugin_prompts import mode_prompt
 from clawchat_gateway.profile_sync import relation_for_sender
 from clawchat_gateway.protocol import (
-    build_message_failed_event,
     build_message_reply_event,
     build_message_send_event,
     build_typing_update_event,
@@ -1589,7 +1588,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._update_message_record(
                 kind="message",
                 direction="outbound",
-                event_type="message.failed",
+                event_type="message.error",
                 trace_id=frame.get("trace_id") or frame.get("id"),
                 chat_id=chat_id,
                 message_id=message_id,
@@ -1747,7 +1746,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._update_message_record(
                 kind="message",
                 direction="outbound",
-                event_type="message.failed",
+                event_type="message.error",
                 trace_id=frame.get("trace_id") or frame.get("id"),
                 chat_id=chat_id,
                 message_id=message_id,
@@ -1998,15 +1997,15 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._record_message(
                 kind="error",
                 direction="outbound",
-                event_type="message.failed",
+                event_type="message.error",
                 trace_id=None,
                 chat_id=chat_id,
                 message_id=run.message_id,
                 text=error,
-                raw={"group_failure_routed_to_owner": True},
+                raw={"reply_failure_routed_to_owner": True},
             )
             logger.info(
-                "clawchat group stream failure suppressed from ClawChat clients chat_id=%s message_id=%s",
+                "clawchat group reply failure suppressed from ClawChat clients chat_id=%s message_id=%s",
                 chat_id,
                 run.message_id,
             )
@@ -2014,15 +2013,15 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._record_message(
             kind="error",
             direction="outbound",
-            event_type="message.failed",
+            event_type="message.error",
             trace_id=None,
             chat_id=chat_id,
             message_id=run.message_id,
             text=error,
-            raw={"failure_suppressed_from_clawchat_clients": True},
+            raw={"reply_failure_suppressed_from_clawchat_clients": True},
         )
         logger.info(
-            "clawchat stream failure suppressed from ClawChat clients chat_id=%s message_id=%s",
+            "clawchat reply failure suppressed from ClawChat clients chat_id=%s message_id=%s",
             chat_id,
             run.message_id,
         )
@@ -2054,22 +2053,25 @@ class ClawChatAdapter(BasePlatformAdapter):
         sent = await self._connection.send_frame(frame, wait_for_ack=True)
         if not sent:
             error = "clawchat complete reply update dropped"
-            failed_frame = build_message_failed_event(
-                chat_id=run.chat_id,
-                chat_type=run.chat_type,
-                message_id=run.message_id,
-                sequence=max(run.sequence, 0),
-                reason=error,
-            )
+            raw_error = {
+                "version": "2",
+                "event": "message.error",
+                "trace_id": new_frame_id("trace"),
+                "chat_id": run.chat_id,
+                "payload": {
+                    "message_id": run.message_id,
+                    "reason": error,
+                },
+            }
             self._update_message_record(
                 kind="message",
                 direction="outbound",
-                event_type="message.failed",
-                trace_id=failed_frame.get("trace_id") or failed_frame.get("id"),
+                event_type="message.error",
+                trace_id=raw_error.get("trace_id") or raw_error.get("id"),
                 chat_id=run.chat_id,
                 message_id=run.message_id,
                 text=error,
-                raw=failed_frame,
+                raw=raw_error,
             )
             run.delivery_degraded = True
             logger.warning(

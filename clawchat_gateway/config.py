@@ -149,9 +149,6 @@ class ClawChatConfig:
     group_mode: str = "all"
     group_command_mode: str = "owner"
     groups: dict[str, dict[str, str]] = field(default_factory=dict)
-    stream_flush_interval_ms: int = 250
-    stream_min_chunk_chars: int = 40
-    stream_max_buffer_chars: int = 2000
     reconnect_initial_delay_ms: int = 500
     reconnect_max_delay_ms: int = 15000
     reconnect_jitter_ratio: float = 0.3
@@ -170,7 +167,6 @@ class ClawChatConfig:
     @classmethod
     def from_platform_config(cls, platform_config: Any) -> "ClawChatConfig":
         extra = getattr(platform_config, "extra", None) or {}
-        stream = extra.get("stream") or {}
         media_roots_env = _get_env("CLAWCHAT_MEDIA_LOCAL_ROOTS")
         media_local_roots = (
             tuple(p.strip() for p in media_roots_env.split(os.pathsep) if p.strip())
@@ -213,9 +209,6 @@ class ClawChatConfig:
                 or _get_config_value(extra, "group_command_mode", "owner")
             ),
             groups=_read_groups(_get_config_value(extra, "groups", {})),
-            stream_flush_interval_ms=_get_config_value(stream, "flush_interval_ms", 250),
-            stream_min_chunk_chars=_get_config_value(stream, "min_chunk_chars", 40),
-            stream_max_buffer_chars=_get_config_value(stream, "max_buffer_chars", 2000),
             reconnect_initial_delay_ms=_get_config_value(
                 extra, "reconnect_initial_delay_ms", 500
             ),

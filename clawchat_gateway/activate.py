@@ -78,7 +78,6 @@ def persist_activation(
     else:
         extra.pop("agent_id", None)
     extra["owner_user_id"] = owner_user_id
-    extra.pop("reply_mode", None)
     extra["show_tools_output"] = False
     extra["show_think_output"] = False
 
