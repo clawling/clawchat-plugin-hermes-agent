@@ -68,7 +68,7 @@ def test_persist_activation_does_not_create_reply_mode_or_streaming(monkeypatch,
     }
 
 
-def test_persist_activation_preserves_existing_streaming(monkeypatch, tmp_path):
+def test_persist_activation_preserves_legacy_reply_mode_and_existing_streaming(monkeypatch, tmp_path):
     activate, saved_config, _env_values = _load_activate(
         monkeypatch,
         tmp_path,
@@ -93,7 +93,7 @@ def test_persist_activation_preserves_existing_streaming(monkeypatch, tmp_path):
     )
 
     extra = saved_config["platforms"]["clawchat"]["extra"]
-    assert "reply_mode" not in extra
+    assert extra["reply_mode"] == "static"
     assert saved_config["streaming"] == {
         "enabled": False,
         "transport": "none",
@@ -102,7 +102,7 @@ def test_persist_activation_preserves_existing_streaming(monkeypatch, tmp_path):
     }
 
 
-def test_runtime_defaults_do_not_write_reply_mode_or_streaming(monkeypatch, tmp_path):
+def test_runtime_defaults_do_not_write_or_remove_reply_mode_or_streaming(monkeypatch, tmp_path):
     home = tmp_path / "hermes"
     config_path = home / "config.yaml"
     config_path.parent.mkdir()
@@ -122,7 +122,7 @@ platforms:
     assert changed is True
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     extra = config["platforms"]["clawchat"]["extra"]
-    assert "reply_mode" not in extra
+    assert extra["reply_mode"] == "static"
     assert "streaming" not in config
     assert extra["show_tools_output"] is False
     assert extra["show_think_output"] is False
