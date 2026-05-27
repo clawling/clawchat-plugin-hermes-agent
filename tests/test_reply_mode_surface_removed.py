@@ -158,9 +158,12 @@ streaming:
 class _FakeConnection:
     def __init__(self):
         self.frames = []
+        self.send_results = []
 
     async def send_frame(self, frame, **kwargs):
         self.frames.append((frame, kwargs))
+        if self.send_results:
+            return self.send_results.pop(0)
         return True
 
 
@@ -314,3 +317,50 @@ async def test_adapter_does_not_require_clawchat_config_reply_mode_attribute(mon
 
     assert result.success is True
     assert _sent_events(adapter) == ["message.reply"]
+
+
+@pytest.mark.asyncio
+async def test_edit_complete_reply_update_failure_is_visible(monkeypatch):
+    adapter = _adapter(monkeypatch)
+    result = await adapter.send(
+        "chat-1",
+        "draft",
+        metadata={"notify": True, "chat_type": "direct"},
+    )
+    adapter._connection.send_results.append(False)
+
+    edit_result = await adapter.edit_message(
+        "chat-1",
+        result.message_id,
+        "undelivered final",
+    )
+
+    assert edit_result.success is False
+    assert edit_result.error == "clawchat complete reply update dropped"
+    assert adapter._active_runs_by_id[result.message_id].last_text == "draft"
+    assert adapter._store.updated[-1]["event_type"] == "message.failed"
+    assert adapter._store.updated[-1]["text"] == "clawchat complete reply update dropped"
+
+
+@pytest.mark.asyncio
+async def test_run_complete_update_failure_keeps_run_active_and_failed_visible(monkeypatch):
+    adapter = _adapter(monkeypatch)
+    result = await adapter.send(
+        "chat-1",
+        "draft",
+        metadata={"notify": True, "chat_type": "direct"},
+    )
+    adapter._connection.send_results.append(False)
+
+    complete_result = await adapter.on_run_complete(
+        "chat-1",
+        "undelivered final",
+        message_id=result.message_id,
+    )
+
+    assert complete_result.success is False
+    assert complete_result.error == "clawchat complete reply update dropped"
+    assert adapter._active_runs_by_id[result.message_id].last_text == "draft"
+    assert result.message_id not in adapter._completed_run_ids
+    assert adapter._store.updated[-1]["event_type"] == "message.failed"
+    assert adapter._store.updated[-1]["text"] == "clawchat complete reply update dropped"

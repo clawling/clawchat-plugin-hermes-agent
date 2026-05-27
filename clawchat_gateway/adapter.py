@@ -1861,6 +1861,9 @@ class ClawChatAdapter(BasePlatformAdapter):
                 run=run,
                 visible_content=visible_content,
             )
+            if frame is None:
+                error = "clawchat complete reply update dropped"
+                return SendResult(success=False, error=error, message_id=run.message_id)
             self._record_thinking_if_present(
                 event_type="message.reply",
                 trace_id=frame.get("trace_id") or frame.get("id"),
@@ -1871,11 +1874,13 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
 
         if finalize:
-            await self.on_run_complete(
+            result = await self.on_run_complete(
                 chat_id=chat_id,
                 final_text=content or "",
                 message_id=run.message_id,
             )
+            if not result.success:
+                return result
 
         return SendResult(success=True, message_id=run.message_id)
 
@@ -1884,7 +1889,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         chat_id: str,
         final_text: str,
         message_id: str | None = None,
-    ) -> None:
+    ) -> SendResult:
         run = self._resolve_active_run(chat_id=chat_id, message_id=message_id)
         self._debug_hermes_output(
             phase="on_run_complete",
@@ -1896,7 +1901,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             if run is not None:
                 self._discard_run(run)
                 self._remember_completed_run(run.message_id)
-            return
+                return SendResult(success=True, message_id=run.message_id)
+            return SendResult(success=True, message_id=message_id)
         if run is None:
             if message_id and message_id in self._completed_run_ids:
                 logger.info(
@@ -1904,13 +1910,13 @@ class ClawChatAdapter(BasePlatformAdapter):
                     chat_id,
                     message_id,
                 )
-                return
+                return SendResult(success=True, message_id=message_id)
             logger.warning(
                 "clawchat run complete skipped chat_id=%s message_id=%s reason=no_active_run",
                 chat_id,
                 message_id,
             )
-            return
+            return SendResult(success=True, message_id=message_id)
         is_group = run.chat_type == "group"
         logger.info(
             "clawchat run complete chat_id=%s message_id=%s final_len=%d",
@@ -1937,12 +1943,15 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._discard_run(run)
             self._remember_completed_run(run.message_id)
             logger.info("clawchat silent response final suppressed chat_id=%s message_id=%s", chat_id, run.message_id)
-            return
+            return SendResult(success=True, message_id=run.message_id)
         if visible_final_text != run.last_text:
             frame = await self._send_complete_reply_update(
                 run=run,
                 visible_content=visible_final_text,
             )
+            if frame is None:
+                error = "clawchat complete reply update dropped"
+                return SendResult(success=False, error=error, message_id=run.message_id)
             self._record_thinking_if_present(
                 event_type="message.reply",
                 trace_id=frame.get("trace_id") or frame.get("id"),
@@ -1958,6 +1967,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             chat_id,
             run.message_id,
         )
+        return SendResult(success=True, message_id=run.message_id)
 
     def _remember_completed_run(self, message_id: str) -> None:
         if message_id in self._completed_run_ids:
@@ -2039,7 +2049,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         *,
         run: _ActiveRun,
         visible_content: str,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | None:
         frame = build_message_reply_event(
             chat_id=run.chat_id,
             chat_type=run.chat_type,
@@ -2048,7 +2058,33 @@ class ClawChatAdapter(BasePlatformAdapter):
             reply_to_message_id=run.reply_to_message_id,
             include_message_id=True,
         )
-        await self._connection.send_frame(frame, wait_for_ack=True)
+        sent = await self._connection.send_frame(frame, wait_for_ack=True)
+        if not sent:
+            error = "clawchat complete reply update dropped"
+            failed_frame = build_message_failed_event(
+                chat_id=run.chat_id,
+                chat_type=run.chat_type,
+                message_id=run.message_id,
+                sequence=max(run.sequence, 0),
+                reason=error,
+            )
+            self._update_message_record(
+                kind="message",
+                direction="outbound",
+                event_type="message.failed",
+                trace_id=failed_frame.get("trace_id") or failed_frame.get("id"),
+                chat_id=run.chat_id,
+                message_id=run.message_id,
+                text=error,
+                raw=failed_frame,
+            )
+            run.delivery_degraded = True
+            logger.warning(
+                "clawchat complete reply update dropped chat_id=%s message_id=%s",
+                run.chat_id,
+                run.message_id,
+            )
+            return None
         self._update_message_record(
             kind="message",
             direction="outbound",
