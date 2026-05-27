@@ -10,7 +10,7 @@ import re
 import time
 from collections import deque
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -283,6 +283,8 @@ class _ActiveRun:
     started_order: int
     last_text: str = ""
     reply_to_message_id: str | None = None
+    metadata: Any = None
+    kwargs: dict[str, Any] = field(default_factory=dict)
 
 
 def check_clawchat_requirements(platform_config: Any) -> bool:
@@ -1690,15 +1692,25 @@ class ClawChatAdapter(BasePlatformAdapter):
             force_hide_think=is_group,
             force_hide_tools=is_group,
         )
-        fragments = await self._build_fragments(visible_content, metadata, kwargs)
-        if is_group and (content or "").strip() and self._is_empty_text_response(fragments):
+        is_send_message_tool_call = self._is_send_message_tool_call()
+        if is_send_message_tool_call:
+            fragments = await self._build_fragments(visible_content, metadata, kwargs)
+            fragment_count = len(fragments)
+            has_media = False
+        else:
+            fragments = self._build_non_media_fragments(visible_content, metadata, kwargs)
+            media_urls = self._extract_media_urls(metadata, kwargs)
+            fragment_count = len(fragments) + len(media_urls)
+            has_media = bool(media_urls)
+
+        if is_group and (content or "").strip() and not has_media and self._is_empty_text_response(fragments):
             logger.info(
                 "clawchat group hidden-only output suppressed chat_id=%s text_len=%d",
                 chat_id,
                 len(content or ""),
             )
             return SendResult(success=True)
-        if self._is_pure_silent_response(fragments):
+        if not has_media and self._is_pure_silent_response(fragments):
             logger.info("clawchat silent response suppressed chat_id=%s chat_type=%s", chat_id, chat_type)
             return SendResult(success=True)
         message_id = new_frame_id("msg")
@@ -1707,7 +1719,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             chat_id,
             chat_type,
             len(visible_content),
-            len(fragments),
+            fragment_count,
             reply_to,
         )
 
@@ -1718,15 +1730,17 @@ class ClawChatAdapter(BasePlatformAdapter):
             started_order=self._next_run_order(),
             last_text=visible_content,
             reply_to_message_id=reply_to,
+            metadata=dict(metadata) if isinstance(metadata, dict) else metadata,
+            kwargs=dict(kwargs),
         )
-        if not self._is_send_message_tool_call():
+        if not is_send_message_tool_call:
             self._active_runs_by_id[message_id] = run
             self._active_chat_runs[chat_id] = message_id
             logger.info(
                 "clawchat complete reply buffered chat_id=%s message_id=%s fragments=%d",
                 chat_id,
                 message_id,
-                len(fragments),
+                fragment_count,
             )
             return SendResult(success=True, message_id=message_id)
 
@@ -1928,7 +1942,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             force_hide_think=is_group,
             force_hide_tools=is_group,
         )
-        if not run.last_text and (
+        if not run.last_text and not self._has_outbound_media(run.metadata, run.kwargs) and (
             self._is_noop_response_text(visible_final_text)
             or self._is_no_reply_token_prefix(visible_final_text)
         ):
@@ -1941,7 +1955,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             chat_id=run.chat_id,
             chat_type=run.chat_type,
             message_id=run.message_id,
-            fragments=await self._build_fragments(final_content),
+            fragments=await self._build_fragments(final_content, run.metadata, run.kwargs),
             reply_to_message_id=run.reply_to_message_id,
             include_message_id=True,
         )
@@ -2425,13 +2439,34 @@ class ClawChatAdapter(BasePlatformAdapter):
         metadata: Any = None,
         kwargs: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        fragments: list[dict[str, Any]] = []
+        fragments = self._build_non_media_fragments(content, metadata, kwargs)
+        if self._is_empty_text_response(fragments):
+            fragments = []
+
+        merged_kwargs = kwargs or {}
+        uploaded_fragments = await self._build_media_fragments(
+            media_urls=self._extract_media_urls(metadata, merged_kwargs),
+            metadata=metadata,
+            kwargs=merged_kwargs,
+        )
+        fragments.extend(uploaded_fragments)
+
+        if not fragments:
+            fragments.append({"kind": "text", "text": ""})
+        return fragments
+
+    def _build_non_media_fragments(
+        self,
+        content: str = "",
+        metadata: Any = None,
+        kwargs: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         rich_fragment = self._build_interaction_fragment(content, metadata, kwargs)
         if rich_fragment is not None:
-            fragments.append(rich_fragment)
-        elif content:
-            fragments.append({"kind": "text", "text": content})
+            return [rich_fragment]
+        return [{"kind": "text", "text": content}]
 
+    def _extract_media_urls(self, metadata: Any, kwargs: dict[str, Any] | None = None) -> list[str]:
         merged_kwargs = kwargs or {}
         media_urls: list[str] = []
         if isinstance(metadata, dict):
@@ -2449,17 +2484,10 @@ class ClawChatAdapter(BasePlatformAdapter):
                 for url in raw_kw_urls
                 if isinstance(url, str)
             )
+        return media_urls
 
-        uploaded_fragments = await self._build_media_fragments(
-            media_urls=media_urls,
-            metadata=metadata,
-            kwargs=merged_kwargs,
-        )
-        fragments.extend(uploaded_fragments)
-
-        if not fragments:
-            fragments.append({"kind": "text", "text": ""})
-        return fragments
+    def _has_outbound_media(self, metadata: Any, kwargs: dict[str, Any] | None = None) -> bool:
+        return bool(self._extract_media_urls(metadata, kwargs))
 
     def _build_interaction_fragment(
         self,
