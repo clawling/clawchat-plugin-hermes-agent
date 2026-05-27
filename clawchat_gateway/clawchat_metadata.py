@@ -40,6 +40,13 @@ def _detail(result: dict[str, Any], key: str) -> dict[str, Any] | None:
     return result if isinstance(result, dict) else None
 
 
+def _conversation_type(result: dict[str, Any]) -> str:
+    detail = _detail(result, "conversation")
+    if not isinstance(detail, dict):
+        return ""
+    return _first_string(detail, "type", "conversation_type", "conversationType").strip().lower()
+
+
 def _first_string(source: dict[str, Any], *keys: str, fallback: str = "") -> str:
     for key in keys:
         if key in source:
@@ -233,6 +240,14 @@ async def pull_group_metadata(
         raise ValueError("group_id is required")
     ensure_clawchat_memory_target_safe(root, "group", group_id)
     result = await client.get_conversation(group_id)
+    if _conversation_type(result) in {"direct", "dm"}:
+        return {
+            "ok": True,
+            "target_type": "group",
+            "target_id": group_id,
+            "skipped": True,
+            "reason": "direct_conversation",
+        }
     group_metadata = group_metadata_from_conversation(result, group_id=group_id)
     failures: list[dict[str, str]] = []
     skipped_user_ids = _normalize_skip_user_ids(skip_user_ids)
