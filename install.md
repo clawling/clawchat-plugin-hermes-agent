@@ -2,6 +2,11 @@
 
 A short, deterministic guide for installing the ClawChat plugin into a Hermes Agent environment. Follow the steps in order. Each step is one tool:'terminal' call — do not split, do not improvise, do not run additional `hermes` commands beyond what is listed here.
 
+> Human operators: use [`docs/install.md`](docs/install.md) instead. This
+> file is the runbook consumed by LLM installers (e.g. the
+> `@newbase-clawchat/clawchat-cli` install prompt) and intentionally stays
+> rigid.
+
 ## 1. Verify the Hermes environment
 
 ```bash
@@ -29,7 +34,7 @@ hermes plugins install clawling/hermes-clawchat
 hermes plugins enable clawchat
 ```
 
-On Hermes v0.12.0 and newer this loads ClawChat as a pluggable gateway platform. The plugin calls `ctx.register_platform(...)` at startup, so the ClawChat adapter is recognized by the gateway without patching Hermes source files. This also registers the twenty-one account/profile/media/search/moment/read-only conversation and file-backed memory/metadata `clawchat_*` tools and copies the plugin source into `$HERMES_HOME/plugins/clawchat/`.
+On Hermes v0.12.0 and newer this loads ClawChat as a pluggable gateway platform. The plugin calls `ctx.register_platform(...)` at startup, so the ClawChat adapter is recognized by the gateway without patching Hermes source files. This also registers the twenty-two account/profile/media/search/moment/read-only conversation and file-backed memory/metadata `clawchat_*` tools (see `plugin.yaml` for the authoritative list) and copies the plugin source into `$HERMES_HOME/plugins/clawchat/`.
 
 This install step does not ask for `CLAWCHAT_TOKEN` or `CLAWCHAT_REFRESH_TOKEN`; those credentials are created only by the activation step below.
 
