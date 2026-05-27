@@ -10,12 +10,11 @@ dist/
 tmp
 .worktrees
 
-# Local development, tests, docs, and deployment helpers are intentionally
+# Local development, tests, and deployment helpers are intentionally
 # excluded from the published Hermes plugin checkout. Hermes installs this
 # repository directly into $HERMES_HOME/plugins/clawchat, so keep GitHub's
-# tracked tree focused on runtime plugin files only.
+# tracked tree focused on runtime plugin files plus repository documentation.
 .e2e/
-docs/
 tests/
 deploy/
 scripts/
