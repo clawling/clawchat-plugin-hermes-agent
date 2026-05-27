@@ -304,7 +304,7 @@ async def test_adapter_run_complete_sends_one_final_complete_message(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_send_image_uploads_once_on_final_complete_message(monkeypatch):
+async def test_send_image_sends_complete_media_immediately(monkeypatch):
     adapter = _adapter(monkeypatch)
     uploaded_urls = []
 
@@ -333,28 +333,66 @@ async def test_send_image_uploads_once_on_final_complete_message(monkeypatch):
     )
 
     assert result.success is True
-    assert _sent_events(adapter) == []
-    assert uploaded_urls == []
-
-    complete_result = await adapter.on_run_complete(
-        "chat-1",
-        "final image",
-        message_id=result.message_id,
-    )
-
-    assert complete_result.success is True
     assert uploaded_urls == [["https://cdn/image.png"]]
     assert _sent_events(adapter) == ["message.reply"]
+    assert result.message_id not in adapter._active_runs_by_id
     frame = adapter._connection.frames[0][0]
     assert frame["payload"]["message_id"] == result.message_id
     assert frame["payload"]["message"]["body"]["fragments"] == [
-        {"kind": "text", "text": "final image"},
+        {"kind": "text", "text": "draft image"},
         {
             "kind": "image",
             "url": "https://cdn/uploaded.png",
             "mime": "image/png",
             "size": 12,
             "name": "image.png",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_send_image_file_sends_complete_file_immediately(monkeypatch):
+    adapter = _adapter(monkeypatch)
+    uploaded_urls = []
+
+    async def fake_upload_outbound_media(urls, **_kwargs):
+        uploaded_urls.append(list(urls))
+        return [
+            {
+                "kind": "file",
+                "url": "https://cdn/report.pdf",
+                "mime": "application/pdf",
+                "size": 3456,
+                "name": "report.pdf",
+            }
+        ]
+
+    monkeypatch.setattr(
+        "clawchat_gateway.adapter.upload_outbound_media",
+        fake_upload_outbound_media,
+    )
+
+    result = await adapter.send_image_file(
+        "chat-1",
+        "/tmp/report.pdf",
+        caption="PDF",
+        metadata={"notify": True, "chat_type": "direct"},
+    )
+
+    assert result.success is True
+    assert uploaded_urls == [["/tmp/report.pdf"]]
+    assert _sent_events(adapter) == ["message.reply"]
+    assert result.message_id not in adapter._active_runs_by_id
+    frame = adapter._connection.frames[0][0]
+    assert frame["payload"]["message_id"] == result.message_id
+    assert frame["payload"]["message"]["body"]["fragments"] == [
+        {"kind": "text", "text": "PDF"},
+        {
+            "kind": "file",
+            "url": "https://cdn/report.pdf",
+            "mime": "application/pdf",
+            "size": 3456,
+            "name": "report.pdf",
         },
     ]
 

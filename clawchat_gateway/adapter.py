@@ -96,6 +96,7 @@ DEBUG_EVENT_TEXT_BEGIN = "----- BEGIN CLAWCHAT DEBUG EVENT TEXT -----"
 DEBUG_EVENT_TEXT_END = "----- END CLAWCHAT DEBUG EVENT TEXT -----"
 DEBUG_HERMES_OUTPUT_BEGIN = "----- BEGIN CLAWCHAT DEBUG HERMES OUTPUT -----"
 DEBUG_HERMES_OUTPUT_END = "----- END CLAWCHAT DEBUG HERMES OUTPUT -----"
+IMMEDIATE_MEDIA_SEND_METADATA_KEY = "_clawchat_immediate_media_send"
 SILENT_RESPONSE_TOKEN = "<clawchat:silent/>"
 NO_REPLY_TOKEN = "<clawchat:no-reply/>"
 GROUP_OWNER_ATTENTION_TITLE = "requires owner attention"
@@ -1693,10 +1694,11 @@ class ClawChatAdapter(BasePlatformAdapter):
             force_hide_tools=is_group,
         )
         is_send_message_tool_call = self._is_send_message_tool_call()
-        if is_send_message_tool_call:
+        is_immediate_media_send = self._is_immediate_media_send(metadata, kwargs)
+        if is_send_message_tool_call or is_immediate_media_send:
             fragments = await self._build_fragments(visible_content, metadata, kwargs)
             fragment_count = len(fragments)
-            has_media = False
+            has_media = self._has_outbound_media(metadata, kwargs)
         else:
             fragments = self._build_non_media_fragments(visible_content, metadata, kwargs)
             media_urls = self._extract_media_urls(metadata, kwargs)
@@ -1714,10 +1716,12 @@ class ClawChatAdapter(BasePlatformAdapter):
             logger.info("clawchat silent response suppressed chat_id=%s chat_type=%s", chat_id, chat_type)
             return SendResult(success=True)
         message_id = new_frame_id("msg")
+        mode = "complete" if is_immediate_media_send else "complete-buffered"
         logger.info(
-            "clawchat send start chat_id=%s chat_type=%s mode=complete-buffered text_len=%d fragments=%d reply_to=%s",
+            "clawchat send start chat_id=%s chat_type=%s mode=%s text_len=%d fragments=%d reply_to=%s",
             chat_id,
             chat_type,
+            mode,
             len(visible_content),
             fragment_count,
             reply_to,
@@ -1733,7 +1737,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             metadata=dict(metadata) if isinstance(metadata, dict) else metadata,
             kwargs=dict(kwargs),
         )
-        if not is_send_message_tool_call:
+        if not is_send_message_tool_call and not is_immediate_media_send:
             self._active_runs_by_id[message_id] = run
             self._active_chat_runs[chat_id] = message_id
             logger.info(
@@ -2092,6 +2096,7 @@ class ClawChatAdapter(BasePlatformAdapter):
     ) -> SendResult:
         merged_metadata = dict(metadata or {})
         merged_metadata["media_urls"] = [normalize_outbound_media_reference(image_url)]
+        merged_metadata[IMMEDIATE_MEDIA_SEND_METADATA_KEY] = True
         return await self.send(
             chat_id=chat_id,
             content=caption or "",
@@ -2109,6 +2114,7 @@ class ClawChatAdapter(BasePlatformAdapter):
     ) -> SendResult:
         merged_metadata = dict(kwargs.get("metadata") or {})
         merged_metadata["media_urls"] = [normalize_outbound_media_reference(image_path)]
+        merged_metadata[IMMEDIATE_MEDIA_SEND_METADATA_KEY] = True
         return await self.send(
             chat_id=chat_id,
             content=caption or "",
@@ -2199,6 +2205,12 @@ class ClawChatAdapter(BasePlatformAdapter):
 
     def _should_use_static_mode(self, fragments: list[dict[str, Any]], metadata: Any = None) -> bool:
         return True
+
+    def _is_immediate_media_send(self, metadata: Any, kwargs: dict[str, Any] | None = None) -> bool:
+        for carrier in (metadata, kwargs or {}):
+            if isinstance(carrier, dict) and carrier.get(IMMEDIATE_MEDIA_SEND_METADATA_KEY) is True:
+                return True
+        return False
 
     def _is_managed_turn_response(self, metadata: Any) -> bool:
         if isinstance(metadata, dict) and metadata.get("notify") is True:
