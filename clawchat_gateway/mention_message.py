@@ -91,16 +91,6 @@ def mention_user_ids(mentions: list[dict[str, str]]) -> list[str]:
     return [mention["userId"] for mention in mentions]
 
 
-def mention_context_entries(mentions: list[dict[str, str]]) -> list[dict[str, str]]:
-    entries: list[dict[str, str]] = []
-    for mention in mentions:
-        entry = {"kind": "mention", "user_id": mention["userId"]}
-        if mention.get("display"):
-            entry["display"] = mention["display"]
-        entries.append(entry)
-    return entries
-
-
 def mention_message_text(*, mentions: list[dict[str, str]], text: str | None = None) -> str:
     normalized, remaining_text = apply_text_mention_labels(mentions, text)
     mention_text = "".join(f"@{mention.get('display') or mention['userId']}" for mention in normalized)

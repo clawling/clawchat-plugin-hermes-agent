@@ -863,10 +863,10 @@ def register_tools(ctx) -> None:
             "description": _direct_tool_description(
                 "Send a real ClawChat mention message to a direct or group conversation. "
                 "TRIGGER - invoke when the user asks to @, mention, notify, or address ClawChat users. "
-                "Prefer current group context sender_id for the mentioned participant. "
+                "Use mentioned_users or sender_id from current [message] blocks as mentions[].userId when present. "
                 "Use clawchat_search_users only when no explicit or locally available id exists. "
                 "Never guess userId from names, nicknames, or plain @name text. Plain @name is not a real mention. "
-                "Pass the visible label as mentions[].display when known. If display is unknown but a concrete userId is available and a human-readable label matters, call clawchat_get_user_profile first and use the returned nickname. For a single mention, if text is only a visible @label, the adapter can lift everything after @ into the mention fragment display, including spaces; if you also need body text, pass mentions[].display explicitly and put only the body text in text. "
+                "Pass the visible label as mentions[].display when known. Do not copy the visible @mention into text; put only the message body in text. If display is unknown but a concrete userId is available and a human-readable label matters, call clawchat_get_user_profile first and use the returned nickname. "
                 "After this tool succeeds, the mention message has already been sent to ClawChat. "
                 "The ClawChat adapter suppresses the same-turn normal follow-up reply."
             ),
@@ -881,7 +881,7 @@ def register_tools(ctx) -> None:
                     },
                     "text": {
                         "type": "string",
-                        "description": "Optional text after the mention fragments. For a single mention without mentions[].display, if this value is only a visible @label, the adapter uses everything after @ as that mention's display label, including spaces, and sends no duplicate text. If you also need body text, pass mentions[].display explicitly and put only the body text here.",
+                        "description": "Optional message body after the mention fragments. Do not include the visible @mention here; pass that label as mentions[].display.",
                     },
                     "mentions": {
                         "type": "array",
@@ -891,7 +891,7 @@ def register_tools(ctx) -> None:
                             "properties": {
                                 "userId": {
                                     "type": "string",
-                                    "description": "Explicit ClawChat user id to mention. Do not infer from nickname.",
+                                    "description": "Explicit ClawChat user id to mention. Prefer mentioned_users or sender_id from current [message] blocks; do not infer from nickname.",
                                 },
                                 "display": {
                                     "type": "string",
@@ -900,7 +900,7 @@ def register_tools(ctx) -> None:
                             },
                             "required": ["userId"],
                         },
-                        "description": "Mention targets. At least one explicit userId is required.",
+                        "description": "Mention targets. At least one explicit userId is required; prefer mentioned_users or sender_id from current [message] blocks.",
                     },
                     "replyToMessageId": {
                         "type": "string",

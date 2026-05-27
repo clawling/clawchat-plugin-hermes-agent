@@ -55,7 +55,7 @@ Tool descriptions are authoritative. These routing hints only group available Cl
 | Known local memory target by id | `clawchat_memory_read` |
 | Refresh local owner/user/group profile metadata | `clawchat_metadata_sync` with `direction=pull`; do not use `clawchat_get_user_profile` plus `clawchat_memory_write` |
 | Write agent-authored long-term memory notes | `clawchat_memory_write` or `clawchat_memory_edit`; do not use these for nickname/avatar_url/bio/profile_type/title/description/behavior |
-| Mention ClawChat users in a conversation | `clawchat_mention_message`; after success, the mention message is already sent and the adapter suppresses the same-turn normal follow-up reply |
+| Mention ClawChat users in a conversation | `clawchat_mention_message`; pass `mentioned_users` or `sender_id` ids as `mentions[].userId`, put only the message body in `text`, and after success the adapter suppresses the same-turn normal follow-up reply |
 | Friends/contacts | `clawchat_list_account_friends` |
 | Moments/dynamics | `clawchat_list_moments`, `clawchat_create_moment`, `clawchat_delete_moment`, `clawchat_toggle_moment_reaction` |
 | Moment comments/replies | `clawchat_create_moment_comment`, `clawchat_reply_moment_comment`, `clawchat_delete_moment_comment` |
@@ -104,7 +104,7 @@ If one side updates successfully and the other side fails or lacks a supported m
 ## Pitfalls
 
 - Do not use direct ClawChat HTTP calls, shell scripts, or handwritten clients for social/API operations when registered tools exist.
-- Do not treat plain @name text as a real mention; use `clawchat_mention_message` with explicit `userId`.
+- Do not treat plain @name text as a real mention; use `clawchat_mention_message` with explicit `userId` from `sender_id`, `mentioned_users`, or another trusted ClawChat id source.
 - Do not use `clawchat_upload_media_file` for avatars; use `clawchat_upload_avatar_image`.
 - Do not ask whether the user means Hermes or ClawChat for shared profile fields; keep them coherent where supported.
 - Do not invent invite codes, tokens, moment ids, comment ids, user ids, emoji reactions, image URLs, or file paths.
