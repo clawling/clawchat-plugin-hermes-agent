@@ -167,7 +167,7 @@ def _metadata_patch_error(target_type: str, patch: Any) -> dict[str, Any] | None
     allowed = {
         "owner": {"agent_behavior"},
         "user": {"nickname", "avatar_url", "bio"},
-        "group": {"title", "description"},
+        "group": {"group_title", "group_description"},
     }.get(target_type, set())
     forbidden = [key for key in patch if key not in allowed]
     if forbidden:

@@ -39,8 +39,12 @@ def _message_profile_type(message: InboundMessage) -> str:
     return "user"
 
 
-def _message_is_owner(message: InboundMessage) -> str:
+def _message_is_agent_owner(message: InboundMessage) -> str:
     return "true" if _message_relation(message) == "owner" else "false"
+
+
+def _message_is_group_owner(message: InboundMessage) -> str:
+    return "true" if message.sender_is_group_owner else "false"
 
 
 def _message_mentions(message: InboundMessage) -> str:
@@ -85,7 +89,8 @@ def format_coalesced_group_text(
         lines.append(f"sender_id: {_message_field(message.sender_id)}")
         lines.append(f"sender_name: {_message_field(sender_name)}")
         lines.append(f"sender_profile_type: {_message_field(_message_profile_type(message))}")
-        lines.append(f"sender_is_owner: {_message_is_owner(message)}")
+        lines.append(f"sender_is_agent_owner: {_message_is_agent_owner(message)}")
+        lines.append(f"sender_is_group_owner: {_message_is_group_owner(message)}")
         lines.append(f"mentions_current_agent: {'true' if message.was_mentioned else 'false'}")
         lines.append(f"mentioned_users: {_message_mentions(message)}")
         lines.append("text:")

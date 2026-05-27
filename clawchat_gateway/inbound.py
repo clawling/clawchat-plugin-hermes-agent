@@ -22,6 +22,7 @@ class InboundMessage:
     mentioned_users: list[dict[str, str]] = field(default_factory=list)
     sender_relation: str = ""
     sender_profile_type: str = ""
+    sender_is_group_owner: bool = False
 
 
 def _as_dict(value: Any) -> dict[str, Any] | None:

@@ -25,7 +25,7 @@ __all__ = [
 
 _OWNER_MUTABLE_FIELDS = ("agent_behavior",)
 _USER_MUTABLE_FIELDS = ("nickname", "avatar_url", "bio")
-_GROUP_MUTABLE_FIELDS = ("title", "description")
+_GROUP_MUTABLE_FIELDS = ("group_title", "group_description")
 _MUTABLE_FIELDS_BY_TARGET = {
     "owner": _OWNER_MUTABLE_FIELDS,
     "user": _USER_MUTABLE_FIELDS,
@@ -92,7 +92,7 @@ def owner_metadata_from_agent(
         fallback=owner_user_id,
     )
     if resolved_owner_id:
-        metadata["owner_id"] = resolved_owner_id
+        metadata["agent_owner_id"] = resolved_owner_id
     _copy_present(metadata, "agent_nickname", detail, "nickname")
     _copy_present(metadata, "agent_avatar_url", detail, "avatar_url", "avatarUrl")
     _copy_present(metadata, "agent_bio", detail, "bio")
@@ -107,9 +107,9 @@ def add_owner_profile_metadata(
     detail = _detail(result, "user")
     if not isinstance(detail, dict):
         return
-    _copy_present(metadata, "owner_nickname", detail, "nickname")
-    _copy_present(metadata, "owner_avatar_url", detail, "avatar_url", "avatarUrl")
-    _copy_present(metadata, "owner_bio", detail, "bio")
+    _copy_present(metadata, "agent_owner_nickname", detail, "nickname")
+    _copy_present(metadata, "agent_owner_avatar_url", detail, "avatar_url", "avatarUrl")
+    _copy_present(metadata, "agent_owner_bio", detail, "bio")
 
 
 def user_metadata_from_profile(result: dict[str, Any], *, user_id: str) -> dict[str, str]:
@@ -137,15 +137,15 @@ def group_metadata_from_conversation(
     group = detail.get("group") if isinstance(detail.get("group"), dict) else {}
     metadata: dict[str, str] = {}
     _copy_present(metadata, "updated_at", detail, "updated_at", "updatedAt")
-    metadata["id"] = group_id
-    _copy_present(metadata, "type", detail, "type", "conversation_type", "conversationType")
+    metadata["group_id"] = group_id
+    _copy_present(metadata, "group_type", detail, "type", "conversation_type", "conversationType")
     for field in ("title", "description"):
         if field in detail:
-            _copy_present(metadata, field, detail, field)
+            _copy_present(metadata, f"group_{field}", detail, field)
         elif field in group:
-            _copy_present(metadata, field, group, field)
-    _copy_present(metadata, "creator_id", detail, "creator_id", "creatorId")
-    _copy_present(metadata, "created_at", detail, "created_at", "createdAt")
+            _copy_present(metadata, f"group_{field}", group, field)
+    _copy_present(metadata, "group_owner_id", detail, "creator_id", "creatorId")
+    _copy_present(metadata, "group_created_at", detail, "created_at", "createdAt")
     participant_ids: list[str] = []
     raw_participants = detail.get("participants")
     if isinstance(raw_participants, list):
@@ -157,6 +157,12 @@ def group_metadata_from_conversation(
             if user_id and user_id not in seen:
                 seen.add(user_id)
                 participant_ids.append(user_id)
+            if user_id and not metadata.get("group_owner_id") and _first_string(participant, "role") == "owner":
+                metadata["group_owner_id"] = user_id
+            if user_id and metadata.get("group_owner_id") == user_id:
+                source = participant.get("user") if isinstance(participant.get("user"), dict) else participant
+                _copy_present(metadata, "group_owner_nickname", source, "nickname")
+                _copy_present(metadata, "group_owner_profile_type", source, "profile_type", "type")
     if participant_ids:
         metadata["participant_ids"] = ",".join(participant_ids)
     return metadata
@@ -199,7 +205,7 @@ async def pull_owner_metadata(
         connected_user_id=connected_user_id,
         owner_user_id=owner_user_id,
     )
-    owner_id = metadata.get("owner_id", "")
+    owner_id = metadata.get("agent_owner_id", "")
     if owner_id:
         add_owner_profile_metadata(metadata, await client.get_user_info(owner_id))
     write_clawchat_metadata(root, "owner", "owner", metadata)
@@ -228,10 +234,19 @@ async def pull_group_metadata(
     ensure_clawchat_memory_target_safe(root, "group", group_id)
     result = await client.get_conversation(group_id)
     group_metadata = group_metadata_from_conversation(result, group_id=group_id)
-    write_clawchat_metadata(root, "group", group_id, group_metadata)
-
     failures: list[dict[str, str]] = []
     skipped_user_ids = _normalize_skip_user_ids(skip_user_ids)
+    group_owner_id = group_metadata.get("group_owner_id", "")
+    if group_owner_id and not group_metadata.get("group_owner_nickname") and group_owner_id not in skipped_user_ids:
+        try:
+            owner_profile = await client.get_user_info(group_owner_id)
+            detail = _detail(owner_profile, "user") or {}
+            _copy_present(group_metadata, "group_owner_nickname", detail, "nickname")
+            _copy_present(group_metadata, "group_owner_profile_type", detail, "profile_type", "type")
+        except Exception as exc:  # noqa: BLE001
+            failures.append({"target_type": "user", "target_id": group_owner_id, "error": str(exc)})
+    write_clawchat_metadata(root, "group", group_id, group_metadata)
+
     for participant in _participants(result):
         user_id = _participant_user_id(participant)
         if user_id in skipped_user_ids:
@@ -390,7 +405,7 @@ async def update_metadata(
             result,
             connected_user_id=connected_user_id,
         )
-        owner_id = metadata.get("owner_id", "")
+        owner_id = metadata.get("agent_owner_id", "")
         if owner_id:
             add_owner_profile_metadata(metadata, await client.get_user_info(owner_id))
         write_clawchat_metadata(root, "owner", "owner", metadata)
@@ -399,7 +414,12 @@ async def update_metadata(
         metadata = user_metadata_from_profile(result, user_id=target_id)
         write_clawchat_metadata(root, "user", target_id, metadata)
     elif target_type == "group":
-        result = await client.patch_conversation(target_id, **allowed_patch)
+        conversation_patch: dict[str, str] = {}
+        if "group_title" in allowed_patch:
+            conversation_patch["title"] = allowed_patch["group_title"]
+        if "group_description" in allowed_patch:
+            conversation_patch["description"] = allowed_patch["group_description"]
+        result = await client.patch_conversation(target_id, **conversation_patch)
         metadata = group_metadata_from_conversation(result, group_id=target_id)
         write_clawchat_metadata(root, "group", target_id, metadata)
     else:
