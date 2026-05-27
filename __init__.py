@@ -221,11 +221,11 @@ def _configure_runtime_defaults() -> None:
     try:
         from clawchat_gateway.runtime_defaults import (
             configure_clawchat_allow_all,
-            configure_clawchat_streaming,
+            configure_clawchat_display_defaults,
         )
 
         configure_clawchat_allow_all()
-        configure_clawchat_streaming()
+        configure_clawchat_display_defaults()
     except Exception as exc:
         logger.warning("ClawChat could not configure runtime defaults: %s", exc)
 

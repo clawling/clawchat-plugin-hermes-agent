@@ -78,15 +78,9 @@ def persist_activation(
     else:
         extra.pop("agent_id", None)
     extra["owner_user_id"] = owner_user_id
-    extra["reply_mode"] = "stream"
+    extra.pop("reply_mode", None)
     extra["show_tools_output"] = False
     extra["show_think_output"] = False
-
-    streaming = config.setdefault("streaming", {})
-    streaming["enabled"] = True
-    streaming.setdefault("transport", "edit")
-    streaming.setdefault("edit_interval", 0.25)
-    streaming.setdefault("buffer_threshold", 16)
 
     display = config.setdefault("display", {})
     display_platforms = display.setdefault("platforms", {})

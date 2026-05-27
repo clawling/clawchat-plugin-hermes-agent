@@ -39,7 +39,7 @@ def configure_clawchat_allow_all() -> bool:
     return changed
 
 
-def configure_clawchat_streaming() -> bool:
+def configure_clawchat_display_defaults() -> bool:
     config_path = _hermes_home() / "config.yaml"
     if config_path.exists():
         try:
@@ -53,24 +53,12 @@ def configure_clawchat_streaming() -> bool:
     platforms = config.setdefault("platforms", {})
     clawchat = platforms.setdefault("clawchat", {})
     extra = clawchat.setdefault("extra", {})
-    if extra.get("reply_mode") != "stream":
-        extra["reply_mode"] = "stream"
+    if "reply_mode" in extra:
+        extra.pop("reply_mode", None)
         changed = True
     for key in ("show_tools_output", "show_think_output"):
         if extra.get(key) is not False:
             extra[key] = False
-            changed = True
-
-    streaming = config.setdefault("streaming", {})
-    stream_defaults = {
-        "enabled": True,
-        "transport": "edit",
-        "edit_interval": 0.25,
-        "buffer_threshold": 16,
-    }
-    for key, value in stream_defaults.items():
-        if streaming.get(key) != value:
-            streaming[key] = value
             changed = True
 
     display = config.setdefault("display", {})

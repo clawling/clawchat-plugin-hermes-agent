@@ -146,7 +146,6 @@ class ClawChatConfig:
     agent_id: str = ""
     owner_user_id: str = ""
     memory_root: str = ""
-    reply_mode: str = "stream"
     group_mode: str = "all"
     group_command_mode: str = "owner"
     groups: dict[str, dict[str, str]] = field(default_factory=dict)
@@ -205,8 +204,6 @@ class ClawChatConfig:
             owner_user_id=_get_env("CLAWCHAT_OWNER_USER_ID")
             or _get_config_value(extra, "owner_user_id", ""),
             memory_root=_resolve_memory_root(),
-            reply_mode=_get_env("CLAWCHAT_REPLY_MODE")
-            or _get_config_value(extra, "reply_mode", "stream"),
             group_mode=_read_group_mode(
                 _get_env("CLAWCHAT_GROUP_MODE")
                 or _get_config_value(extra, "group_mode", "all")
