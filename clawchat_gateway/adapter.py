@@ -1891,6 +1891,22 @@ class ClawChatAdapter(BasePlatformAdapter):
                 run.message_id,
             )
             return SendResult(success=True, message_id=run.message_id)
+        if not run.last_text and self._is_no_reply_token_prefix(visible_content):
+            if finalize:
+                self._discard_run(run)
+                self._remember_completed_run(run.message_id)
+                logger.info(
+                    "clawchat silent response edit prefix suppressed chat_id=%s message_id=%s",
+                    chat_id,
+                    run.message_id,
+                )
+            else:
+                logger.info(
+                    "clawchat silent response edit prefix held chat_id=%s message_id=%s",
+                    chat_id,
+                    run.message_id,
+                )
+            return SendResult(success=True, message_id=run.message_id)
 
         full_text, delta = compute_delta(run.last_text, visible_content)
         if delta:
@@ -1970,7 +1986,10 @@ class ClawChatAdapter(BasePlatformAdapter):
             force_hide_think=is_group,
             force_hide_tools=is_group,
         )
-        if not run.last_text and self._is_noop_response_text(visible_final_text):
+        if not run.last_text and (
+            self._is_noop_response_text(visible_final_text)
+            or self._is_no_reply_token_prefix(visible_final_text)
+        ):
             logger.info("clawchat silent response final suppressed chat_id=%s message_id=%s", chat_id, run.message_id)
             return
         full_text, delta = compute_delta(run.last_text, visible_final_text)
@@ -2276,6 +2295,10 @@ class ClawChatAdapter(BasePlatformAdapter):
     def _is_noop_response_text(self, content: str) -> bool:
         text = content.strip()
         return text in {NO_REPLY_TOKEN, LEGACY_EMPTY_RESPONSE_TOKEN}
+
+    def _is_no_reply_token_prefix(self, content: str) -> bool:
+        text = content.strip()
+        return bool(text) and text != NO_REPLY_TOKEN and NO_REPLY_TOKEN.startswith(text)
 
     def _is_pure_silent_response(self, fragments: list[dict[str, Any]]) -> bool:
         return (
