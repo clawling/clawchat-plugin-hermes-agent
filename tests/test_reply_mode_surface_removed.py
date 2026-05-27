@@ -231,29 +231,48 @@ STREAM_LIFECYCLE_EVENTS = {
 
 
 @pytest.mark.asyncio
-async def test_adapter_uses_complete_messages(monkeypatch):
+async def test_adapter_buffers_official_hermes_stream_lifecycle_until_finalize(monkeypatch):
     adapter = _adapter(monkeypatch)
 
     result = await adapter.send(
         "chat-1",
-        "first chunk",
+        "Hey! I'm ▉",
         reply_to="incoming-1",
         metadata={"notify": True, "chat_type": "direct"},
     )
-    await adapter.edit_message(
+    edit_result = await adapter.edit_message(
         "chat-1",
         result.message_id,
-        "first chunk and second chunk",
-        finalize=True,
+        "Hey! I'm doing well ▉",
+        stream_id="abc",
+        chunk_index=3,
     )
 
     assert result.success is True
-    assert "message.reply" in _sent_events(adapter)
+    assert edit_result.success is True
+    assert adapter.REQUIRES_EDIT_FINALIZE is True
+    assert _sent_events(adapter) == []
+
+    final_result = await adapter.edit_message(
+        "chat-1",
+        result.message_id,
+        "Hey! I'm doing well",
+        finalize=True,
+    )
+
+    assert final_result.success is True
+    assert _sent_events(adapter) == ["message.reply"]
+    frame = adapter._connection.frames[0][0]
+    assert frame["payload"]["message_id"] == result.message_id
+    assert frame["payload"]["message"]["body"]["fragments"] == [
+        {"kind": "text", "text": "Hey! I'm doing well"}
+    ]
+    assert "▉" not in str(frame)
     assert not STREAM_LIFECYCLE_EVENTS & set(_sent_events(adapter))
 
 
 @pytest.mark.asyncio
-async def test_adapter_run_complete_does_not_emit_stream_lifecycle_frames(monkeypatch):
+async def test_adapter_run_complete_sends_one_final_complete_message(monkeypatch):
     adapter = _adapter(monkeypatch)
 
     result = await adapter.send(
@@ -261,14 +280,75 @@ async def test_adapter_run_complete_does_not_emit_stream_lifecycle_frames(monkey
         "draft",
         metadata={"notify": True, "chat_type": "direct"},
     )
+    await adapter.edit_message(
+        "chat-1",
+        result.message_id,
+        "intermediate",
+    )
+
+    assert _sent_events(adapter) == []
+
     await adapter.on_run_complete(
         "chat-1",
         "final response",
         message_id=result.message_id,
     )
 
-    assert _sent_events(adapter).count("message.reply") >= 1
+    assert _sent_events(adapter) == ["message.reply"]
+    frame = adapter._connection.frames[0][0]
+    assert frame["payload"]["message_id"] == result.message_id
+    assert frame["payload"]["message"]["body"]["fragments"] == [
+        {"kind": "text", "text": "final response"}
+    ]
     assert not STREAM_LIFECYCLE_EVENTS & set(_sent_events(adapter))
+
+
+@pytest.mark.asyncio
+async def test_on_run_complete_without_message_id_uses_latest_stream_run(monkeypatch):
+    adapter = _adapter(monkeypatch)
+
+    result = await adapter.send(
+        "chat-1",
+        "hello",
+        metadata={"notify": True, "chat_type": "direct"},
+    )
+
+    complete_result = await adapter.on_run_complete("chat-1", "hello world")
+
+    assert complete_result.success is True
+    assert _sent_events(adapter) == ["message.reply"]
+    frame = adapter._connection.frames[0][0]
+    assert frame["payload"]["message_id"] == result.message_id
+    assert frame["payload"]["message"]["body"]["fragments"] == [
+        {"kind": "text", "text": "hello world"}
+    ]
+    assert not STREAM_LIFECYCLE_EVENTS & set(_sent_events(adapter))
+
+
+@pytest.mark.asyncio
+async def test_duplicate_run_complete_after_finalize_is_idempotent(monkeypatch):
+    adapter = _adapter(monkeypatch)
+
+    result = await adapter.send(
+        "chat-1",
+        "hello",
+        metadata={"notify": True, "chat_type": "direct"},
+    )
+    final_result = await adapter.edit_message(
+        "chat-1",
+        result.message_id,
+        "hello world",
+        finalize=True,
+    )
+    duplicate_result = await adapter.on_run_complete(
+        "chat-1",
+        "hello world",
+        message_id=result.message_id,
+    )
+
+    assert final_result.success is True
+    assert duplicate_result.success is True
+    assert _sent_events(adapter) == ["message.reply"]
 
 
 @pytest.mark.asyncio
@@ -295,7 +375,7 @@ async def test_adapter_run_failed_does_not_emit_stream_lifecycle_frames(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_edit_complete_reply_update_failure_is_visible(monkeypatch):
+async def test_edit_buffers_without_transport_failure(monkeypatch):
     adapter = _adapter(monkeypatch)
     result = await adapter.send(
         "chat-1",
@@ -310,15 +390,14 @@ async def test_edit_complete_reply_update_failure_is_visible(monkeypatch):
         "undelivered final",
     )
 
-    assert edit_result.success is False
-    assert edit_result.error == "clawchat complete reply update dropped"
-    assert adapter._active_runs_by_id[result.message_id].last_text == "draft"
-    assert adapter._store.updated[-1]["event_type"] == "message.error"
-    assert adapter._store.updated[-1]["text"] == "clawchat complete reply update dropped"
+    assert edit_result.success is True
+    assert adapter._active_runs_by_id[result.message_id].last_text == "undelivered final"
+    assert _sent_events(adapter) == []
+    assert adapter._store.updated == []
 
 
 @pytest.mark.asyncio
-async def test_run_complete_update_failure_keeps_run_active_and_failed_visible(monkeypatch):
+async def test_run_complete_send_failure_keeps_run_active_and_failed_visible(monkeypatch):
     adapter = _adapter(monkeypatch)
     result = await adapter.send(
         "chat-1",
@@ -334,8 +413,8 @@ async def test_run_complete_update_failure_keeps_run_active_and_failed_visible(m
     )
 
     assert complete_result.success is False
-    assert complete_result.error == "clawchat complete reply update dropped"
+    assert complete_result.error == "clawchat complete reply dropped"
     assert adapter._active_runs_by_id[result.message_id].last_text == "draft"
     assert result.message_id not in adapter._completed_run_ids
     assert adapter._store.updated[-1]["event_type"] == "message.error"
-    assert adapter._store.updated[-1]["text"] == "clawchat complete reply update dropped"
+    assert adapter._store.updated[-1]["text"] == "clawchat complete reply dropped"
