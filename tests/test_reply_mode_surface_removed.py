@@ -257,6 +257,14 @@ def _sent_events(adapter):
     return [frame["event"] for frame, _kwargs in adapter._connection.frames]
 
 
+STREAM_LIFECYCLE_EVENTS = {
+    "message.created",
+    "message.add",
+    "message.done",
+    "message.failed",
+}
+
+
 @pytest.mark.asyncio
 async def test_adapter_uses_complete_messages_even_with_old_streaming_config(monkeypatch):
     adapter = _adapter(
@@ -282,7 +290,7 @@ async def test_adapter_uses_complete_messages_even_with_old_streaming_config(mon
 
     assert result.success is True
     assert "message.reply" in _sent_events(adapter)
-    assert not {"message.created", "message.add", "message.done"} & set(_sent_events(adapter))
+    assert not STREAM_LIFECYCLE_EVENTS & set(_sent_events(adapter))
 
 
 @pytest.mark.asyncio
@@ -301,7 +309,30 @@ async def test_adapter_run_complete_does_not_emit_stream_lifecycle_frames(monkey
     )
 
     assert _sent_events(adapter).count("message.reply") >= 1
-    assert not {"message.created", "message.add", "message.done"} & set(_sent_events(adapter))
+    assert not STREAM_LIFECYCLE_EVENTS & set(_sent_events(adapter))
+
+
+@pytest.mark.asyncio
+async def test_adapter_run_failed_does_not_emit_stream_lifecycle_frames(monkeypatch):
+    adapter = _adapter(monkeypatch)
+    result = await adapter.send(
+        "chat-1",
+        "draft",
+        metadata={"notify": True, "chat_type": "direct"},
+    )
+
+    await adapter.on_run_failed(
+        "chat-1",
+        "runtime failed",
+        message_id=result.message_id,
+    )
+
+    assert "message.failed" not in _sent_events(adapter)
+    assert not STREAM_LIFECYCLE_EVENTS & set(_sent_events(adapter))
+    assert result.message_id not in adapter._active_runs_by_id
+    assert result.message_id in adapter._completed_run_ids
+    assert adapter._store.inserted[-1]["event_type"] == "message.failed"
+    assert adapter._store.inserted[-1]["text"] == "runtime failed"
 
 
 @pytest.mark.asyncio

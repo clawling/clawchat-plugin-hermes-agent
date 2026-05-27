@@ -1993,6 +1993,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
             return
         self._discard_run(run)
+        self._remember_completed_run(run.message_id)
         if run.chat_type == "group":
             self._record_message(
                 kind="error",
@@ -2010,26 +2011,18 @@ class ClawChatAdapter(BasePlatformAdapter):
                 run.message_id,
             )
             return
-        frame = build_message_failed_event(
-            chat_id=chat_id,
-            chat_type=run.chat_type,
-            message_id=run.message_id,
-            sequence=max(run.sequence, 0),
-            reason=error,
-        )
-        await self._send_best_effort(frame, run)
         self._record_message(
             kind="error",
             direction="outbound",
             event_type="message.failed",
-            trace_id=frame.get("trace_id") or frame.get("id"),
+            trace_id=None,
             chat_id=chat_id,
             message_id=run.message_id,
             text=error,
-            raw=frame,
+            raw={"failure_suppressed_from_clawchat_clients": True},
         )
         logger.info(
-            "clawchat stream failed queued chat_id=%s message_id=%s",
+            "clawchat stream failure suppressed from ClawChat clients chat_id=%s message_id=%s",
             chat_id,
             run.message_id,
         )
