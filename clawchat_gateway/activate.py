@@ -61,6 +61,7 @@ def persist_activation(
     agent_id: str = "",
     refresh_token: str | None,
     base_url: str,
+    home_channel_id: str | None = None,
 ) -> dict[str, Any]:
     config_path, config = _load_config()
     platforms = config.setdefault("platforms", {})
@@ -93,12 +94,19 @@ def persist_activation(
     clawchat_display["tool_progress"] = "off"
     clawchat_display["show_reasoning"] = False
 
-    env_path = _write_env_values(
-        {
-            "CLAWCHAT_TOKEN": access_token,
-            "CLAWCHAT_REFRESH_TOKEN": refresh_token or None,
-        }
-    )
+    env_values = {
+        "CLAWCHAT_TOKEN": access_token,
+        "CLAWCHAT_REFRESH_TOKEN": refresh_token or None,
+    }
+    if home_channel_id:
+        env_values.update(
+            {
+                "CLAWCHAT_HOME_CHANNEL": home_channel_id,
+                "CLAWCHAT_HOME_CHANNEL_THREAD_ID": "",
+                "CLAWCHAT_HOME_CHANNEL_NAME": "ClawChat",
+            }
+        )
+    env_path = _write_env_values(env_values)
     _write_config(config_path, config)
     return {
         "config_path": str(config_path),
@@ -110,6 +118,7 @@ def persist_activation(
         "websocket_url": extra["websocket_url"],
         "token": "***",
         "refresh_token": "***" if refresh_token else None,
+        "home_channel_id": home_channel_id or None,
         "restart_required": True,
         "restart_message": "Restart Hermes gateway so ClawChat reloads the new credentials.",
     }
@@ -130,6 +139,7 @@ async def activate(code: str, *, base_url: str) -> dict[str, Any]:
         owner_user_id=owner_id,
         refresh_token=result.get("refresh_token"),
         base_url=base_url,
+        home_channel_id=conversation_id,
     )
     try:
         get_clawchat_store().upsert_activation(
