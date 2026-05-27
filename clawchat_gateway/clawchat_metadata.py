@@ -415,7 +415,7 @@ async def update_metadata(
         raise ValueError("metadata patch is empty")
 
     if target_type == "owner":
-        result = await client.patch_agent(agent_id, behavior=allowed_patch["agent_behavior"])
+        result = await client.update_agent_behavior(allowed_patch["agent_behavior"])
         metadata = owner_metadata_from_agent(
             result,
             connected_user_id=connected_user_id,
