@@ -1,4 +1,3 @@
-from importlib.resources import files
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
@@ -69,9 +68,7 @@ def load_clawchat_prompts_from_root(plugin_root: Path) -> ClawChatPrompts:
     return _load_clawchat_prompts_from_dir(plugin_root / "prompts")
 
 
-_PROMPTS = _load_clawchat_prompts_from_dir(
-    files("clawchat_gateway").joinpath("prompts")
-)
+_PROMPTS = load_clawchat_prompts_from_root(Path(__file__).resolve().parents[1])
 
 
 def platform_prompt() -> str:
