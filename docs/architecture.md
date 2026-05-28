@@ -65,20 +65,17 @@ lifecycle (`clawchat_gateway.connection`), inbound frame parsing
 (`clawchat_gateway.media_runtime`), and per-turn channel-prompt
 injection (`_compose_channel_prompt` → `mode_prompt`).
 
-## Wire protocol — relationship to `clawchat-msghub`
+## Wire protocol
 
 This plugin and the sibling `openclaw-clawchat` plugin are **peer
-Protocol-v2 clients** of `clawchat-msghub`. The wire contract is owned
-by msghub; see:
-
-- `clawchat-msghub/docs/features/msghub/protocol-v2-reference.md` —
-  authoritative envelope and event reference.
-- `clawchat-msghub/docs/features/msghub/protocol-v2-client-integration.md`
-  — integration guidance for client adapters.
+Protocol-v2 clients**. The wire contract is documented in
+[`./client-integration.md`](./client-integration.md) — the authoritative
+Protocol v2 reference for this plugin (envelope, events, routing, replay,
+streaming, and canonical wire examples).
 
 When the wire shape changes:
 
-1. Update the msghub doc first (source of truth).
+1. Update [`./client-integration.md`](./client-integration.md) first.
 2. Update `clawchat_gateway/protocol.py` (frame builders) and
    `clawchat_gateway/inbound.py` (frame parsing) here.
 3. Mirror the same change in `openclaw-clawchat/src/`.

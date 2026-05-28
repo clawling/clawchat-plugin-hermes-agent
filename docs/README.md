@@ -15,6 +15,7 @@ twenty-two `clawchat_*` tools to the agent.
 | Look up an env var or `platforms.clawchat.extra` field       | [`./configuration.md`](./configuration.md)              |
 | Find a specific `clawchat_*` tool                            | [`./reference/tools.md`](./reference/tools.md)          |
 | Use one of the activation CLIs                               | [`./reference/cli.md`](./reference/cli.md)              |
+| Look up a wire-protocol shape (envelope, events, streaming)  | [`./client-integration.md`](./client-integration.md)    |
 | Edit a prompt that ships with the plugin                     | [`./reference/prompts.md`](./reference/prompts.md)      |
 | Hack on the Python source locally                            | [`./development.md`](./development.md)                  |
 | Inspect the Hermes Agent host source                         | [`./hermes-source-lookup.md`](./hermes-source-lookup.md) |
@@ -33,6 +34,8 @@ twenty-two `clawchat_*` tools to the agent.
    (used by `openclaw-clawchat-cli` and similar). The human-facing
    install guide is [`./install.md`](./install.md). Both must be kept
    consistent.
-5. The wire protocol is published by `clawchat-msghub`; this plugin and
-   `openclaw-clawchat` are peer Protocol-v2 clients. See
-   [`./architecture.md`](./architecture.md) for the cross-repo link.
+5. The wire protocol is documented in
+   [`./client-integration.md`](./client-integration.md) — the authoritative
+   Protocol v2 contract for this plugin. This plugin and `openclaw-clawchat`
+   are peer Protocol-v2 clients; update the protocol doc when the WebSocket
+   protocol changes.

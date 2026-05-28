@@ -101,9 +101,9 @@ already in `.gitignore`; nothing committed depends on it.
 
 ## Modifying the wire protocol
 
-`clawchat-msghub` owns Protocol v2. Read
-`clawchat-msghub/docs/features/msghub/protocol-v2-reference.md` first,
-then update `clawchat_gateway/protocol.py` (outbound builders) and
+The Protocol v2 contract is documented in
+[`./client-integration.md`](./client-integration.md). Update it first, then
+update `clawchat_gateway/protocol.py` (outbound builders) and
 `clawchat_gateway/inbound.py` (parsing). Mirror the same change in
 `openclaw-clawchat/src/` — the two plugins are peers.
 

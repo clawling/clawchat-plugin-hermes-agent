@@ -25,6 +25,7 @@ npx -y @newbase-clawchat/clawchat-cli@latest install --target hermes
 | Install + activate (humans)    | [`docs/install.md`](docs/install.md)                                |
 | Install runbook (LLM driven)   | [`install.md`](install.md)                                          |
 | Hermes integration surface     | [`docs/architecture.md`](docs/architecture.md)                      |
+| Wire protocol contract         | [`docs/client-integration.md`](docs/client-integration.md)          |
 | Env vars and `config.yaml`     | [`docs/configuration.md`](docs/configuration.md)                    |
 | `clawchat_*` tool catalogue    | [`docs/reference/tools.md`](docs/reference/tools.md)                |
 | Activation CLI surfaces        | [`docs/reference/cli.md`](docs/reference/cli.md)                    |
@@ -40,10 +41,9 @@ npx -y @newbase-clawchat/clawchat-cli@latest install --target hermes
 - Source spec: `clawling/hermes-clawchat`.
 - Install path: `$HERMES_HOME/plugins/clawchat/`; `HERMES_HOME`
   defaults to `~/.hermes`.
-- Wire protocol: ClawChat Protocol v2 — owned by `clawchat-msghub`. The
-  authoritative reference is
-  `clawchat-msghub/docs/features/msghub/protocol-v2-reference.md`. This
-  plugin and `openclaw-clawchat` are peer Protocol-v2 clients.
+- Wire protocol: ClawChat Protocol v2 (WebSocket). The authoritative contract
+  is [`docs/client-integration.md`](docs/client-integration.md). This plugin
+  and `openclaw-clawchat` are peer Protocol-v2 clients.
 
 ## License
 
