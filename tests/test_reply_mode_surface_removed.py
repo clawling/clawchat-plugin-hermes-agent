@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import importlib
+import asyncio
 import sys
 from types import ModuleType, SimpleNamespace
 from pathlib import Path
@@ -34,10 +35,16 @@ def _load_activate(monkeypatch, tmp_path, raw_config):
     return importlib.reload(activate), saved_config, env_values
 
 
-def test_platform_config_exposes_no_reply_mode_or_stream_tuning():
+def test_platform_config_exposes_no_reply_mode_or_stream_tuning(monkeypatch):
+    monkeypatch.delenv("CLAWCHAT_TOKEN", raising=False)
+    monkeypatch.delenv("CLAWCHAT_REFRESH_TOKEN", raising=False)
+    monkeypatch.setattr("clawchat_gateway.config._read_hermes_env_value", lambda name: "")
+    monkeypatch.setattr("clawchat_gateway.config._read_env_file_value", lambda name: "")
     platform_config = SimpleNamespace(
         extra={
             "websocket_url": "wss://example.test/ws",
+            "token": "config-token",
+            "refresh_token": "config-refresh",
         }
     )
 
@@ -49,6 +56,8 @@ def test_platform_config_exposes_no_reply_mode_or_stream_tuning():
     assert not hasattr(config, "stream_max_buffer_chars")
     assert not hasattr(config, "show_tools_output")
     assert not hasattr(config, "show_think_output")
+    assert config.token == ""
+    assert config.refresh_token == ""
 
 
 def test_persist_activation_does_not_create_reply_mode_or_streaming(monkeypatch, tmp_path):
@@ -77,6 +86,52 @@ def test_persist_activation_does_not_create_reply_mode_or_streaming(monkeypatch,
         "CLAWCHAT_TOKEN": "token",
         "CLAWCHAT_REFRESH_TOKEN": None,
     }
+
+
+def test_activation_persists_tokens_to_sqlite(monkeypatch, tmp_path):
+    activate, saved_config, env_values = _load_activate(monkeypatch, tmp_path, {})
+
+    calls = []
+
+    class Store:
+        def upsert_activation(self, **kwargs):
+            calls.append(kwargs)
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def agents_connect(self, *, code):
+            return {
+                "access_token": "access-token",
+                "refresh_token": "refresh-token",
+                "agent": {
+                    "id": "agent",
+                    "user_id": "user",
+                    "owner_id": "owner",
+                },
+                "conversation": {"id": "conv-activation"},
+            }
+
+    monkeypatch.setattr(activate, "ClawChatApiClient", Client)
+    monkeypatch.setattr(activate, "get_clawchat_store", lambda: Store())
+
+    payload = asyncio.run(activate.activate("CODE", base_url="https://app.clawling.com"))
+
+    assert payload["user_id"] == "user"
+    assert saved_config["platforms"]["clawchat"]["extra"]["user_id"] == "user"
+    assert env_values["CLAWCHAT_TOKEN"] == "access-token"
+    assert calls == [
+        {
+            "platform": "hermes",
+            "account_id": "default",
+            "user_id": "user",
+            "conversation_id": "conv-activation",
+            "owner_user_id": "owner",
+            "access_token": "access-token",
+            "refresh_token": "refresh-token",
+        }
+    ]
 
 
 def test_runtime_defaults_write_display_defaults_without_streaming(monkeypatch, tmp_path):

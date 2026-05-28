@@ -6,19 +6,24 @@ priority order is documented in [`./architecture.md`](./architecture.md):
 process env → `hermes_cli.config.get_env_value` → `$HERMES_HOME/.env`
 → `platforms.clawchat.extra` → dataclass default.
 
+Credential tokens are the exception: `CLAWCHAT_TOKEN` and
+`CLAWCHAT_REFRESH_TOKEN` are resolved only from env-backed sources, not from
+`platforms.clawchat.extra`.
+
 ## Credentials (written by activation)
 
 | Env var                              | `extra.*` key      | Default | Notes |
 |--------------------------------------|--------------------|---------|-------|
-| `CLAWCHAT_TOKEN`                     | `token`            | —       | Required for the gateway to start. Written to `$HERMES_HOME/.env` by activation. |
-| `CLAWCHAT_REFRESH_TOKEN`             | `refresh_token`    | —       | Written to `$HERMES_HOME/.env` by activation. |
+| `CLAWCHAT_TOKEN`                     | —                  | —       | Required for the gateway to start. Written to `$HERMES_HOME/.env` by activation. |
+| `CLAWCHAT_REFRESH_TOKEN`             | —                  | —       | Written to `$HERMES_HOME/.env` by activation. |
 | `CLAWCHAT_USER_ID`                   | `user_id`          | `""`    | ClawChat user id of the bot account. |
 | `CLAWCHAT_AGENT_ID`                  | `agent_id`         | JWT `aid` claim from `CLAWCHAT_TOKEN` | Set by activation. |
 | `CLAWCHAT_OWNER_USER_ID`             | `owner_user_id`    | `""`    | Identifies the human owner of the agent account. |
 
-The token / refresh-token pair are **only** ever stored in `.env`; the
-plugin never copies them into `config.yaml`
-(`activate.persist_activation` calls `extra.pop("token", None)`).
+The token / refresh-token pair are stored in `.env` for runtime resolution and
+in plugin SQLite for the latest activation record. The plugin never copies them
+into `config.yaml` (`activate.persist_activation` calls `extra.pop("token",
+None)` and `extra.pop("refresh_token", None)`).
 
 ## Connection
 

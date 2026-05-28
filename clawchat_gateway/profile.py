@@ -93,7 +93,6 @@ def load_profile_config() -> ProfileConfig:
     token = _first_non_empty(
         os.environ.get("CLAWCHAT_TOKEN"),
         env.get("CLAWCHAT_TOKEN"),
-        extra.get("token"),
     )
     user_id = _first_non_empty(
         os.environ.get("CLAWCHAT_USER_ID"),
@@ -101,7 +100,7 @@ def load_profile_config() -> ProfileConfig:
         extra.get("user_id"),
     )
     if not token:
-        raise ProfileConfigError("missing CLAWCHAT_TOKEN / platforms.clawchat.extra.token; activate ClawChat first")
+        raise ProfileConfigError("missing CLAWCHAT_TOKEN; activate ClawChat first")
     if not user_id:
         raise ProfileConfigError("missing CLAWCHAT_USER_ID / platforms.clawchat.extra.user_id; activate ClawChat first")
     return ProfileConfig(base_url=base_url, token=token, user_id=user_id, config_path=config_path)

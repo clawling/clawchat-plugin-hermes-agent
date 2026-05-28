@@ -133,7 +133,8 @@ docker exec hermes sh -lc \
 | File                                       | Contents (per `clawchat_gateway/activate.py`)                                 |
 |--------------------------------------------|--------------------------------------------------------------------------------|
 | `$HERMES_HOME/.env`                        | `CLAWCHAT_TOKEN`, `CLAWCHAT_REFRESH_TOKEN`, optional `CLAWCHAT_HOME_CHANNEL*`. |
-| `$HERMES_HOME/config.yaml`                 | `platforms.clawchat.enabled=true`, `extra.base_url`, `extra.websocket_url`, `extra.user_id`, `extra.agent_id`, `extra.owner_user_id`, `extra.reply_mode=stream`, `streaming.*`, `display.platforms.clawchat.*`. |
+| `$HERMES_HOME/config.yaml`                 | `platforms.clawchat.enabled=true`, `extra.base_url`, `extra.websocket_url`, `extra.user_id`, `extra.agent_id`, `extra.owner_user_id`, `display.platforms.clawchat.*`. |
+| `$HERMES_HOME/clawchat.sqlite`             | Latest activation row, including access token, optional refresh token, user ids, and activation conversation id. |
 
 Successful activation prints `clawchat: activation complete for <user_id>`
 and exits 0. Treat any non-zero exit as a hard failure — activation

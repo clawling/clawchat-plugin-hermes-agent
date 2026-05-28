@@ -139,6 +139,8 @@ async def activate(code: str, *, base_url: str) -> dict[str, Any]:
             user_id=user_id,
             conversation_id=conversation_id,
             owner_user_id=owner_id,
+            access_token=str(result["access_token"]),
+            refresh_token=result.get("refresh_token"),
         )
     except Exception:  # noqa: BLE001
         logger.warning("clawchat activation database persistence failed")

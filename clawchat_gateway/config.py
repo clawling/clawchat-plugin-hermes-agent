@@ -170,15 +170,14 @@ class ClawChatConfig:
             if media_roots_env
             else _get_config_value(extra, "media_local_roots", ())
         )
-        token = _get_env("CLAWCHAT_TOKEN") or extra.get("token") or ""
+        token = _get_env("CLAWCHAT_TOKEN")
         return cls(
             websocket_url=_get_env("CLAWCHAT_WEBSOCKET_URL", "CLAWCHAT_WS_URL")
             or _get_config_value(extra, "websocket_url", ""),
             base_url=_get_env("CLAWCHAT_BASE_URL")
             or _get_config_value(extra, "base_url", ""),
             token=token,
-            refresh_token=_get_env("CLAWCHAT_REFRESH_TOKEN")
-            or _get_config_value(extra, "refresh_token", ""),
+            refresh_token=_get_env("CLAWCHAT_REFRESH_TOKEN"),
             user_id=_get_env("CLAWCHAT_USER_ID")
             or _get_config_value(extra, "user_id", ""),
             agent_id=_get_env("CLAWCHAT_AGENT_ID")
