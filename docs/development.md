@@ -105,7 +105,7 @@ The Protocol v2 contract is documented in
 [`./client-integration.md`](./client-integration.md). Update it first, then
 update `clawchat_gateway/protocol.py` (outbound builders) and
 `clawchat_gateway/inbound.py` (parsing). Mirror the same change in
-`openclaw-clawchat/src/` — the two plugins are peers.
+`clawchat-plugin-openclaw/src/` — the two plugins are peers.
 
 ## Excluded from this checkout
 

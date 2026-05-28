@@ -78,7 +78,7 @@ When the wire shape changes:
 1. Update [`./client-integration.md`](./client-integration.md) first.
 2. Update `clawchat_gateway/protocol.py` (frame builders) and
    `clawchat_gateway/inbound.py` (frame parsing) here.
-3. Mirror the same change in `openclaw-clawchat/src/`.
+3. Mirror the same change in `clawchat-plugin-openclaw/src/`.
 
 ## Configuration loading
 
