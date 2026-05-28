@@ -90,6 +90,15 @@ The runtime hook
 when it drops a self-echo frame — useful for confirming the plugin is
 loaded.
 
+## Consulting Hermes host source
+
+When a question crosses into Hermes host behavior — plugin SDK contract,
+`ctx.register_platform`/`ctx.register_skill`, gateway dispatch, the
+`send_message` tool, or activation lifecycle — point `tmp/hermes/` at a
+matching Hermes Agent v0.12.0+ checkout and follow
+[`./hermes-source-lookup.md`](./hermes-source-lookup.md). The path is
+already in `.gitignore`; nothing committed depends on it.
+
 ## Modifying the wire protocol
 
 `clawchat-msghub` owns Protocol v2. Read

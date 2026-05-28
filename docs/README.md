@@ -17,6 +17,7 @@ twenty-two `clawchat_*` tools to the agent.
 | Use one of the activation CLIs                               | [`./reference/cli.md`](./reference/cli.md)              |
 | Edit a prompt that ships with the plugin                     | [`./reference/prompts.md`](./reference/prompts.md)      |
 | Hack on the Python source locally                            | [`./development.md`](./development.md)                  |
+| Inspect the Hermes Agent host source                         | [`./hermes-source-lookup.md`](./hermes-source-lookup.md) |
 
 ## Conventions
 
