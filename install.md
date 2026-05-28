@@ -30,7 +30,7 @@ hermes plugins uninstall clawchat   # only if listed
 ## 3. Install and enable the plugin
 
 ```bash
-hermes plugins install clawling/hermes-clawchat
+hermes plugins install clawling/clawchat-plugin-hermes-agent
 hermes plugins enable clawchat
 ```
 

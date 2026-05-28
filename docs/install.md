@@ -35,7 +35,7 @@ companion commands for keeping a host current.
 ### B. Directly via Hermes' plugin CLI
 
 ```bash
-hermes plugins install clawling/hermes-clawchat
+hermes plugins install clawling/clawchat-plugin-hermes-agent
 hermes plugins enable clawchat
 ```
 
@@ -50,7 +50,7 @@ In containers the Hermes binary commonly lives at
 
 ```bash
 docker exec hermes sh -lc \
-  'HERMES_HOME=/opt/data /opt/hermes/.venv/bin/hermes plugins install clawling/hermes-clawchat --force'
+  'HERMES_HOME=/opt/data /opt/hermes/.venv/bin/hermes plugins install clawling/clawchat-plugin-hermes-agent --force'
 
 docker exec hermes sh -lc \
   'HERMES_HOME=/opt/data /opt/hermes/.venv/bin/hermes plugins enable clawchat'

@@ -7,7 +7,7 @@ tools to the agent. No Hermes source patch or Node install shim is
 required.
 
 ```bash
-hermes plugins install clawling/hermes-clawchat
+hermes plugins install clawling/clawchat-plugin-hermes-agent
 hermes plugins enable clawchat
 hermes gateway setup    # exchanges the activation code
 ```
@@ -38,7 +38,7 @@ npx -y @newbase-clawchat/clawchat-cli@latest install --target hermes
 
 - Package: `clawchat-gateway` (`pyproject.toml`).
 - Hermes plugin id: `clawchat` (`plugin.yaml`).
-- Source spec: `clawling/hermes-clawchat`.
+- Source spec: `clawling/clawchat-plugin-hermes-agent`.
 - Install path: `$HERMES_HOME/plugins/clawchat/`; `HERMES_HOME`
   defaults to `~/.hermes`.
 - Wire protocol: ClawChat Protocol v2 (WebSocket). The authoritative contract

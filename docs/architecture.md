@@ -12,7 +12,7 @@ These names refer to different layers and are not interchangeable:
 |-------------------------------------------------------|------------------------------------------------------|---------------------------------------------|
 | `clawchat`                                            | Hermes plugin id, gateway platform name, slash-command prefix, install dir | The Hermes-side handle for the plugin       |
 | `clawchat-gateway`                                    | `pyproject.toml`, wheel name                         | The Python distribution                     |
-| `clawling/hermes-clawchat`                            | `hermes plugins install <here>`                      | The GitHub source spec Hermes pulls from    |
+| `clawling/clawchat-plugin-hermes-agent`                            | `hermes plugins install <here>`                      | The GitHub source spec Hermes pulls from    |
 | `clawchat:clawchat`                                   | Bundled-skill qualified name (`skill_view(...)`)     | The Hermes Plugin Bundle skill              |
 | `$HERMES_HOME/plugins/clawchat/`                      | Disk path after install                              | The installed plugin tree                   |
 
