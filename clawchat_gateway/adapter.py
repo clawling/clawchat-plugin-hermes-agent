@@ -165,30 +165,6 @@ HERMES_CONFIRM_SLASH_COMMANDS = {
     "nevermind",
 }
 
-_THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
-_THINK_CONTENT_RE = re.compile(r"<think\b[^>]*>(.*?)</think>", re.IGNORECASE | re.DOTALL)
-_THINK_OPEN_RE = re.compile(r"<think\b[^>]*>.*\Z", re.IGNORECASE | re.DOTALL)
-_TOOL_TAG_BLOCK_RE = re.compile(
-    r"<(?:tool|tools|tool_call|tool_result|function_call|function_result)\b[^>]*>"
-    r".*?</(?:tool|tools|tool_call|tool_result|function_call|function_result)>",
-    re.IGNORECASE | re.DOTALL,
-)
-_TOOL_TAG_OPEN_RE = re.compile(
-    r"<(?:tool|tools|tool_call|tool_result|function_call|function_result)\b[^>]*>.*\Z",
-    re.IGNORECASE | re.DOTALL,
-)
-_TOOL_FENCE_BLOCK_RE = re.compile(
-    r"```(?:tool|tools|tool_call|tool_result|function_call|function_result)[^\n`]*\n.*?```",
-    re.IGNORECASE | re.DOTALL,
-)
-_TOOL_FENCE_OPEN_RE = re.compile(
-    r"```(?:tool|tools|tool_call|tool_result|function_call|function_result)[^\n`]*\n.*\Z",
-    re.IGNORECASE | re.DOTALL,
-)
-_TOOL_PROGRESS_LINE_RE = re.compile(
-    r"^\s*(?:[^\w\s`]{1,4}\s*)?[A-Za-z_][\w.-]*(?:\([^)]*\))?"
-    r"(?:\.\.\.|: \"|\n)",
-)
 # Hermes streams append a typing-cursor block character to every intermediate
 # chunk's tail. Strip it so complete-message updates do not retain the cursor.
 _STREAMING_CURSOR_RE = re.compile(r"\s*[▀-▟]+\s*\Z")
@@ -276,6 +252,15 @@ def _owner_attention_text(group_id: str, fallback_text: str) -> str:
     return f"ClawChat group {group_id} {GROUP_OWNER_ATTENTION_TITLE}."
 
 
+def _exec_approval_fallback_text(command: str, description: str) -> str:
+    cmd_preview = command[:200] + "..." if len(command) > 200 else command
+    return (
+        "Command approval required:\n"
+        f"{cmd_preview}\n\n"
+        f"Reason: {description}"
+    )
+
+
 @dataclass
 class _ActiveRun:
     chat_id: str
@@ -325,6 +310,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._active_runs_by_id: dict[str, _ActiveRun] = {}
         self._active_chat_runs: dict[str, str] = {}
         self._typing_state: dict[str, tuple[bool, float]] = {}
+        self._known_chat_types: dict[str, str] = {}
+        self._owner_approval_routes: dict[str, str] = {}
         self._run_counter = 0
         self._inbound_window: dict[str, deque[float]] = {}
         self._completed_run_ids: set[str] = set()
@@ -950,10 +937,11 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._trace_inbound_frame(frame)
         event_name = str(frame.get("event") or "")
         if event_name == "interaction.submit":
-            logger.info(
-                "clawchat interaction submit ignored chat_id=%s reason=ws_control_event",
-                frame.get("chat_id"),
-            )
+            if not await self._handle_interaction_submit(frame):
+                logger.info(
+                    "clawchat interaction submit ignored chat_id=%s reason=unsupported_payload",
+                    frame.get("chat_id"),
+                )
             return
         protocol_message_id = None
         if event_name in {"message.send", "message.reply"}:
@@ -981,6 +969,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             len(inbound.text),
             len(inbound.media_urls),
         )
+        self._known_chat_types[inbound.chat_id] = inbound.chat_type
         if inbound.chat_type == "group":
             self._schedule_profile_sync(self._refresh_conversation_metadata(inbound.chat_id))
         elif inbound.sender_id != self._owner_user_id():
@@ -1005,6 +994,8 @@ class ClawChatAdapter(BasePlatformAdapter):
                     event_name,
                 )
                 return
+        if await self._handle_owner_forwarded_approval(inbound):
+            return
         if inbound.chat_type == "group":
             if _is_known_hermes_slash_command(inbound.text):
                 command_mode = effective_group_command_mode(
@@ -1655,6 +1646,50 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
         return SendResult(success=True, message_id=message_id)
 
+    async def send_exec_approval(
+        self,
+        chat_id: str,
+        command: str,
+        session_key: str,
+        description: str = "dangerous command",
+        metadata: Any = None,
+    ) -> SendResult:
+        chat_type = self._resolve_chat_type(chat_id, metadata, {})
+        target_chat_id = chat_id
+        fallback_text = _exec_approval_fallback_text(command, description)
+        if chat_type == "group":
+            owner_user_id = self._owner_user_id()
+            if not owner_user_id:
+                logger.error(
+                    "clawchat exec approval suppressed reason=missing_owner_user_id group=%s",
+                    chat_id,
+                )
+                return SendResult(success=True)
+            target_chat_id = owner_user_id
+            self._remember_owner_approval_route(owner_user_id, session_key)
+            fallback_text = _owner_attention_text(chat_id, fallback_text)
+
+        fragments = [
+            {"kind": "text", "text": fallback_text},
+            self._exec_approval_fragment(command, description, session_key),
+        ]
+        message_id = new_frame_id("msg")
+        frame = build_message_reply_event(
+            chat_id=target_chat_id,
+            chat_type="direct",
+            message_id=message_id,
+            fragments=fragments,
+            include_message_id=True,
+        )
+        sent = await self._connection.send_frame(frame, wait_for_ack=True)
+        if not sent:
+            return SendResult(
+                success=False,
+                error="clawchat exec approval dropped",
+                message_id=message_id,
+            )
+        return SendResult(success=True, message_id=message_id)
+
     async def send(
         self,
         chat_id: str,
@@ -1667,13 +1702,6 @@ class ClawChatAdapter(BasePlatformAdapter):
         is_group = chat_type == "group"
         if self._consume_terminal_send(chat_id, phase="send"):
             return SendResult(success=True)
-        if self._should_suppress_tool_progress(content or "", force=is_group):
-            logger.info(
-                "clawchat tool progress suppressed chat_id=%s text_len=%d",
-                chat_id,
-                len(content or ""),
-            )
-            return SendResult(success=True)
         if is_group:
             owner_fragment = self._build_interaction_fragment(
                 content or "",
@@ -1682,16 +1710,13 @@ class ClawChatAdapter(BasePlatformAdapter):
                 force=True,
             )
             if owner_fragment is not None:
-                explicit_fragment = self._extract_interaction(metadata, kwargs)
                 return await self._send_owner_attention(
                     group_id=chat_id,
                     fallback_text=str(owner_fragment.get("fallback_text") or content or ""),
-                    rich_fragment=explicit_fragment,
+                    rich_fragment=owner_fragment,
                 )
         visible_content = self._filter_output_content(
             content or "",
-            force_hide_think=is_group,
-            force_hide_tools=is_group,
         )
         is_send_message_tool_call = self._is_send_message_tool_call()
         is_immediate_media_send = self._is_immediate_media_send(metadata, kwargs)
@@ -1795,14 +1820,6 @@ class ClawChatAdapter(BasePlatformAdapter):
                 message_id,
             )
             return SendResult(success=False, error=error, message_id=message_id)
-        self._record_thinking_if_present(
-            event_type="message.reply",
-            trace_id=frame.get("trace_id") or frame.get("id"),
-            chat_id=chat_id,
-            message_id=message_id,
-            content=content or "",
-            raw=frame,
-        )
         logger.info(
             "clawchat send complete reply queued chat_id=%s message_id=%s fragments=%d",
             chat_id,
@@ -1841,19 +1858,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="no active run for message_id")
 
         is_group = run.chat_type == "group"
-        if self._should_suppress_tool_progress(content or "", force=is_group) and not finalize:
-            logger.info(
-                "clawchat tool progress edit suppressed chat_id=%s message_id=%s text_len=%d",
-                chat_id,
-                message_id,
-                len(content or ""),
-            )
-            return SendResult(success=True, message_id=run.message_id)
-
         visible_content = self._filter_output_content(
             content or "",
-            force_hide_think=is_group,
-            force_hide_tools=is_group,
         )
         if self._is_noop_response_text(visible_content):
             self._discard_run(run)
@@ -1936,16 +1942,12 @@ class ClawChatAdapter(BasePlatformAdapter):
             len(
                 self._filter_output_content(
                     final_text or "",
-                    force_hide_think=is_group,
-                    force_hide_tools=is_group,
                 )
             ),
         )
 
         visible_final_text = self._filter_output_content(
             final_text or "",
-            force_hide_think=is_group,
-            force_hide_tools=is_group,
         )
         if not run.last_text and not self._has_outbound_media(run.metadata, run.kwargs) and (
             self._is_noop_response_text(visible_final_text)
@@ -2001,14 +2003,6 @@ class ClawChatAdapter(BasePlatformAdapter):
                 run.message_id,
             )
             return SendResult(success=False, error=error, message_id=run.message_id)
-        self._record_thinking_if_present(
-            event_type="message.reply",
-            trace_id=frame.get("trace_id") or frame.get("id"),
-            chat_id=chat_id,
-            message_id=run.message_id,
-            content=final_text or run.last_text,
-            raw=frame,
-        )
         self._update_message_record(
             kind="message",
             direction="outbound",
@@ -2123,11 +2117,204 @@ class ClawChatAdapter(BasePlatformAdapter):
             metadata=merged_metadata,
         )
 
+    def _exec_approval_fragment(
+        self,
+        command: str,
+        description: str,
+        session_key: str,
+    ) -> dict[str, Any]:
+        fallback_text = _exec_approval_fallback_text(command, description)
+        return {
+            "kind": "approval_request",
+            "title": "Command approval required",
+            "fallback_text": fallback_text,
+            "state": "pending",
+            "actions": [
+                {
+                    "id": "approve_once",
+                    "label": "Approve Once",
+                    "style": "primary",
+                    "payload": {
+                        "type": "exec_approval",
+                        "session_key": session_key,
+                        "decision": "once",
+                    },
+                },
+                {
+                    "id": "approve_session",
+                    "label": "Approve Session",
+                    "style": "primary",
+                    "payload": {
+                        "type": "exec_approval",
+                        "session_key": session_key,
+                        "decision": "session",
+                    },
+                },
+                {
+                    "id": "approve_always",
+                    "label": "Always Approve",
+                    "style": "primary",
+                    "payload": {
+                        "type": "exec_approval",
+                        "session_key": session_key,
+                        "decision": "always",
+                    },
+                },
+                {
+                    "id": "deny",
+                    "label": "Deny",
+                    "style": "danger",
+                    "payload": {
+                        "type": "exec_approval",
+                        "session_key": session_key,
+                        "decision": "deny",
+                    },
+                },
+            ],
+        }
+
+    def _remember_owner_approval_route(self, owner_user_id: str, session_key: str) -> None:
+        routes = getattr(self, "_owner_approval_routes", None)
+        if routes is None:
+            self._owner_approval_routes = {}
+            routes = self._owner_approval_routes
+        routes[owner_user_id] = session_key
+
+    def _owner_approval_session_key(self, inbound: InboundMessage) -> str | None:
+        routes = getattr(self, "_owner_approval_routes", {})
+        return (
+            routes.get(inbound.chat_id)
+            or routes.get(inbound.sender_id)
+            or routes.get(self._owner_user_id())
+        )
+
+    def _forget_owner_approval_route(self, session_key: str) -> None:
+        routes = getattr(self, "_owner_approval_routes", {})
+        for key, value in list(routes.items()):
+            if value == session_key:
+                routes.pop(key, None)
+
+    async def _handle_owner_forwarded_approval(self, inbound: InboundMessage) -> bool:
+        if inbound.chat_type != "direct" or inbound.sender_id != self._owner_user_id():
+            return False
+        command_name = _slash_command_name(inbound.text)
+        if command_name not in {"approve", "deny"}:
+            return False
+        session_key = self._owner_approval_session_key(inbound)
+        if not session_key:
+            return False
+        choice, resolve_all = self._approval_choice_from_text(command_name, inbound.text)
+        resolved = self._resolve_gateway_approval(session_key, choice, resolve_all=resolve_all)
+        if not resolved:
+            return False
+        self._forget_owner_approval_route(session_key)
+        await self.send(
+            inbound.chat_id,
+            self._approval_resolution_text(choice, resolved),
+            metadata={"chat_type": "direct"},
+        )
+        return True
+
+    async def _handle_interaction_submit(self, frame: dict[str, Any]) -> bool:
+        payload = self._extract_exec_approval_payload(frame)
+        if payload is None:
+            return False
+        sender = frame.get("sender") if isinstance(frame.get("sender"), dict) else {}
+        sender_id = str(sender.get("id") or "")
+        if sender_id != self._owner_user_id():
+            logger.warning(
+                "clawchat approval interaction denied sender_id=%s owner_id=%s",
+                sender_id,
+                self._owner_user_id(),
+            )
+            return True
+        session_key = str(payload.get("session_key") or "")
+        decision = str(payload.get("decision") or "")
+        if decision == "approve":
+            decision = "once"
+        if decision not in {"once", "session", "always", "deny"} or not session_key:
+            return False
+        resolved = self._resolve_gateway_approval(session_key, decision, resolve_all=False)
+        if not resolved:
+            return True
+        self._forget_owner_approval_route(session_key)
+        chat_id = str(frame.get("chat_id") or sender_id)
+        await self.send(
+            chat_id,
+            self._approval_resolution_text(decision, resolved),
+            metadata={"chat_type": "direct"},
+        )
+        return True
+
+    def _extract_exec_approval_payload(self, frame: dict[str, Any]) -> dict[str, Any] | None:
+        payload = frame.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        candidates: list[Any] = [payload]
+        for key in ("action", "interaction", "submission", "data"):
+            value = payload.get(key)
+            if isinstance(value, dict):
+                candidates.append(value)
+                nested = value.get("payload")
+                if isinstance(nested, dict):
+                    candidates.append(nested)
+        nested_payload = payload.get("payload")
+        if isinstance(nested_payload, dict):
+            candidates.append(nested_payload)
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            if (
+                candidate.get("type") == "exec_approval"
+                and isinstance(candidate.get("session_key"), str)
+                and isinstance(candidate.get("decision"), str)
+            ):
+                return candidate
+        return None
+
+    def _approval_choice_from_text(self, command_name: str, text: str) -> tuple[str, bool]:
+        args = text.strip().split()[1:]
+        lowered = [arg.lower() for arg in args]
+        resolve_all = "all" in lowered
+        if command_name == "deny":
+            return "deny", resolve_all
+        if any(arg in {"always", "permanent", "permanently"} for arg in lowered):
+            return "always", resolve_all
+        if any(arg in {"session", "ses"} for arg in lowered):
+            return "session", resolve_all
+        return "once", resolve_all
+
+    def _resolve_gateway_approval(
+        self,
+        session_key: str,
+        choice: str,
+        *,
+        resolve_all: bool,
+    ) -> int:
+        from tools.approval import has_blocking_approval, resolve_gateway_approval
+
+        if not has_blocking_approval(session_key):
+            return 0
+        return int(resolve_gateway_approval(session_key, choice, resolve_all=resolve_all) or 0)
+
+    def _approval_resolution_text(self, choice: str, count: int) -> str:
+        if choice == "deny":
+            return "Denied pending command." if count == 1 else f"Denied {count} pending commands."
+        label = {
+            "once": "Approved once",
+            "session": "Approved for this session",
+            "always": "Approved permanently",
+        }.get(choice, "Approved")
+        return f"{label}." if count == 1 else f"{label} for {count} pending commands."
+
     def _resolve_chat_type(self, chat_id: str, metadata: Any, kwargs: dict[str, Any]) -> str:
         if isinstance(metadata, dict) and isinstance(metadata.get("chat_type"), str):
             return metadata["chat_type"]
         if isinstance(kwargs.get("chat_type"), str):
             return kwargs["chat_type"]
+        cached = getattr(self, "_known_chat_types", {}).get(chat_id)
+        if cached in {"direct", "group"}:
+            return cached
         if self._memory_group_exists(chat_id):
             return "group"
         return "direct"
@@ -2237,22 +2424,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             del frame
         return False
 
-    def _filter_output_content(
-        self,
-        content: str,
-        *,
-        force_hide_think: bool = False,
-        force_hide_tools: bool = False,
-    ) -> str:
+    def _filter_output_content(self, content: str) -> str:
         filtered = content
-        if force_hide_think or not self._clawchat_config.show_think_output:
-            filtered = _THINK_BLOCK_RE.sub("", filtered)
-            filtered = _THINK_OPEN_RE.sub("", filtered)
-        if force_hide_tools or not self._clawchat_config.show_tools_output:
-            filtered = _TOOL_FENCE_BLOCK_RE.sub("", filtered)
-            filtered = _TOOL_FENCE_OPEN_RE.sub("", filtered)
-            filtered = _TOOL_TAG_BLOCK_RE.sub("", filtered)
-            filtered = _TOOL_TAG_OPEN_RE.sub("", filtered)
         filtered = _HERMES_STREAM_CURSOR_RE.sub("", filtered)
         filtered = _STREAMING_CURSOR_RE.sub("", filtered)
         return filtered.strip()
@@ -2278,14 +2451,6 @@ class ClawChatAdapter(BasePlatformAdapter):
             and fragments[0].get("kind") == "text"
             and not str(fragments[0].get("text") or "").strip()
         )
-
-    def _should_suppress_tool_progress(self, content: str, *, force: bool = False) -> bool:
-        if self._clawchat_config.show_tool_progress and not force:
-            return False
-        lines = [line for line in content.splitlines() if line.strip()]
-        if not lines:
-            return False
-        return all(_TOOL_PROGRESS_LINE_RE.match(line) for line in lines)
 
     def _record_message(
         self,
@@ -2413,36 +2578,6 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
         except Exception:  # noqa: BLE001
             logger.warning("clawchat message database update failed")
-
-    def _record_thinking_if_present(
-        self,
-        *,
-        event_type: str,
-        trace_id: Any,
-        chat_id: str,
-        message_id: str | None,
-        content: str,
-        raw: Any,
-    ) -> None:
-        if not message_id:
-            return
-        thinking = self._extract_thinking_content(content)
-        if thinking is None:
-            return
-        self._record_message(
-            kind="thinking",
-            direction="outbound",
-            event_type=event_type,
-            trace_id=trace_id,
-            chat_id=chat_id,
-            message_id=message_id,
-            text=thinking,
-            raw=raw,
-        )
-
-    def _extract_thinking_content(self, content: str) -> str | None:
-        parts = [match.strip() for match in _THINK_CONTENT_RE.findall(content) if match.strip()]
-        return "\n\n".join(parts) or None
 
     def _extract_protocol_message_id(self, frame: dict[str, Any]) -> str | None:
         payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}

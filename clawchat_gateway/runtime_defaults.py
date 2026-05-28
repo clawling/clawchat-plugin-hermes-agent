@@ -52,17 +52,13 @@ def configure_clawchat_display_defaults() -> bool:
     changed = False
     platforms = config.setdefault("platforms", {})
     clawchat = platforms.setdefault("clawchat", {})
-    extra = clawchat.setdefault("extra", {})
-    for key in ("show_tools_output", "show_think_output"):
-        if extra.get(key) is not False:
-            extra[key] = False
-            changed = True
 
     display = config.setdefault("display", {})
     display_platforms = display.setdefault("platforms", {})
     clawchat_display = display_platforms.setdefault("clawchat", {})
     display_defaults = {
         "tool_progress": "off",
+        "long_running_notifications": False,
         "show_reasoning": False,
     }
     for key, value in display_defaults.items():

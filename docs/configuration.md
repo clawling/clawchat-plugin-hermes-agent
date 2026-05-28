@@ -35,16 +35,14 @@ plugin never copies them into `config.yaml`
 | —                                      | `stream.flush_interval_ms`     | `250`          |
 | —                                      | `stream.min_chunk_chars`       | `40`           |
 | —                                      | `stream.max_buffer_chars`      | `2000`         |
-| —                                      | `show_tools_output`            | `false`        |
-| —                                      | `show_tool_progress`           | inherits `show_tools_output` |
-| —                                      | `show_think_output`            | `false`        |
 | —                                      | `enable_rich_interactions`     | `false`        |
 
 `configure_clawchat_streaming` at plugin load also writes the top-level
 `streaming.*` block (`enabled=true`, `transport=edit`,
 `edit_interval=0.25`, `buffer_threshold=16`) and the
 `display.platforms.clawchat.*` block (`tool_progress=off`,
-`show_reasoning=false`) into `config.yaml` if any value is missing.
+`long_running_notifications=false`, `show_reasoning=false`) into
+`config.yaml` if any value is missing.
 
 ## Group behavior
 
@@ -116,8 +114,6 @@ platforms:
       agent_id: agt_...
       owner_user_id: usr_...
       reply_mode: stream
-      show_tools_output: false
-      show_think_output: false
 streaming:
   enabled: true
   transport: edit
@@ -127,6 +123,7 @@ display:
   platforms:
     clawchat:
       tool_progress: off
+      long_running_notifications: false
       show_reasoning: false
 ```
 

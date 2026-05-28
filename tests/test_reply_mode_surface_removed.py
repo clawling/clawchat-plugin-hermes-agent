@@ -47,6 +47,8 @@ def test_platform_config_exposes_no_reply_mode_or_stream_tuning():
     assert not hasattr(config, "stream_flush_interval_ms")
     assert not hasattr(config, "stream_min_chunk_chars")
     assert not hasattr(config, "stream_max_buffer_chars")
+    assert not hasattr(config, "show_tools_output")
+    assert not hasattr(config, "show_think_output")
 
 
 def test_persist_activation_does_not_create_reply_mode_or_streaming(monkeypatch, tmp_path):
@@ -63,7 +65,14 @@ def test_persist_activation_does_not_create_reply_mode_or_streaming(monkeypatch,
 
     extra = saved_config["platforms"]["clawchat"]["extra"]
     assert "reply_mode" not in extra
+    assert "show_tools_output" not in extra
+    assert "show_think_output" not in extra
     assert "streaming" not in saved_config
+    assert saved_config["display"]["platforms"]["clawchat"] == {
+        "tool_progress": "off",
+        "long_running_notifications": False,
+        "show_reasoning": False,
+    }
     assert env_values == {
         "CLAWCHAT_TOKEN": "token",
         "CLAWCHAT_REFRESH_TOKEN": None,
@@ -90,10 +99,11 @@ platforms:
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     extra = config["platforms"]["clawchat"]["extra"]
     assert "streaming" not in config
-    assert extra["show_tools_output"] is False
-    assert extra["show_think_output"] is False
+    assert "show_tools_output" not in extra
+    assert "show_think_output" not in extra
     assert config["display"]["platforms"]["clawchat"] == {
         "tool_progress": "off",
+        "long_running_notifications": False,
         "show_reasoning": False,
     }
 
@@ -148,6 +158,27 @@ class _FakeStore:
 
     def insert_message(self, **kwargs):
         self.inserted.append(kwargs)
+
+
+def _install_fake_approval_module(monkeypatch, *, blocking=True):
+    calls = []
+    tools_module = sys.modules.get("tools") or ModuleType("tools")
+    approval_module = ModuleType("tools.approval")
+
+    def has_blocking_approval(session_key):
+        calls.append(("has", session_key))
+        return blocking
+
+    def resolve_gateway_approval(session_key, choice, resolve_all=False):
+        calls.append(("resolve", session_key, choice, resolve_all))
+        return 1 if blocking else 0
+
+    approval_module.has_blocking_approval = has_blocking_approval
+    approval_module.resolve_gateway_approval = resolve_gateway_approval
+    tools_module.approval = approval_module
+    monkeypatch.setitem(sys.modules, "tools", tools_module)
+    monkeypatch.setitem(sys.modules, "tools.approval", approval_module)
+    return calls
 
 
 def _load_adapter_class(monkeypatch):
@@ -211,6 +242,9 @@ def _adapter(monkeypatch, extra=None):
     adapter._connection = _FakeConnection()
     adapter._store = _FakeStore()
     adapter._memory_root = None
+    adapter._inbound_window = {}
+    adapter._known_chat_types = {}
+    adapter._owner_approval_routes = {}
     adapter._active_runs_by_id = {}
     adapter._active_chat_runs = {}
     adapter._completed_run_ids = set()
@@ -331,6 +365,167 @@ async def test_non_stream_send_sends_complete_message_immediately(monkeypatch):
     assert frame["payload"]["message"]["body"]["fragments"] == [
         {"kind": "text", "text": "final response"}
     ]
+
+
+@pytest.mark.asyncio
+async def test_group_text_that_resembles_tool_progress_is_not_filtered_by_adapter(monkeypatch):
+    adapter = _adapter(monkeypatch)
+
+    result = await adapter.send(
+        "group-1",
+        'search_docs: "runtime settings"',
+        metadata={"notify": True, "chat_type": "group"},
+    )
+
+    assert result.success is True
+    assert _sent_events(adapter) == ["message.reply"]
+    frame = adapter._connection.frames[0][0]
+    assert frame["payload"]["message"]["body"]["fragments"] == [
+        {"kind": "text", "text": 'search_docs: "runtime settings"'}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_group_tool_call_text_is_not_filtered_by_adapter(monkeypatch):
+    adapter = _adapter(monkeypatch)
+    content = '<tool_call>{"name":"search_docs"}</tool_call>'
+
+    result = await adapter.send(
+        "group-1",
+        content,
+        metadata={"notify": True, "chat_type": "group"},
+    )
+
+    assert result.success is True
+    assert _sent_events(adapter) == ["message.reply"]
+    frame = adapter._connection.frames[0][0]
+    assert frame["payload"]["message"]["body"]["fragments"] == [
+        {"kind": "text", "text": content}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_group_think_text_is_not_filtered_by_adapter(monkeypatch):
+    adapter = _adapter(monkeypatch)
+    content = "<think>private draft</think>visible response"
+
+    result = await adapter.send(
+        "group-1",
+        content,
+        metadata={"notify": True, "chat_type": "group"},
+    )
+
+    assert result.success is True
+    assert _sent_events(adapter) == ["message.reply"]
+    frame = adapter._connection.frames[0][0]
+    assert frame["payload"]["message"]["body"]["fragments"] == [
+        {"kind": "text", "text": content}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_group_approval_prompt_without_chat_type_metadata_routes_to_owner(monkeypatch):
+    adapter = _adapter(monkeypatch, {"owner_user_id": "usr_owner"})
+    adapter._known_chat_types = {"group-1": "group"}
+    content = (
+        "Reply `/approve` to execute, `/approve session` to approve this pattern "
+        "for the session, `/approve always` to approve permanently, or `/deny` to cancel."
+    )
+
+    result = await adapter.send("group-1", content)
+
+    assert result.success is True
+    assert _sent_events(adapter) == ["message.reply"]
+    frame = adapter._connection.frames[0][0]
+    assert frame["chat_id"] == "usr_owner"
+    fragments = frame["payload"]["message"]["body"]["fragments"]
+    assert fragments[0]["kind"] == "text"
+    assert "ClawChat group group-1 requires owner attention." in fragments[0]["text"]
+    assert fragments[1]["kind"] == "approval_request"
+    assert [action["id"] for action in fragments[1]["actions"]] == ["approve", "deny"]
+
+
+@pytest.mark.asyncio
+async def test_group_exec_approval_routes_to_owner_with_session_payload(monkeypatch):
+    adapter = _adapter(monkeypatch, {"owner_user_id": "usr_owner"})
+    adapter._known_chat_types = {"group-1": "group"}
+
+    result = await adapter.send_exec_approval(
+        chat_id="group-1",
+        command="rm -rf /tmp/example",
+        session_key="agent:main:clawchat:group:group-1:usr_sender",
+        description="dangerous command",
+    )
+
+    assert result.success is True
+    frame = adapter._connection.frames[0][0]
+    assert frame["chat_id"] == "usr_owner"
+    fragments = frame["payload"]["message"]["body"]["fragments"]
+    assert fragments[0]["kind"] == "text"
+    approval = fragments[1]
+    assert approval["kind"] == "approval_request"
+    assert approval["actions"][0]["payload"] == {
+        "type": "exec_approval",
+        "session_key": "agent:main:clawchat:group:group-1:usr_sender",
+        "decision": "once",
+    }
+
+
+@pytest.mark.asyncio
+async def test_owner_direct_approve_resolves_forwarded_group_approval(monkeypatch):
+    calls = _install_fake_approval_module(monkeypatch)
+    adapter = _adapter(monkeypatch, {"owner_user_id": "usr_owner"})
+    adapter._owner_approval_routes = {
+        "usr_owner": "agent:main:clawchat:group:group-1:usr_sender"
+    }
+    frame = {
+        "event": "message.send",
+        "chat_id": "dm-owner",
+        "chat_type": "direct",
+        "sender": {"id": "usr_owner", "name": "Owner"},
+        "payload": {
+            "message_id": "in-1",
+            "message": {
+                "body": {"fragments": [{"kind": "text", "text": "/approve always"}]},
+                "context": {"mentions": [], "reply": None},
+            },
+        },
+    }
+
+    await adapter._on_message(frame)
+
+    assert ("resolve", "agent:main:clawchat:group:group-1:usr_sender", "always", False) in calls
+    assert _sent_events(adapter) == ["message.reply"]
+    ack_frame = adapter._connection.frames[0][0]
+    assert ack_frame["chat_id"] == "dm-owner"
+
+
+@pytest.mark.asyncio
+async def test_owner_interaction_submit_resolves_exec_approval_payload(monkeypatch):
+    calls = _install_fake_approval_module(monkeypatch)
+    adapter = _adapter(monkeypatch, {"owner_user_id": "usr_owner"})
+    frame = {
+        "event": "interaction.submit",
+        "chat_id": "dm-owner",
+        "chat_type": "direct",
+        "sender": {"id": "usr_owner", "name": "Owner"},
+        "payload": {
+            "action": {
+                "payload": {
+                    "type": "exec_approval",
+                    "session_key": "agent:main:clawchat:group:group-1:usr_sender",
+                    "decision": "session",
+                }
+            }
+        },
+    }
+
+    await adapter._on_message(frame)
+
+    assert ("resolve", "agent:main:clawchat:group:group-1:usr_sender", "session", False) in calls
+    assert _sent_events(adapter) == ["message.reply"]
+    ack_frame = adapter._connection.frames[0][0]
+    assert ack_frame["chat_id"] == "dm-owner"
 
 
 @pytest.mark.asyncio

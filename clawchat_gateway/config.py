@@ -159,9 +159,6 @@ class ClawChatConfig:
     ack_auto_resend_on_timeout: bool = False
     media_local_roots: tuple[str, ...] = field(default_factory=tuple)
     media_download_dir: str = "/tmp/clawchat-media"
-    show_tools_output: bool = False
-    show_tool_progress: bool = False
-    show_think_output: bool = False
     enable_rich_interactions: bool = False
 
     @classmethod
@@ -172,16 +169,6 @@ class ClawChatConfig:
             tuple(p.strip() for p in media_roots_env.split(os.pathsep) if p.strip())
             if media_roots_env
             else _get_config_value(extra, "media_local_roots", ())
-        )
-        show_tools_output = bool(
-            _get_config_value(extra, "show_tools_output", False)
-        )
-        show_tool_progress = bool(
-            _get_config_value(
-                extra,
-                "show_tool_progress",
-                show_tools_output,
-            )
         )
         token = _get_env("CLAWCHAT_TOKEN") or extra.get("token") or ""
         return cls(
@@ -234,11 +221,6 @@ class ClawChatConfig:
             media_local_roots=tuple(media_local_roots),
             media_download_dir=_get_config_value(
                 extra, "media_download_dir", "/tmp/clawchat-media"
-            ),
-            show_tools_output=show_tools_output,
-            show_tool_progress=show_tool_progress,
-            show_think_output=bool(
-                _get_config_value(extra, "show_think_output", False)
             ),
             enable_rich_interactions=bool(
                 _get_config_value(
