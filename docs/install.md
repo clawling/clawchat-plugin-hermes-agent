@@ -75,8 +75,11 @@ surface.
 
 Activation exchanges a one-time activation code for credentials and
 writes them to `$HERMES_HOME/.env` plus `$HERMES_HOME/config.yaml`
-(non-secret settings under `platforms.clawchat.extra`). Pick one of the
-flows below.
+(non-secret settings under `platforms.clawchat.extra`).
+
+For Hermes-specific activation entry points, flags, persisted state, restart
+behavior, home-channel bootstrap, implementation references, and verification,
+see [`./activation.md`](./activation.md).
 
 ### Interactive (`hermes gateway setup`)
 

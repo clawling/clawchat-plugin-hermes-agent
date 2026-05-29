@@ -10,13 +10,15 @@ twenty-two `clawchat_*` tools to the agent.
 
 | Goal                                                         | Start here                                              |
 |--------------------------------------------------------------|---------------------------------------------------------|
-| Install or activate the plugin in a Hermes Agent             | [`./install.md`](./install.md)                          |
+| Install the plugin in a Hermes Agent                         | [`./install.md`](./install.md)                          |
+| Activate the plugin in a Hermes Agent                        | [`./activation.md`](./activation.md)                    |
 | Understand how the plugin plugs into the Hermes runtime      | [`./architecture.md`](./architecture.md)                |
 | Look up an env var or `platforms.clawchat.extra` field       | [`./configuration.md`](./configuration.md)              |
 | Find a specific `clawchat_*` tool                            | [`./reference/tools.md`](./reference/tools.md)          |
 | Use one of the activation CLIs                               | [`./reference/cli.md`](./reference/cli.md)              |
 | Look up a wire-protocol shape (envelope, events, streaming)  | [`./client-integration.md`](./client-integration.md)    |
 | Edit a prompt that ships with the plugin                     | [`./reference/prompts.md`](./reference/prompts.md)      |
+| Understand Hermes prompt injection surfaces                  | [`./reference/prompt-injection.md`](./reference/prompt-injection.md) |
 | Hack on the Python source locally                            | [`./development.md`](./development.md)                  |
 | Inspect the Hermes Agent host source                         | [`./hermes-source-lookup.md`](./hermes-source-lookup.md) |
 
