@@ -11,6 +11,14 @@ import pytest
 import yaml
 
 from clawchat_gateway.config import ClawChatConfig
+from clawchat_gateway.group_message_coalescer import format_coalesced_group_text
+from clawchat_gateway.inbound import InboundMessage, parse_inbound_message
+from clawchat_gateway.mention_message import (
+    build_context_mentions,
+    build_mention_message_fragments,
+    normalize_mention_targets,
+    validate_mention_payload,
+)
 from clawchat_gateway.runtime_defaults import configure_clawchat_display_defaults
 
 
@@ -899,3 +907,141 @@ async def test_run_complete_send_failure_keeps_run_active_and_failed_visible(mon
     assert result.message_id not in adapter._completed_run_ids
     assert adapter._store.updated[-1]["event_type"] == "message.error"
     assert adapter._store.updated[-1]["text"] == "clawchat complete reply dropped"
+
+
+def test_normalize_mention_targets_requires_display() -> None:
+    with pytest.raises(ValueError, match=r"mentions\[0\]\.display"):
+        normalize_mention_targets([{"userId": "usr_123"}])
+
+
+def test_normalize_mention_targets_strips_leading_display_at() -> None:
+    assert normalize_mention_targets([{"userId": " usr_123 ", "display": " @Alice "}]) == [
+        {"userId": "usr_123", "display": "Alice"}
+    ]
+
+
+def test_build_mention_payload_requires_fragment_display_and_matching_context() -> None:
+    mentions = normalize_mention_targets([{"userId": "usr_123", "display": "Alice"}])
+
+    fragments = build_mention_message_fragments(mentions=mentions, text="请看")
+    context_mentions = build_context_mentions(mentions)
+
+    assert fragments == [
+        {"kind": "mention", "user_id": "usr_123", "display": "Alice"},
+        {"kind": "text", "text": " 请看"},
+    ]
+    assert context_mentions == ["usr_123"]
+    validate_mention_payload(fragments, context_mentions)
+
+
+def test_text_is_not_reparsed_as_mention_display() -> None:
+    mentions = normalize_mention_targets([{"userId": "usr_123", "display": "Alice"}])
+
+    assert build_mention_message_fragments(mentions=mentions, text="@Bob 请看") == [
+        {"kind": "mention", "user_id": "usr_123", "display": "Alice"},
+        {"kind": "text", "text": " @Bob 请看"},
+    ]
+
+
+def test_validate_mention_payload_rejects_context_mismatch() -> None:
+    with pytest.raises(ValueError, match="context.mentions must match mention fragments"):
+        validate_mention_payload(
+            [{"kind": "mention", "user_id": "usr_123", "display": "Alice"}],
+            ["usr_other"],
+        )
+
+
+def test_validate_mention_payload_rejects_missing_fragment_display() -> None:
+    with pytest.raises(ValueError, match="mention fragment requires display"):
+        validate_mention_payload(
+            [{"kind": "mention", "user_id": "usr_123"}],
+            ["usr_123"],
+        )
+
+
+def test_group_message_prompt_separates_sender_and_mention_display() -> None:
+    text = format_coalesced_group_text(
+        [
+            InboundMessage(
+                chat_id="cnv_group",
+                chat_type="group",
+                sender_id="usr_sender",
+                sender_name="Alice",
+                text="@Alice 请看",
+                raw_message={},
+                was_mentioned=False,
+                mentioned_user_ids=["usr_mentioned"],
+                mentioned_users=[{"id": "usr_mentioned", "display": "Alice"}],
+                sender_profile_type="user",
+            )
+        ],
+        idle_seconds=10,
+        max_wait_seconds=30,
+    )
+
+    assert "sender:\n  user_id: usr_sender\n  display: Alice\n  profile_type: user" in text
+    assert "mentions:\n  - user_id: usr_mentioned\n    display: Alice" in text
+    assert "sender_name:" not in text
+    assert "mentioned_users:" not in text
+
+
+def _group_envelope(*, fragments, context_mentions):
+    return {
+        "version": "2",
+        "event": "message.send",
+        "chat_id": "cnv_group",
+        "chat_type": "group",
+        "sender": {"id": "usr_sender", "nick_name": "Sender"},
+        "payload": {
+            "message_id": "msg_123",
+            "message": {
+                "body": {"fragments": fragments},
+                "context": {"mentions": context_mentions, "reply": None},
+            },
+        },
+    }
+
+
+def test_group_mention_mode_requires_context_mentions_for_dispatch() -> None:
+    config = ClawChatConfig(
+        websocket_url="wss://example.test/ws",
+        user_id="usr_agent",
+        group_mode="mention",
+    )
+
+    inbound = parse_inbound_message(
+        _group_envelope(
+            fragments=[
+                {"kind": "mention", "user_id": "usr_agent", "display": "Agent"},
+                {"kind": "text", "text": " hi"},
+            ],
+            context_mentions=[],
+        ),
+        config,
+    )
+
+    assert inbound is None
+
+
+def test_context_mentions_drive_dispatch_and_fragment_display_drives_llm_context() -> None:
+    config = ClawChatConfig(
+        websocket_url="wss://example.test/ws",
+        user_id="usr_agent",
+        group_mode="mention",
+    )
+
+    inbound = parse_inbound_message(
+        _group_envelope(
+            fragments=[
+                {"kind": "mention", "user_id": "usr_agent", "display": "Agent"},
+                {"kind": "text", "text": " hi"},
+            ],
+            context_mentions=["usr_agent"],
+        ),
+        config,
+    )
+
+    assert inbound is not None
+    assert inbound.was_mentioned is True
+    assert inbound.mentioned_users == [{"id": "usr_agent", "display": "Agent"}]
+    assert inbound.text == "@Agent hi"

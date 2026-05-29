@@ -47,20 +47,19 @@ def _message_is_group_owner(message: InboundMessage) -> str:
     return "true" if message.sender_is_group_owner else "false"
 
 
-def _message_mentions(message: InboundMessage) -> str:
+def _append_message_mentions(lines: list[str], message: InboundMessage) -> None:
     mentions = message.mentioned_users or [{"id": user_id} for user_id in message.mentioned_user_ids]
     if not mentions:
-        return "-"
-    values: list[str] = []
+        lines.append("mentions: -")
+        return
+    lines.append("mentions:")
     for mention in mentions:
         user_id = mention.get("id")
         if not user_id:
             continue
-        display = mention.get("display")
-        safe_user_id = _message_field(user_id)
-        safe_display = _message_field(display) if display else ""
-        values.append(f"{safe_user_id}({safe_display})" if safe_display else safe_user_id)
-    return ",".join(values) or "-"
+        display = mention.get("display") or "<missing>"
+        lines.append(f"  - user_id: {_message_field(user_id)}")
+        lines.append(f"    display: {_message_field(display)}")
 
 
 def _message_field(value: str) -> str:
@@ -86,13 +85,14 @@ def format_coalesced_group_text(
         if len(lines) > 1:
             lines.append("")
         lines.append("[message]")
-        lines.append(f"sender_id: {_message_field(message.sender_id)}")
-        lines.append(f"sender_name: {_message_field(sender_name)}")
-        lines.append(f"sender_profile_type: {_message_field(_message_profile_type(message))}")
-        lines.append(f"sender_is_agent_owner: {_message_is_agent_owner(message)}")
-        lines.append(f"sender_is_group_owner: {_message_is_group_owner(message)}")
+        lines.append("sender:")
+        lines.append(f"  user_id: {_message_field(message.sender_id)}")
+        lines.append(f"  display: {_message_field(sender_name)}")
+        lines.append(f"  profile_type: {_message_field(_message_profile_type(message))}")
+        lines.append(f"  is_agent_owner: {_message_is_agent_owner(message)}")
+        lines.append(f"  is_group_owner: {_message_is_group_owner(message)}")
         lines.append(f"mentions_current_agent: {'true' if message.was_mentioned else 'false'}")
-        lines.append(f"mentioned_users: {_message_mentions(message)}")
+        _append_message_mentions(lines, message)
         lines.append("text:")
         lines.append(_message_body(message))
     return "\n".join(lines)

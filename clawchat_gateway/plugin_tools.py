@@ -863,10 +863,10 @@ def register_tools(ctx) -> None:
             "description": _direct_tool_description(
                 "Send a real ClawChat mention message to a direct or group conversation. "
                 "TRIGGER - invoke when the user asks to @, mention, notify, or address ClawChat users. "
-                "Use mentioned_users or sender_id from current [message] blocks as mentions[].userId when present. "
+                "Use mentions[].user_id/display or sender.user_id/display from current [message] blocks as mentions[].userId/display when present. "
                 "Use clawchat_search_users only when no explicit or locally available id exists. "
-                "Never guess userId from names, nicknames, or plain @name text. Plain @name is not a real mention. "
-                "Pass the visible label as mentions[].display when known. Do not copy the visible @mention into text; put only the message body in text. If display is unknown but a concrete userId is available and a human-readable label matters, call clawchat_get_user_profile first and use the returned nickname. "
+                "When the user writes @name, treat it as intent to send a real mention, but never guess userId from names, nicknames, or plain @name text. "
+                "Each mention requires both userId and display. Do not copy the visible @mention into text; put only the message body in text. If display is unknown but a concrete userId is available, call clawchat_get_user_profile first and use the returned nickname. "
                 "After this tool succeeds, the mention message has already been sent to ClawChat. "
                 "The ClawChat adapter suppresses the same-turn normal follow-up reply."
             ),
@@ -891,16 +891,16 @@ def register_tools(ctx) -> None:
                             "properties": {
                                 "userId": {
                                     "type": "string",
-                                    "description": "Explicit ClawChat user id to mention. Prefer mentioned_users or sender_id from current [message] blocks; do not infer from nickname.",
+                                    "description": "Explicit ClawChat user id to mention. Prefer mentions[].user_id or sender.user_id from current [message] blocks; do not infer from nickname.",
                                 },
                                 "display": {
                                     "type": "string",
-                                    "description": "Optional visible mention label without leading @. Use a reliable label from current context or clawchat_get_user_profile when human-readable display matters. Omit only when unknown; do not put userId here as a fallback.",
+                                    "description": "Required visible mention label without leading @. Use mentions[].display, sender.display, or clawchat_get_user_profile; do not put userId here as a fallback.",
                                 },
                             },
-                            "required": ["userId"],
+                            "required": ["userId", "display"],
                         },
-                        "description": "Mention targets. At least one explicit userId is required; prefer mentioned_users or sender_id from current [message] blocks.",
+                        "description": "Mention targets. At least one explicit userId/display pair is required; prefer mentions or sender fields from current [message] blocks.",
                     },
                     "replyToMessageId": {
                         "type": "string",

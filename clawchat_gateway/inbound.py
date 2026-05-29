@@ -147,6 +147,7 @@ def parse_inbound_message(
         return None
 
     context_mentioned_users = _extract_mentioned_users(context.get("mentions"))
+    context_mentioned_user_ids = _mentioned_user_ids(context_mentioned_users)
     fragment_mentioned_users: list[dict[str, str]] = []
     for fragment in _coerce_fragments(message):
         if isinstance(fragment, dict) and _fragment_kind(fragment) == "mention":
@@ -159,7 +160,7 @@ def parse_inbound_message(
                 fragment_mentioned_users.append(item)
     mentioned_users = _merge_mentioned_users(fragment_mentioned_users, context_mentioned_users)
     mentioned_user_ids = _mentioned_user_ids(mentioned_users)
-    was_mentioned = config.user_id in mentioned_user_ids
+    was_mentioned = config.user_id in context_mentioned_user_ids
 
     if (
         chat_type == "group"
