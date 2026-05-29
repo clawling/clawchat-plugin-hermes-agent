@@ -446,6 +446,16 @@ def _register_commands(ctx) -> None:
     )
 
 
+def _register_llm_context_debug_hooks(ctx) -> None:
+    register_hook = getattr(ctx, "register_hook", None)
+    if not callable(register_hook):
+        return
+
+    from clawchat_gateway.llm_context_hooks import _clawchat_pre_api_request
+
+    register_hook("pre_api_request", _clawchat_pre_api_request)
+
+
 def register(ctx) -> None:
     _register_platform(ctx)
     _configure_runtime_defaults()
@@ -456,4 +466,5 @@ def register(ctx) -> None:
     _register_skill(ctx)
     _register_cli_commands(ctx)
     _register_commands(ctx)
+    _register_llm_context_debug_hooks(ctx)
     ctx.register_hook("pre_gateway_dispatch", _clawchat_pre_gateway_dispatch)

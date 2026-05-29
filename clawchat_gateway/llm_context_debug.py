@@ -63,6 +63,7 @@ class ClawChatLlmContextDebug:
             "trace": dict(trace),
             "context": {
                 "promptParts": list((context or {}).get("promptParts") or []),
+                "injectionParts": list((context or {}).get("injectionParts") or []),
                 "tools": list((context or {}).get("tools") or []),
                 "skills": list((context or {}).get("skills") or []),
             },
@@ -70,6 +71,9 @@ class ClawChatLlmContextDebug:
                 "injectedPrompt": str(input.get("injectedPrompt") or ""),
                 "eventText": str(input.get("eventText") or ""),
                 "fullLlmInput": input.get("fullLlmInput"),
+                "requestMessages": list(input.get("requestMessages") or []),
+                "requestTools": list(input.get("requestTools") or []),
+                "placementChecks": list(input.get("placementChecks") or []),
                 "sections": list(input.get("sections") or []),
             },
             "output": {

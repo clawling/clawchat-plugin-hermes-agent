@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import importlib
 import asyncio
+import json
 import sys
 from types import ModuleType, SimpleNamespace
 from pathlib import Path
@@ -20,6 +21,114 @@ from clawchat_gateway.mention_message import (
     validate_mention_payload,
 )
 from clawchat_gateway.runtime_defaults import configure_clawchat_display_defaults
+from clawchat_gateway.llm_context_debug import ClawChatLlmContextDebug
+import clawchat_gateway.llm_context_hooks as llm_context_hooks
+
+
+def test_snapshot_preserves_injection_groups_and_llm_request(tmp_path: Path) -> None:
+    debugger = ClawChatLlmContextDebug(
+        env={
+            "CLAWCHAT_LLM_CONTEXT_DEBUG": "1",
+            "CLAWCHAT_LLM_CONTEXT_SNAPSHOT_DIR": str(tmp_path),
+        }
+    )
+    injection_parts = [
+        {
+            "id": "turn-metadata",
+            "group": "metadata",
+            "target": "system.channel_prompt",
+            "content": "## ClawChat Turn Metadata\nchat_id: cnv_1",
+        }
+    ]
+    request_messages = [
+        {"role": "system", "content": "base\n\n## ClawChat Turn Metadata\nchat_id: cnv_1"},
+        {"role": "user", "content": "hello"},
+    ]
+    placement_checks = [
+        {
+            "partId": "turn-metadata",
+            "target": "system.channel_prompt",
+            "found": True,
+            "messageIndex": 0,
+        }
+    ]
+
+    snapshot_path = debugger.write_snapshot(
+        visibility="full_llm_input",
+        trace={"messageId": "msg_1", "traceId": "trace_1"},
+        context={"injectionParts": injection_parts},
+        input={
+            "requestMessages": request_messages,
+            "placementChecks": placement_checks,
+            "fullLlmInput": {"messages": request_messages},
+        },
+    )
+
+    assert snapshot_path is not None
+    body = json.loads(Path(snapshot_path).read_text(encoding="utf-8"))
+    assert body["context"]["injectionParts"] == injection_parts
+    assert body["input"]["requestMessages"] == request_messages
+    assert body["input"]["placementChecks"] == placement_checks
+    assert body["input"]["fullLlmInput"] == {"messages": request_messages}
+
+
+def test_pre_api_request_writes_grouped_injections_and_full_llm_input(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    env = {
+        "CLAWCHAT_LLM_CONTEXT_DEBUG": "1",
+        "CLAWCHAT_LLM_CONTEXT_CAPTURE_FULL_INPUT": "1",
+        "CLAWCHAT_LLM_CONTEXT_SNAPSHOT_DIR": str(tmp_path),
+    }
+    monkeypatch.setattr(llm_context_hooks.os, "environ", env)
+    llm_context_hooks.clear_pending_injection_parts()
+    injection_parts = [
+        {
+            "id": "message-blocks",
+            "group": "message",
+            "target": "system.channel_prompt",
+            "content": "## ClawChat Message Blocks\n[message]\ntext: hello",
+        }
+    ]
+    llm_context_hooks.remember_injection_parts(
+        platform="clawchat",
+        user_message="hello",
+        parts=injection_parts,
+        trace={"messageId": "msg_1", "chatId": "cnv_1"},
+    )
+    request_messages = [
+        {
+            "role": "system",
+            "content": "base\n\n## ClawChat Message Blocks\n[message]\ntext: hello",
+        },
+        {"role": "user", "content": "hello"},
+    ]
+
+    llm_context_hooks._clawchat_pre_api_request(
+        platform="clawchat",
+        user_message="hello",
+        session_id="session_1",
+        request={"messages": request_messages, "model": "test-model"},
+    )
+
+    body = json.loads((tmp_path / "hermes" / "latest.json").read_text(encoding="utf-8"))
+    assert body["visibility"] == "full_llm_input"
+    assert body["trace"]["messageId"] == "msg_1"
+    assert body["trace"]["sessionId"] == "session_1"
+    assert body["context"]["injectionParts"] == injection_parts
+    assert body["input"]["requestMessages"] == request_messages
+    assert body["input"]["fullLlmInput"]["messages"] == request_messages
+    assert body["input"]["placementChecks"] == [
+        {
+            "partId": "message-blocks",
+            "group": "message",
+            "target": "system.channel_prompt",
+            "found": True,
+            "messageIndex": 0,
+            "role": "system",
+        }
+    ]
 
 
 def _load_activate(monkeypatch, tmp_path, raw_config):

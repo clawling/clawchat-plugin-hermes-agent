@@ -55,6 +55,11 @@ try:
 except ModuleNotFoundError:
     def write_llm_context_snapshot(**_kwargs: Any) -> None:
         return None
+try:
+    from clawchat_gateway.llm_context_hooks import remember_injection_parts
+except ModuleNotFoundError:
+    def remember_injection_parts(**_kwargs: Any) -> None:
+        return None
 from clawchat_gateway.media_runtime import (
     download_inbound_media,
     infer_media_kind_from_mime,
@@ -1077,9 +1082,21 @@ class ClawChatAdapter(BasePlatformAdapter):
             reply_to_message_id=reply_to_message_id,
             reply_to_text=reply_to_text,
         )
-        channel_prompt = self._compose_channel_prompt(inbound)
+        channel_prompt_parts = self._compose_channel_prompt_parts(inbound)
+        channel_prompt = self._render_channel_prompt_parts(channel_prompt_parts)
         if channel_prompt:
             event.channel_prompt = channel_prompt
+            remember_injection_parts(
+                platform="clawchat",
+                user_message=event.text,
+                parts=channel_prompt_parts,
+                trace={
+                    "messageId": inbound.raw_message.get("message_id") or "",
+                    "chatId": inbound.chat_id,
+                    "chatType": inbound.chat_type,
+                    "senderId": inbound.sender_id,
+                },
+            )
             if _debug_prompt_injection_enabled():
                 logger.warning(
                     "clawchat prompt injection debug chat_id=%s chat_type=%s sender_id=%s\n%s\n%s\n%s\n%s\n%s\n%s",
@@ -1105,6 +1122,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 "injectedPrompt": channel_prompt or "",
                 "eventText": event.text,
             },
+            context={"injectionParts": channel_prompt_parts},
             warnings=[] if channel_prompt else [
                 "Hermes event did not include a ClawChat channel_prompt for this turn.",
             ],
@@ -1142,28 +1160,111 @@ class ClawChatAdapter(BasePlatformAdapter):
         await self._refresh_conversation_metadata(group_id)
 
     def _compose_channel_prompt(self, inbound: InboundMessage) -> str | None:
-        prompts = [CONVERSATION_SEMANTICS]
-        prompts.append(CLAWCHAT_METADATA_GLOSSARY)
-        prompts.append(self._format_turn_metadata_section(inbound))
+        return self._render_channel_prompt_parts(
+            self._compose_channel_prompt_parts(inbound)
+        )
+
+    def _compose_channel_prompt_parts(
+        self,
+        inbound: InboundMessage,
+    ) -> list[dict[str, str]]:
+        parts = [
+            self._channel_prompt_part(
+                "conversation-semantics",
+                "platform",
+                CONVERSATION_SEMANTICS,
+            ),
+            self._channel_prompt_part(
+                "metadata-glossary",
+                "platform",
+                CLAWCHAT_METADATA_GLOSSARY,
+            ),
+            self._channel_prompt_part(
+                "turn-metadata",
+                "metadata",
+                self._format_turn_metadata_section(inbound),
+            ),
+        ]
         owner_metadata = self._read_memory_metadata("owner", "owner")
-        prompts.extend(self._format_owner_metadata_sections(owner_metadata))
+        for index, section in enumerate(
+            self._format_owner_metadata_sections(owner_metadata)
+        ):
+            parts.append(
+                self._channel_prompt_part(
+                    f"owner-metadata-{index + 1}",
+                    "metadata",
+                    section,
+                )
+            )
         if inbound.chat_type == "group":
             group_section = self._format_group_profile_section(inbound.chat_id)
             if group_section:
-                prompts.append(group_section)
+                parts.append(
+                    self._channel_prompt_part(
+                        "group-profile",
+                        "metadata",
+                        group_section,
+                    )
+                )
             participant_section = self._format_group_participants_section(
                 inbound.chat_id,
                 owner_metadata,
             )
             if participant_section:
-                prompts.append(participant_section)
+                parts.append(
+                    self._channel_prompt_part(
+                        "group-participants",
+                        "metadata",
+                        participant_section,
+                    )
+                )
         elif inbound.sender_id != self._owner_user_id():
             user_section = self._format_peer_profile_section(inbound.sender_id)
             if user_section:
-                prompts.append(user_section)
-        prompts.append(self._format_message_blocks(inbound))
-        prompts.append(self._format_response_protocol(inbound))
-        return "\n\n".join(prompts) or None
+                parts.append(
+                    self._channel_prompt_part(
+                        "peer-profile",
+                        "metadata",
+                        user_section,
+                    )
+                )
+        parts.append(
+            self._channel_prompt_part(
+                "message-blocks",
+                "message",
+                self._format_message_blocks(inbound),
+            )
+        )
+        parts.append(
+            self._channel_prompt_part(
+                "response-protocol",
+                "protocol",
+                self._format_response_protocol(inbound),
+            )
+        )
+        return [part for part in parts if part["content"]]
+
+    def _channel_prompt_part(
+        self,
+        part_id: str,
+        group: str,
+        content: str | None,
+    ) -> dict[str, str]:
+        return {
+            "id": part_id,
+            "group": group,
+            "target": "system.channel_prompt",
+            "content": content or "",
+        }
+
+    def _render_channel_prompt_parts(
+        self,
+        parts: list[Mapping[str, Any]],
+    ) -> str | None:
+        prompt = "\n\n".join(
+            str(part.get("content") or "") for part in parts if part.get("content")
+        )
+        return prompt or None
 
     def _resolve_inbound_sender_context(self, inbound: InboundMessage) -> InboundMessage:
         resolved_sender_name = self._resolve_sender_name(inbound)
