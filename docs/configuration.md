@@ -49,14 +49,23 @@ None)` and `extra.pop("refresh_token", None)`).
 |----------------------------------------|--------------------------|-----------|------------------------|
 | `CLAWCHAT_GROUP_MODE`                  | `group_mode`             | `"all"`   | `"all"`, `"mention"`   |
 | `CLAWCHAT_GROUP_COMMAND_MODE`          | `group_command_mode`     | `"owner"` | `"owner"`, `"all"`, `"off"` |
+| —                                      | `group_sessions_per_user` | `true`    | Hermes-compatible group session isolation flag |
 | —                                      | `groups.<chat_id>.group_mode`         | inherits `group_mode`         | per-group override          |
 | —                                      | `groups.<chat_id>.group_command_mode` | inherits `group_command_mode` | per-group override          |
+| —                                      | `groups.<chat_id>.group_sessions_per_user` | inherits `group_sessions_per_user` | per-group override |
 | —                                      | `groups["*"].group_mode`              | inherits `group_mode`         | wildcard group default      |
 | —                                      | `groups["*"].group_command_mode`      | inherits `group_command_mode` | wildcard group default      |
+| —                                      | `groups["*"].group_sessions_per_user` | inherits `group_sessions_per_user` | wildcard group default |
 
 `group_mode=all` makes every inbound group message eligible for a reply;
 `group_mode=mention` requires a structured `@` mention.
-`effective_group_mode` / `effective_group_command_mode` in
+`group_sessions_per_user=true` keeps Hermes' default group behavior: each
+participant in a group gets an isolated session. `group_sessions_per_user=false`
+makes the group share one session across participants. In shared group sessions,
+sender-specific facts still belong in the current message context, not
+session-level prompts.
+`effective_group_mode` / `effective_group_command_mode` /
+`effective_group_sessions_per_user` in
 `clawchat_gateway.config` resolve the precedence (`chat_id` exact →
 `"*"` → top-level).
 

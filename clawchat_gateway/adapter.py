@@ -35,7 +35,11 @@ from clawchat_gateway.clawchat_metadata import (
     pull_owner_metadata,
     pull_user_metadata,
 )
-from clawchat_gateway.config import ClawChatConfig, effective_group_command_mode
+from clawchat_gateway.config import (
+    ClawChatConfig,
+    effective_group_command_mode,
+    effective_group_sessions_per_user,
+)
 from clawchat_gateway.connection import (
     HANDSHAKE_TIMEOUT_SECONDS,
     ClawChatConnection,
@@ -65,7 +69,6 @@ from clawchat_gateway.mention_message import (
     normalize_mention_targets,
     validate_mention_payload,
 )
-from clawchat_gateway.plugin_prompts import mode_prompt
 from clawchat_gateway.profile_sync import relation_for_sender
 from clawchat_gateway.protocol import (
     build_message_reply_event,
@@ -1053,7 +1056,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
         source = self.build_source(
             chat_id=inbound.chat_id,
-            user_id=inbound.sender_id,
+            user_id=self._session_user_id_for_inbound(inbound),
             chat_name=inbound.chat_id,
             chat_type=self._map_source_chat_type(inbound.chat_type),
         )
@@ -1122,6 +1125,14 @@ class ClawChatAdapter(BasePlatformAdapter):
             inbound.sender_id,
         )
 
+    def _session_user_id_for_inbound(self, inbound: InboundMessage) -> str | None:
+        if inbound.chat_type == "group" and not effective_group_sessions_per_user(
+            self._clawchat_config,
+            inbound.chat_id,
+        ):
+            return None
+        return inbound.sender_id
+
     async def _ensure_group_participants_metadata(self, group_id: str) -> None:
         if not group_id:
             return
@@ -1132,9 +1143,6 @@ class ClawChatAdapter(BasePlatformAdapter):
 
     def _compose_channel_prompt(self, inbound: InboundMessage) -> str | None:
         prompts = [CONVERSATION_SEMANTICS]
-        base_prompt = mode_prompt(inbound.chat_type)
-        if base_prompt:
-            prompts.append(base_prompt)
         prompts.append(CLAWCHAT_METADATA_GLOSSARY)
         prompts.append(self._format_turn_metadata_section(inbound))
         owner_metadata = self._read_memory_metadata("owner", "owner")

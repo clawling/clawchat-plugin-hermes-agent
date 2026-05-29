@@ -3,7 +3,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 
 def _read_env_file_value(name: str) -> str:
@@ -119,20 +119,43 @@ def _read_group_command_mode(value: Any) -> str:
     return value if value in {"owner", "all", "off"} else "owner"
 
 
-def _read_groups(value: Any) -> dict[str, dict[str, str]]:
+def _read_optional_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return None
+
+
+def _read_group_sessions_per_user(value: Any) -> bool:
+    parsed = _read_optional_bool(value)
+    return True if parsed is None else parsed
+
+
+def _read_groups(value: Any) -> dict[str, dict[str, Any]]:
     if not isinstance(value, dict):
         return {}
-    groups: dict[str, dict[str, str]] = {}
+    groups: dict[str, dict[str, Any]] = {}
     for chat_id, raw_group in value.items():
         if not isinstance(chat_id, str) or not chat_id:
             continue
         group = raw_group if isinstance(raw_group, dict) else {}
-        groups[chat_id] = {
-            "group_mode": _read_group_mode(group.get("group_mode")),
-            "group_command_mode": _read_group_command_mode(
+        parsed_group: dict[str, Any] = {}
+        if "group_mode" in group:
+            parsed_group["group_mode"] = _read_group_mode(group.get("group_mode"))
+        if "group_command_mode" in group:
+            parsed_group["group_command_mode"] = _read_group_command_mode(
                 group.get("group_command_mode")
-            ),
-        }
+            )
+        if "group_sessions_per_user" in group:
+            parsed = _read_optional_bool(group.get("group_sessions_per_user"))
+            if parsed is not None:
+                parsed_group["group_sessions_per_user"] = parsed
+        groups[chat_id] = parsed_group
     return groups
 
 
@@ -148,7 +171,8 @@ class ClawChatConfig:
     memory_root: str = ""
     group_mode: str = "all"
     group_command_mode: str = "owner"
-    groups: dict[str, dict[str, str]] = field(default_factory=dict)
+    group_sessions_per_user: bool = True
+    groups: dict[str, dict[str, Any]] = field(default_factory=dict)
     reconnect_initial_delay_ms: int = 500
     reconnect_max_delay_ms: int = 15000
     reconnect_jitter_ratio: float = 0.3
@@ -194,6 +218,9 @@ class ClawChatConfig:
                 _get_env("CLAWCHAT_GROUP_COMMAND_MODE")
                 or _get_config_value(extra, "group_command_mode", "owner")
             ),
+            group_sessions_per_user=_read_group_sessions_per_user(
+                _get_config_value(extra, "group_sessions_per_user", True)
+            ),
             groups=_read_groups(_get_config_value(extra, "groups", {})),
             reconnect_initial_delay_ms=_get_config_value(
                 extra, "reconnect_initial_delay_ms", 500
@@ -233,19 +260,29 @@ class ClawChatConfig:
 
 def effective_group_mode(config: ClawChatConfig, chat_id: str) -> str:
     exact = config.groups.get(chat_id)
-    if exact is not None:
+    if exact is not None and "group_mode" in exact:
         return _read_group_mode(exact.get("group_mode"))
     wildcard = config.groups.get("*")
-    if wildcard is not None:
+    if wildcard is not None and "group_mode" in wildcard:
         return _read_group_mode(wildcard.get("group_mode"))
     return _read_group_mode(config.group_mode)
 
 
 def effective_group_command_mode(config: ClawChatConfig, chat_id: str) -> str:
     exact = config.groups.get(chat_id)
-    if exact is not None:
+    if exact is not None and "group_command_mode" in exact:
         return _read_group_command_mode(exact.get("group_command_mode"))
     wildcard = config.groups.get("*")
-    if wildcard is not None:
+    if wildcard is not None and "group_command_mode" in wildcard:
         return _read_group_command_mode(wildcard.get("group_command_mode"))
     return _read_group_command_mode(config.group_command_mode)
+
+
+def effective_group_sessions_per_user(config: ClawChatConfig, chat_id: str) -> bool:
+    exact = config.groups.get(chat_id)
+    if exact is not None and "group_sessions_per_user" in exact:
+        return bool(exact.get("group_sessions_per_user"))
+    wildcard = config.groups.get("*")
+    if wildcard is not None and "group_sessions_per_user" in wildcard:
+        return bool(wildcard.get("group_sessions_per_user"))
+    return bool(config.group_sessions_per_user)

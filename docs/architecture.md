@@ -63,7 +63,7 @@ lifecycle (`clawchat_gateway.connection`), inbound frame parsing
 (`clawchat_gateway.inbound`), outbound frame construction
 (`clawchat_gateway.protocol`), media handling
 (`clawchat_gateway.media_runtime`), and per-turn channel-prompt
-injection (`_compose_channel_prompt` → `mode_prompt`).
+injection (`_compose_channel_prompt`).
 
 ## Wire protocol
 
