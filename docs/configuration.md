@@ -32,19 +32,13 @@ None)` and `extra.pop("refresh_token", None)`).
 | `CLAWCHAT_BASE_URL`                                  | `base_url`      | `https://app.clawling.com`           | REST API base. Trailing slashes are stripped. |
 | `CLAWCHAT_WEBSOCKET_URL` (or `CLAWCHAT_WS_URL`)      | `websocket_url` | `wss://app.clawling.com/ws`          | Derived from `base_url` when activation runs (`activate._derive_websocket_url`). |
 
-## Reply mode and streaming
+## Rich interactions and display
 
 | Env var                                | `extra.*` key                  | Default        |
 |----------------------------------------|--------------------------------|----------------|
-| `CLAWCHAT_REPLY_MODE`                  | `reply_mode`                   | `"stream"`     |
-| —                                      | `stream.flush_interval_ms`     | `250`          |
-| —                                      | `stream.min_chunk_chars`       | `40`           |
-| —                                      | `stream.max_buffer_chars`      | `2000`         |
 | —                                      | `enable_rich_interactions`     | `false`        |
 
-`configure_clawchat_streaming` at plugin load also writes the top-level
-`streaming.*` block (`enabled=true`, `transport=edit`,
-`edit_interval=0.25`, `buffer_threshold=16`) and the
+`configure_clawchat_display_defaults` at plugin load also writes the
 `display.platforms.clawchat.*` block (`tool_progress=off`,
 `long_running_notifications=false`, `show_reasoning=false`) into
 `config.yaml` if any value is missing.
@@ -118,12 +112,6 @@ platforms:
       user_id: usr_...
       agent_id: agt_...
       owner_user_id: usr_...
-      reply_mode: stream
-streaming:
-  enabled: true
-  transport: edit
-  edit_interval: 0.25
-  buffer_threshold: 16
 display:
   platforms:
     clawchat:

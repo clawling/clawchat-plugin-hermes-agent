@@ -2,7 +2,7 @@
 
 The plugin is a Python module loaded at runtime by a Hermes Agent
 v0.12.0+ process. Its single public entrypoint is the top-level
-`register(ctx)` function in `__init__.py:350-361`.
+`register(ctx)` function in `__init__.py:449-459`.
 
 ## Naming map
 
@@ -23,11 +23,11 @@ These names refer to different layers and are not interchangeable:
 | Call                                                         | Provided by              | Effect                                                                                       |
 |--------------------------------------------------------------|--------------------------|----------------------------------------------------------------------------------------------|
 | `ctx.register_platform(name="clawchat", ...)`                | `__init__._register_platform` | Registers the gateway platform. Requires Hermes v0.12.0+; raises otherwise.            |
-| `ctx.register_hook("pre_gateway_dispatch", ...)`             | `__init__._clawchat_pre_gateway_dispatch` | Drops frames whose sender matches the bot's own ClawChat `user_id` (self-echo). |
 | `ctx.register_tool(name, "clawchat", schema, handler, ...)`  | `clawchat_gateway.plugin_tools.register_tools` | Registers all twenty-two `clawchat_*` tools. List is also in `plugin.yaml`. |
 | `ctx.register_skill("clawchat", path, description=...)`      | `__init__._register_skill` | Registers the bundled Plugin Bundle skill `clawchat:clawchat` (path `skills/clawchat/SKILL.md`). Skipped silently if the host does not implement `register_skill`. |
 | `ctx.register_cli_command("clawchat", ...)`                  | `__init__._register_cli_commands` | Adds `hermes clawchat activate <CODE>` on Hermes builds that expose `register_cli_command`. |
 | `ctx.register_command("clawchat-activate", ...)`             | `__init__._register_commands` | Adds the `/clawchat-activate <CODE>` slash command for in-session activation.        |
+| `ctx.register_hook("pre_gateway_dispatch", ...)`             | `__init__._clawchat_pre_gateway_dispatch` | Drops frames whose sender matches the bot's own ClawChat `user_id` (self-echo). |
 
 `adapter_factory`, `setup_fn`, `check_fn`, `validate_config`, and
 `is_connected` are passed through `register_platform`. `setup_fn` runs

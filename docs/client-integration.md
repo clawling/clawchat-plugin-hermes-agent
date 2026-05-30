@@ -805,7 +805,7 @@ A server-pushed signal that some out-of-band field of a chat (currently
 `title`, `description`, or `behavior` — see scope vocabulary below) has
 changed and local cached copies should be refreshed. The frame carries
 **no new data** — only an advisory `scope` of what changed — and the
-client must fetch the new state from `clawchat-member-backend`. The
+client must fetch the new state from the ClawChat server. The
 fetch endpoint depends on the scope (see vocabulary table below): group
 title / description changes are read back from
 `/v1/conversations/{cid}` (mobile) or `/clawnext/conversations/{cid}`
@@ -852,27 +852,27 @@ addressed to one recipient at a time via the WS routing layer.
 
 **Scope vocabulary.** Open-ended and additive — clients **must** treat
 unknown scope strings as a generic "refetch everything" hint, not error.
-Currently produced by `clawchat-member-backend`:
+Currently produced by the server:
 
 | Scope | Triggered by | Refetch from |
 |-------|--------------|--------------|
 | `["title"]` | Successful group rename (`PATCH /v1/conversations/{cid}` with `title`). | `GET /v1/conversations/{cid}` (mobile) / `GET /clawnext/conversations/{cid}` (web). |
 | `["description"]` | Successful group description / system-prompt change (`PATCH /v1/conversations/{cid}` with `description`). | `GET /v1/conversations/{cid}` (mobile) / `GET /clawnext/conversations/{cid}` (web). |
-| `["behavior"]` | Owner edits the per-agent behavior / system prompt (`PATCH /v1/agents/{configured agent REST id}` with `behavior`). Fired only when the value actually changes. Fanned over the agent's direct conversation; recipients are the owner and the agent's ClawChat user id. | `GET /v1/agents/{configured agent REST id}` against the agent paired in this direct conversation. |
+| `["behavior"]` | The per-agent behavior / system prompt changes — via `PATCH /v1/agents/me/behavior` (agent self-update) or the owner-driven `PATCH /v1/agents/{id}`; both have identical effect. Fired only when the value actually changes. Fanned over the agent's direct conversation; recipients are the owner and the agent's ClawChat user id. | `GET /v1/agents/{configured agent REST id}` against the agent paired in this direct conversation. |
 
 A single mutation always emits a single-element scope today; future
 changes may emit multi-element scope (e.g. `["title", "description"]`)
 or new scope strings. Implementations that only recognize `title` must
 still refresh on `description` or any unknown value.
 
-**No-op short-circuit.** The producer (`clawchat-member-backend`) does
+**No-op short-circuit.** The server does
 **not** emit a signal when the new value equals the current value
 (server-side "same title" / "same description" / "same behavior"
 check). Clients will therefore never see a redundant
 `chat.metadata.invalidated` for an unchanged field.
 
 **Direct vs group.** The Protocol v2 wire surface is type-agnostic and
-member-backend uses it for both kinds:
+the server uses it for both kinds:
 
 - Group `title` / `description` edits flow through
   `PATCH /v1/conversations/{cid}`, which rejects direct conversations

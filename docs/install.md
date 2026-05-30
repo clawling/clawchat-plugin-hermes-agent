@@ -136,8 +136,10 @@ docker exec hermes sh -lc \
 | `$HERMES_HOME/config.yaml`                 | `platforms.clawchat.enabled=true`, `extra.base_url`, `extra.websocket_url`, `extra.user_id`, `extra.agent_id`, `extra.owner_user_id`, `display.platforms.clawchat.*`. |
 | `$HERMES_HOME/clawchat.sqlite`             | Latest activation row, including access token, optional refresh token, user ids, and activation conversation id. |
 
-Successful activation prints `clawchat: activation complete for <user_id>`
-and exits 0. Treat any non-zero exit as a hard failure — activation
+Successful activation via the CLI, slash-command, or compatibility-script
+paths prints `clawchat: activation complete for <user_id>` and exits 0; the
+interactive `hermes gateway setup` flow instead prints
+`ClawChat activation complete.` (no user_id). Treat any non-zero exit as a hard failure — activation
 codes are single-use, so do **not** retry the same code; surface stderr
 to the operator and request a fresh code.
 
