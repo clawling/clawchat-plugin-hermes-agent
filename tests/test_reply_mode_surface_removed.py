@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 from clawchat_gateway.config import ClawChatConfig
+from clawchat_gateway.clawchat_metadata import owner_metadata_from_agent
 from clawchat_gateway.group_message_coalescer import format_coalesced_group_text
 from clawchat_gateway.inbound import InboundMessage, parse_inbound_message
 from clawchat_gateway.mention_message import (
@@ -667,7 +668,7 @@ def test_group_prompt_injects_agent_profile_metadata(monkeypatch):
     adapter = _adapter(monkeypatch)
     adapter._read_memory_metadata = lambda target_type, target_id: {
         ("owner", "owner"): {
-            "agent_id": "usr_agent",
+            "agent_user_id": "usr_agent",
             "agent_nickname": "Hermes Bot",
             "agent_avatar_url": "https://cdn.example/agent.png",
             "agent_bio": "I help the group.",
@@ -688,7 +689,7 @@ def test_group_prompt_injects_agent_profile_metadata(monkeypatch):
     )
 
     assert "## ClawChat Agent Profile" in prompt
-    assert "agent_id: usr_agent" in prompt
+    assert "agent_user_id: usr_agent" in prompt
     assert "agent_nickname: Hermes Bot" in prompt
     assert "agent_avatar_url: https://cdn.example/agent.png" in prompt
     assert "agent_bio: I help the group." in prompt
@@ -696,7 +697,26 @@ def test_group_prompt_injects_agent_profile_metadata(monkeypatch):
     assert "Reply tersely." in prompt
 
 
-def test_group_prompt_injects_agent_id_from_config_when_metadata_missing(monkeypatch):
+def test_owner_metadata_writes_agent_user_id_not_config_agent_id() -> None:
+    metadata = owner_metadata_from_agent(
+        {
+            "agent": {
+                "id": "agt_record",
+                "user_id": "usr_agent",
+                "owner_id": "usr_owner",
+                "nickname": "Hermes Bot",
+            }
+        },
+        connected_user_id="usr_fallback",
+        owner_user_id="usr_owner_fallback",
+    )
+
+    assert metadata["agent_user_id"] == "usr_agent"
+    assert metadata["agent_owner_id"] == "usr_owner"
+    assert "agent_id" not in metadata
+
+
+def test_group_prompt_injects_agent_user_id_from_config_when_metadata_missing(monkeypatch):
     adapter = _adapter(monkeypatch)
     adapter._read_memory_metadata = lambda _target_type, _target_id: {}
 
@@ -712,7 +732,29 @@ def test_group_prompt_injects_agent_id_from_config_when_metadata_missing(monkeyp
     )
 
     assert "## ClawChat Agent Profile" in prompt
-    assert "agent_id: usr_agent" in prompt
+    assert "agent_user_id: usr_agent" in prompt
+
+
+def test_group_prompt_falls_back_to_legacy_agent_id_metadata(monkeypatch):
+    adapter = _adapter(monkeypatch)
+    adapter._read_memory_metadata = lambda target_type, target_id: {
+        ("owner", "owner"): {"agent_id": "usr_legacy"}
+    }.get((target_type, target_id), {})
+
+    prompt = adapter._compose_channel_prompt(
+        InboundMessage(
+            chat_id="cnv_group",
+            chat_type="group",
+            sender_id="usr_sender",
+            sender_name="Sender",
+            text="hello",
+            raw_message={},
+        )
+    )
+
+    assert "## ClawChat Agent Profile" in prompt
+    assert "agent_user_id: usr_legacy" in prompt
+    assert "agent_id: usr_legacy" not in prompt
 
 
 @pytest.mark.asyncio

@@ -17,7 +17,7 @@ Credential tokens are the exception: `CLAWCHAT_TOKEN` and
 | `CLAWCHAT_TOKEN`                     | —                  | —       | Required for the gateway to start. Written to `$HERMES_HOME/.env` by activation. |
 | `CLAWCHAT_REFRESH_TOKEN`             | —                  | —       | Written to `$HERMES_HOME/.env` by activation. |
 | `CLAWCHAT_USER_ID`                   | `user_id`          | `""`    | ClawChat user id of the bot account. |
-| `CLAWCHAT_AGENT_ID`                  | `agent_id`         | JWT `aid` claim from `CLAWCHAT_TOKEN` | Set by activation. |
+| `CLAWCHAT_AGENT_ID`                  | `agent_id`         | JWT `aid` claim from `CLAWCHAT_TOKEN` | Set by activation. This is the REST agent record id (`agt_...`), distinct from owner metadata `agent_user_id` (`usr_...`). |
 | `CLAWCHAT_OWNER_USER_ID`             | `owner_user_id`    | `""`    | Identifies the human owner of the agent account. |
 
 The token / refresh-token pair are stored in `.env` for runtime resolution and

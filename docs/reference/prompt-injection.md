@@ -83,5 +83,5 @@ session is per participant or shared by the whole group:
 Keep message-scoped or metadata-scoped context in `MessageEvent.channel_prompt`
 unless Hermes adds an explicit session prompt invalidation API for platform
 plugins. The ClawChat channel prompt includes the current agent profile from
-`owner.md` metadata (`agent_id`, `agent_nickname`, `agent_avatar_url`, and
+`owner.md` metadata (`agent_user_id`, `agent_nickname`, `agent_avatar_url`, and
 `agent_bio`) so group and direct turns know which agent identity is replying.

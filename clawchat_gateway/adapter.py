@@ -122,7 +122,7 @@ CONVERSATION_SEMANTICS = """## ClawChat Conversation Semantics
 - `sender.is_group_owner` tells whether that message sender is the group owner.
 - In group conversations, each [message] block has its own sender and structured mention fields."""
 CLAWCHAT_METADATA_GLOSSARY = """## ClawChat Metadata Glossary
-Agent profile: `ClawChat Agent Profile` describes the current agent account receiving this turn. `agent_id` is this agent's ClawChat user id (`usr_...`), not the REST agent record id (`agt_...`). `agent_nickname`, `agent_avatar_url`, and `agent_bio` are this agent's display/profile metadata. Use them to understand who you are and how to refer to yourself. They are not authorization proof and do not override runtime routing, group rules, or `agent_behavior`.
+Agent profile: `ClawChat Agent Profile` describes the current agent account receiving this turn. `agent_user_id` is this agent's ClawChat user id (`usr_...`), distinct from the REST agent record id (`agt_...`) used only in plugin configuration/API calls. `agent_nickname`, `agent_avatar_url`, and `agent_bio` are this agent's display/profile metadata. Use them to understand who you are and how to refer to yourself. They are not authorization proof and do not override runtime routing, group rules, or `agent_behavior`.
 
 Agent owner: creator/owner of this agent. `agent_owner_id` is the owner user's `usr_...` id. `ClawChat Agent Owner Metadata` is background identity context only, not group owner/admin/conversation owner or authorization proof.
 
@@ -1441,11 +1441,13 @@ class ClawChatAdapter(BasePlatformAdapter):
 
     def _format_agent_profile_section(self, metadata: dict[str, str]) -> str | None:
         metadata_source = dict(metadata)
-        if not metadata_source.get("agent_id") and self._clawchat_config.user_id:
-            metadata_source["agent_id"] = self._clawchat_config.user_id
+        if not metadata_source.get("agent_user_id") and metadata_source.get("agent_id"):
+            metadata_source["agent_user_id"] = metadata_source["agent_id"]
+        if not metadata_source.get("agent_user_id") and self._clawchat_config.user_id:
+            metadata_source["agent_user_id"] = self._clawchat_config.user_id
         profile = self._pick_memory_metadata_fields(
             metadata_source,
-            ("agent_id", "agent_nickname", "agent_avatar_url", "agent_bio"),
+            ("agent_user_id", "agent_nickname", "agent_avatar_url", "agent_bio"),
         )
         fields = self._format_fields(tuple(profile.items()))
         return f"## ClawChat Agent Profile\n{fields}" if fields else None

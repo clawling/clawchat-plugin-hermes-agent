@@ -82,14 +82,14 @@ def owner_metadata_from_agent(
         return {}
     metadata: dict[str, str] = {}
     _copy_present(metadata, "updated_at", detail, "updated_at", "updatedAt")
-    resolved_agent_id = _first_string(
+    resolved_agent_user_id = _first_string(
         detail,
         "user_id",
         "userId",
         fallback=connected_user_id,
     )
-    if resolved_agent_id:
-        metadata["agent_id"] = resolved_agent_id
+    if resolved_agent_user_id:
+        metadata["agent_user_id"] = resolved_agent_user_id
     resolved_owner_id = _first_string(
         detail,
         "owner_id",

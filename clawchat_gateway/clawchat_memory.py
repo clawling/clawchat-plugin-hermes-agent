@@ -31,7 +31,7 @@ _METADATA_VALUE_LINE_BREAK_RE = re.compile(r"[\r\n]+")
 _METADATA_FIELDS_BY_TARGET = {
     "owner": {
         "updated_at",
-        "agent_id",
+        "agent_user_id",
         "agent_owner_id",
         "agent_nickname",
         "agent_avatar_url",
