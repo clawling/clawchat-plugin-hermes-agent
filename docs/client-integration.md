@@ -342,6 +342,12 @@ Required:
 - `payload.message.context` (with `mentions: []` and `reply: null` when
   not applicable).
 
+`payload.message.context.mentions` is a list of structured mention fragments,
+using the same object shape as `kind: "mention"` entries in
+`payload.message.body.fragments`. When a message mentions a user, include an
+entry such as `{ "kind": "mention", "user_id": "usr_123", "display": "Alice" }`;
+do not send bare user id strings on uplink.
+
 Forbidden:
 
 - Top-level `sender` — server stamps it.

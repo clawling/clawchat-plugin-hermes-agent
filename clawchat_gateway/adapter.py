@@ -71,6 +71,7 @@ from clawchat_gateway.mention_message import (
     build_context_mentions,
     build_mention_message_fragments,
     mention_message_text,
+    mention_user_ids,
     normalize_mention_targets,
     validate_mention_payload,
 )
@@ -1752,19 +1753,20 @@ class ClawChatAdapter(BasePlatformAdapter):
         reply_to_message_id: str | None = None,
     ) -> dict[str, Any]:
         normalized_mentions = normalize_mention_targets(mentions)
-        mentioned_ids = build_context_mentions(normalized_mentions)
+        context_mentions = build_context_mentions(normalized_mentions)
+        mentioned_ids = mention_user_ids(normalized_mentions)
         fragments = build_mention_message_fragments(
             mentions=normalized_mentions,
             text=text,
         )
-        validate_mention_payload(fragments, mentioned_ids)
+        validate_mention_payload(fragments, context_mentions)
         message_id = new_frame_id("msg")
         frame = build_message_send_event(
             chat_id=chat_id,
             chat_type=chat_type,
             message_id=message_id,
             fragments=fragments,
-            mentioned_user_ids=mentioned_ids,
+            context_mentions=context_mentions,
             reply_to_message_id=reply_to_message_id,
             include_message_id=True,
         )

@@ -134,11 +134,11 @@ def build_message_send_event(
     chat_type: str,
     message_id: str,
     fragments: list[dict[str, Any]],
-    mentioned_user_ids: list[str] | None = None,
+    context_mentions: list[dict[str, Any]] | None = None,
     reply_to_message_id: str | None = None,
     include_message_id: bool = False,
 ) -> dict[str, Any]:
-    context: dict[str, Any] = {"mentions": mentioned_user_ids or [], "reply": None}
+    context: dict[str, Any] = {"mentions": context_mentions or [], "reply": None}
     if reply_to_message_id:
         context["reply"] = {
             "reply_to_msg_id": reply_to_message_id,

@@ -1308,7 +1308,9 @@ def test_build_mention_payload_requires_fragment_display_and_matching_context() 
         {"kind": "mention", "user_id": "usr_123", "display": "Alice"},
         {"kind": "text", "text": " 请看"},
     ]
-    assert context_mentions == ["usr_123"]
+    assert context_mentions == [
+        {"kind": "mention", "user_id": "usr_123", "display": "Alice"}
+    ]
     validate_mention_payload(fragments, context_mentions)
 
 
@@ -1325,7 +1327,7 @@ def test_validate_mention_payload_rejects_context_mismatch() -> None:
     with pytest.raises(ValueError, match="context.mentions must match mention fragments"):
         validate_mention_payload(
             [{"kind": "mention", "user_id": "usr_123", "display": "Alice"}],
-            ["usr_other"],
+            [{"kind": "mention", "user_id": "usr_other", "display": "Other"}],
         )
 
 
@@ -1333,7 +1335,7 @@ def test_validate_mention_payload_rejects_missing_fragment_display() -> None:
     with pytest.raises(ValueError, match="mention fragment requires display"):
         validate_mention_payload(
             [{"kind": "mention", "user_id": "usr_123"}],
-            ["usr_123"],
+            [{"kind": "mention", "user_id": "usr_123", "display": "Alice"}],
         )
 
 
@@ -1414,7 +1416,9 @@ def test_context_mentions_drive_dispatch_and_fragment_display_drives_llm_context
                 {"kind": "mention", "user_id": "usr_agent", "display": "Agent"},
                 {"kind": "text", "text": " hi"},
             ],
-            context_mentions=["usr_agent"],
+            context_mentions=[
+                {"kind": "mention", "user_id": "usr_agent", "display": "Agent"}
+            ],
         ),
         config,
     )

@@ -63,12 +63,21 @@ def build_mention_message_fragments(
     return fragments
 
 
-def build_context_mentions(mentions: Any) -> list[str]:
-    return mention_user_ids(normalize_mention_targets(mentions))
+def build_context_mentions(mentions: Any) -> list[dict[str, str]]:
+    context_mentions: list[dict[str, str]] = []
+    for mention in normalize_mention_targets(mentions):
+        context_mentions.append(
+            {
+                "kind": "mention",
+                "user_id": mention["userId"],
+                "display": mention["display"],
+            }
+        )
+    return context_mentions
 
 
-def _mention_fragment_user_ids(fragments: list[dict[str, Any]]) -> list[str]:
-    user_ids: list[str] = []
+def _mention_fragments(fragments: list[dict[str, Any]]) -> list[dict[str, str]]:
+    mentions: list[dict[str, str]] = []
     for index, fragment in enumerate(fragments):
         if fragment.get("kind") != "mention":
             continue
@@ -78,16 +87,29 @@ def _mention_fragment_user_ids(fragments: list[dict[str, Any]]) -> list[str]:
         display = fragment.get("display")
         if not isinstance(display, str) or not display.strip():
             raise ValueError(f"mention fragment requires display at index {index}")
-        user_ids.append(user_id)
-    return user_ids
+        mentions.append({"kind": "mention", "user_id": user_id, "display": display})
+    return mentions
 
 
 def validate_mention_payload(
     fragments: list[dict[str, Any]],
-    context_mentions: list[str],
+    context_mentions: list[dict[str, Any]],
 ) -> None:
-    fragment_user_ids = _mention_fragment_user_ids(fragments)
-    if fragment_user_ids != context_mentions:
+    fragment_mentions = _mention_fragments(fragments)
+    normalized_context_mentions: list[dict[str, str]] = []
+    for index, mention in enumerate(context_mentions):
+        if not isinstance(mention, dict) or mention.get("kind") != "mention":
+            raise ValueError(f"context.mentions requires mention fragment at index {index}")
+        user_id = mention.get("user_id")
+        if not isinstance(user_id, str) or not user_id.strip():
+            raise ValueError(f"context.mentions requires user_id at index {index}")
+        display = mention.get("display")
+        if not isinstance(display, str) or not display.strip():
+            raise ValueError(f"context.mentions requires display at index {index}")
+        normalized_context_mentions.append(
+            {"kind": "mention", "user_id": user_id, "display": display}
+        )
+    if fragment_mentions != normalized_context_mentions:
         raise ValueError("context.mentions must match mention fragments")
 
 
