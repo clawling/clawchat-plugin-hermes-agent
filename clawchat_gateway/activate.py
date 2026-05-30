@@ -78,13 +78,6 @@ def persist_activation(
     else:
         extra.pop("agent_id", None)
     extra["owner_user_id"] = owner_user_id
-    display = config.setdefault("display", {})
-    display_platforms = display.setdefault("platforms", {})
-    clawchat_display = display_platforms.setdefault("clawchat", {})
-    clawchat_display["tool_progress"] = "off"
-    clawchat_display["long_running_notifications"] = False
-    clawchat_display["show_reasoning"] = False
-
     env_values = {
         "CLAWCHAT_TOKEN": access_token,
         "CLAWCHAT_REFRESH_TOKEN": refresh_token or None,

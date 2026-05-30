@@ -94,7 +94,7 @@ Activation writes:
 | File | Contents |
 |---|---|
 | `$HERMES_HOME/.env` | `CLAWCHAT_TOKEN`, `CLAWCHAT_REFRESH_TOKEN`, optional `CLAWCHAT_HOME_CHANNEL*`. |
-| `$HERMES_HOME/config.yaml` | `platforms.clawchat.enabled=true`, `extra.base_url`, `extra.websocket_url`, `extra.user_id`, `extra.agent_id`, `extra.owner_user_id`, `display.platforms.clawchat.*`. |
+| `$HERMES_HOME/config.yaml` | `platforms.clawchat.enabled=true`, `extra.base_url`, `extra.websocket_url`, `extra.user_id`, `extra.agent_id`, `extra.owner_user_id`. Display settings are not written by activation; configure `display.platforms.clawchat.*` manually when needed. |
 | `$HERMES_HOME/clawchat.sqlite` | Latest activation row, including access token, optional refresh token, user ids, and activation conversation id. |
 
 Credential tokens are stored in `.env` for runtime resolution and in plugin

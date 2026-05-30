@@ -20,7 +20,7 @@ from clawchat_gateway.mention_message import (
     normalize_mention_targets,
     validate_mention_payload,
 )
-from clawchat_gateway.runtime_defaults import configure_clawchat_display_defaults
+from clawchat_gateway.runtime_defaults import configure_clawchat_allow_all
 from clawchat_gateway.llm_context_debug import ClawChatLlmContextDebug
 import clawchat_gateway.llm_context_hooks as llm_context_hooks
 
@@ -177,7 +177,9 @@ def test_platform_config_exposes_no_reply_mode_or_stream_tuning(monkeypatch):
     assert config.refresh_token == ""
 
 
-def test_persist_activation_does_not_create_reply_mode_or_streaming(monkeypatch, tmp_path):
+def test_persist_activation_does_not_create_reply_mode_streaming_or_display(
+    monkeypatch, tmp_path
+):
     activate, saved_config, env_values = _load_activate(monkeypatch, tmp_path, {})
 
     activate.persist_activation(
@@ -194,14 +196,41 @@ def test_persist_activation_does_not_create_reply_mode_or_streaming(monkeypatch,
     assert "show_tools_output" not in extra
     assert "show_think_output" not in extra
     assert "streaming" not in saved_config
-    assert saved_config["display"]["platforms"]["clawchat"] == {
-        "tool_progress": "off",
-        "long_running_notifications": False,
-        "show_reasoning": False,
-    }
+    assert "display" not in saved_config
     assert env_values == {
         "CLAWCHAT_TOKEN": "token",
         "CLAWCHAT_REFRESH_TOKEN": None,
+    }
+
+
+def test_persist_activation_preserves_existing_display_without_filling_defaults(
+    monkeypatch, tmp_path
+):
+    activate, saved_config, _env_values = _load_activate(
+        monkeypatch,
+        tmp_path,
+        {
+            "display": {
+                "platforms": {
+                    "clawchat": {
+                        "tool_progress": "all",
+                    }
+                }
+            }
+        },
+    )
+
+    activate.persist_activation(
+        access_token="token",
+        user_id="user",
+        owner_user_id="owner",
+        agent_id="agent",
+        refresh_token=None,
+        base_url="https://app.clawling.com",
+    )
+
+    assert saved_config["display"]["platforms"]["clawchat"] == {
+        "tool_progress": "all",
     }
 
 
@@ -251,7 +280,7 @@ def test_activation_persists_tokens_to_sqlite(monkeypatch, tmp_path):
     ]
 
 
-def test_runtime_defaults_write_display_defaults_without_streaming(monkeypatch, tmp_path):
+def test_runtime_defaults_do_not_write_display_defaults(monkeypatch, tmp_path):
     home = tmp_path / "hermes"
     config_path = home / "config.yaml"
     config_path.parent.mkdir()
@@ -265,7 +294,7 @@ platforms:
     )
     monkeypatch.setenv("HERMES_HOME", str(home))
 
-    changed = configure_clawchat_display_defaults()
+    changed = configure_clawchat_allow_all()
 
     assert changed is True
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -273,11 +302,7 @@ platforms:
     assert "streaming" not in config
     assert "show_tools_output" not in extra
     assert "show_think_output" not in extra
-    assert config["display"]["platforms"]["clawchat"] == {
-        "tool_progress": "off",
-        "long_running_notifications": False,
-        "show_reasoning": False,
-    }
+    assert "display" not in config
 
 
 def test_runtime_defaults_preserve_existing_streaming(monkeypatch, tmp_path):
@@ -297,7 +322,7 @@ streaming:
     )
     monkeypatch.setenv("HERMES_HOME", str(home))
 
-    configure_clawchat_display_defaults()
+    configure_clawchat_allow_all()
 
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert config["streaming"] == {"enabled": False, "transport": "none"}

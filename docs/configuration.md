@@ -38,10 +38,90 @@ None)` and `extra.pop("refresh_token", None)`).
 |----------------------------------------|--------------------------------|----------------|
 | —                                      | `enable_rich_interactions`     | `false`        |
 
-`configure_clawchat_display_defaults` at plugin load also writes the
-`display.platforms.clawchat.*` block (`tool_progress=off`,
-`long_running_notifications=false`, `show_reasoning=false`) into
-`config.yaml` if any value is missing.
+## Hermes display settings for ClawChat
+
+Hermes display settings are read from `$HERMES_HOME/config.yaml`, not from
+`platforms.clawchat.extra`. The ClawChat plugin does not write display
+defaults during plugin load or activation. Operators who want ClawChat-specific
+display behavior must configure it explicitly:
+
+```yaml
+display:
+  platforms:
+    clawchat:
+      tool_progress: off
+      show_reasoning: false
+      streaming: false
+      interim_assistant_messages: false
+      long_running_notifications: false
+      busy_ack_detail: false
+      cleanup_progress: false
+```
+
+The plugin does not write top-level `display.*` or `streaming.*` settings.
+ClawChat display defaults should remain platform-scoped; do not write
+top-level `display.*` defaults unless the operator explicitly wants the same
+behavior on every Hermes messaging platform.
+
+Use these verified Hermes display keys when tuning ClawChat behavior:
+
+| Setting | Global setting exists | Platform override exists | Recommended ClawChat location | Function | Example input | Result with the shown setting |
+|---------|-----------------------|--------------------------|-------------------------------|----------|---------------|-------------------------------|
+| `busy_input_mode` | yes | no | `display.busy_input_mode: queue` | Controls how Hermes handles a new message while the agent is already running. Valid values: `interrupt`, `queue`, `steer`. | The agent is running tests; the user sends "also check README". | `queue` keeps the current run alive and handles the new message as the next turn. |
+| `busy_ack_enabled` | yes | no | `display.busy_ack_enabled: false` | Controls whether Hermes sends a busy acknowledgment message. | The agent is busy; the user sends "continue checking logs". | `false` suppresses the busy acknowledgment. The message still follows `busy_input_mode`. |
+| `background_process_notifications` | yes | no | `display.background_process_notifications: off` | Controls notifications from background terminal processes. Valid values: `all`, `result`, `error`, `off`. | The user starts `/background run the deploy check`. | `off` sends no watcher updates for background process output or completion. |
+| `tool_progress_command` | yes | no | `display.tool_progress_command: false` | Controls whether messaging users can use `/verbose` to cycle tool progress verbosity. | The user sends `/verbose` in ClawChat. | `false` prevents `/verbose` from enabling or changing tool progress display. |
+| `tool_preview_length` | yes | no | `display.tool_preview_length: 0` | Controls maximum tool-call preview length. | Tool progress displays a long shell command. | `0` means no preview length limit; it does not hide previews. |
+| `tool_progress` | yes | yes | `display.platforms.clawchat.tool_progress: off` | Controls tool progress messages. Valid values: `off`, `new`, `all`, `verbose`. | The agent runs `rg`, reads files, or executes commands. | `off` hides ClawChat tool progress messages and leaves only final assistant replies. |
+| `show_reasoning` | yes | yes | `display.platforms.clawchat.show_reasoning: false` | Controls whether model reasoning/thinking is shown in replies. | The model produces reasoning for a complex question. | `false` hides reasoning in ClawChat replies. |
+| `streaming` | yes | yes | `display.platforms.clawchat.streaming: false` | Controls platform streaming display behavior when supported by the gateway adapter. | The agent writes a long reply. | `false` avoids progressive ClawChat reply streaming. |
+| `interim_assistant_messages` | yes | yes | `display.platforms.clawchat.interim_assistant_messages: false` | Controls natural mid-turn assistant messages sent separately from final replies. | The model says "I will inspect the config first" during a turn. | `false` suppresses that separate interim ClawChat message. |
+| `long_running_notifications` | no | yes | `display.platforms.clawchat.long_running_notifications: false` | Controls long-running "still working" heartbeat messages. | A task runs for several minutes. | `false` prevents ClawChat heartbeat messages such as "Working - N min". |
+| `busy_ack_detail` | no | yes | `display.platforms.clawchat.busy_ack_detail: false` | Controls whether busy acknowledgments and long-running heartbeats include detailed runtime state. | The agent is busy and receives another message. | `false` keeps busy/heartbeat messages terse when those messages are enabled. |
+| `cleanup_progress` | no | yes | `display.platforms.clawchat.cleanup_progress: false` | Controls automatic deletion of progress/status bubbles on platforms whose adapter supports deletion. | Tool progress or heartbeat messages were sent earlier in the turn. | `false` leaves those messages in place instead of auto-deleting them. |
+
+To make ClawChat quiet and non-streaming without writing global display
+settings, use only platform-scoped ClawChat overrides:
+
+```yaml
+display:
+  platforms:
+    clawchat:
+      tool_progress: off
+      show_reasoning: false
+      streaming: false
+      interim_assistant_messages: false
+      long_running_notifications: false
+      busy_ack_detail: false
+      cleanup_progress: false
+```
+
+`interim_assistant_messages` is explicitly `false` in the ClawChat override
+block. The remaining ClawChat platform display settings are `off` or `false`.
+
+If the operator also wants queueing, disabled busy acknowledgments, disabled
+background notifications, or disabled `/verbose`, those are global Hermes
+display settings and must be configured separately:
+
+```yaml
+display:
+  busy_input_mode: queue
+  busy_ack_enabled: false
+  background_process_notifications: off
+  tool_progress_command: false
+```
+
+Three of those global settings also have official environment variables:
+
+| Environment variable | Equivalent config key | Example value | Notes |
+|----------------------|-----------------------|---------------|-------|
+| `HERMES_GATEWAY_BUSY_INPUT_MODE` | `display.busy_input_mode` | `queue` | Gateway busy-input behavior. Valid values are `interrupt`, `queue`, and `steer`. |
+| `HERMES_GATEWAY_BUSY_ACK_ENABLED` | `display.busy_ack_enabled` | `false` | Enables or disables busy acknowledgment messages. |
+| `HERMES_BACKGROUND_NOTIFICATIONS` | `display.background_process_notifications` | `off` | Background-process notification mode. Valid values are `all`, `result`, `error`, and `off`. |
+
+`display.tool_progress_command` does not have a confirmed official
+environment variable; configure it in `config.yaml` when the default needs to
+change.
 
 ## Group behavior
 
@@ -121,12 +201,6 @@ platforms:
       user_id: usr_...
       agent_id: agt_...
       owner_user_id: usr_...
-display:
-  platforms:
-    clawchat:
-      tool_progress: off
-      long_running_notifications: false
-      show_reasoning: false
 ```
 
 `$HERMES_HOME/.env` after activation contains at least:

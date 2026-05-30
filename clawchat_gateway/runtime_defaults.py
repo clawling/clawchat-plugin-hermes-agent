@@ -3,8 +3,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-import yaml
-
 
 def _hermes_home() -> Path:
     return Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
@@ -36,37 +34,4 @@ def configure_clawchat_allow_all() -> bool:
 
     if changed:
         env_path.write_text("\n".join(lines) + "\n")
-    return changed
-
-
-def configure_clawchat_display_defaults() -> bool:
-    config_path = _hermes_home() / "config.yaml"
-    if config_path.exists():
-        try:
-            config = yaml.safe_load(config_path.read_text()) or {}
-        except Exception:
-            config = {}
-    else:
-        config = {}
-
-    changed = False
-    platforms = config.setdefault("platforms", {})
-    clawchat = platforms.setdefault("clawchat", {})
-
-    display = config.setdefault("display", {})
-    display_platforms = display.setdefault("platforms", {})
-    clawchat_display = display_platforms.setdefault("clawchat", {})
-    display_defaults = {
-        "tool_progress": "off",
-        "long_running_notifications": False,
-        "show_reasoning": False,
-    }
-    for key, value in display_defaults.items():
-        if clawchat_display.get(key) != value:
-            clawchat_display[key] = value
-            changed = True
-
-    if changed:
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(yaml.safe_dump(config, allow_unicode=False, sort_keys=False))
     return changed
