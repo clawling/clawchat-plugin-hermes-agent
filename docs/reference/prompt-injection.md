@@ -63,9 +63,9 @@ repeated on every message, even though this is a responsibility compromise:
 Hermes currently exposes this as a memory-provider surface, not as a general
 platform session-prompt surface. Keep this block limited to stable explanatory
 text, such as the merged ClawChat conversation semantics and metadata glossary.
-Do not include `agent_behavior`, agent-owner metadata, peer profile metadata,
-group profile metadata, current `[message]` blocks, or other ClawChat data that
-can change within a session.
+Do not include `agent_behavior`, current agent profile metadata, agent-owner
+metadata, peer profile metadata, group profile metadata, current `[message]`
+blocks, or other ClawChat data that can change within a session.
 
 Session-level ClawChat context is valid only when the Hermes session is strictly
 bound to the intended conversation. Direct messages are bound by the direct
@@ -82,4 +82,6 @@ session is per participant or shared by the whole group:
 
 Keep message-scoped or metadata-scoped context in `MessageEvent.channel_prompt`
 unless Hermes adds an explicit session prompt invalidation API for platform
-plugins.
+plugins. The ClawChat channel prompt includes the current agent profile from
+`owner.md` metadata (`agent_id`, `agent_nickname`, `agent_avatar_url`, and
+`agent_bio`) so group and direct turns know which agent identity is replying.

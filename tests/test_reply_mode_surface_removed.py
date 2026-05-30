@@ -4,6 +4,7 @@ import copy
 import importlib
 import asyncio
 import json
+import logging
 import sys
 from types import ModuleType, SimpleNamespace
 from pathlib import Path
@@ -460,6 +461,7 @@ def _adapter(monkeypatch, extra=None):
     adapter._active_chat_runs = {}
     adapter._completed_run_ids = set()
     adapter._completed_run_order = []
+    adapter._conversation_metadata_versions = {}
     adapter._run_counter = 0
     return adapter
 
@@ -483,6 +485,141 @@ STREAM_LIFECYCLE_EVENTS = {
     "message.done",
     "message.failed",
 }
+
+
+@pytest.mark.asyncio
+async def test_metadata_invalidation_validates_all_group_scope_fields(monkeypatch):
+    adapter = _adapter(monkeypatch)
+    calls = []
+
+    async def refresh_conversation_metadata(
+        conversation_id,
+        *,
+        expected_changed_fields=(),
+        **_kwargs,
+    ):
+        calls.append((conversation_id, expected_changed_fields))
+        return True
+
+    async def refresh_agent_behavior(*_args, **_kwargs):
+        raise AssertionError("group title/description should not refresh owner metadata")
+
+    adapter._refresh_conversation_metadata = refresh_conversation_metadata
+    adapter._refresh_agent_behavior = refresh_agent_behavior
+
+    await adapter._handle_metadata_invalidated(
+        {
+            "chat_id": "cnv_group",
+            "chat_type": "group",
+            "payload": {"scope": ["title", "description"], "version": 42},
+        }
+    )
+
+    assert calls == [("cnv_group", ("group_title", "group_description"))]
+    assert adapter._conversation_metadata_versions["cnv_group"] == 42
+
+
+@pytest.mark.asyncio
+async def test_metadata_invalidation_empty_direct_scope_refreshes_behavior(monkeypatch):
+    adapter = _adapter(monkeypatch)
+    calls = []
+
+    async def refresh_agent_behavior(
+        conversation_id,
+        *,
+        expected_changed_fields=(),
+        **_kwargs,
+    ):
+        calls.append((conversation_id, expected_changed_fields))
+        return True
+
+    async def refresh_conversation_metadata(*_args, **_kwargs):
+        raise AssertionError("direct all-scope invalidation should refresh behavior")
+
+    adapter._refresh_agent_behavior = refresh_agent_behavior
+    adapter._refresh_conversation_metadata = refresh_conversation_metadata
+
+    await adapter._handle_metadata_invalidated(
+        {
+            "chat_id": "cnv_direct",
+            "chat_type": "direct",
+            "payload": {"version": 43},
+        }
+    )
+
+    assert calls == [("cnv_direct", ())]
+    assert adapter._conversation_metadata_versions["cnv_direct"] == 43
+
+
+def test_metadata_invalidation_warns_when_scoped_field_did_not_change(
+    monkeypatch,
+    caplog,
+):
+    adapter = _adapter(monkeypatch)
+    caplog.set_level(logging.WARNING, logger="clawchat_gateway.adapter")
+
+    adapter._validate_metadata_changed_fields(
+        target_type="group",
+        target_id="cnv_group",
+        before={"group_title": "old", "group_description": "same"},
+        after={"group_title": "new", "group_description": "same"},
+        expected_changed_fields=("group_title", "group_description"),
+    )
+
+    assert "changed_fields=group_title" in caplog.text
+    assert "unchanged_fields=group_description" in caplog.text
+
+
+def test_group_prompt_injects_agent_profile_metadata(monkeypatch):
+    adapter = _adapter(monkeypatch)
+    adapter._read_memory_metadata = lambda target_type, target_id: {
+        ("owner", "owner"): {
+            "agent_id": "usr_agent",
+            "agent_nickname": "Hermes Bot",
+            "agent_avatar_url": "https://cdn.example/agent.png",
+            "agent_bio": "I help the group.",
+            "agent_behavior": "Reply tersely.",
+        },
+        ("group", "cnv_group"): {},
+    }.get((target_type, target_id), {})
+
+    prompt = adapter._compose_channel_prompt(
+        InboundMessage(
+            chat_id="cnv_group",
+            chat_type="group",
+            sender_id="usr_sender",
+            sender_name="Sender",
+            text="hello",
+            raw_message={},
+        )
+    )
+
+    assert "## ClawChat Agent Profile" in prompt
+    assert "agent_id: usr_agent" in prompt
+    assert "agent_nickname: Hermes Bot" in prompt
+    assert "agent_avatar_url: https://cdn.example/agent.png" in prompt
+    assert "agent_bio: I help the group." in prompt
+    assert "## ClawChat Agent Behavior" in prompt
+    assert "Reply tersely." in prompt
+
+
+def test_group_prompt_injects_agent_id_from_config_when_metadata_missing(monkeypatch):
+    adapter = _adapter(monkeypatch)
+    adapter._read_memory_metadata = lambda _target_type, _target_id: {}
+
+    prompt = adapter._compose_channel_prompt(
+        InboundMessage(
+            chat_id="cnv_group",
+            chat_type="group",
+            sender_id="usr_sender",
+            sender_name="Sender",
+            text="hello",
+            raw_message={},
+        )
+    )
+
+    assert "## ClawChat Agent Profile" in prompt
+    assert "agent_id: usr_agent" in prompt
 
 
 @pytest.mark.asyncio

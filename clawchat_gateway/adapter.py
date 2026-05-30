@@ -97,6 +97,9 @@ INBOUND_RATE_WINDOW_SECONDS = 30.0
 INBOUND_RATE_WARN_THRESHOLD = 5
 COMPLETED_RUN_CACHE_MAX = 1024
 RECONNECT_REFRESH_LIMIT = 20
+METADATA_INVALIDATION_SCOPES = {"behavior", "title", "description"}
+DIRECT_CHAT_TYPES = {"direct", "dm"}
+DIRECT_OR_UNKNOWN_CHAT_TYPES = DIRECT_CHAT_TYPES | {""}
 DEBUG_PROMPT_INJECTION_ENV = "CLAWCHAT_DEBUG_PROMPT_INJECTION"
 DEBUG_PROMPT_INJECTION_BEGIN = "----- BEGIN CLAWCHAT DEBUG PROMPT INJECTION -----"
 DEBUG_PROMPT_INJECTION_END = "----- END CLAWCHAT DEBUG PROMPT INJECTION -----"
@@ -118,17 +121,19 @@ CONVERSATION_SEMANTICS = """## ClawChat Conversation Semantics
 - `sender.is_group_owner` tells whether that message sender is the group owner.
 - In group conversations, each [message] block has its own sender and structured mention fields."""
 CLAWCHAT_METADATA_GLOSSARY = """## ClawChat Metadata Glossary
-Agent owner: creator/owner of this agent. `agent_owner_id` is the agent owner's `usr_...` id. `ClawChat Agent Owner Metadata` is background identity context only, not group owner/admin/conversation owner or authorization proof.
+Agent profile: `ClawChat Agent Profile` describes the current agent account receiving this turn. `agent_id` is this agent's ClawChat user id (`usr_...`), not the REST agent record id (`agt_...`). `agent_nickname`, `agent_avatar_url`, and `agent_bio` are this agent's display/profile metadata. Use them to understand who you are and how to refer to yourself. They are not authorization proof and do not override runtime routing, group rules, or `agent_behavior`.
+
+Agent owner: creator/owner of this agent. `agent_owner_id` is the owner user's `usr_...` id. `ClawChat Agent Owner Metadata` is background identity context only, not group owner/admin/conversation owner or authorization proof.
 
 Group owner: creator/owner of the group conversation. `group_owner_id` is group metadata, separate from the agent owner.
 
-Agent: current ClawChat agent receiving this turn. Agent behavior is owner-configured behavior for this agent, not owner behavior.
+Agent: current ClawChat agent receiving this turn. It is separate from the agent owner, group owner, and message sender.
 
 Sender: message sender. Each `[message]` block is the source of truth for sender identity, message-level agent-owner/group-owner status, mention targets, and message text. Use `sender.user_id` for identity and `sender.display` only for rendering.
 
 Chat: direct-message and group-message routing is runtime state. Do not infer chat routing from profile text.
 
-Behavior: `agent_behavior` is this agent's owner-configured behavior, not owner behavior. Apply it when deciding whether/how to reply.
+Behavior: `agent_behavior` is the owner-configured behavior for this agent. Apply it when deciding whether/how to reply, unless platform/runtime rules require a stricter outcome.
 
 Group: group `group_description` may include purpose, social context, rules, constraints, or agent participation instructions. Apply it in that group unless it conflicts with agent behavior or platform/runtime rules.
 
@@ -488,17 +493,24 @@ class ClawChatAdapter(BasePlatformAdapter):
                 )
                 return
         scopes = self._signal_scopes(payload)
+        chat_type = self._signal_chat_type(frame, payload)
         signal_version = version if isinstance(version, int) else None
-        needs_behavior = self._scope_needs_behavior(scopes)
-        needs_conversation = self._scope_needs_conversation(scopes)
+        needs_behavior = self._scope_needs_behavior(scopes, chat_type)
+        needs_conversation = self._scope_needs_conversation(scopes, chat_type)
         required_results: list[bool] = []
         if needs_behavior:
-            required_results.append(await self._refresh_agent_behavior(conversation_id))
+            required_results.append(
+                await self._refresh_agent_behavior(
+                    conversation_id,
+                    expected_changed_fields=self._owner_changed_fields_for_scopes(scopes),
+                )
+            )
         if needs_conversation:
             required_results.append(
                 await self._refresh_conversation_metadata(
                     conversation_id,
                     advance_version=not needs_behavior,
+                    expected_changed_fields=self._conversation_changed_fields_for_scopes(scopes),
                 )
             )
         if required_results and all(required_results) and signal_version is not None:
@@ -512,11 +524,67 @@ class ClawChatAdapter(BasePlatformAdapter):
             return [item for item in raw if isinstance(item, str)]
         return []
 
-    def _scope_needs_behavior(self, scopes: list[str]) -> bool:
-        return "behavior" in scopes
+    def _signal_chat_type(self, frame: dict[str, Any], payload: dict[str, Any]) -> str:
+        for value in (
+            frame.get("chat_type"),
+            payload.get("chat_type"),
+            payload.get("chatType"),
+        ):
+            if isinstance(value, str) and value:
+                return value.strip().lower()
+        return ""
 
-    def _scope_needs_conversation(self, scopes: list[str]) -> bool:
-        return not scopes or any(scope != "behavior" for scope in scopes)
+    def _scope_refetches_all(self, scopes: list[str]) -> bool:
+        return not scopes or any(scope not in METADATA_INVALIDATION_SCOPES for scope in scopes)
+
+    def _scope_needs_behavior(self, scopes: list[str], chat_type: str = "") -> bool:
+        return "behavior" in scopes or (
+            self._scope_refetches_all(scopes) and chat_type in DIRECT_OR_UNKNOWN_CHAT_TYPES
+        )
+
+    def _scope_needs_conversation(self, scopes: list[str], chat_type: str = "") -> bool:
+        return any(scope in {"title", "description"} for scope in scopes) or (
+            self._scope_refetches_all(scopes) and chat_type not in DIRECT_CHAT_TYPES
+        )
+
+    def _owner_changed_fields_for_scopes(self, scopes: list[str]) -> tuple[str, ...]:
+        return ("agent_behavior",) if "behavior" in scopes else ()
+
+    def _conversation_changed_fields_for_scopes(self, scopes: list[str]) -> tuple[str, ...]:
+        fields: list[str] = []
+        if "title" in scopes:
+            fields.append("group_title")
+        if "description" in scopes:
+            fields.append("group_description")
+        return tuple(fields)
+
+    def _validate_metadata_changed_fields(
+        self,
+        *,
+        target_type: str,
+        target_id: str,
+        before: dict[str, str],
+        after: dict[str, str],
+        expected_changed_fields: tuple[str, ...],
+    ) -> None:
+        if not expected_changed_fields:
+            return
+        unchanged = [
+            field for field in expected_changed_fields if before.get(field) == after.get(field)
+        ]
+        if not unchanged:
+            return
+        changed = [
+            field for field in expected_changed_fields if before.get(field) != after.get(field)
+        ]
+        logger.warning(
+            "clawchat metadata invalidation refresh found unchanged fields "
+            "target_type=%s target_id=%s changed_fields=%s unchanged_fields=%s",
+            target_type,
+            target_id,
+            ",".join(changed),
+            ",".join(unchanged),
+        )
 
     def _signal_conversation_id(self, frame: dict[str, Any], payload: dict[str, Any]) -> str | None:
         for value in (
@@ -551,10 +619,16 @@ class ClawChatAdapter(BasePlatformAdapter):
         *,
         signal_version: int | None = None,
         advance_version: bool = True,
+        expected_changed_fields: tuple[str, ...] = (),
     ) -> bool:
         root = self._metadata_memory_root("group", conversation_id)
         if root is None:
             return False
+        before = (
+            self._read_memory_metadata("group", conversation_id)
+            if expected_changed_fields
+            else {}
+        )
         try:
             client = ClawChatApiClient(
                 base_url=self._clawchat_config.base_url,
@@ -587,9 +661,22 @@ class ClawChatAdapter(BasePlatformAdapter):
             return False
         if not result.get("ok"):
             return False
+        after = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+        self._validate_metadata_changed_fields(
+            target_type="group",
+            target_id=conversation_id,
+            before=before,
+            after={str(key): str(value) for key, value in after.items()},
+            expected_changed_fields=expected_changed_fields,
+        )
         return True
 
-    async def _refresh_agent_behavior(self, conversation_id: str) -> bool:
+    async def _refresh_agent_behavior(
+        self,
+        conversation_id: str,
+        *,
+        expected_changed_fields: tuple[str, ...] = (),
+    ) -> bool:
         agent_id = self._clawchat_config.agent_id
         if not agent_id:
             logger.warning(
@@ -600,6 +687,11 @@ class ClawChatAdapter(BasePlatformAdapter):
         root = self._metadata_memory_root("owner", "owner")
         if root is None:
             return False
+        before = (
+            self._read_memory_metadata("owner", "owner")
+            if expected_changed_fields
+            else {}
+        )
         try:
             client = ClawChatApiClient(
                 base_url=self._clawchat_config.base_url,
@@ -621,7 +713,17 @@ class ClawChatAdapter(BasePlatformAdapter):
                 exc,
             )
             return False
-        return bool(result.get("ok"))
+        if not result.get("ok"):
+            return False
+        after = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+        self._validate_metadata_changed_fields(
+            target_type="owner",
+            target_id="owner",
+            before=before,
+            after={str(key): str(value) for key, value in after.items()},
+            expected_changed_fields=expected_changed_fields,
+        )
+        return True
 
     def _metadata_memory_root(self, target_type: str, target_id: str) -> Path | None:
         if self._memory_root is None:
@@ -1186,6 +1288,15 @@ class ClawChatAdapter(BasePlatformAdapter):
             ),
         ]
         owner_metadata = self._read_memory_metadata("owner", "owner")
+        agent_profile_section = self._format_agent_profile_section(owner_metadata)
+        if agent_profile_section:
+            parts.append(
+                self._channel_prompt_part(
+                    "agent-profile",
+                    "metadata",
+                    agent_profile_section,
+                )
+            )
         for index, section in enumerate(
             self._format_owner_metadata_sections(owner_metadata)
         ):
@@ -1326,6 +1437,17 @@ class ClawChatAdapter(BasePlatformAdapter):
             if fields:
                 sections.append(f"## ClawChat Agent Owner Metadata\n{fields}")
         return sections
+
+    def _format_agent_profile_section(self, metadata: dict[str, str]) -> str | None:
+        metadata_source = dict(metadata)
+        if not metadata_source.get("agent_id") and self._clawchat_config.user_id:
+            metadata_source["agent_id"] = self._clawchat_config.user_id
+        profile = self._pick_memory_metadata_fields(
+            metadata_source,
+            ("agent_id", "agent_nickname", "agent_avatar_url", "agent_bio"),
+        )
+        fields = self._format_fields(tuple(profile.items()))
+        return f"## ClawChat Agent Profile\n{fields}" if fields else None
 
     def _format_turn_metadata_section(self, inbound: InboundMessage) -> str:
         chat_type = "group" if inbound.chat_type == "group" else "dm"
