@@ -691,9 +691,38 @@ async def update_account_profile(
     if err is not None:
         return err
     try:
-        return await client.update_my_profile(**patch)
+        result = await client.update_my_profile(**patch)
+        owner_sync = await _sync_owner_metadata_after_account_profile_update(client)
+        if owner_sync is None:
+            return result
+        return {**result, "owner_metadata_sync": owner_sync}
     except ClawChatApiError as exc:
         return _api_error(exc)
+    except Exception as exc:  # noqa: BLE001
+        return _unknown_error(exc)
+
+
+async def _sync_owner_metadata_after_account_profile_update(
+    client: ClawChatApiClient,
+) -> dict[str, Any] | None:
+    root, err = _resolve_memory_root()
+    if err is not None:
+        return {**err, "target_type": "owner", "target_id": "owner"}
+    cfg = _resolve_clawchat_config()
+    if not cfg["agent_id"]:
+        return _config_error("agent_id is required for owner metadata")
+    try:
+        return await pull_owner_metadata(
+            root,
+            client,
+            cfg["agent_id"],
+            connected_user_id=cfg.get("user_id", ""),
+            owner_user_id=cfg.get("owner_user_id", ""),
+        )
+    except ClawChatApiError as exc:
+        return _api_error(exc)
+    except ValueError as exc:
+        return _validation_error_from_exception(exc)
     except Exception as exc:  # noqa: BLE001
         return _unknown_error(exc)
 

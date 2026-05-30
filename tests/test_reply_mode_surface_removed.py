@@ -178,6 +178,99 @@ def test_platform_config_exposes_no_reply_mode_or_stream_tuning(monkeypatch):
     assert config.refresh_token == ""
 
 
+@pytest.mark.asyncio
+async def test_update_account_profile_refreshes_owner_metadata(monkeypatch, tmp_path):
+    from clawchat_gateway import tools
+
+    class _Client:
+        def __init__(self):
+            self.patch = None
+
+        async def update_my_profile(self, **patch):
+            self.patch = patch
+            return {"user": {"id": "usr_agent", **patch}}
+
+    client = _Client()
+    pull_calls = []
+
+    async def pull_owner_metadata(
+        root,
+        passed_client,
+        agent_id,
+        *,
+        connected_user_id="",
+        owner_user_id="",
+    ):
+        pull_calls.append(
+            {
+                "root": root,
+                "client": passed_client,
+                "agent_id": agent_id,
+                "connected_user_id": connected_user_id,
+                "owner_user_id": owner_user_id,
+            }
+        )
+        return {
+            "ok": True,
+            "target_type": "owner",
+            "target_id": "owner",
+            "metadata": {"agent_nickname": "Agent New"},
+        }
+
+    monkeypatch.setattr(tools, "_build_client", lambda: (client, None))
+    monkeypatch.setattr(tools, "_resolve_memory_root", lambda: (tmp_path, None))
+    monkeypatch.setattr(
+        tools,
+        "_resolve_clawchat_config",
+        lambda: {
+            "agent_id": "agt_agent",
+            "user_id": "usr_agent",
+            "owner_user_id": "usr_owner",
+        },
+    )
+    monkeypatch.setattr(tools, "pull_owner_metadata", pull_owner_metadata)
+
+    result = await tools.update_account_profile(nickname="Agent New")
+
+    assert client.patch == {"nickname": "Agent New"}
+    assert pull_calls == [
+        {
+            "root": tmp_path,
+            "client": client,
+            "agent_id": "agt_agent",
+            "connected_user_id": "usr_agent",
+            "owner_user_id": "usr_owner",
+        }
+    ]
+    assert result["owner_metadata_sync"]["metadata"]["agent_nickname"] == "Agent New"
+
+
+@pytest.mark.asyncio
+async def test_update_account_profile_surfaces_owner_metadata_sync_config_error(monkeypatch):
+    from clawchat_gateway import tools
+
+    class _Client:
+        async def update_my_profile(self, **patch):
+            return {"user": {"id": "usr_agent", **patch}}
+
+    monkeypatch.setattr(tools, "_build_client", lambda: (_Client(), None))
+    monkeypatch.setattr(
+        tools,
+        "_resolve_memory_root",
+        lambda: (None, {"error": "config", "message": "ClawChat memory root is not configured"}),
+    )
+
+    result = await tools.update_account_profile(bio="new bio")
+
+    assert result["user"]["bio"] == "new bio"
+    assert result["owner_metadata_sync"] == {
+        "error": "config",
+        "message": "ClawChat memory root is not configured",
+        "target_type": "owner",
+        "target_id": "owner",
+    }
+
+
 def test_persist_activation_writes_clawchat_display_defaults_without_top_level_streaming(
     monkeypatch, tmp_path
 ):
