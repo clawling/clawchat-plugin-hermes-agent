@@ -136,7 +136,7 @@ docker exec hermes sh -lc \
 | File                                       | Contents (per `clawchat_gateway/activate.py`)                                 |
 |--------------------------------------------|--------------------------------------------------------------------------------|
 | `$HERMES_HOME/.env`                        | `CLAWCHAT_TOKEN`, `CLAWCHAT_REFRESH_TOKEN`, optional `CLAWCHAT_HOME_CHANNEL*`. |
-| `$HERMES_HOME/config.yaml`                 | `platforms.clawchat.enabled=true`, `extra.base_url`, `extra.websocket_url`, `extra.user_id`, `extra.agent_id`, `extra.owner_user_id`. Display settings are not written by install or activation; configure `display.platforms.clawchat.*` manually when needed. |
+| `$HERMES_HOME/config.yaml`                 | `platforms.clawchat.enabled=true`, `extra.base_url`, `extra.websocket_url`, `extra.user_id`, `extra.agent_id`, `extra.owner_user_id`, and missing `display.platforms.clawchat.*` quiet defaults. Operators may edit the ClawChat display block manually after activation. |
 | `$HERMES_HOME/clawchat.sqlite`             | Latest activation row, including access token, optional refresh token, user ids, and activation conversation id. |
 
 Successful activation via the CLI, slash-command, or compatibility-script

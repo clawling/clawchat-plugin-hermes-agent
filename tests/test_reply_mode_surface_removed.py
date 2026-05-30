@@ -177,7 +177,7 @@ def test_platform_config_exposes_no_reply_mode_or_stream_tuning(monkeypatch):
     assert config.refresh_token == ""
 
 
-def test_persist_activation_does_not_create_reply_mode_streaming_or_display(
+def test_persist_activation_writes_clawchat_display_defaults_without_top_level_streaming(
     monkeypatch, tmp_path
 ):
     activate, saved_config, env_values = _load_activate(monkeypatch, tmp_path, {})
@@ -196,14 +196,22 @@ def test_persist_activation_does_not_create_reply_mode_streaming_or_display(
     assert "show_tools_output" not in extra
     assert "show_think_output" not in extra
     assert "streaming" not in saved_config
-    assert "display" not in saved_config
+    assert saved_config["display"]["platforms"]["clawchat"] == {
+        "tool_progress": "off",
+        "show_reasoning": False,
+        "streaming": False,
+        "interim_assistant_messages": False,
+        "long_running_notifications": False,
+        "busy_ack_detail": False,
+        "cleanup_progress": False,
+    }
     assert env_values == {
         "CLAWCHAT_TOKEN": "token",
         "CLAWCHAT_REFRESH_TOKEN": None,
     }
 
 
-def test_persist_activation_preserves_existing_display_without_filling_defaults(
+def test_persist_activation_preserves_existing_display_values_and_fills_defaults(
     monkeypatch, tmp_path
 ):
     activate, saved_config, _env_values = _load_activate(
@@ -231,6 +239,12 @@ def test_persist_activation_preserves_existing_display_without_filling_defaults(
 
     assert saved_config["display"]["platforms"]["clawchat"] == {
         "tool_progress": "all",
+        "show_reasoning": False,
+        "streaming": False,
+        "interim_assistant_messages": False,
+        "long_running_notifications": False,
+        "busy_ack_detail": False,
+        "cleanup_progress": False,
     }
 
 

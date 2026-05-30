@@ -41,9 +41,9 @@ None)` and `extra.pop("refresh_token", None)`).
 ## Hermes display settings for ClawChat
 
 Hermes display settings are read from `$HERMES_HOME/config.yaml`, not from
-`platforms.clawchat.extra`. The ClawChat plugin does not write display
-defaults during plugin load or activation. Operators who want ClawChat-specific
-display behavior must configure it explicitly:
+`platforms.clawchat.extra`. During activation, the ClawChat plugin writes a
+platform-scoped default block so ClawChat is quiet by default while leaving the
+setting visible for the operator to edit:
 
 ```yaml
 display:
@@ -58,10 +58,11 @@ display:
       cleanup_progress: false
 ```
 
-The plugin does not write top-level `display.*` or `streaming.*` settings.
-ClawChat display defaults should remain platform-scoped; do not write
-top-level `display.*` defaults unless the operator explicitly wants the same
-behavior on every Hermes messaging platform.
+Activation fills missing keys in `display.platforms.clawchat` but preserves
+existing values, so an operator can manually replace any of these settings and
+keep that value across later activations. The plugin does not write top-level
+`display.*` or `streaming.*` settings; those remain global Hermes behavior and
+should only be changed explicitly by the operator.
 
 Use these verified Hermes display keys when tuning ClawChat behavior:
 
@@ -80,8 +81,7 @@ Use these verified Hermes display keys when tuning ClawChat behavior:
 | `busy_ack_detail` | no | yes | `display.platforms.clawchat.busy_ack_detail: false` | Controls whether busy acknowledgments and long-running heartbeats include detailed runtime state. | The agent is busy and receives another message. | `false` keeps busy/heartbeat messages terse when those messages are enabled. |
 | `cleanup_progress` | no | yes | `display.platforms.clawchat.cleanup_progress: false` | Controls automatic deletion of progress/status bubbles on platforms whose adapter supports deletion. | Tool progress or heartbeat messages were sent earlier in the turn. | `false` leaves those messages in place instead of auto-deleting them. |
 
-To make ClawChat quiet and non-streaming without writing global display
-settings, use only platform-scoped ClawChat overrides:
+Activation writes this platform-scoped ClawChat block when keys are missing:
 
 ```yaml
 display:
@@ -98,6 +98,8 @@ display:
 
 `interim_assistant_messages` is explicitly `false` in the ClawChat override
 block. The remaining ClawChat platform display settings are `off` or `false`.
+On Hermes versions that do not yet implement every key, unknown keys remain
+visible in `config.yaml` for future compatibility and operator editing.
 
 If the operator also wants queueing, disabled busy acknowledgments, disabled
 background notifications, or disabled `/verbose`, those are global Hermes
@@ -201,6 +203,16 @@ platforms:
       user_id: usr_...
       agent_id: agt_...
       owner_user_id: usr_...
+display:
+  platforms:
+    clawchat:
+      tool_progress: off
+      show_reasoning: false
+      streaming: false
+      interim_assistant_messages: false
+      long_running_notifications: false
+      busy_ack_detail: false
+      cleanup_progress: false
 ```
 
 `$HERMES_HOME/.env` after activation contains at least:

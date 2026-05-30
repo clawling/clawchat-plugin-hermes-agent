@@ -26,6 +26,16 @@ from clawchat_gateway.storage import get_clawchat_store
 
 logger = logging.getLogger(__name__)
 
+CLAWCHAT_DISPLAY_DEFAULTS = {
+    "tool_progress": "off",
+    "show_reasoning": False,
+    "streaming": False,
+    "interim_assistant_messages": False,
+    "long_running_notifications": False,
+    "busy_ack_detail": False,
+    "cleanup_progress": False,
+}
+
 
 def _load_config() -> tuple[Path, dict[str, Any]]:
     config_path = Path(get_config_path())
@@ -53,6 +63,23 @@ def _derive_websocket_url(base_url: str) -> str:
     return urlunparse((scheme, parsed.netloc, "/ws", "", "", ""))
 
 
+def _ensure_clawchat_display_defaults(config: dict[str, Any]) -> None:
+    display = config.setdefault("display", {})
+    if not isinstance(display, dict):
+        display = {}
+        config["display"] = display
+    display_platforms = display.setdefault("platforms", {})
+    if not isinstance(display_platforms, dict):
+        display_platforms = {}
+        display["platforms"] = display_platforms
+    clawchat_display = display_platforms.setdefault("clawchat", {})
+    if not isinstance(clawchat_display, dict):
+        clawchat_display = {}
+        display_platforms["clawchat"] = clawchat_display
+    for key, value in CLAWCHAT_DISPLAY_DEFAULTS.items():
+        clawchat_display.setdefault(key, value)
+
+
 def persist_activation(
     *,
     access_token: str,
@@ -78,6 +105,7 @@ def persist_activation(
     else:
         extra.pop("agent_id", None)
     extra["owner_user_id"] = owner_user_id
+    _ensure_clawchat_display_defaults(config)
     env_values = {
         "CLAWCHAT_TOKEN": access_token,
         "CLAWCHAT_REFRESH_TOKEN": refresh_token or None,
