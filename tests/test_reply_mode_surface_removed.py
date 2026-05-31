@@ -939,10 +939,10 @@ async def test_group_approval_prompt_without_chat_type_metadata_routes_to_owner(
     frame = adapter._connection.frames[0][0]
     assert frame["chat_id"] == "dm-owner"
     fragments = frame["payload"]["message"]["body"]["fragments"]
+    assert len(fragments) == 1
     assert fragments[0]["kind"] == "text"
     assert "ClawChat group group-1 requires owner attention." in fragments[0]["text"]
-    assert fragments[1]["kind"] == "approval_request"
-    assert [action["id"] for action in fragments[1]["actions"]] == ["approve", "deny"]
+    assert "Reply `/approve` to execute" in fragments[0]["text"]
 
 
 @pytest.mark.asyncio
@@ -962,26 +962,21 @@ async def test_group_exec_approval_routes_to_owner_with_session_payload(monkeypa
     frame = adapter._connection.frames[0][0]
     assert frame["chat_id"] == "dm-owner"
     fragments = frame["payload"]["message"]["body"]["fragments"]
-    assert len(fragments) == 2
+    assert len(fragments) == 1
     assert fragments[0]["kind"] == "text"
     assert "ClawChat group group-1 requires owner attention." in fragments[0]["text"]
-    assert "Approve Session - reply /approve session" in fragments[0]["text"]
-    assert "Text fallback: reply /approve, /approve session, /always, or /cancel." in fragments[0]["text"]
-    approval = fragments[1]
-    assert approval["kind"] == "approval_request"
-    assert approval["fallback_text"].startswith("Command approval required:\n```shell\n")
-    assert approval["actions"][0]["payload"] == {
-        "type": "exec_approval",
-        "session_key": "agent:main:clawchat:group:group-1:usr_sender",
-        "decision": "once",
-    }
+    assert "Command approval required:" in fragments[0]["text"]
+    assert "```shell\nrm -rf /tmp/example\n```" in fragments[0]["text"]
+    assert "Reason: dangerous command" in fragments[0]["text"]
+    assert "Choose:" in fragments[0]["text"]
+    assert "Text fallback" not in fragments[0]["text"]
     assert adapter._owner_approval_routes == {
         "dm-owner": "agent:main:clawchat:group:group-1:usr_sender",
     }
 
 
 @pytest.mark.asyncio
-async def test_direct_exec_approval_keeps_rich_fragment_with_complete_fallback(monkeypatch):
+async def test_direct_exec_approval_sends_text_only_for_unsupported_clients(monkeypatch):
     adapter = _adapter(monkeypatch, {"owner_user_id": "usr_owner"})
 
     result = await adapter.send_exec_approval(
@@ -995,14 +990,13 @@ async def test_direct_exec_approval_keeps_rich_fragment_with_complete_fallback(m
     assert result.success is True
     frame = adapter._connection.frames[0][0]
     fragments = frame["payload"]["message"]["body"]["fragments"]
-    assert len(fragments) == 2
+    assert len(fragments) == 1
     assert fragments[0]["kind"] == "text"
     assert "Command approval required:" in fragments[0]["text"]
     assert "python3 -c \"import hermes\"" in fragments[0]["text"]
-    assert "Approve Session - reply /approve session" in fragments[0]["text"]
-    assert "Text fallback: reply /approve, /approve session, /always, or /cancel." in fragments[0]["text"]
-    assert fragments[1]["kind"] == "approval_request"
-    assert fragments[1]["fallback_text"] == fragments[0]["text"]
+    assert "Reason: script execution via -e/-c flag" in fragments[0]["text"]
+    assert "Choose:" in fragments[0]["text"]
+    assert "Text fallback" not in fragments[0]["text"]
 
 
 @pytest.mark.asyncio
@@ -1026,8 +1020,38 @@ async def test_direct_exec_approval_formats_multiline_command_separately_from_re
     text = fragments[0]["text"]
     assert f"```shell\n{command}\n```" in text
     assert "head -5\n```\n\nReason: script execution via -e/-c flag" in text
-    assert fragments[1]["kind"] == "approval_request"
-    assert fragments[1]["fallback_text"] == text
+    assert "Choose:" in text
+    assert len(fragments) == 1
+
+
+@pytest.mark.asyncio
+async def test_direct_exec_approval_preserves_original_empty_command_block(monkeypatch):
+    adapter = _adapter(monkeypatch, {"owner_user_id": "usr_owner"})
+
+    result = await adapter.send_exec_approval(
+        chat_id="dm-owner",
+        command="",
+        session_key="agent:main:clawchat:direct:dm-owner",
+        description="delete in root path",
+        metadata={"chat_type": "direct"},
+    )
+
+    assert result.success is True
+    fragments = adapter._connection.frames[0][0]["payload"]["message"]["body"]["fragments"]
+    text = fragments[0]["text"]
+    assert text == (
+        "Command approval required:\n"
+        "```shell\n"
+        "\n"
+        "```\n\n"
+        "Reason: delete in root path\n\n"
+        "Choose:\n"
+        "- Approve Once - reply /approve\n"
+        "- Approve Session - reply /approve session\n"
+        "- Always Approve - reply /approve always\n"
+        "- Deny - reply /deny"
+    )
+    assert len(fragments) == 1
 
 
 @pytest.mark.asyncio

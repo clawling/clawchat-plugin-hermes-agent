@@ -277,9 +277,8 @@ def _exec_approval_fallback_text(command: str, description: str) -> str:
         "Choose:\n"
         "- Approve Once - reply /approve\n"
         "- Approve Session - reply /approve session\n"
-        "- Always Approve - reply /always\n"
-        "- Cancel - reply /cancel or /deny\n\n"
-        "Text fallback: reply /approve, /approve session, /always, or /cancel."
+        "- Always Approve - reply /approve always\n"
+        "- Deny - reply /deny"
     )
 
 
@@ -1901,8 +1900,6 @@ class ClawChatAdapter(BasePlatformAdapter):
         fragments: list[dict[str, Any]] = [
             {"kind": "text", "text": _owner_attention_text(group_id, fallback_text)}
         ]
-        if rich_fragment is not None:
-            fragments.append(rich_fragment)
         message_id = new_frame_id("msg")
         frame = build_message_reply_event(
             chat_id=owner_chat_id,
@@ -1946,10 +1943,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._remember_owner_approval_route(owner_chat_id, session_key)
             fallback_text = _owner_attention_text(chat_id, fallback_text)
 
-        fragments = [
-            {"kind": "text", "text": fallback_text},
-            self._exec_approval_fragment(command, description, session_key),
-        ]
+        fragments = [{"kind": "text", "text": fallback_text}]
         message_id = new_frame_id("msg")
         frame = build_message_reply_event(
             chat_id=target_chat_id,
