@@ -41,9 +41,20 @@ None)` and `extra.pop("refresh_token", None)`).
 ## Hermes display settings for ClawChat
 
 Hermes display settings are read from `$HERMES_HOME/config.yaml`, not from
-`platforms.clawchat.extra`. During activation, the ClawChat plugin writes a
-platform-scoped default block so ClawChat is quiet by default while leaving the
-setting visible for the operator to edit:
+`platforms.clawchat.extra`. During activation, the ClawChat plugin overwrites
+four global display settings so ClawChat starts quiet even if the prior Hermes
+config used different values:
+
+```yaml
+display:
+  busy_input_mode: queue
+  busy_ack_enabled: false
+  background_process_notifications: off
+  tool_progress_command: false
+```
+
+Activation also writes a platform-scoped default block so ClawChat is quiet by
+default while leaving the setting visible for the operator to edit:
 
 ```yaml
 display:
@@ -59,10 +70,11 @@ display:
 ```
 
 Activation fills missing keys in `display.platforms.clawchat` but preserves
-existing values, so an operator can manually replace any of these settings and
-keep that value across later activations. The plugin does not write top-level
-`display.*` or `streaming.*` settings; those remain global Hermes behavior and
-should only be changed explicitly by the operator.
+existing values, so an operator can manually replace platform-scoped settings
+and keep those values across later activations. The four global settings above
+are intentionally overwritten on each activation because Hermes does not support
+ClawChat-only platform overrides for them. Activation does not write top-level
+`streaming.*` settings.
 
 Use these verified Hermes display keys when tuning ClawChat behavior:
 
@@ -80,6 +92,16 @@ Use these verified Hermes display keys when tuning ClawChat behavior:
 | `long_running_notifications` | no | yes | `display.platforms.clawchat.long_running_notifications: false` | Controls long-running "still working" heartbeat messages. | A task runs for several minutes. | `false` prevents ClawChat heartbeat messages such as "Working - N min". |
 | `busy_ack_detail` | no | yes | `display.platforms.clawchat.busy_ack_detail: false` | Controls whether busy acknowledgments and long-running heartbeats include detailed runtime state. | The agent is busy and receives another message. | `false` keeps busy/heartbeat messages terse when those messages are enabled. |
 | `cleanup_progress` | no | yes | `display.platforms.clawchat.cleanup_progress: false` | Controls automatic deletion of progress/status bubbles on platforms whose adapter supports deletion. | Tool progress or heartbeat messages were sent earlier in the turn. | `false` leaves those messages in place instead of auto-deleting them. |
+
+Activation writes these global ClawChat defaults on every activation:
+
+```yaml
+display:
+  busy_input_mode: queue
+  busy_ack_enabled: false
+  background_process_notifications: off
+  tool_progress_command: false
+```
 
 Activation writes this platform-scoped ClawChat block when keys are missing:
 
@@ -101,18 +123,6 @@ block. The remaining ClawChat platform display settings are `off` or `false`.
 On Hermes versions that do not yet implement every key, unknown keys remain
 visible in `config.yaml` for future compatibility and operator editing.
 
-If the operator also wants queueing, disabled busy acknowledgments, disabled
-background notifications, or disabled `/verbose`, those are global Hermes
-display settings and must be configured separately:
-
-```yaml
-display:
-  busy_input_mode: queue
-  busy_ack_enabled: false
-  background_process_notifications: off
-  tool_progress_command: false
-```
-
 Three of those global settings also have official environment variables:
 
 | Environment variable | Equivalent config key | Example value | Notes |
@@ -122,8 +132,8 @@ Three of those global settings also have official environment variables:
 | `HERMES_BACKGROUND_NOTIFICATIONS` | `display.background_process_notifications` | `off` | Background-process notification mode. Valid values are `all`, `result`, `error`, and `off`. |
 
 `display.tool_progress_command` does not have a confirmed official
-environment variable; configure it in `config.yaml` when the default needs to
-change.
+environment variable. If an operator changes any of these four global settings
+after activation, a later activation writes the ClawChat defaults again.
 
 ## Group behavior
 
@@ -204,6 +214,10 @@ platforms:
       agent_id: agt_...
       owner_user_id: usr_...
 display:
+  busy_input_mode: queue
+  busy_ack_enabled: false
+  background_process_notifications: off
+  tool_progress_command: false
   platforms:
     clawchat:
       tool_progress: off

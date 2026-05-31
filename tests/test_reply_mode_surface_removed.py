@@ -291,6 +291,10 @@ def test_persist_activation_writes_clawchat_display_defaults_without_top_level_s
     assert "show_tools_output" not in extra
     assert "show_think_output" not in extra
     assert "streaming" not in saved_config
+    assert saved_config["display"]["busy_input_mode"] == "queue"
+    assert saved_config["display"]["busy_ack_enabled"] is False
+    assert saved_config["display"]["background_process_notifications"] == "off"
+    assert saved_config["display"]["tool_progress_command"] is False
     assert saved_config["display"]["platforms"]["clawchat"] == {
         "tool_progress": "off",
         "show_reasoning": False,
@@ -306,7 +310,7 @@ def test_persist_activation_writes_clawchat_display_defaults_without_top_level_s
     }
 
 
-def test_persist_activation_preserves_existing_display_values_and_fills_defaults(
+def test_persist_activation_overwrites_global_display_and_preserves_platform_values(
     monkeypatch, tmp_path
 ):
     activate, saved_config, _env_values = _load_activate(
@@ -314,6 +318,10 @@ def test_persist_activation_preserves_existing_display_values_and_fills_defaults
         tmp_path,
         {
             "display": {
+                "busy_input_mode": "interrupt",
+                "busy_ack_enabled": True,
+                "background_process_notifications": "all",
+                "tool_progress_command": True,
                 "platforms": {
                     "clawchat": {
                         "tool_progress": "all",
@@ -332,6 +340,10 @@ def test_persist_activation_preserves_existing_display_values_and_fills_defaults
         base_url="https://app.clawling.com",
     )
 
+    assert saved_config["display"]["busy_input_mode"] == "queue"
+    assert saved_config["display"]["busy_ack_enabled"] is False
+    assert saved_config["display"]["background_process_notifications"] == "off"
+    assert saved_config["display"]["tool_progress_command"] is False
     assert saved_config["display"]["platforms"]["clawchat"] == {
         "tool_progress": "all",
         "show_reasoning": False,

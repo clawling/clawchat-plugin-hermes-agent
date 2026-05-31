@@ -26,6 +26,13 @@ from clawchat_gateway.storage import get_clawchat_store
 
 logger = logging.getLogger(__name__)
 
+CLAWCHAT_GLOBAL_DISPLAY_DEFAULTS = {
+    "busy_input_mode": "queue",
+    "busy_ack_enabled": False,
+    "background_process_notifications": "off",
+    "tool_progress_command": False,
+}
+
 CLAWCHAT_DISPLAY_DEFAULTS = {
     "tool_progress": "off",
     "show_reasoning": False,
@@ -68,6 +75,8 @@ def _ensure_clawchat_display_defaults(config: dict[str, Any]) -> None:
     if not isinstance(display, dict):
         display = {}
         config["display"] = display
+    for key, value in CLAWCHAT_GLOBAL_DISPLAY_DEFAULTS.items():
+        display[key] = value
     display_platforms = display.setdefault("platforms", {})
     if not isinstance(display_platforms, dict):
         display_platforms = {}
