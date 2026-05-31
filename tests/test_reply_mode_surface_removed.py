@@ -939,10 +939,12 @@ async def test_group_approval_prompt_without_chat_type_metadata_routes_to_owner(
     frame = adapter._connection.frames[0][0]
     assert frame["chat_id"] == "dm-owner"
     fragments = frame["payload"]["message"]["body"]["fragments"]
-    assert fragments[0]["kind"] == "text"
-    assert "ClawChat group group-1 requires owner attention." in fragments[0]["text"]
-    assert fragments[1]["kind"] == "approval_request"
-    assert [action["id"] for action in fragments[1]["actions"]] == ["approve", "deny"]
+    assert fragments == [
+        {
+            "kind": "text",
+            "text": "ClawChat group group-1 requires owner attention.\n\n" + content,
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -962,17 +964,53 @@ async def test_group_exec_approval_routes_to_owner_with_session_payload(monkeypa
     frame = adapter._connection.frames[0][0]
     assert frame["chat_id"] == "dm-owner"
     fragments = frame["payload"]["message"]["body"]["fragments"]
+    assert len(fragments) == 1
     assert fragments[0]["kind"] == "text"
-    approval = fragments[1]
-    assert approval["kind"] == "approval_request"
-    assert approval["actions"][0]["payload"] == {
-        "type": "exec_approval",
-        "session_key": "agent:main:clawchat:group:group-1:usr_sender",
-        "decision": "once",
-    }
+    assert "ClawChat group group-1 requires owner attention." in fragments[0]["text"]
+    assert "Text fallback: reply /approve, /always, or /cancel." in fragments[0]["text"]
     assert adapter._owner_approval_routes == {
         "dm-owner": "agent:main:clawchat:group:group-1:usr_sender",
     }
+
+
+@pytest.mark.asyncio
+async def test_direct_exec_approval_uses_text_fallback_without_rich_fragment(monkeypatch):
+    adapter = _adapter(monkeypatch, {"owner_user_id": "usr_owner"})
+
+    result = await adapter.send_exec_approval(
+        chat_id="dm-owner",
+        command="python3 -c \"import hermes\"",
+        session_key="agent:main:clawchat:direct:dm-owner",
+        description="script execution via -e/-c flag",
+        metadata={"chat_type": "direct"},
+    )
+
+    assert result.success is True
+    frame = adapter._connection.frames[0][0]
+    fragments = frame["payload"]["message"]["body"]["fragments"]
+    assert len(fragments) == 1
+    assert fragments[0]["kind"] == "text"
+    assert "Command approval required:" in fragments[0]["text"]
+    assert "python3 -c \"import hermes\"" in fragments[0]["text"]
+    assert "Text fallback: reply /approve, /always, or /cancel." in fragments[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_exec_approval_fallback_includes_full_command(monkeypatch):
+    adapter = _adapter(monkeypatch)
+    command = "printf '" + ("x" * 240) + "' && rm -rf /tmp/example"
+
+    result = await adapter.send_exec_approval(
+        chat_id="dm-owner",
+        command=command,
+        session_key="agent:main:clawchat:direct:dm-owner",
+        description="dangerous command",
+        metadata={"chat_type": "direct"},
+    )
+
+    assert result.success is True
+    fragments = adapter._connection.frames[0][0]["payload"]["message"]["body"]["fragments"]
+    assert command in fragments[0]["text"]
 
 
 @pytest.mark.asyncio
@@ -1020,6 +1058,60 @@ async def test_owner_direct_approve_resolves_forwarded_group_approval(monkeypatc
     assert _sent_events(adapter) == ["message.reply"]
     ack_frame = adapter._connection.frames[0][0]
     assert ack_frame["chat_id"] == "dm-owner"
+
+
+@pytest.mark.asyncio
+async def test_owner_direct_always_alias_resolves_forwarded_group_approval(monkeypatch):
+    calls = _install_fake_approval_module(monkeypatch)
+    adapter = _adapter(monkeypatch, {"owner_user_id": "usr_owner"})
+    adapter._owner_approval_routes = {
+        "dm-owner": "agent:main:clawchat:group:group-1:usr_sender"
+    }
+    frame = {
+        "event": "message.send",
+        "chat_id": "dm-owner",
+        "chat_type": "direct",
+        "sender": {"id": "usr_owner", "name": "Owner"},
+        "payload": {
+            "message_id": "in-1",
+            "message": {
+                "body": {"fragments": [{"kind": "text", "text": "/always"}]},
+                "context": {"mentions": [], "reply": None},
+            },
+        },
+    }
+
+    await adapter._on_message(frame)
+
+    assert ("resolve", "agent:main:clawchat:group:group-1:usr_sender", "always", False) in calls
+    assert _sent_events(adapter) == ["message.reply"]
+
+
+@pytest.mark.asyncio
+async def test_owner_direct_cancel_alias_denies_forwarded_group_approval(monkeypatch):
+    calls = _install_fake_approval_module(monkeypatch)
+    adapter = _adapter(monkeypatch, {"owner_user_id": "usr_owner"})
+    adapter._owner_approval_routes = {
+        "dm-owner": "agent:main:clawchat:group:group-1:usr_sender"
+    }
+    frame = {
+        "event": "message.send",
+        "chat_id": "dm-owner",
+        "chat_type": "direct",
+        "sender": {"id": "usr_owner", "name": "Owner"},
+        "payload": {
+            "message_id": "in-1",
+            "message": {
+                "body": {"fragments": [{"kind": "text", "text": "/cancel"}]},
+                "context": {"mentions": [], "reply": None},
+            },
+        },
+    }
+
+    await adapter._on_message(frame)
+
+    assert ("resolve", "agent:main:clawchat:group:group-1:usr_sender", "deny", False) in calls
+    assert _sent_events(adapter) == ["message.reply"]
 
 
 @pytest.mark.asyncio

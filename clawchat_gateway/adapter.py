@@ -268,11 +268,15 @@ def _owner_attention_text(group_id: str, fallback_text: str) -> str:
 
 
 def _exec_approval_fallback_text(command: str, description: str) -> str:
-    cmd_preview = command[:200] + "..." if len(command) > 200 else command
     return (
         "Command approval required:\n"
-        f"{cmd_preview}\n\n"
-        f"Reason: {description}"
+        f"{command}\n\n"
+        f"Reason: {description}\n\n"
+        "Choose:\n"
+        "- Approve Once - proceed this time only\n"
+        "- Always Approve - proceed and silence this prompt permanently\n"
+        "- Cancel - keep current conversation\n\n"
+        "Text fallback: reply /approve, /always, or /cancel."
     )
 
 
@@ -1939,10 +1943,9 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._remember_owner_approval_route(owner_chat_id, session_key)
             fallback_text = _owner_attention_text(chat_id, fallback_text)
 
-        fragments = [
-            {"kind": "text", "text": fallback_text},
-            self._exec_approval_fragment(command, description, session_key),
-        ]
+        fragments = [{"kind": "text", "text": fallback_text}]
+        if self._clawchat_config.enable_rich_interactions:
+            fragments.append(self._exec_approval_fragment(command, description, session_key))
         message_id = new_frame_id("msg")
         frame = build_message_reply_event(
             chat_id=target_chat_id,
@@ -1983,7 +1986,11 @@ class ClawChatAdapter(BasePlatformAdapter):
                 return await self._send_owner_attention(
                     group_id=chat_id,
                     fallback_text=str(owner_fragment.get("fallback_text") or content or ""),
-                    rich_fragment=owner_fragment,
+                    rich_fragment=(
+                        owner_fragment
+                        if self._clawchat_config.enable_rich_interactions
+                        else None
+                    ),
                 )
         visible_content = self._filter_output_content(
             content or "",
@@ -2464,7 +2471,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         if inbound.chat_type != "direct" or inbound.sender_id != self._owner_user_id():
             return False
         command_name = _slash_command_name(inbound.text)
-        if command_name not in {"approve", "deny"}:
+        if command_name not in {"approve", "deny", "always", "cancel"}:
             return False
         session_key = self._owner_approval_session_key(inbound)
         if not session_key:
@@ -2544,6 +2551,10 @@ class ClawChatAdapter(BasePlatformAdapter):
         resolve_all = "all" in lowered
         if command_name == "deny":
             return "deny", resolve_all
+        if command_name == "cancel":
+            return "deny", resolve_all
+        if command_name == "always":
+            return "always", resolve_all
         if any(arg in {"always", "permanent", "permanently"} for arg in lowered):
             return "always", resolve_all
         if any(arg in {"session", "ses"} for arg in lowered):
