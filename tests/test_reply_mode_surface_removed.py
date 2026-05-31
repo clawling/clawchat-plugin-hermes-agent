@@ -939,12 +939,10 @@ async def test_group_approval_prompt_without_chat_type_metadata_routes_to_owner(
     frame = adapter._connection.frames[0][0]
     assert frame["chat_id"] == "dm-owner"
     fragments = frame["payload"]["message"]["body"]["fragments"]
-    assert fragments == [
-        {
-            "kind": "text",
-            "text": "ClawChat group group-1 requires owner attention.\n\n" + content,
-        }
-    ]
+    assert fragments[0]["kind"] == "text"
+    assert "ClawChat group group-1 requires owner attention." in fragments[0]["text"]
+    assert fragments[1]["kind"] == "approval_request"
+    assert [action["id"] for action in fragments[1]["actions"]] == ["approve", "deny"]
 
 
 @pytest.mark.asyncio
@@ -964,17 +962,26 @@ async def test_group_exec_approval_routes_to_owner_with_session_payload(monkeypa
     frame = adapter._connection.frames[0][0]
     assert frame["chat_id"] == "dm-owner"
     fragments = frame["payload"]["message"]["body"]["fragments"]
-    assert len(fragments) == 1
+    assert len(fragments) == 2
     assert fragments[0]["kind"] == "text"
     assert "ClawChat group group-1 requires owner attention." in fragments[0]["text"]
-    assert "Text fallback: reply /approve, /always, or /cancel." in fragments[0]["text"]
+    assert "Approve Session - reply /approve session" in fragments[0]["text"]
+    assert "Text fallback: reply /approve, /approve session, /always, or /cancel." in fragments[0]["text"]
+    approval = fragments[1]
+    assert approval["kind"] == "approval_request"
+    assert approval["fallback_text"].startswith("Command approval required:\n```shell\n")
+    assert approval["actions"][0]["payload"] == {
+        "type": "exec_approval",
+        "session_key": "agent:main:clawchat:group:group-1:usr_sender",
+        "decision": "once",
+    }
     assert adapter._owner_approval_routes == {
         "dm-owner": "agent:main:clawchat:group:group-1:usr_sender",
     }
 
 
 @pytest.mark.asyncio
-async def test_direct_exec_approval_uses_text_fallback_without_rich_fragment(monkeypatch):
+async def test_direct_exec_approval_keeps_rich_fragment_with_complete_fallback(monkeypatch):
     adapter = _adapter(monkeypatch, {"owner_user_id": "usr_owner"})
 
     result = await adapter.send_exec_approval(
@@ -988,11 +995,39 @@ async def test_direct_exec_approval_uses_text_fallback_without_rich_fragment(mon
     assert result.success is True
     frame = adapter._connection.frames[0][0]
     fragments = frame["payload"]["message"]["body"]["fragments"]
-    assert len(fragments) == 1
+    assert len(fragments) == 2
     assert fragments[0]["kind"] == "text"
     assert "Command approval required:" in fragments[0]["text"]
     assert "python3 -c \"import hermes\"" in fragments[0]["text"]
-    assert "Text fallback: reply /approve, /always, or /cancel." in fragments[0]["text"]
+    assert "Approve Session - reply /approve session" in fragments[0]["text"]
+    assert "Text fallback: reply /approve, /approve session, /always, or /cancel." in fragments[0]["text"]
+    assert fragments[1]["kind"] == "approval_request"
+    assert fragments[1]["fallback_text"] == fragments[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_direct_exec_approval_formats_multiline_command_separately_from_reason(monkeypatch):
+    adapter = _adapter(monkeypatch, {"owner_user_id": "usr_owner"})
+    command = (
+        'find /opt/data -name "hermes" -o -name "hermes.py" 2>/dev/null | head -10\n'
+        'which python3 && python3 -c "import hermes" 2>&1 | head -5'
+    )
+
+    result = await adapter.send_exec_approval(
+        chat_id="dm-owner",
+        command=command,
+        session_key="agent:main:clawchat:direct:dm-owner",
+        description="script execution via -e/-c flag",
+        metadata={"chat_type": "direct"},
+    )
+
+    assert result.success is True
+    fragments = adapter._connection.frames[0][0]["payload"]["message"]["body"]["fragments"]
+    text = fragments[0]["text"]
+    assert f"```shell\n{command}\n```" in text
+    assert "head -5\n```\n\nReason: script execution via -e/-c flag" in text
+    assert fragments[1]["kind"] == "approval_request"
+    assert fragments[1]["fallback_text"] == text
 
 
 @pytest.mark.asyncio

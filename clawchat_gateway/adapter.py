@@ -270,13 +270,16 @@ def _owner_attention_text(group_id: str, fallback_text: str) -> str:
 def _exec_approval_fallback_text(command: str, description: str) -> str:
     return (
         "Command approval required:\n"
-        f"{command}\n\n"
+        "```shell\n"
+        f"{command}\n"
+        "```\n\n"
         f"Reason: {description}\n\n"
         "Choose:\n"
-        "- Approve Once - proceed this time only\n"
-        "- Always Approve - proceed and silence this prompt permanently\n"
-        "- Cancel - keep current conversation\n\n"
-        "Text fallback: reply /approve, /always, or /cancel."
+        "- Approve Once - reply /approve\n"
+        "- Approve Session - reply /approve session\n"
+        "- Always Approve - reply /always\n"
+        "- Cancel - reply /cancel or /deny\n\n"
+        "Text fallback: reply /approve, /approve session, /always, or /cancel."
     )
 
 
@@ -1943,9 +1946,10 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._remember_owner_approval_route(owner_chat_id, session_key)
             fallback_text = _owner_attention_text(chat_id, fallback_text)
 
-        fragments = [{"kind": "text", "text": fallback_text}]
-        if self._clawchat_config.enable_rich_interactions:
-            fragments.append(self._exec_approval_fragment(command, description, session_key))
+        fragments = [
+            {"kind": "text", "text": fallback_text},
+            self._exec_approval_fragment(command, description, session_key),
+        ]
         message_id = new_frame_id("msg")
         frame = build_message_reply_event(
             chat_id=target_chat_id,
@@ -1986,11 +1990,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 return await self._send_owner_attention(
                     group_id=chat_id,
                     fallback_text=str(owner_fragment.get("fallback_text") or content or ""),
-                    rich_fragment=(
-                        owner_fragment
-                        if self._clawchat_config.enable_rich_interactions
-                        else None
-                    ),
+                    rich_fragment=owner_fragment,
                 )
         visible_content = self._filter_output_content(
             content or "",
