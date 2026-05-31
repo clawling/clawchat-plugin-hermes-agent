@@ -454,6 +454,7 @@ class _FakeStore:
         self.claimed = []
         self.updated = []
         self.inserted = []
+        self.activation_conversation = None
 
     def claim_message_once(self, **kwargs):
         self.claimed.append(kwargs)
@@ -464,6 +465,9 @@ class _FakeStore:
 
     def insert_message(self, **kwargs):
         self.inserted.append(kwargs)
+
+    def get_activation_conversation(self, **_kwargs):
+        return self.activation_conversation
 
 
 def _install_fake_approval_module(monkeypatch, *, blocking=True):
@@ -909,6 +913,7 @@ async def test_group_think_text_is_not_filtered_by_adapter(monkeypatch):
 @pytest.mark.asyncio
 async def test_group_approval_prompt_without_chat_type_metadata_routes_to_owner(monkeypatch):
     adapter = _adapter(monkeypatch, {"owner_user_id": "usr_owner"})
+    adapter._store.activation_conversation = "dm-owner"
     adapter._known_chat_types = {"group-1": "group"}
     content = (
         "Reply `/approve` to execute, `/approve session` to approve this pattern "
@@ -920,7 +925,7 @@ async def test_group_approval_prompt_without_chat_type_metadata_routes_to_owner(
     assert result.success is True
     assert _sent_events(adapter) == ["message.reply"]
     frame = adapter._connection.frames[0][0]
-    assert frame["chat_id"] == "usr_owner"
+    assert frame["chat_id"] == "dm-owner"
     fragments = frame["payload"]["message"]["body"]["fragments"]
     assert fragments[0]["kind"] == "text"
     assert "ClawChat group group-1 requires owner attention." in fragments[0]["text"]
@@ -931,6 +936,7 @@ async def test_group_approval_prompt_without_chat_type_metadata_routes_to_owner(
 @pytest.mark.asyncio
 async def test_group_exec_approval_routes_to_owner_with_session_payload(monkeypatch):
     adapter = _adapter(monkeypatch, {"owner_user_id": "usr_owner"})
+    adapter._store.activation_conversation = "dm-owner"
     adapter._known_chat_types = {"group-1": "group"}
 
     result = await adapter.send_exec_approval(
@@ -942,7 +948,7 @@ async def test_group_exec_approval_routes_to_owner_with_session_payload(monkeypa
 
     assert result.success is True
     frame = adapter._connection.frames[0][0]
-    assert frame["chat_id"] == "usr_owner"
+    assert frame["chat_id"] == "dm-owner"
     fragments = frame["payload"]["message"]["body"]["fragments"]
     assert fragments[0]["kind"] == "text"
     approval = fragments[1]
@@ -952,6 +958,27 @@ async def test_group_exec_approval_routes_to_owner_with_session_payload(monkeypa
         "session_key": "agent:main:clawchat:group:group-1:usr_sender",
         "decision": "once",
     }
+    assert adapter._owner_approval_routes == {
+        "dm-owner": "agent:main:clawchat:group:group-1:usr_sender",
+    }
+
+
+@pytest.mark.asyncio
+async def test_group_exec_approval_does_not_fallback_to_owner_user_id(monkeypatch):
+    adapter = _adapter(monkeypatch, {"owner_user_id": "usr_owner"})
+    adapter._known_chat_types = {"group-1": "group"}
+
+    result = await adapter.send_exec_approval(
+        chat_id="group-1",
+        command="rm -rf /tmp/example",
+        session_key="agent:main:clawchat:group:group-1:usr_sender",
+        description="dangerous command",
+    )
+
+    assert result.success is False
+    assert result.error == "clawchat owner direct chat unavailable"
+    assert adapter._connection.frames == []
+    assert adapter._owner_approval_routes == {}
 
 
 @pytest.mark.asyncio
@@ -959,7 +986,7 @@ async def test_owner_direct_approve_resolves_forwarded_group_approval(monkeypatc
     calls = _install_fake_approval_module(monkeypatch)
     adapter = _adapter(monkeypatch, {"owner_user_id": "usr_owner"})
     adapter._owner_approval_routes = {
-        "usr_owner": "agent:main:clawchat:group:group-1:usr_sender"
+        "dm-owner": "agent:main:clawchat:group:group-1:usr_sender"
     }
     frame = {
         "event": "message.send",

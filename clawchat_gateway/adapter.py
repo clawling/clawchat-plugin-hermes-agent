@@ -764,6 +764,21 @@ class ClawChatAdapter(BasePlatformAdapter):
             return ""
         return str(owner_user_id or "")
 
+    def _owner_direct_chat_id(self) -> str:
+        if self._store is None:
+            return ""
+        try:
+            chat_id = self._store.get_activation_conversation(
+                platform="hermes",
+                account_id="default",
+            )
+        except AttributeError:
+            return ""
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat activation conversation cache read failed", exc_info=True)
+            return ""
+        return str(chat_id or "")
+
     def _resolve_sender_name(self, inbound: InboundMessage) -> str:
         if inbound.sender_name and inbound.sender_name != inbound.sender_id:
             return inbound.sender_name
@@ -1866,13 +1881,16 @@ class ClawChatAdapter(BasePlatformAdapter):
         fallback_text: str,
         rich_fragment: dict[str, Any] | None = None,
     ) -> SendResult:
-        owner_user_id = self._owner_user_id()
-        if not owner_user_id:
+        owner_chat_id = self._owner_direct_chat_id()
+        if not owner_chat_id:
             logger.error(
-                "clawchat group owner attention suppressed reason=missing_owner_user_id group=%s",
+                "clawchat group owner attention suppressed reason=missing_owner_direct_chat_id group=%s",
                 group_id,
             )
-            return SendResult(success=True)
+            return SendResult(
+                success=False,
+                error="clawchat owner direct chat unavailable",
+            )
         fragments: list[dict[str, Any]] = [
             {"kind": "text", "text": _owner_attention_text(group_id, fallback_text)}
         ]
@@ -1880,7 +1898,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             fragments.append(rich_fragment)
         message_id = new_frame_id("msg")
         frame = build_message_reply_event(
-            chat_id=owner_user_id,
+            chat_id=owner_chat_id,
             chat_type="direct",
             message_id=message_id,
             fragments=fragments,
@@ -1907,15 +1925,18 @@ class ClawChatAdapter(BasePlatformAdapter):
         target_chat_id = chat_id
         fallback_text = _exec_approval_fallback_text(command, description)
         if chat_type == "group":
-            owner_user_id = self._owner_user_id()
-            if not owner_user_id:
+            owner_chat_id = self._owner_direct_chat_id()
+            if not owner_chat_id:
                 logger.error(
-                    "clawchat exec approval suppressed reason=missing_owner_user_id group=%s",
+                    "clawchat exec approval suppressed reason=missing_owner_direct_chat_id group=%s",
                     chat_id,
                 )
-                return SendResult(success=True)
-            target_chat_id = owner_user_id
-            self._remember_owner_approval_route(owner_user_id, session_key)
+                return SendResult(
+                    success=False,
+                    error="clawchat owner direct chat unavailable",
+                )
+            target_chat_id = owner_chat_id
+            self._remember_owner_approval_route(owner_chat_id, session_key)
             fallback_text = _owner_attention_text(chat_id, fallback_text)
 
         fragments = [
@@ -2422,20 +2443,16 @@ class ClawChatAdapter(BasePlatformAdapter):
             ],
         }
 
-    def _remember_owner_approval_route(self, owner_user_id: str, session_key: str) -> None:
+    def _remember_owner_approval_route(self, owner_chat_id: str, session_key: str) -> None:
         routes = getattr(self, "_owner_approval_routes", None)
         if routes is None:
             self._owner_approval_routes = {}
             routes = self._owner_approval_routes
-        routes[owner_user_id] = session_key
+        routes[owner_chat_id] = session_key
 
     def _owner_approval_session_key(self, inbound: InboundMessage) -> str | None:
         routes = getattr(self, "_owner_approval_routes", {})
-        return (
-            routes.get(inbound.chat_id)
-            or routes.get(inbound.sender_id)
-            or routes.get(self._owner_user_id())
-        )
+        return routes.get(inbound.chat_id)
 
     def _forget_owner_approval_route(self, session_key: str) -> None:
         routes = getattr(self, "_owner_approval_routes", {})
