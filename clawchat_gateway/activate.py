@@ -33,6 +33,10 @@ CLAWCHAT_GLOBAL_DISPLAY_DEFAULTS = {
     "tool_progress_command": False,
 }
 
+CLAWCHAT_AGENT_DEFAULTS = {
+    "gateway_notify_interval": 0,
+}
+
 CLAWCHAT_DISPLAY_DEFAULTS = {
     "tool_progress": "off",
     "show_reasoning": False,
@@ -89,6 +93,15 @@ def _ensure_clawchat_display_defaults(config: dict[str, Any]) -> None:
         clawchat_display.setdefault(key, value)
 
 
+def _ensure_clawchat_agent_defaults(config: dict[str, Any]) -> None:
+    agent = config.setdefault("agent", {})
+    if not isinstance(agent, dict):
+        agent = {}
+        config["agent"] = agent
+    for key, value in CLAWCHAT_AGENT_DEFAULTS.items():
+        agent[key] = value
+
+
 def persist_activation(
     *,
     access_token: str,
@@ -115,6 +128,7 @@ def persist_activation(
         extra.pop("agent_id", None)
     extra["owner_user_id"] = owner_user_id
     extra.setdefault("runtime_status_messages", False)
+    _ensure_clawchat_agent_defaults(config)
     _ensure_clawchat_display_defaults(config)
     env_values = {
         "CLAWCHAT_TOKEN": access_token,

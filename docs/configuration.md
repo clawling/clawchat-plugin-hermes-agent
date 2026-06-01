@@ -77,9 +77,18 @@ display:
       cleanup_progress: false
 ```
 
+Activation also writes this global Hermes agent setting on every activation so
+Hermes does not emit gateway "still working" heartbeats into ClawChat:
+
+```yaml
+agent:
+  gateway_notify_interval: 0
+```
+
 Activation fills missing keys in `display.platforms.clawchat` but preserves
 existing values, so an operator can manually replace platform-scoped settings
-and keep those values across later activations. The four global settings above
+and keep those values across later activations. The four global display
+settings and `agent.gateway_notify_interval` above
 are intentionally overwritten on each activation because Hermes does not support
 ClawChat-only platform overrides for them. Activation does not write top-level
 `streaming.*` settings.
@@ -97,13 +106,15 @@ Use these verified Hermes display keys when tuning ClawChat behavior:
 | `show_reasoning` | yes | yes | `display.platforms.clawchat.show_reasoning: false` | Controls whether model reasoning/thinking is shown in replies. | The model produces reasoning for a complex question. | `false` hides reasoning in ClawChat replies. |
 | `streaming` | yes | yes | `display.platforms.clawchat.streaming: false` | Controls platform streaming display behavior when supported by the gateway adapter. | The agent writes a long reply. | `false` avoids progressive ClawChat reply streaming. |
 | `interim_assistant_messages` | yes | yes | `display.platforms.clawchat.interim_assistant_messages: false` | Controls natural mid-turn assistant messages sent separately from final replies. | The model says "I will inspect the config first" during a turn. | `false` suppresses that separate interim ClawChat message. |
-| `long_running_notifications` | no | yes | `display.platforms.clawchat.long_running_notifications: false` | Controls long-running "still working" heartbeat messages. | A task runs for several minutes. | `false` prevents ClawChat heartbeat messages such as "Working - N min". |
+| `long_running_notifications` | no | yes | `display.platforms.clawchat.long_running_notifications: false` plus `agent.gateway_notify_interval: 0` | Controls long-running "still working" heartbeat messages. | A task runs for several minutes. | `agent.gateway_notify_interval: 0` disables gateway heartbeat messages such as "Still working...". |
 | `busy_ack_detail` | no | yes | `display.platforms.clawchat.busy_ack_detail: false` | Controls whether busy acknowledgments and long-running heartbeats include detailed runtime state. | The agent is busy and receives another message. | `false` keeps busy/heartbeat messages terse when those messages are enabled. |
 | `cleanup_progress` | no | yes | `display.platforms.clawchat.cleanup_progress: false` | Controls automatic deletion of progress/status bubbles on platforms whose adapter supports deletion. | Tool progress or heartbeat messages were sent earlier in the turn. | `false` leaves those messages in place instead of auto-deleting them. |
 
 Activation writes these global ClawChat defaults on every activation:
 
 ```yaml
+agent:
+  gateway_notify_interval: 0
 display:
   busy_input_mode: queue
   busy_ack_enabled: false
