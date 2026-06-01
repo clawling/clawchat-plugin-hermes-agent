@@ -12,8 +12,10 @@ from pathlib import Path
 import pytest
 import yaml
 
+from clawchat_gateway import connection as connection_module
 from clawchat_gateway.config import ClawChatConfig
 from clawchat_gateway.clawchat_metadata import owner_metadata_from_agent
+from clawchat_gateway.connection import ClawChatConnection
 from clawchat_gateway.group_message_coalescer import format_coalesced_group_text
 from clawchat_gateway.inbound import InboundMessage, parse_inbound_message
 from clawchat_gateway.mention_message import (
@@ -25,6 +27,44 @@ from clawchat_gateway.mention_message import (
 from clawchat_gateway.runtime_defaults import configure_clawchat_allow_all
 from clawchat_gateway.llm_context_debug import ClawChatLlmContextDebug
 import clawchat_gateway.llm_context_hooks as llm_context_hooks
+
+
+class _MissingActivationStore:
+    def get_activation_credentials(self, *, platform: str, account_id: str):
+        return None
+
+
+async def _ignore_connection_message(frame):
+    return None
+
+
+async def test_activation_wait_poll_heartbeat_is_debug_only(monkeypatch, caplog):
+    monkeypatch.setattr(connection_module, "ACTIVATION_CREDENTIAL_POLL_INTERVAL_SECONDS", 0.001)
+    conn = ClawChatConnection(
+        ClawChatConfig(websocket_url="wss://example.invalid/ws"),
+        on_message=_ignore_connection_message,
+    )
+    conn._store = _MissingActivationStore()
+
+    caplog.set_level(logging.DEBUG, logger="clawchat_gateway.connection")
+    task = asyncio.create_task(conn._wait_for_activation_credentials())
+    await asyncio.sleep(0.003)
+    conn._stopping = True
+
+    assert await task is False
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("event=activation_wait" in message for message in messages)
+    assert any(
+        "event=activation_poll" in message
+        and "status=waiting" in message
+        and "interval_seconds=0.001" in message
+        for message in messages
+    )
+    assert all(
+        record.levelno == logging.DEBUG
+        for record in caplog.records
+        if "event=activation_poll" in record.getMessage()
+    )
 
 
 def test_snapshot_preserves_injection_groups_and_llm_request(tmp_path: Path) -> None:

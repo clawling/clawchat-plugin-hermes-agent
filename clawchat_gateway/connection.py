@@ -350,6 +350,20 @@ class ClawChatConnection:
                     logger.warning("clawchat activation credential read failed", exc_info=True)
             if credentials is not None:
                 if credentials.access_token == self._rejected_activation_token:
+                    logger.debug(
+                        format_ws_log(
+                            event="activation_poll",
+                            account_id=self._account_id,
+                            attempt=self._attempt,
+                            reconnect_count=self._reconnect_count,
+                            state=self._state.value,
+                            action="wait",
+                            fields=[
+                                ("status", "rejected_token_unchanged"),
+                                ("interval_seconds", ACTIVATION_CREDENTIAL_POLL_INTERVAL_SECONDS),
+                            ],
+                        )
+                    )
                     await asyncio.sleep(ACTIVATION_CREDENTIAL_POLL_INTERVAL_SECONDS)
                     continue
                 self._cfg = replace(
@@ -376,6 +390,21 @@ class ClawChatConnection:
                     )
                 )
                 return True
+            logger.debug(
+                format_ws_log(
+                    event="activation_poll",
+                    account_id=self._account_id,
+                    attempt=self._attempt,
+                    reconnect_count=self._reconnect_count,
+                    state=self._state.value,
+                    action="wait",
+                    fields=[
+                        ("status", "waiting"),
+                        ("has_store", self._store is not None),
+                        ("interval_seconds", ACTIVATION_CREDENTIAL_POLL_INTERVAL_SECONDS),
+                    ],
+                )
+            )
             await asyncio.sleep(ACTIVATION_CREDENTIAL_POLL_INTERVAL_SECONDS)
         return False
 
