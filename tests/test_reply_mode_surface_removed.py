@@ -312,6 +312,7 @@ def test_persist_activation_writes_clawchat_display_defaults_without_top_level_s
     assert extra["runtime_status_messages"] is False
     assert "streaming" not in saved_config
     assert saved_config["agent"]["gateway_notify_interval"] == 0
+    assert saved_config["agent"]["gateway_timeout_warning"] == 0
     assert saved_config["display"]["busy_input_mode"] == "queue"
     assert saved_config["display"]["busy_ack_enabled"] is False
     assert saved_config["display"]["background_process_notifications"] == "off"
@@ -358,6 +359,7 @@ def test_persist_activation_overwrites_global_display_and_preserves_platform_val
             },
             "agent": {
                 "gateway_notify_interval": 180,
+                "gateway_timeout_warning": 900,
             },
         },
     )
@@ -376,6 +378,7 @@ def test_persist_activation_overwrites_global_display_and_preserves_platform_val
     assert saved_config["display"]["background_process_notifications"] == "off"
     assert saved_config["display"]["tool_progress_command"] is False
     assert saved_config["agent"]["gateway_notify_interval"] == 0
+    assert saved_config["agent"]["gateway_timeout_warning"] == 0
     assert saved_config["platforms"]["clawchat"]["extra"]["runtime_status_messages"] is True
     assert saved_config["display"]["platforms"]["clawchat"] == {
         "tool_progress": "all",

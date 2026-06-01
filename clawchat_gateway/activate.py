@@ -35,6 +35,7 @@ CLAWCHAT_GLOBAL_DISPLAY_DEFAULTS = {
 
 CLAWCHAT_AGENT_DEFAULTS = {
     "gateway_notify_interval": 0,
+    "gateway_timeout_warning": 0,
 }
 
 CLAWCHAT_DISPLAY_DEFAULTS = {

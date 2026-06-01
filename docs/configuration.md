@@ -78,17 +78,19 @@ display:
 ```
 
 Activation also writes this global Hermes agent setting on every activation so
-Hermes does not emit gateway "still working" heartbeats into ClawChat:
+Hermes does not emit gateway "still working" heartbeats or inactivity warnings
+into ClawChat:
 
 ```yaml
 agent:
   gateway_notify_interval: 0
+  gateway_timeout_warning: 0
 ```
 
 Activation fills missing keys in `display.platforms.clawchat` but preserves
 existing values, so an operator can manually replace platform-scoped settings
 and keep those values across later activations. The four global display
-settings and `agent.gateway_notify_interval` above
+settings and agent settings above
 are intentionally overwritten on each activation because Hermes does not support
 ClawChat-only platform overrides for them. Activation does not write top-level
 `streaming.*` settings.
@@ -115,6 +117,7 @@ Activation writes these global ClawChat defaults on every activation:
 ```yaml
 agent:
   gateway_notify_interval: 0
+  gateway_timeout_warning: 0
 display:
   busy_input_mode: queue
   busy_ack_enabled: false
