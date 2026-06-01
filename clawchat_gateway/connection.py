@@ -7,7 +7,7 @@ import enum
 import logging
 import random
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Awaitable, Callable
 
 try:
@@ -37,6 +37,7 @@ HANDSHAKE_TIMEOUT_SECONDS = 10.0
 SEND_QUEUE_MAX = 128
 BACKOFF_RESET_AFTER_SECONDS = 5.0
 ACKABLE_EVENTS = {"message.send", "message.reply"}
+ACTIVATION_CREDENTIAL_POLL_INTERVAL_SECONDS = 2.0
 
 
 @dataclass
@@ -121,6 +122,13 @@ class ClawChatConnection:
         self._pending_acks: dict[str, _PendingAck] = {}
         self._stable_ready_handle: asyncio.TimerHandle | None = None
         self._stable_ready_reset_done = False
+        self._activation_wait_logged = False
+        self._using_activation_db_credentials = False
+        self._rejected_activation_token: str | None = None
+
+    @property
+    def config(self) -> ClawChatConfig:
+        return self._cfg
 
     async def start(self) -> None:
         if self._supervisor_task is not None:
@@ -245,6 +253,10 @@ class ClawChatConnection:
         retries = 0
         reconnect_reason = "-"
         while not self._stopping:
+            if not self._has_connect_credentials():
+                loaded = await self._wait_for_activation_credentials()
+                if not loaded:
+                    break
             try:
                 await self._set_state(ConnectionState.CONNECTING)
                 await self._run_one_connection()
@@ -298,6 +310,74 @@ class ClawChatConnection:
             await asyncio.sleep(delay_with_jitter)
             delay_seconds = min(delay_seconds * 2.0, max_delay_seconds)
         await self._set_state(ConnectionState.CLOSED)
+
+    def _has_connect_credentials(self) -> bool:
+        return bool(
+            self._cfg.websocket_url
+            and self._cfg.token
+            and self._cfg.user_id
+            and self._cfg.owner_user_id
+        )
+
+    async def _wait_for_activation_credentials(self) -> bool:
+        if not self._activation_wait_logged:
+            logger.info(
+                format_ws_log(
+                    event="activation_wait",
+                    account_id=self._account_id,
+                    attempt=self._attempt,
+                    reconnect_count=self._reconnect_count,
+                    state=self._state.value,
+                    action="wait",
+                    fields=[
+                        ("has_websocket_url", bool(self._cfg.websocket_url)),
+                        ("has_token", bool(self._cfg.token)),
+                        ("has_user_id", bool(self._cfg.user_id)),
+                        ("has_owner_user_id", bool(self._cfg.owner_user_id)),
+                    ],
+                )
+            )
+            self._activation_wait_logged = True
+        while not self._stopping:
+            credentials = None
+            if self._store is not None:
+                try:
+                    credentials = self._store.get_activation_credentials(
+                        platform="hermes",
+                        account_id=self._account_id,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.warning("clawchat activation credential read failed", exc_info=True)
+            if credentials is not None:
+                if credentials.access_token == self._rejected_activation_token:
+                    await asyncio.sleep(ACTIVATION_CREDENTIAL_POLL_INTERVAL_SECONDS)
+                    continue
+                self._cfg = replace(
+                    self._cfg,
+                    token=credentials.access_token,
+                    refresh_token=credentials.refresh_token or "",
+                    user_id=credentials.user_id,
+                    owner_user_id=credentials.owner_user_id,
+                )
+                self._using_activation_db_credentials = True
+                self._rejected_activation_token = None
+                self._activation_wait_logged = False
+                logger.info(
+                    format_ws_log(
+                        event="activation_loaded",
+                        account_id=self._account_id,
+                        attempt=self._attempt,
+                        reconnect_count=self._reconnect_count,
+                        state=self._state.value,
+                        action="connect",
+                        fields=[
+                            ("has_refresh_token", bool(credentials.refresh_token)),
+                        ],
+                    )
+                )
+                return True
+            await asyncio.sleep(ACTIVATION_CREDENTIAL_POLL_INTERVAL_SECONDS)
+        return False
 
     async def _run_one_connection(self) -> bool:
         attempt, reconnect_count = self._tracker.next_connect()
@@ -735,13 +815,26 @@ class ClawChatConnection:
             trace_id_match = bool(
                 self._pending_connect_id and frame_trace_id == self._pending_connect_id
             )
+            using_activation_db_credentials = self._using_activation_db_credentials
             self._auth_failed = True
-            self._stopping = True
+            if not using_activation_db_credentials:
+                self._stopping = True
             await self._set_state(ConnectionState.AUTH_FAILED)
             self._finish_current_connection(
                 ConnectionState.AUTH_FAILED.value,
                 error=reason,
             )
+            if using_activation_db_credentials:
+                self._rejected_activation_token = self._cfg.token or None
+                self._cfg = replace(
+                    self._cfg,
+                    token="",
+                    refresh_token="",
+                    user_id="",
+                    owner_user_id="",
+                )
+                self._using_activation_db_credentials = False
+                self._auth_failed = False
             logger.info(
                 format_ws_log(
                     event="auth_failed",
@@ -749,7 +842,11 @@ class ClawChatConnection:
                     attempt=self._attempt,
                     reconnect_count=self._reconnect_count,
                     state=ConnectionState.AUTH_FAILED.value,
-                    action="stop_reconnect",
+                    action=(
+                        "wait_activation"
+                        if using_activation_db_credentials
+                        else "stop_reconnect"
+                    ),
                     fields=[
                         ("trace_id", frame_trace_id),
                         ("pending_id", self._pending_connect_id),

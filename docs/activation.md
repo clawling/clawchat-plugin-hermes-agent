@@ -98,8 +98,20 @@ Activation writes:
 | `$HERMES_HOME/clawchat.sqlite` | Latest activation row, including access token, optional refresh token, user ids, and activation conversation id. |
 
 Credential tokens are stored in `.env` for runtime resolution and in plugin
-SQLite for the latest activation record. The plugin never copies
-`CLAWCHAT_TOKEN` or `CLAWCHAT_REFRESH_TOKEN` into `config.yaml`.
+SQLite for the latest activation record. Runtime resolution uses a complete
+env-backed credential bundle first. If env-backed credentials are missing, the
+running adapter waits for and then reads the latest SQLite activation row. The
+plugin never copies `CLAWCHAT_TOKEN` or `CLAWCHAT_REFRESH_TOKEN` into
+`config.yaml`.
+
+When Hermes has registered the ClawChat platform but no complete token/user
+credential bundle is available, the adapter starts in a waiting-for-activation
+state and returns control to Hermes so platform startup is not blocked by the
+connection timeout. A later successful activation writes SQLite and the
+background connection supervisor opens the WebSocket without requiring another
+Hermes restart. If Hermes has not registered the plugin platform at all, normal
+plugin reload or Gateway restart is still required before this waiting state can
+run.
 
 The WebSocket URL is derived from `base_url` during activation and written to
 `platforms.clawchat.extra.websocket_url`.
@@ -132,6 +144,8 @@ conversation id.
 - `clawchat_gateway/setup.py`: `hermes gateway setup` activation flow.
 - `clawchat_gateway/activate.py`: credential exchange, config and `.env` writes,
   restart scheduling, and SQLite activation upsert.
+- `clawchat_gateway/connection.py`: waiting-for-activation credential polling
+  and WebSocket connection lifecycle.
 - `clawchat_gateway/api_client.py`: `agents_connect` HTTP request.
 - `docs/install.md`, `docs/reference/cli.md`, and `docs/configuration.md`:
   operator-facing activation behavior and persisted state.

@@ -153,6 +153,14 @@ class ActivationBootstrapClaim:
     claimed_at: int
 
 
+@dataclass(frozen=True)
+class ActivationCredentials:
+    user_id: str
+    owner_user_id: str
+    access_token: str
+    refresh_token: str | None
+
+
 class ClawChatStore:
     def __init__(self, db_path: Path | str | None = None) -> None:
         self.db_path = Path(db_path) if db_path is not None else default_db_path()
@@ -248,6 +256,42 @@ class ClawChatStore:
             )
 
         self._write("upsert_activation", write)
+
+    def get_activation_credentials(
+        self,
+        *,
+        platform: str,
+        account_id: str,
+    ) -> ActivationCredentials | None:
+        self.initialize()
+        if self._disabled:
+            return None
+        conn = sqlite3.connect(self.db_path)
+        try:
+            row = conn.execute(
+                """
+                SELECT user_id, owner_user_id, access_token, refresh_token
+                FROM activations
+                WHERE platform = ? AND account_id = ?
+                """,
+                (platform, account_id),
+            ).fetchone()
+            if row is None:
+                return None
+            user_id = str(row[0] or "").strip()
+            owner_user_id = str(row[1] or "").strip()
+            access_token = str(row[2] or "").strip()
+            refresh_token = str(row[3] or "").strip() or None
+            if not user_id or not owner_user_id or not access_token:
+                return None
+            return ActivationCredentials(
+                user_id=user_id,
+                owner_user_id=owner_user_id,
+                access_token=access_token,
+                refresh_token=refresh_token,
+            )
+        finally:
+            conn.close()
 
     def get_activation_conversation(
         self,

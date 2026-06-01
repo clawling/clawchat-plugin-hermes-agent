@@ -7,8 +7,9 @@ process env → `hermes_cli.config.get_env_value` → `$HERMES_HOME/.env`
 → `platforms.clawchat.extra` → dataclass default.
 
 Credential tokens are the exception: `CLAWCHAT_TOKEN` and
-`CLAWCHAT_REFRESH_TOKEN` are resolved only from env-backed sources, not from
-`platforms.clawchat.extra`.
+`CLAWCHAT_REFRESH_TOKEN` are resolved from env-backed sources first, not from
+`platforms.clawchat.extra`. When env-backed credentials are missing, runtime
+connection falls back to the latest complete activation row in plugin SQLite.
 
 ## Credentials (written by activation)
 
@@ -20,10 +21,11 @@ Credential tokens are the exception: `CLAWCHAT_TOKEN` and
 | `CLAWCHAT_AGENT_ID`                  | `agent_id`         | JWT `aid` claim from `CLAWCHAT_TOKEN` | Set by activation. This is the REST agent record id (`agt_...`), distinct from owner metadata `agent_user_id` (`usr_...`). |
 | `CLAWCHAT_OWNER_USER_ID`             | `owner_user_id`    | `""`    | Identifies the human owner of the agent account. |
 
-The token / refresh-token pair are stored in `.env` for runtime resolution and
-in plugin SQLite for the latest activation record. The plugin never copies them
-into `config.yaml` (`activate.persist_activation` calls `extra.pop("token",
-None)` and `extra.pop("refresh_token", None)`).
+The token / refresh-token pair are stored in `.env` for primary runtime
+resolution and in plugin SQLite for the latest activation record and startup
+fallback. The plugin never copies them into `config.yaml`
+(`activate.persist_activation` calls `extra.pop("token", None)` and
+`extra.pop("refresh_token", None)`).
 
 ## Connection
 

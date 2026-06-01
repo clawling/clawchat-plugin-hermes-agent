@@ -343,9 +343,9 @@ def check_clawchat_requirements(platform_config: Any) -> bool:
         logger.warning("ClawChat: websockets library not installed")
         return False
     cfg = ClawChatConfig.from_platform_config(platform_config)
-    if not cfg.websocket_url or not cfg.token:
+    if not cfg.websocket_url:
         logger.warning(
-            "ClawChat: websocket_url and token are required in platforms.clawchat.extra"
+            "ClawChat: websocket_url is required in platforms.clawchat.extra"
         )
         return False
     return True
@@ -399,6 +399,14 @@ class ClawChatAdapter(BasePlatformAdapter):
 
     async def connect(self) -> bool:
         await self._connection.start()
+        if not (
+            self._clawchat_config.websocket_url
+            and self._clawchat_config.token
+            and self._clawchat_config.user_id
+            and self._clawchat_config.owner_user_id
+        ):
+            logger.info("clawchat connect waiting for activation credentials")
+            return True
         ready = await self._connection.wait_until_ready(
             timeout=HANDSHAKE_TIMEOUT_SECONDS + 1.0,
         )
@@ -463,6 +471,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         if state == ConnectionState.AUTH_FAILED:
             self._auth_failed = True
         if state == ConnectionState.READY:
+            self._clawchat_config = self._connection.config
+            self._auth_failed = False
             self._schedule_activation_bootstrap()
             self._schedule_owner_metadata_refresh()
             await self._schedule_reconnect_conversation_refresh()

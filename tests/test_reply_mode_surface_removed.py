@@ -439,6 +439,29 @@ def test_activation_persists_tokens_to_sqlite(monkeypatch, tmp_path):
     ]
 
 
+def test_storage_reads_activation_credentials(tmp_path):
+    from clawchat_gateway.storage import ClawChatStore
+
+    store = ClawChatStore(tmp_path / "clawchat.sqlite")
+    store.upsert_activation(
+        platform="hermes",
+        account_id="default",
+        user_id=" user ",
+        owner_user_id=" owner ",
+        conversation_id="conv-activation",
+        access_token=" token ",
+        refresh_token=" refresh ",
+    )
+
+    credentials = store.get_activation_credentials(platform="hermes", account_id="default")
+
+    assert credentials is not None
+    assert credentials.user_id == "user"
+    assert credentials.owner_user_id == "owner"
+    assert credentials.access_token == "token"
+    assert credentials.refresh_token == "refresh"
+
+
 def test_runtime_defaults_do_not_write_display_defaults(monkeypatch, tmp_path):
     home = tmp_path / "hermes"
     config_path = home / "config.yaml"
@@ -491,6 +514,16 @@ class _FakeConnection:
     def __init__(self):
         self.frames = []
         self.send_results = []
+        self.started = False
+        self.waited = False
+        self.config = None
+
+    async def start(self):
+        self.started = True
+
+    async def wait_until_ready(self, **_kwargs):
+        self.waited = True
+        return True
 
     async def send_frame(self, frame, **kwargs):
         self.frames.append((frame, kwargs))
@@ -633,6 +666,29 @@ STREAM_LIFECYCLE_EVENTS = {
     "message.done",
     "message.failed",
 }
+
+
+def test_plugin_config_validation_allows_activation_pending(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setattr(plugin, "_clawchat_dependencies_available", lambda: True)
+
+    assert plugin._validate_clawchat_platform_config(SimpleNamespace(extra={})) is True
+
+
+@pytest.mark.asyncio
+async def test_adapter_connect_waits_in_background_without_activation(monkeypatch):
+    adapter = _adapter(
+        monkeypatch,
+        {"user_id": "", "owner_user_id": ""},
+    )
+    adapter._clawchat_config = ClawChatConfig.from_platform_config(
+        SimpleNamespace(extra={"websocket_url": "wss://example.test/ws"})
+    )
+    adapter._connection.config = adapter._clawchat_config
+
+    assert await adapter.connect() is True
+    assert adapter._connection.started is True
+    assert adapter._connection.waited is False
 
 
 @pytest.mark.asyncio

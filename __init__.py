@@ -122,6 +122,18 @@ def _clawchat_connection_configured(config=None) -> bool:
     return bool(clawchat_config.websocket_url and clawchat_config.token)
 
 
+def _clawchat_can_start(config=None) -> bool:
+    from clawchat_gateway.config import ClawChatConfig
+
+    platform_config = (
+        _clawchat_platform_config_with_home_extra(config)
+        if config is not None
+        else SimpleNamespace(extra=_clawchat_home_extra())
+    )
+    clawchat_config = ClawChatConfig.from_platform_config(platform_config)
+    return bool(clawchat_config.websocket_url)
+
+
 def _check_clawchat_platform_requirements() -> bool:
     return _clawchat_dependencies_available()
 
@@ -134,7 +146,7 @@ def _validate_clawchat_platform_config(config) -> bool:
 
     merged_config = _clawchat_platform_config_with_home_extra(config)
     clawchat_config = ClawChatConfig.from_platform_config(merged_config)
-    configured = bool(clawchat_config.websocket_url and clawchat_config.token)
+    configured = bool(clawchat_config.websocket_url)
     if not configured:
         logger.warning(
             "ClawChat platform config incomplete: websocket_url=%s token=%s hermes_home=%s",
@@ -297,7 +309,7 @@ def _register_platform(ctx) -> bool:
         setup_fn=_setup_clawchat_platform,
         check_fn=_check_clawchat_platform_requirements,
         validate_config=_validate_clawchat_platform_config,
-        is_connected=_validate_clawchat_platform_config,
+        is_connected=_clawchat_can_start,
         required_env=[],
         install_hint=(
             "Activate ClawChat with hermes gateway setup, hermes clawchat activate CODE, "

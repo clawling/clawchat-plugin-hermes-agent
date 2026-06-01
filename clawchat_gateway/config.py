@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+from clawchat_gateway.api_client import DEFAULT_BASE_URL, DEFAULT_WEBSOCKET_URL
+
 
 def _read_env_file_value(name: str) -> str:
     home = os.getenv("HERMES_HOME", "").strip()
@@ -198,9 +200,11 @@ class ClawChatConfig:
         token = _get_env("CLAWCHAT_TOKEN")
         return cls(
             websocket_url=_get_env("CLAWCHAT_WEBSOCKET_URL", "CLAWCHAT_WS_URL")
-            or _get_config_value(extra, "websocket_url", ""),
+            or _get_config_value(extra, "websocket_url", "")
+            or DEFAULT_WEBSOCKET_URL,
             base_url=_get_env("CLAWCHAT_BASE_URL")
-            or _get_config_value(extra, "base_url", ""),
+            or _get_config_value(extra, "base_url", "")
+            or DEFAULT_BASE_URL,
             token=token,
             refresh_token=_get_env("CLAWCHAT_REFRESH_TOKEN"),
             user_id=_get_env("CLAWCHAT_USER_ID")
