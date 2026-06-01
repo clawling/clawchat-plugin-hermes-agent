@@ -909,6 +909,65 @@ async def test_runtime_status_messages_are_suppressed_by_default(monkeypatch):
     assert _sent_events(adapter) == []
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        "⚠️ provider stream interrupted (RemoteProtocolError) after 12.3s — reconnecting, retry 1/3",
+        "⚠ Auxiliary memory failed: provider timed out",
+        "⚠ No auxiliary LLM provider configured — context compression will drop middle turns without a summary.",
+        "⚠ Compression model small-model (provider) context is 65,536 tokens, but the main model threshold was 100,000 tokens.",
+        "⚠️ No response from provider for 180s (model: test-model, context: ~20,000 tokens). Reconnecting...",
+        "❌ Connection to provider failed after 3 attempts. The provider may be experiencing issues — try again in a moment.",
+        "🔄 Primary model failed — switching to fallback: model-b via provider-b",
+        "⚠ Compression summary failed: upstream timeout. Inserted a fallback context marker.",
+        "ℹ Configured compression model 'aux-model' failed (timeout). Recovered using main model — check auxiliary.compression.model in config.yaml.",
+        "🔌 Detected stale connections from a previous provider issue — cleaned up automatically. Proceeding with fresh connection.",
+        "📦 Preflight compression: ~120,000 tokens >= 100,000 threshold. This may take a moment.",
+        "⏳ Nous Portal rate limit active — resets in 12m.",
+        "⚠️ Empty/malformed response — switching to fallback...",
+        "⚠️ Max retries (3) for invalid responses — trying fallback...",
+        "❌ Max retries (3) exceeded for invalid responses. Giving up.",
+        "🗜️ Context reduced to 80,000 tokens (was 120,000), retrying...",
+        "⚠️ Rate limited — switching to fallback provider...",
+        "⚠️  Request payload too large (413) — compression attempt 1/3...",
+        "🗜️ Compressed 42 → 18 messages, retrying...",
+        "🗜️ Context too large (~120,000 tokens) — compressing (1/3)...",
+        "⚠️ Non-retryable error (HTTP 401) — trying fallback...",
+        "❌ Non-retryable error (HTTP 401): Unauthorized",
+        "⚠️ Max retries (3) exhausted — trying fallback...",
+        "❌ Rate limited after 3 retries — quota exhausted",
+        "❌ API failed after 3 retries — connection reset",
+        "⏱️ Rate limited. Waiting 2.0s (attempt 2/3)...",
+        "⏳ Retrying in 2.0s (attempt 1/3)...",
+        "⚠️ Tool guardrail halted write_file: repeated_args",
+        "↻ Stream interrupted — using delivered content as final response",
+        "↻ Empty response after tool calls — using earlier content as final answer",
+        "⚠️ Model returned empty after tool calls — nudging to continue",
+        "↻ Thinking-only response — prefilling to continue (1/2)",
+        "⚠️ Empty response from model — retrying (1/3)",
+        "⚠️ Model returning empty responses — switching to fallback provider...",
+        "↻ Switched to fallback: fallback-model (provider)",
+        "⚠️ Model produced reasoning but no visible response after all retries. Returning empty.",
+        "❌ Model returned no content after all retries. No fallback providers configured.",
+        "⚠️ Iteration budget exhausted (90/90) — asking model to summarise",
+    ],
+)
+@pytest.mark.asyncio
+async def test_hermes_lifecycle_status_messages_sent_through_send_are_suppressed_by_default(
+    monkeypatch, content
+):
+    adapter = _adapter(monkeypatch)
+
+    result = await adapter.send(
+        "chat-1",
+        content,
+        metadata={"chat_type": "direct"},
+    )
+
+    assert result.success is True
+    assert _sent_events(adapter) == []
+
+
 @pytest.mark.asyncio
 async def test_runtime_status_messages_can_be_enabled(monkeypatch):
     adapter = _adapter(monkeypatch, {"runtime_status_messages": True})
@@ -925,6 +984,25 @@ async def test_runtime_status_messages_can_be_enabled(monkeypatch):
     frame = adapter._connection.frames[0][0]
     assert frame["payload"]["message"]["body"]["fragments"] == [
         {"kind": "text", "text": "⚠️ Empty response from model — retrying (1/3)"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_hermes_lifecycle_status_messages_sent_through_send_can_be_enabled(monkeypatch):
+    adapter = _adapter(monkeypatch, {"runtime_status_messages": True})
+    content = "⚠️ Empty response from model — retrying (1/3)"
+
+    result = await adapter.send(
+        "chat-1",
+        content,
+        metadata={"chat_type": "direct"},
+    )
+
+    assert result.success is True
+    assert _sent_events(adapter) == ["message.reply"]
+    frame = adapter._connection.frames[0][0]
+    assert frame["payload"]["message"]["body"]["fragments"] == [
+        {"kind": "text", "text": content}
     ]
 
 

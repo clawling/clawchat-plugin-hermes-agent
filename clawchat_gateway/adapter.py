@@ -187,7 +187,43 @@ _STREAMING_CURSOR_RE = re.compile(r"\s*[▀-▟]+\s*\Z")
 _APPROVE_COMMAND_RE = re.compile(r"(?<!\w)/approve(?!\w)", re.IGNORECASE)
 _DENY_COMMAND_RE = re.compile(r"(?<!\w)/(?:deny|reject)(?!\w)", re.IGNORECASE)
 _HERMES_STREAM_CURSOR_RE = re.compile(r"[ \t]*▉\Z")
-_EMPTY_RESPONSE_FINAL_PREFIXES = (
+_HERMES_RUNTIME_STATUS_PREFIXES = (
+    "⚠ Auxiliary ",
+    "⚠ No auxiliary LLM provider configured ",
+    "⚠ Compression model ",
+    "⚠️ No response from provider for ",
+    "❌ Connection to provider failed after ",
+    "🔄 Primary model failed ",
+    "⚠ Compression summary failed:",
+    "ℹ Configured compression model ",
+    "🔌 Detected stale connections from a previous provider issue ",
+    "📦 Preflight compression:",
+    "⏳ Nous Portal rate limit active ",
+    "⚠️ Empty/malformed response ",
+    "⚠️ Max retries (",
+    "❌ Max retries (",
+    "🗜️ Context reduced to ",
+    "⚠️ Rate limited ",
+    "⚠️  Request payload too large (413) ",
+    "🗜️ Compressed ",
+    "🗜️ Context too large ",
+    "⚠️ Non-retryable error ",
+    "❌ Non-retryable error ",
+    "❌ Rate limited after ",
+    "❌ API failed after ",
+    "⏱️ Rate limited. Waiting ",
+    "⏳ Retrying in ",
+    "⚠️ Tool guardrail halted ",
+    "↻ Stream interrupted ",
+    "↻ Empty response after tool calls ",
+    "⚠️ Model returned empty after tool calls ",
+    "↻ Thinking-only response ",
+    "⚠️ Empty response from model ",
+    "⚠️ Model returning empty responses ",
+    "↻ Switched to fallback:",
+    "⚠️ Model produced reasoning but no visible response after all retries.",
+    "❌ Model returned no content after all retries",
+    "⚠️ Iteration budget exhausted ",
     "⚠️ The model returned no response after processing tool results.",
     "The model returned no response after processing tool results.",
 )
@@ -1994,8 +2030,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         is_group = chat_type == "group"
         if self._consume_terminal_send(chat_id, phase="send"):
             return SendResult(success=True)
-        if self._should_suppress_empty_response_notice(content or ""):
-            logger.info("clawchat empty response notice suppressed chat_id=%s", chat_id)
+        if self._should_suppress_runtime_status_message(content or ""):
+            logger.info("clawchat runtime status message suppressed chat_id=%s", chat_id)
             return SendResult(success=True)
         if is_group:
             owner_fragment = self._build_interaction_fragment(
@@ -2725,11 +2761,17 @@ class ClawChatAdapter(BasePlatformAdapter):
         filtered = _STREAMING_CURSOR_RE.sub("", filtered)
         return filtered.strip()
 
-    def _should_suppress_empty_response_notice(self, content: str) -> bool:
+    def _should_suppress_runtime_status_message(self, content: str) -> bool:
         if self._clawchat_config.runtime_status_messages:
             return False
         text = (content or "").strip()
-        return any(text.startswith(prefix) for prefix in _EMPTY_RESPONSE_FINAL_PREFIXES)
+        if any(text.startswith(prefix) for prefix in _HERMES_RUNTIME_STATUS_PREFIXES):
+            return True
+        return (
+            text.startswith("⚠️ ")
+            and " stream " in text
+            and "— reconnecting, retry " in text
+        )
 
     def _is_noop_response_text(self, content: str) -> bool:
         text = content.strip()
