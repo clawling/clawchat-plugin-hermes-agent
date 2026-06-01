@@ -112,6 +112,7 @@ class ClawChatConnection:
         self._connection_row_id: int | None = None
         self._supervisor_task: asyncio.Task[None] | None = None
         self._read_task: asyncio.Task[None] | None = None
+        self._credential_watch_task: asyncio.Task[None] | None = None
         self._hello_wait: asyncio.Future[bool] | None = None
         self._ready_event = asyncio.Event()
         self._pending_connect_id: str | None = None
@@ -148,6 +149,8 @@ class ClawChatConnection:
         self._reject_queued_ack_waiters(RuntimeError("connection stopped"), clear_queue=True)
         if self._read_task is not None:
             self._read_task.cancel()
+        if self._credential_watch_task is not None:
+            self._credential_watch_task.cancel()
         if self._hello_wait is not None and not self._hello_wait.done():
             self._hello_wait.cancel()
         if self._ws is not None:
@@ -408,6 +411,54 @@ class ClawChatConnection:
             await asyncio.sleep(ACTIVATION_CREDENTIAL_POLL_INTERVAL_SECONDS)
         return False
 
+    async def _watch_activation_credentials(self) -> None:
+        while not self._stopping:
+            await asyncio.sleep(ACTIVATION_CREDENTIAL_POLL_INTERVAL_SECONDS)
+            if self._state != ConnectionState.READY or self._store is None:
+                continue
+            try:
+                credentials = self._store.get_activation_credentials(
+                    platform="hermes",
+                    account_id=self._account_id,
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning("clawchat activation credential watch failed", exc_info=True)
+                continue
+            if credentials is None:
+                continue
+            changed = (
+                credentials.access_token != self._cfg.token
+                or credentials.user_id != self._cfg.user_id
+                or credentials.owner_user_id != self._cfg.owner_user_id
+            )
+            if not changed:
+                continue
+            logger.info(
+                format_ws_log(
+                    event="activation_credentials_changed",
+                    account_id=self._account_id,
+                    attempt=self._attempt,
+                    reconnect_count=self._reconnect_count,
+                    state=self._state.value,
+                    action="reconnect",
+                    fields=[
+                        ("has_refresh_token", bool(credentials.refresh_token)),
+                    ],
+                )
+            )
+            self._cfg = replace(
+                self._cfg,
+                token="",
+                refresh_token="",
+                user_id="",
+                owner_user_id="",
+            )
+            self._using_activation_db_credentials = False
+            self._rejected_activation_token = None
+            if self._ws is not None:
+                await self._ws.close()
+            return
+
     async def _run_one_connection(self) -> bool:
         attempt, reconnect_count = self._tracker.next_connect()
         self._attempt = attempt
@@ -487,9 +538,22 @@ class ClawChatConnection:
                 )
             )
             await self._flush_send_queue(ws)
+            self._credential_watch_task = asyncio.create_task(
+                self._watch_activation_credentials(),
+                name="clawchat-credential-watch",
+            )
             await self._read_task
         finally:
             self._cancel_stable_ready_reset()
+            credential_watch_task = self._credential_watch_task
+            if credential_watch_task is not None:
+                if not credential_watch_task.done():
+                    credential_watch_task.cancel()
+                try:
+                    await credential_watch_task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+            self._credential_watch_task = None
             read_task = self._read_task
             if read_task is not None:
                 if not read_task.done():

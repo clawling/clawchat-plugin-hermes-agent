@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import copy
 import importlib
 import asyncio
@@ -15,7 +16,7 @@ import yaml
 from clawchat_gateway import connection as connection_module
 from clawchat_gateway.config import ClawChatConfig
 from clawchat_gateway.clawchat_metadata import owner_metadata_from_agent
-from clawchat_gateway.connection import ClawChatConnection
+from clawchat_gateway.connection import ClawChatConnection, ConnectionState
 from clawchat_gateway.group_message_coalescer import format_coalesced_group_text
 from clawchat_gateway.inbound import InboundMessage, parse_inbound_message
 from clawchat_gateway.mention_message import (
@@ -32,6 +33,22 @@ import clawchat_gateway.llm_context_hooks as llm_context_hooks
 class _MissingActivationStore:
     def get_activation_credentials(self, *, platform: str, account_id: str):
         return None
+
+
+class _ActivationStore:
+    def __init__(self, credentials):
+        self.credentials = credentials
+
+    def get_activation_credentials(self, *, platform: str, account_id: str):
+        return self.credentials
+
+
+class _ClosableWs:
+    def __init__(self):
+        self.closed = False
+
+    async def close(self):
+        self.closed = True
 
 
 async def _ignore_connection_message(frame):
@@ -65,6 +82,105 @@ async def test_activation_wait_poll_heartbeat_is_debug_only(monkeypatch, caplog)
         for record in caplog.records
         if "event=activation_poll" in record.getMessage()
     )
+
+
+@pytest.mark.asyncio
+async def test_activation_credential_watch_closes_ready_ws_on_token_change(monkeypatch, caplog):
+    from clawchat_gateway.storage import ActivationCredentials
+
+    monkeypatch.setattr(connection_module, "ACTIVATION_CREDENTIAL_POLL_INTERVAL_SECONDS", 0.001)
+    conn = ClawChatConnection(
+        ClawChatConfig(
+            websocket_url="wss://example.invalid/ws",
+            token="old-token",
+            refresh_token="old-refresh",
+            user_id="old-user",
+            owner_user_id="old-owner",
+        ),
+        on_message=_ignore_connection_message,
+    )
+    ws = _ClosableWs()
+    conn._ws = ws
+    conn._state = ConnectionState.READY
+    conn._store = _ActivationStore(
+        ActivationCredentials(
+            access_token="new-token",
+            refresh_token="new-refresh",
+            user_id="new-user",
+            owner_user_id="new-owner",
+        )
+    )
+
+    caplog.set_level(logging.INFO, logger="clawchat_gateway.connection")
+
+    await asyncio.wait_for(conn._watch_activation_credentials(), timeout=0.05)
+
+    assert ws.closed is True
+    assert conn.config.token == ""
+    assert conn.config.refresh_token == ""
+    assert conn.config.user_id == ""
+    assert conn.config.owner_user_id == ""
+    assert any(
+        "event=activation_credentials_changed" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_clawchat_cli_activate_defaults_without_restart(monkeypatch, capsys):
+    from clawchat_gateway import cli
+
+    calls = []
+
+    async def run_activate(code, *, base_url, restart):
+        calls.append({"code": code, "base_url": base_url, "restart": restart})
+        return {"user_id": "user"}
+
+    monkeypatch.setattr(cli, "activate_and_maybe_restart", run_activate)
+    parser = argparse.ArgumentParser()
+    cli.setup_clawchat_cli(parser)
+    args = parser.parse_args(["activate", "CODE"])
+
+    assert cli.handle_clawchat_cli(args) == 0
+    assert calls == [
+        {
+            "code": "CODE",
+            "base_url": "https://app.clawling.com",
+            "restart": False,
+        }
+    ]
+    output = capsys.readouterr().out
+    assert "activation complete" in output
+    assert "restart scheduled" not in output
+
+
+@pytest.mark.asyncio
+async def test_slash_activate_restart_is_explicit(monkeypatch, tmp_path):
+    _load_activate(monkeypatch, tmp_path, {})
+    from clawchat_gateway import commands
+    importlib.reload(commands)
+
+    calls = []
+
+    async def run_activate(code, *, base_url, restart):
+        calls.append({"code": code, "base_url": base_url, "restart": restart})
+        return {
+            "user_id": "user",
+            "restart_scheduled": restart,
+            "restart_delay_seconds": 2,
+        }
+
+    monkeypatch.setattr(commands, "activate_and_maybe_restart", run_activate)
+
+    output = await commands.handle_clawchat_activate_command("CODE --restart")
+
+    assert calls == [
+        {
+            "code": "CODE",
+            "base_url": "https://app.clawling.com",
+            "restart": True,
+        }
+    ]
+    assert "Hermes restart scheduled in 2s" in output
 
 
 def test_snapshot_preserves_injection_groups_and_llm_request(tmp_path: Path) -> None:
@@ -713,6 +829,22 @@ def test_plugin_config_validation_allows_activation_pending(monkeypatch):
     monkeypatch.setattr(plugin, "_clawchat_dependencies_available", lambda: True)
 
     assert plugin._validate_clawchat_platform_config(SimpleNamespace(extra={})) is True
+
+
+def test_plugin_env_enablement_seeds_pending_clawchat_platform(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.delenv("CLAWCHAT_BASE_URL", raising=False)
+    monkeypatch.delenv("CLAWCHAT_WEBSOCKET_URL", raising=False)
+    monkeypatch.delenv("CLAWCHAT_WS_URL", raising=False)
+    monkeypatch.delenv("CLAWCHAT_HOME_CHANNEL", raising=False)
+
+    seed = plugin._clawchat_env_enablement()
+
+    assert seed == {
+        "base_url": "https://app.clawling.com",
+        "websocket_url": "wss://app.clawling.com/ws",
+    }
+    assert plugin._clawchat_can_start(SimpleNamespace(extra=seed)) is True
 
 
 @pytest.mark.asyncio

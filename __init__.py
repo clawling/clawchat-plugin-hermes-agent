@@ -88,9 +88,19 @@ def _clawchat_platform_config_with_home_extra(config):
 
 
 def _clawchat_env_enablement() -> dict | None:
+    from clawchat_gateway.api_client import DEFAULT_BASE_URL, DEFAULT_WEBSOCKET_URL
+
+    seed = {
+        "base_url": os.getenv("CLAWCHAT_BASE_URL", "").strip() or DEFAULT_BASE_URL,
+        "websocket_url": (
+            os.getenv("CLAWCHAT_WEBSOCKET_URL", "").strip()
+            or os.getenv("CLAWCHAT_WS_URL", "").strip()
+            or DEFAULT_WEBSOCKET_URL
+        ),
+    }
     home_channel = os.getenv("CLAWCHAT_HOME_CHANNEL", "").strip()
     if not home_channel:
-        return None
+        return seed
 
     home = {
         "chat_id": home_channel,
@@ -99,7 +109,8 @@ def _clawchat_env_enablement() -> dict | None:
     thread_id = os.getenv("CLAWCHAT_HOME_CHANNEL_THREAD_ID", "").strip()
     if thread_id:
         home["thread_id"] = thread_id
-    return {"home_channel": home}
+    seed["home_channel"] = home
+    return seed
 
 
 def _clawchat_dependencies_available() -> bool:
@@ -455,7 +466,7 @@ def _register_commands(ctx) -> None:
         "clawchat-activate",
         handle_clawchat_activate_command,
         description="Activate ClawChat with an activation code.",
-        args_hint="CODE [--base-url URL] [--no-restart]",
+        args_hint="CODE [--base-url URL] [--restart] [--no-restart]",
     )
     register_command(
         "clawchat-output",
