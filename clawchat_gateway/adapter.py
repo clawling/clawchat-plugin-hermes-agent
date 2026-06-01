@@ -193,6 +193,8 @@ _HERMES_RUNTIME_STATUS_PREFIXES = (
     "⚠ Compression model ",
     "⚠️ No response from provider for ",
     "❌ Connection to provider failed after ",
+    "⚠️ Connection to provider dropped ",
+    "🔄 Reconnected — resuming",
     "🔄 Primary model failed ",
     "⚠ Compression summary failed:",
     "ℹ Configured compression model ",

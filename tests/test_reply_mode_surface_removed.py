@@ -923,6 +923,8 @@ async def test_runtime_status_messages_are_suppressed_by_default(monkeypatch):
         "⚠ Compression model small-model (provider) context is 65,536 tokens, but the main model threshold was 100,000 tokens.",
         "⚠️ No response from provider for 180s (model: test-model, context: ~20,000 tokens). Reconnecting...",
         "❌ Connection to provider failed after 3 attempts. The provider may be experiencing issues — try again in a moment.",
+        "⚠️ Connection to provider dropped (ReadTimeout). Reconnecting…",
+        "🔄 Reconnected — resuming",
         "🔄 Primary model failed — switching to fallback: model-b via provider-b",
         "⚠ Compression summary failed: upstream timeout. Inserted a fallback context marker.",
         "ℹ Configured compression model 'aux-model' failed (timeout). Recovered using main model — check auxiliary.compression.model in config.yaml.",
