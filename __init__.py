@@ -434,13 +434,22 @@ def _register_commands(ctx) -> None:
     if not callable(register_command):
         return
 
-    from clawchat_gateway.commands import handle_clawchat_activate_command
+    from clawchat_gateway.commands import (
+        handle_clawchat_activate_command,
+        handle_clawchat_output_command,
+    )
 
     register_command(
         "clawchat-activate",
         handle_clawchat_activate_command,
         description="Activate ClawChat with an activation code.",
         args_hint="CODE [--base-url URL] [--no-restart]",
+    )
+    register_command(
+        "clawchat-output",
+        handle_clawchat_output_command,
+        description="Set ClawChat output visibility.",
+        args_hint="minimal|normal|full",
     )
 
 

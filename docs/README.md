@@ -14,6 +14,7 @@ twenty-two `clawchat_*` tools to the agent.
 | Activate the plugin in a Hermes Agent                        | [`./activation.md`](./activation.md)                    |
 | Understand how the plugin plugs into the Hermes runtime      | [`./architecture.md`](./architecture.md)                |
 | Understand command approval prompts and group owner routing  | [`./approve.md`](./approve.md)                          |
+| Configure ClawChat output visibility                         | [`./output-visibility.md`](./output-visibility.md)      |
 | Look up an env var or `platforms.clawchat.extra` field       | [`./configuration.md`](./configuration.md)              |
 | Find a specific `clawchat_*` tool                            | [`./reference/tools.md`](./reference/tools.md)          |
 | Use one of the activation CLIs                               | [`./reference/cli.md`](./reference/cli.md)              |

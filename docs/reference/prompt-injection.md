@@ -64,8 +64,8 @@ Hermes currently exposes this as a memory-provider surface, not as a general
 platform session-prompt surface. Keep this block limited to stable explanatory
 text, such as the merged ClawChat conversation semantics and metadata glossary.
 Do not include `agent_behavior`, current agent profile metadata, agent-owner
-metadata, peer profile metadata, group profile metadata, current `[message]`
-blocks, or other ClawChat data that can change within a session.
+metadata, peer profile metadata, group profile metadata, sender metadata, group
+message metadata, or other ClawChat data that can change within a session.
 
 Session-level ClawChat context is valid only when the Hermes session is strictly
 bound to the intended conversation. Direct messages are bound by the direct
@@ -78,10 +78,15 @@ session is per participant or shared by the whole group:
 - `group_sessions_per_user=false`: group sessions are shared by the group
   conversation. Session-level context may describe stable group-level semantics,
   but current sender facts and mutable group/user metadata still belong in
-  `MessageEvent.channel_prompt` or the current `[message]` block.
+  `MessageEvent.channel_prompt`, while current message text stays in the
+  user-message body.
 
 Keep message-scoped or metadata-scoped context in `MessageEvent.channel_prompt`
 unless Hermes adds an explicit session prompt invalidation API for platform
 plugins. The ClawChat channel prompt includes the current agent profile from
 `owner.md` metadata (`agent_user_id`, `agent_nickname`, `agent_avatar_url`, and
 `agent_bio`) so group and direct turns know which agent identity is replying.
+It injects `ClawChat Sender Metadata` for direct chats and `ClawChat Group
+Message Metadata` for group chats. Current direct message text and group
+transcript text stay in the host user-message body and are not duplicated in
+the system context.

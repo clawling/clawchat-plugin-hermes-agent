@@ -37,14 +37,21 @@ None)` and `extra.pop("refresh_token", None)`).
 | Env var                                | `extra.*` key                  | Default        |
 |----------------------------------------|--------------------------------|----------------|
 | —                                      | `enable_rich_interactions`     | `false`        |
+| —                                      | `output_visibility`            | `"normal"`     |
 | —                                      | `runtime_status_messages`      | `false`        |
 
-`runtime_status_messages` controls Hermes model/runtime status callbacks that
-do not have a dedicated Hermes display key, for example provider retry,
-fallback, compression, or empty-response notices. It does not control tool
-progress, command previews, long-running heartbeats, interim assistant
-messages, approval prompts, or background-process notifications; use the
-Hermes display settings below for those categories.
+`output_visibility` is the ClawChat visibility preset controlled by
+`/clawchat-output minimal|normal|full`. `runtime_status_messages` controls
+Hermes model/runtime status callbacks that do not have a dedicated Hermes
+display key, for example provider retry, fallback, compression, or
+empty-response notices. The `/clawchat-output` command keeps it aligned with the
+selected preset: `false` for `minimal` and `normal`, `true` for `full`. It does
+not control tool progress, command previews, long-running heartbeats, interim
+assistant messages, approval prompts, or background-process notifications; use
+the Hermes display settings below for those categories.
+
+See [`./output-visibility.md`](./output-visibility.md) for the complete
+`minimal`, `normal`, and `full` config mappings.
 
 ## Hermes display settings for ClawChat
 
@@ -61,8 +68,8 @@ display:
   tool_progress_command: false
 ```
 
-Activation also writes a platform-scoped default block so ClawChat is quiet by
-default while leaving the setting visible for the operator to edit:
+Activation also writes the `normal` platform-scoped default block while leaving
+the setting visible for the operator to edit:
 
 ```yaml
 display:
@@ -71,7 +78,7 @@ display:
       tool_progress: off
       show_reasoning: false
       streaming: false
-      interim_assistant_messages: false
+      interim_assistant_messages: true
       long_running_notifications: false
       busy_ack_detail: false
       cleanup_progress: false
@@ -107,7 +114,7 @@ Use these verified Hermes display keys when tuning ClawChat behavior:
 | `tool_progress` | yes | yes | `display.platforms.clawchat.tool_progress: off` | Controls tool progress messages. Valid values: `off`, `new`, `all`, `verbose`. | The agent runs `rg`, reads files, or executes commands. | `off` hides ClawChat tool progress messages and leaves only final assistant replies. |
 | `show_reasoning` | yes | yes | `display.platforms.clawchat.show_reasoning: false` | Controls whether model reasoning/thinking is shown in replies. | The model produces reasoning for a complex question. | `false` hides reasoning in ClawChat replies. |
 | `streaming` | yes | yes | `display.platforms.clawchat.streaming: false` | Controls platform streaming display behavior when supported by the gateway adapter. | The agent writes a long reply. | `false` avoids progressive ClawChat reply streaming. |
-| `interim_assistant_messages` | yes | yes | `display.platforms.clawchat.interim_assistant_messages: false` | Controls natural mid-turn assistant messages sent separately from final replies. | The model says "I will inspect the config first" during a turn. | `false` suppresses that separate interim ClawChat message. |
+| `interim_assistant_messages` | yes | yes | `display.platforms.clawchat.interim_assistant_messages: true` | Controls natural mid-turn assistant messages sent separately from final replies. | The model says "I will inspect the config first" during a turn. | `true` allows that separate interim ClawChat message in the `normal` and `full` presets. |
 | `long_running_notifications` | no | yes | `display.platforms.clawchat.long_running_notifications: false` plus `agent.gateway_notify_interval: 0` | Controls long-running "still working" heartbeat messages. | A task runs for several minutes. | `agent.gateway_notify_interval: 0` disables gateway heartbeat messages such as "Still working...". |
 | `busy_ack_detail` | no | yes | `display.platforms.clawchat.busy_ack_detail: false` | Controls whether busy acknowledgments and long-running heartbeats include detailed runtime state. | The agent is busy and receives another message. | `false` keeps busy/heartbeat messages terse when those messages are enabled. |
 | `cleanup_progress` | no | yes | `display.platforms.clawchat.cleanup_progress: false` | Controls automatic deletion of progress/status bubbles on platforms whose adapter supports deletion. | Tool progress or heartbeat messages were sent earlier in the turn. | `false` leaves those messages in place instead of auto-deleting them. |
@@ -134,14 +141,15 @@ display:
       tool_progress: off
       show_reasoning: false
       streaming: false
-      interim_assistant_messages: false
+      interim_assistant_messages: true
       long_running_notifications: false
       busy_ack_detail: false
       cleanup_progress: false
 ```
 
-`interim_assistant_messages` is explicitly `false` in the ClawChat override
-block. The remaining ClawChat platform display settings are `off` or `false`.
+`interim_assistant_messages` is explicitly `true` in the ClawChat override
+block because activation defaults to the `normal` output visibility preset. The
+remaining ClawChat platform display settings are `off` or `false`.
 On Hermes versions that do not yet implement every key, unknown keys remain
 visible in `config.yaml` for future compatibility and operator editing.
 
@@ -235,6 +243,7 @@ platforms:
       user_id: usr_...
       agent_id: agt_...
       owner_user_id: usr_...
+      output_visibility: normal
       runtime_status_messages: false
 display:
   busy_input_mode: queue
@@ -246,7 +255,7 @@ display:
       tool_progress: off
       show_reasoning: false
       streaming: false
-      interim_assistant_messages: false
+      interim_assistant_messages: true
       long_running_notifications: false
       busy_ack_detail: false
       cleanup_progress: false

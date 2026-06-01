@@ -7,6 +7,7 @@ from contextlib import redirect_stderr
 
 from clawchat_gateway.activate import activate_and_maybe_restart
 from clawchat_gateway.api_client import DEFAULT_BASE_URL
+from clawchat_gateway.output_visibility import apply_output_visibility
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -27,6 +28,13 @@ def _parser() -> argparse.ArgumentParser:
 
 def _usage(message: str | None = None) -> str:
     lines = ["usage: /clawchat-activate CODE [--base-url URL] [--no-restart]"]
+    if message:
+        lines.append(message)
+    return "\n".join(lines)
+
+
+def _output_usage(message: str | None = None) -> str:
+    lines = ["usage: /clawchat-output minimal|normal|full"]
     if message:
         lines.append(message)
     return "\n".join(lines)
@@ -67,3 +75,24 @@ async def handle_clawchat_activate_command(raw_args: str) -> str:
             f"{payload.get('restart_delay_seconds')}s"
         )
     return "\n".join(lines)
+
+
+async def handle_clawchat_output_command(raw_args: str) -> str:
+    try:
+        argv = shlex.split(raw_args or "")
+    except ValueError as exc:
+        return _output_usage(str(exc))
+    if len(argv) != 1:
+        return _output_usage("expected exactly one visibility mode")
+
+    try:
+        result = apply_output_visibility(argv[0])
+    except ValueError as exc:
+        return _output_usage(str(exc))
+
+    mode = result["mode"]
+    runtime_status = "on" if result["runtime_status_messages"] else "off"
+    return (
+        f"clawchat: output visibility set to {mode}\n"
+        f"clawchat: runtime status messages {runtime_status}"
+    )

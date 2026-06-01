@@ -87,10 +87,10 @@ def test_pre_api_request_writes_grouped_injections_and_full_llm_input(
     llm_context_hooks.clear_pending_injection_parts()
     injection_parts = [
         {
-            "id": "message-blocks",
-            "group": "message",
+            "id": "group-message-metadata",
+            "group": "message_metadata",
             "target": "system.channel_prompt",
-            "content": "## ClawChat Message Blocks\n[message]\ntext: hello",
+            "content": "## ClawChat Group Message Metadata\nmessage_count: 1",
         }
     ]
     llm_context_hooks.remember_injection_parts(
@@ -102,7 +102,7 @@ def test_pre_api_request_writes_grouped_injections_and_full_llm_input(
     request_messages = [
         {
             "role": "system",
-            "content": "base\n\n## ClawChat Message Blocks\n[message]\ntext: hello",
+            "content": "base\n\n## ClawChat Group Message Metadata\nmessage_count: 1",
         },
         {"role": "user", "content": "hello"},
     ]
@@ -123,8 +123,8 @@ def test_pre_api_request_writes_grouped_injections_and_full_llm_input(
     assert body["input"]["fullLlmInput"]["messages"] == request_messages
     assert body["input"]["placementChecks"] == [
         {
-            "partId": "message-blocks",
-            "group": "message",
+            "partId": "group-message-metadata",
+            "group": "message_metadata",
             "target": "system.channel_prompt",
             "found": True,
             "messageIndex": 0,
@@ -309,6 +309,7 @@ def test_persist_activation_writes_clawchat_display_defaults_without_top_level_s
     assert "reply_mode" not in extra
     assert "show_tools_output" not in extra
     assert "show_think_output" not in extra
+    assert extra["output_visibility"] == "normal"
     assert extra["runtime_status_messages"] is False
     assert "streaming" not in saved_config
     assert saved_config["agent"]["gateway_notify_interval"] == 0
@@ -321,7 +322,7 @@ def test_persist_activation_writes_clawchat_display_defaults_without_top_level_s
         "tool_progress": "off",
         "show_reasoning": False,
         "streaming": False,
-        "interim_assistant_messages": False,
+        "interim_assistant_messages": True,
         "long_running_notifications": False,
         "busy_ack_detail": False,
         "cleanup_progress": False,
@@ -379,12 +380,13 @@ def test_persist_activation_overwrites_global_display_and_preserves_platform_val
     assert saved_config["display"]["tool_progress_command"] is False
     assert saved_config["agent"]["gateway_notify_interval"] == 0
     assert saved_config["agent"]["gateway_timeout_warning"] == 0
+    assert saved_config["platforms"]["clawchat"]["extra"]["output_visibility"] == "full"
     assert saved_config["platforms"]["clawchat"]["extra"]["runtime_status_messages"] is True
     assert saved_config["display"]["platforms"]["clawchat"] == {
         "tool_progress": "all",
         "show_reasoning": False,
         "streaming": False,
-        "interim_assistant_messages": False,
+        "interim_assistant_messages": True,
         "long_running_notifications": False,
         "busy_ack_detail": False,
         "cleanup_progress": False,
@@ -787,6 +789,137 @@ def test_group_prompt_injects_agent_user_id_from_config_when_metadata_missing(mo
     assert "agent_user_id: usr_agent" in prompt
 
 
+def test_direct_prompt_injects_sender_metadata_without_message_text(monkeypatch):
+    adapter = _adapter(monkeypatch, {"owner_user_id": "usr_owner"})
+    adapter._read_memory_metadata = lambda target_type, target_id: {
+        ("user", "usr_sender"): {
+            "nickname": "Peer",
+            "avatar_url": "https://cdn.example/peer.png",
+            "bio": "Peer bio",
+            "profile_type": "agent",
+        }
+    }.get((target_type, target_id), {})
+
+    prompt = adapter._compose_channel_prompt(
+        InboundMessage(
+            chat_id="cnv_direct",
+            chat_type="direct",
+            sender_id="usr_sender",
+            sender_name="Peer",
+            text="private body text",
+            raw_message={},
+        )
+    )
+
+    assert "## ClawChat Turn Metadata\nchat_type: direct\nchat_id: cnv_direct" in prompt
+    assert "## ClawChat Peer Profile" in prompt
+    assert "nickname: Peer" in prompt
+    assert "## ClawChat Sender Metadata" in prompt
+    assert "sender_id: usr_sender" in prompt
+    assert "sender_name: Peer" in prompt
+    assert "sender_profile_type: agent" in prompt
+    assert "sender_is_agent_owner: false" in prompt
+    assert "private body text" not in prompt
+    assert "## ClawChat Message Blocks" not in prompt
+    assert "[message]" not in prompt
+
+
+def test_owner_direct_prompt_injects_sender_metadata_without_peer_profile(monkeypatch):
+    adapter = _adapter(monkeypatch, {"owner_user_id": "usr_owner"})
+    adapter._read_memory_metadata = lambda target_type, target_id: {
+        ("owner", "owner"): {"agent_owner_nickname": "Owner"}
+    }.get((target_type, target_id), {})
+
+    prompt = adapter._compose_channel_prompt(
+        InboundMessage(
+            chat_id="cnv_owner",
+            chat_type="direct",
+            sender_id="usr_owner",
+            sender_name="Owner",
+            text="owner body text",
+            raw_message={},
+        )
+    )
+
+    assert "## ClawChat Sender Metadata" in prompt
+    assert "sender_id: usr_owner" in prompt
+    assert "sender_name: Owner" in prompt
+    assert "sender_profile_type: user" in prompt
+    assert "sender_is_agent_owner: true" in prompt
+    assert "## ClawChat Peer Profile" not in prompt
+    assert "owner body text" not in prompt
+
+
+def test_group_prompt_injects_group_message_metadata_without_message_text(monkeypatch):
+    adapter = _adapter(monkeypatch, {"owner_user_id": "usr_owner"})
+    adapter._read_memory_metadata = lambda target_type, target_id: {
+        ("group", "cnv_group"): {
+            "group_title": "Ops",
+            "group_description": "Coordinate work.",
+            "group_owner_id": "usr_owner",
+        },
+        ("owner", "owner"): {"agent_owner_id": "usr_owner"},
+        ("user", "usr_alice"): {"nickname": "Alice", "profile_type": "user"},
+        ("user", "usr_bob"): {"nickname": "Bob", "profile_type": "agent"},
+    }.get((target_type, target_id), {})
+    batch = [
+        _group_envelope(
+            sender_id="usr_alice",
+            sender_name="Alice",
+            text="first group body",
+            context_mentions=[],
+        ),
+        _group_envelope(
+            sender_id="usr_bob",
+            sender_name="Bob",
+            text="@Hermes second group body",
+            context_mentions=[
+                {"kind": "mention", "user_id": "usr_agent", "display": "Hermes"}
+            ],
+        ),
+    ]
+    inbound = InboundMessage(
+        chat_id="cnv_group",
+        chat_type="group",
+        sender_id="usr_bob",
+        sender_name="Bob",
+        text=format_coalesced_group_text(
+            [
+                parse_inbound_message(frame, adapter._clawchat_config)
+                for frame in batch
+            ],
+            idle_seconds=10,
+            max_wait_seconds=30,
+        ),
+        raw_message={"clawchat_group_batch": True, "messages": batch},
+        was_mentioned=True,
+        mentioned_user_ids=["usr_agent"],
+        mentioned_users=[{"id": "usr_agent", "display": "Hermes"}],
+    )
+
+    prompt = adapter._compose_channel_prompt(inbound)
+
+    assert "## ClawChat Group Profile" in prompt
+    assert "group_title: Ops" in prompt
+    assert "## ClawChat Group Message Metadata" in prompt
+    assert "message_count: 2" in prompt
+    assert "[message 1]" in prompt
+    assert "sender_id: usr_alice" in prompt
+    assert "sender_name: Alice" in prompt
+    assert "sender_profile_type: user" in prompt
+    assert "sender_is_agent_owner: false" in prompt
+    assert "sender_is_group_owner: false" in prompt
+    assert "mention_routing: no_structured_mentions" in prompt
+    assert "[message 2]" in prompt
+    assert "sender_id: usr_bob" in prompt
+    assert "mentioned_users: usr_agent(Hermes)" in prompt
+    assert "mention_routing: addressed_to_current_agent" in prompt
+    assert "first group body" not in prompt
+    assert "second group body" not in prompt
+    assert "mentions:" not in prompt
+    assert "[message]\n" not in prompt
+
+
 def test_group_prompt_falls_back_to_legacy_agent_id_metadata(monkeypatch):
     adapter = _adapter(monkeypatch)
     adapter._read_memory_metadata = lambda target_type, target_id: {
@@ -995,6 +1128,36 @@ async def test_runtime_status_messages_can_be_enabled(monkeypatch):
     assert frame["payload"]["message"]["body"]["fragments"] == [
         {"kind": "text", "text": "⚠️ Empty response from model — retrying (1/3)"}
     ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_status_messages_follow_output_visibility_config(monkeypatch):
+    adapter = _adapter(monkeypatch, {"runtime_status_messages": False})
+    hermes_cli = ModuleType("hermes_cli")
+    hermes_config = ModuleType("hermes_cli.config")
+    hermes_config.read_raw_config = lambda: {
+        "platforms": {
+            "clawchat": {
+                "extra": {
+                    "output_visibility": "full",
+                    "runtime_status_messages": True,
+                }
+            }
+        }
+    }
+    hermes_config.save_config = lambda _config: None
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", hermes_config)
+
+    result = await adapter.send_or_update_status(
+        "chat-1",
+        "lifecycle",
+        "⚠️ Empty response from model — retrying (1/3)",
+        metadata={"chat_type": "direct"},
+    )
+
+    assert result.success is True
+    assert _sent_events(adapter) == ["message.reply"]
 
 
 @pytest.mark.asyncio
@@ -1797,21 +1960,32 @@ def test_group_message_prompt_separates_sender_and_mention_display() -> None:
         max_wait_seconds=30,
     )
 
-    assert "sender:\n  user_id: usr_sender\n  display: Alice\n  profile_type: user" in text
-    assert "mentions:\n  - user_id: usr_mentioned\n    display: Alice" in text
+    assert text == "ClawChat group messages:\n[message 1] Alice: @Alice 请看"
+    assert "user_id: usr_sender" not in text
+    assert "mentions:" not in text
     assert "sender_name:" not in text
     assert "mentioned_users:" not in text
 
 
-def _group_envelope(*, fragments, context_mentions):
+def _group_envelope(
+    *,
+    fragments=None,
+    context_mentions,
+    sender_id="usr_sender",
+    sender_name="Sender",
+    text=None,
+    message_id="msg_123",
+):
+    if fragments is None:
+        fragments = [{"kind": "text", "text": text or ""}]
     return {
         "version": "2",
         "event": "message.send",
         "chat_id": "cnv_group",
         "chat_type": "group",
-        "sender": {"id": "usr_sender", "nick_name": "Sender"},
+        "sender": {"id": sender_id, "nick_name": sender_name},
         "payload": {
-            "message_id": "msg_123",
+            "message_id": message_id,
             "message": {
                 "body": {"fragments": fragments},
                 "context": {"mentions": context_mentions, "reply": None},

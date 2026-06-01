@@ -21,6 +21,10 @@ except Exception as exc:
     ) from exc
 
 from clawchat_gateway.api_client import DEFAULT_BASE_URL, DEFAULT_WEBSOCKET_URL, ClawChatApiClient
+from clawchat_gateway.output_visibility import (
+    normalize_output_visibility,
+    runtime_status_messages_for_visibility,
+)
 from clawchat_gateway.restart import schedule_gateway_restart
 from clawchat_gateway.storage import get_clawchat_store
 
@@ -42,7 +46,7 @@ CLAWCHAT_DISPLAY_DEFAULTS = {
     "tool_progress": "off",
     "show_reasoning": False,
     "streaming": False,
-    "interim_assistant_messages": False,
+    "interim_assistant_messages": True,
     "long_running_notifications": False,
     "busy_ack_detail": False,
     "cleanup_progress": False,
@@ -103,6 +107,34 @@ def _ensure_clawchat_agent_defaults(config: dict[str, Any]) -> None:
         agent[key] = value
 
 
+def _read_optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return None
+
+
+def _ensure_output_visibility_defaults(extra: dict[str, Any]) -> None:
+    raw_visibility = extra.get("output_visibility")
+    try:
+        mode = normalize_output_visibility(raw_visibility, default="")
+    except ValueError:
+        mode = ""
+    if not mode:
+        mode = (
+            "full"
+            if _read_optional_bool(extra.get("runtime_status_messages")) is True
+            else "normal"
+        )
+    extra["output_visibility"] = mode
+    extra["runtime_status_messages"] = runtime_status_messages_for_visibility(mode)
+
+
 def persist_activation(
     *,
     access_token: str,
@@ -128,7 +160,7 @@ def persist_activation(
     else:
         extra.pop("agent_id", None)
     extra["owner_user_id"] = owner_user_id
-    extra.setdefault("runtime_status_messages", False)
+    _ensure_output_visibility_defaults(extra)
     _ensure_clawchat_agent_defaults(config)
     _ensure_clawchat_display_defaults(config)
     env_values = {

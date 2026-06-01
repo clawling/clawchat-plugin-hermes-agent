@@ -4,62 +4,11 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
-from datetime import UTC, datetime
 from typing import Any
 
 from clawchat_gateway.inbound import InboundMessage
 
 logger = logging.getLogger("clawchat_gateway.group_message_coalescer")
-
-
-def _message_time(message: InboundMessage) -> str:
-    raw = message.raw_message if isinstance(message.raw_message, dict) else {}
-    emitted_at = raw.get("emitted_at")
-    if isinstance(emitted_at, (int, float)):
-        try:
-            return (
-                datetime.fromtimestamp(emitted_at / 1000, UTC)
-                .isoformat(timespec="milliseconds")
-                .replace("+00:00", "Z")
-            )
-        except (OverflowError, OSError, ValueError):
-            pass
-    return "unknown-time"
-
-
-def _message_relation(message: InboundMessage) -> str:
-    return message.sender_relation or "peer_user"
-
-
-def _message_profile_type(message: InboundMessage) -> str:
-    if message.sender_profile_type:
-        return message.sender_profile_type
-    if _message_relation(message) in {"self_agent", "peer_agent"}:
-        return "agent"
-    return "user"
-
-
-def _message_is_agent_owner(message: InboundMessage) -> str:
-    return "true" if _message_relation(message) == "owner" else "false"
-
-
-def _message_is_group_owner(message: InboundMessage) -> str:
-    return "true" if message.sender_is_group_owner else "false"
-
-
-def _append_message_mentions(lines: list[str], message: InboundMessage) -> None:
-    mentions = message.mentioned_users or [{"id": user_id} for user_id in message.mentioned_user_ids]
-    if not mentions:
-        lines.append("mentions: -")
-        return
-    lines.append("mentions:")
-    for mention in mentions:
-        user_id = mention.get("id")
-        if not user_id:
-            continue
-        display = mention.get("display") or "<missing>"
-        lines.append(f"  - user_id: {_message_field(user_id)}")
-        lines.append(f"    display: {_message_field(display)}")
 
 
 def _message_field(value: str) -> str:
@@ -76,25 +25,16 @@ def format_coalesced_group_text(
     idle_seconds: float,
     max_wait_seconds: float,
 ) -> str:
-    idle = int(idle_seconds)
-    max_wait = int(max_wait_seconds)
-    header = f"ClawChat group batch ({len(messages)} {'message' if len(messages) == 1 else 'messages'}, {idle}s idle, {max_wait}s max):"
-    lines = [header]
-    for message in messages:
+    _ = idle_seconds, max_wait_seconds
+    lines = ["ClawChat group messages:"]
+    for index, message in enumerate(messages, start=1):
         sender_name = message.sender_name or message.sender_id
-        if len(lines) > 1:
-            lines.append("")
-        lines.append("[message]")
-        lines.append("sender:")
-        lines.append(f"  user_id: {_message_field(message.sender_id)}")
-        lines.append(f"  display: {_message_field(sender_name)}")
-        lines.append(f"  profile_type: {_message_field(_message_profile_type(message))}")
-        lines.append(f"  is_agent_owner: {_message_is_agent_owner(message)}")
-        lines.append(f"  is_group_owner: {_message_is_group_owner(message)}")
-        lines.append(f"mentions_current_agent: {'true' if message.was_mentioned else 'false'}")
-        _append_message_mentions(lines, message)
-        lines.append("text:")
-        lines.append(_message_body(message))
+        label = f"[message {index}] {_message_field(sender_name)}:"
+        body = _message_body(message)
+        if "\n" in body:
+            lines.append(f"{label}\n{body}")
+        else:
+            lines.append(f"{label} {body}")
     return "\n".join(lines)
 
 
