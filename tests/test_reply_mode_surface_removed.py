@@ -1039,6 +1039,30 @@ async def test_empty_response_notice_is_suppressed_by_default(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_empty_response_notice_is_suppressed_on_run_complete(monkeypatch):
+    adapter = _adapter(monkeypatch)
+    result = await adapter.send(
+        "chat-1",
+        "draft ▉",
+        metadata={"notify": True, "chat_type": "direct"},
+    )
+
+    final_result = await adapter.on_run_complete(
+        "chat-1",
+        (
+            "⚠️ The model returned no response after processing tool results. "
+            "This can happen with some models — try again or rephrase your question."
+        ),
+        message_id=result.message_id,
+    )
+
+    assert final_result.success is True
+    assert _sent_events(adapter) == []
+    assert result.message_id not in adapter._active_runs_by_id
+    assert result.message_id in adapter._completed_run_ids
+
+
+@pytest.mark.asyncio
 async def test_group_text_that_resembles_tool_progress_is_not_filtered_by_adapter(monkeypatch):
     adapter = _adapter(monkeypatch)
 

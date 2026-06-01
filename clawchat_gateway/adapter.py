@@ -2289,6 +2289,17 @@ class ClawChatAdapter(BasePlatformAdapter):
             logger.info("clawchat silent response final suppressed chat_id=%s message_id=%s", chat_id, run.message_id)
             return SendResult(success=True, message_id=run.message_id)
         final_content = visible_final_text if visible_final_text else run.last_text
+        if not self._has_outbound_media(run.metadata, run.kwargs) and self._should_suppress_runtime_status_message(
+            final_content
+        ):
+            self._discard_run(run)
+            self._remember_completed_run(run.message_id)
+            logger.info(
+                "clawchat runtime status final suppressed chat_id=%s message_id=%s",
+                chat_id,
+                run.message_id,
+            )
+            return SendResult(success=True, message_id=run.message_id)
         frame = build_message_reply_event(
             chat_id=run.chat_id,
             chat_type=run.chat_type,
