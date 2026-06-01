@@ -187,6 +187,10 @@ _STREAMING_CURSOR_RE = re.compile(r"\s*[▀-▟]+\s*\Z")
 _APPROVE_COMMAND_RE = re.compile(r"(?<!\w)/approve(?!\w)", re.IGNORECASE)
 _DENY_COMMAND_RE = re.compile(r"(?<!\w)/(?:deny|reject)(?!\w)", re.IGNORECASE)
 _HERMES_STREAM_CURSOR_RE = re.compile(r"[ \t]*▉\Z")
+_EMPTY_RESPONSE_FINAL_PREFIXES = (
+    "⚠️ The model returned no response after processing tool results.",
+    "The model returned no response after processing tool results.",
+)
 _CLAWCHAT_ACTIVATION_BOOTSTRAP_PROMPT = (
     "ClawChat activation bootstrap: You are now connected to this ClawChat direct conversation.\n\n"
     "Please do both:\n"
@@ -1961,6 +1965,23 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
         return SendResult(success=True, message_id=message_id)
 
+    async def send_or_update_status(
+        self,
+        chat_id: str,
+        status_key: str,
+        content: str,
+        metadata: Any = None,
+    ) -> SendResult:
+        if not self._clawchat_config.runtime_status_messages:
+            logger.info(
+                "clawchat runtime status suppressed chat_id=%s status_key=%s text_len=%d",
+                chat_id,
+                status_key,
+                len(content or ""),
+            )
+            return SendResult(success=True)
+        return await self.send(chat_id, content, metadata=metadata)
+
     async def send(
         self,
         chat_id: str,
@@ -1972,6 +1993,9 @@ class ClawChatAdapter(BasePlatformAdapter):
         chat_type = self._resolve_chat_type(chat_id, metadata, kwargs)
         is_group = chat_type == "group"
         if self._consume_terminal_send(chat_id, phase="send"):
+            return SendResult(success=True)
+        if self._should_suppress_empty_response_notice(content or ""):
+            logger.info("clawchat empty response notice suppressed chat_id=%s", chat_id)
             return SendResult(success=True)
         if is_group:
             owner_fragment = self._build_interaction_fragment(
@@ -2700,6 +2724,12 @@ class ClawChatAdapter(BasePlatformAdapter):
         filtered = _HERMES_STREAM_CURSOR_RE.sub("", filtered)
         filtered = _STREAMING_CURSOR_RE.sub("", filtered)
         return filtered.strip()
+
+    def _should_suppress_empty_response_notice(self, content: str) -> bool:
+        if self._clawchat_config.runtime_status_messages:
+            return False
+        text = (content or "").strip()
+        return any(text.startswith(prefix) for prefix in _EMPTY_RESPONSE_FINAL_PREFIXES)
 
     def _is_noop_response_text(self, content: str) -> bool:
         text = content.strip()

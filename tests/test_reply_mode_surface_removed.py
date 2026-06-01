@@ -177,6 +177,25 @@ def test_platform_config_exposes_no_reply_mode_or_stream_tuning(monkeypatch):
     assert not hasattr(config, "show_think_output")
     assert config.token == ""
     assert config.refresh_token == ""
+    assert config.runtime_status_messages is False
+
+
+def test_platform_config_can_enable_runtime_status_messages(monkeypatch):
+    monkeypatch.delenv("CLAWCHAT_TOKEN", raising=False)
+    monkeypatch.delenv("CLAWCHAT_REFRESH_TOKEN", raising=False)
+    monkeypatch.setattr("clawchat_gateway.config._read_hermes_env_value", lambda name: "")
+    monkeypatch.setattr("clawchat_gateway.config._read_env_file_value", lambda name: "")
+
+    config = ClawChatConfig.from_platform_config(
+        SimpleNamespace(
+            extra={
+                "websocket_url": "wss://example.test/ws",
+                "runtime_status_messages": True,
+            }
+        )
+    )
+
+    assert config.runtime_status_messages is True
 
 
 @pytest.mark.asyncio
@@ -290,6 +309,7 @@ def test_persist_activation_writes_clawchat_display_defaults_without_top_level_s
     assert "reply_mode" not in extra
     assert "show_tools_output" not in extra
     assert "show_think_output" not in extra
+    assert extra["runtime_status_messages"] is False
     assert "streaming" not in saved_config
     assert saved_config["display"]["busy_input_mode"] == "queue"
     assert saved_config["display"]["busy_ack_enabled"] is False
@@ -317,6 +337,13 @@ def test_persist_activation_overwrites_global_display_and_preserves_platform_val
         monkeypatch,
         tmp_path,
         {
+            "platforms": {
+                "clawchat": {
+                    "extra": {
+                        "runtime_status_messages": True,
+                    }
+                }
+            },
             "display": {
                 "busy_input_mode": "interrupt",
                 "busy_ack_enabled": True,
@@ -344,6 +371,7 @@ def test_persist_activation_overwrites_global_display_and_preserves_platform_val
     assert saved_config["display"]["busy_ack_enabled"] is False
     assert saved_config["display"]["background_process_notifications"] == "off"
     assert saved_config["display"]["tool_progress_command"] is False
+    assert saved_config["platforms"]["clawchat"]["extra"]["runtime_status_messages"] is True
     assert saved_config["display"]["platforms"]["clawchat"] == {
         "tool_progress": "all",
         "show_reasoning": False,
@@ -864,6 +892,72 @@ async def test_non_stream_send_sends_complete_message_immediately(monkeypatch):
     assert frame["payload"]["message"]["body"]["fragments"] == [
         {"kind": "text", "text": "final response"}
     ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_status_messages_are_suppressed_by_default(monkeypatch):
+    adapter = _adapter(monkeypatch)
+
+    result = await adapter.send_or_update_status(
+        "chat-1",
+        "lifecycle",
+        "⚠️ Empty response from model — retrying (1/3)",
+        metadata={"chat_type": "direct"},
+    )
+
+    assert result.success is True
+    assert _sent_events(adapter) == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_status_messages_can_be_enabled(monkeypatch):
+    adapter = _adapter(monkeypatch, {"runtime_status_messages": True})
+
+    result = await adapter.send_or_update_status(
+        "chat-1",
+        "lifecycle",
+        "⚠️ Empty response from model — retrying (1/3)",
+        metadata={"chat_type": "direct"},
+    )
+
+    assert result.success is True
+    assert _sent_events(adapter) == ["message.reply"]
+    frame = adapter._connection.frames[0][0]
+    assert frame["payload"]["message"]["body"]["fragments"] == [
+        {"kind": "text", "text": "⚠️ Empty response from model — retrying (1/3)"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_configured_progress_messages_are_not_suppressed_as_runtime_status(monkeypatch):
+    adapter = _adapter(monkeypatch)
+
+    result = await adapter.send(
+        "chat-1",
+        "⏳ Working — 3 min — iteration 9/90, terminal",
+        metadata={"chat_type": "direct"},
+    )
+
+    assert result.success is True
+    assert _sent_events(adapter) == ["message.reply"]
+    frame = adapter._connection.frames[0][0]
+    assert frame["payload"]["message"]["body"]["fragments"] == [
+        {"kind": "text", "text": "⏳ Working — 3 min — iteration 9/90, terminal"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_empty_response_notice_is_suppressed_by_default(monkeypatch):
+    adapter = _adapter(monkeypatch)
+
+    result = await adapter.send(
+        "chat-1",
+        "⚠️ The model returned no response after processing tool results. Try again.",
+        metadata={"chat_type": "direct"},
+    )
+
+    assert result.success is True
+    assert _sent_events(adapter) == []
 
 
 @pytest.mark.asyncio

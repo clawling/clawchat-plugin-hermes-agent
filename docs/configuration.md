@@ -37,6 +37,14 @@ None)` and `extra.pop("refresh_token", None)`).
 | Env var                                | `extra.*` key                  | Default        |
 |----------------------------------------|--------------------------------|----------------|
 | —                                      | `enable_rich_interactions`     | `false`        |
+| —                                      | `runtime_status_messages`      | `false`        |
+
+`runtime_status_messages` controls Hermes model/runtime status callbacks that
+do not have a dedicated Hermes display key, for example provider retry,
+fallback, compression, or empty-response notices. It does not control tool
+progress, command previews, long-running heartbeats, interim assistant
+messages, approval prompts, or background-process notifications; use the
+Hermes display settings below for those categories.
 
 ## Hermes display settings for ClawChat
 
@@ -213,6 +221,7 @@ platforms:
       user_id: usr_...
       agent_id: agt_...
       owner_user_id: usr_...
+      runtime_status_messages: false
 display:
   busy_input_mode: queue
   busy_ack_enabled: false

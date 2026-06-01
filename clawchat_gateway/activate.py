@@ -114,6 +114,7 @@ def persist_activation(
     else:
         extra.pop("agent_id", None)
     extra["owner_user_id"] = owner_user_id
+    extra.setdefault("runtime_status_messages", False)
     _ensure_clawchat_display_defaults(config)
     env_values = {
         "CLAWCHAT_TOKEN": access_token,
