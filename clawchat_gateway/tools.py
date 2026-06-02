@@ -33,6 +33,14 @@ from clawchat_gateway.terminal_send import send_clawchat_mention_message
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
+# Owner-approval gate business codes returned by member-backend for sensitive
+# agent operations. Both are terminal for this call: the agent must NOT retry.
+# - PENDING_APPROVAL: the op needs owner approval; the result arrives later as a
+#   normal chat message, not as the return value of this call.
+# - POLICY_FORBIDDEN: the op is blocked by owner policy.
+CODE_PENDING_APPROVAL = 21001
+CODE_POLICY_FORBIDDEN = 21003
+
 
 def _config_error(message: str) -> dict[str, Any]:
     return {"error": "config", "message": message}
@@ -61,10 +69,64 @@ def _api_error(err: ClawChatApiError) -> dict[str, Any]:
     if err.code is not None:
         meta["code"] = err.code
 
+    if err.code in (CODE_PENDING_APPROVAL, CODE_POLICY_FORBIDDEN):
+        return _permission_gate_result(err, meta)
+
     out: dict[str, Any] = {"error": err.kind, "message": err.message}
     if meta:
         out["meta"] = meta
     return out
+
+
+def _permission_gate_result(err: ClawChatApiError, meta: dict[str, Any]) -> dict[str, Any]:
+    """Map an owner-approval gate code into a clear, non-retryable tool result.
+
+    The operation did NOT fail in a transient/transport sense; retrying is wrong.
+    member-backend returns the real outcome later as a normal chat message, so the
+    agent should stop and wait rather than re-issue the call.
+    """
+    request_id = _extract_request_id(err)
+    if err.code == CODE_PENDING_APPROVAL:
+        message = (
+            "This operation requires the owner's approval and has been submitted for review"
+            f"{f' (request_id={request_id})' if request_id else ''}. "
+            "It has NOT failed. Do not retry — the result will arrive later as a normal "
+            "chat message; wait for it instead of calling this tool again."
+        )
+        status = "pending"
+    else:  # CODE_POLICY_FORBIDDEN
+        message = (
+            "This operation is blocked by the owner's policy (policy_forbidden) and was not "
+            "performed. Do not retry — the owner must change the policy before it can succeed."
+        )
+        status = "forbidden"
+
+    result: dict[str, Any] = {
+        "error": "permission",
+        "message": message,
+        "retryable": False,
+        "status": status,
+    }
+    if request_id:
+        result["request_id"] = request_id
+    if meta:
+        result["meta"] = meta
+    return result
+
+
+def _extract_request_id(err: ClawChatApiError) -> str | None:
+    """Best-effort pull of request_id from the error payload, if one is carried.
+
+    ``ClawChatApiError`` does not currently expose the envelope ``data`` object, so
+    this is defensive: it reads a ``data``/``payload`` attribute only when present.
+    """
+    for attr in ("data", "payload"):
+        data = getattr(err, attr, None)
+        if isinstance(data, dict):
+            value = data.get("request_id")
+            if isinstance(value, str) and value:
+                return value
+    return None
 
 
 def _unknown_error(exc: BaseException) -> dict[str, Any]:
