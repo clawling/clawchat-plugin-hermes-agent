@@ -13,7 +13,7 @@ coroutine; pick whichever matches the host.
 - Registered through `ctx.register_command("clawchat-activate", ...)`
   (`__init__._register_commands`).
 - Handler: `clawchat_gateway.commands.handle_clawchat_activate_command`.
-- Schedules a detached gateway restart only when `--restart` is present.
+- Schedules a detached gateway restart by default. Use `--no-restart` to skip it.
 
 ## Top-level `hermes clawchat …`
 
@@ -55,8 +55,8 @@ hermes gateway setup
 | Flag           | Default                              | Behavior                                                                                  |
 |----------------|--------------------------------------|-------------------------------------------------------------------------------------------|
 | `CODE`         | required                             | Single-use activation code. Use exactly as provided; do not normalize, lowercase, or retry. |
-| `--restart`    | absent                               | Schedule a detached Hermes gateway restart after activation. |
-| `--no-restart` | absent                               | Compatibility flag that prevents restart scheduling when `--restart` is also present. |
+| `--restart`    | absent                               | Compatibility flag; activation schedules a detached Hermes gateway restart by default. |
+| `--no-restart` | absent                               | Skip the detached Hermes gateway restart after activation. |
 
 ## Exit codes
 

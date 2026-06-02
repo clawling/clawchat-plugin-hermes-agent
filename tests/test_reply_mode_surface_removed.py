@@ -126,14 +126,18 @@ async def test_activation_credential_watch_closes_ready_ws_on_token_change(monke
     )
 
 
-def test_clawchat_cli_activate_defaults_without_restart(monkeypatch, capsys):
+def test_clawchat_cli_activate_defaults_with_restart(monkeypatch, capsys):
     from clawchat_gateway import cli
 
     calls = []
 
     async def run_activate(code, *, base_url, restart):
         calls.append({"code": code, "base_url": base_url, "restart": restart})
-        return {"user_id": "user"}
+        return {
+            "user_id": "user",
+            "restart_scheduled": restart,
+            "restart_delay_seconds": 2,
+        }
 
     monkeypatch.setattr(cli, "activate_and_maybe_restart", run_activate)
     parser = argparse.ArgumentParser()
@@ -145,12 +149,12 @@ def test_clawchat_cli_activate_defaults_without_restart(monkeypatch, capsys):
         {
             "code": "CODE",
             "base_url": "https://app.clawling.com",
-            "restart": False,
+            "restart": True,
         }
     ]
     output = capsys.readouterr().out
     assert "activation complete" in output
-    assert "restart scheduled" not in output
+    assert "restart scheduled in 2s" in output
 
 
 def test_clawchat_cli_activate_rejects_base_url(capsys):
@@ -166,7 +170,7 @@ def test_clawchat_cli_activate_rejects_base_url(capsys):
 
 
 @pytest.mark.asyncio
-async def test_slash_activate_restart_is_explicit(monkeypatch, tmp_path):
+async def test_slash_activate_defaults_with_restart(monkeypatch, tmp_path):
     _load_activate(monkeypatch, tmp_path, {})
     from clawchat_gateway import commands
     importlib.reload(commands)
@@ -183,7 +187,7 @@ async def test_slash_activate_restart_is_explicit(monkeypatch, tmp_path):
 
     monkeypatch.setattr(commands, "activate_and_maybe_restart", run_activate)
 
-    output = await commands.handle_clawchat_activate_command("CODE --restart")
+    output = await commands.handle_clawchat_activate_command("CODE")
 
     assert calls == [
         {

@@ -57,8 +57,8 @@ docker exec hermes sh -lc \
 
 | Flag | Effect |
 |---|---|
-| `--restart` | Schedule a detached Hermes gateway restart after the code is exchanged. |
-| `--no-restart` | Compatibility flag that prevents restart scheduling when `--restart` is also present. |
+| `--restart` | Compatibility flag; activation schedules a detached Hermes gateway restart by default. |
+| `--no-restart` | Skip the detached Hermes gateway restart after activation. |
 
 Successful activation prints `clawchat: activation complete for <user_id>` and
 exits 0. Treat any non-zero exit as a hard failure. Activation codes are
@@ -119,13 +119,13 @@ The WebSocket URL is derived from `base_url` during activation and written to
 ## Restart Or Reload
 
 CLI activation and in-session slash activation schedule a detached Hermes
-gateway restart only when `--restart` is present.
+gateway restart by default. Use `--no-restart` to skip that restart.
 
 `hermes gateway setup` exchanges the code without scheduling that detached
 restart because the surrounding setup flow manages start/restart behavior.
 
-`--no-restart` is retained as a compatibility flag for command lines that also
-include `--restart`.
+`--restart` is retained as a compatibility flag for command lines that already
+include it.
 
 ## Activation Bootstrap
 

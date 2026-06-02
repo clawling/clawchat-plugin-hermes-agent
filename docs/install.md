@@ -128,8 +128,8 @@ docker exec hermes sh -lc \
 
 | Flag           | Effect                                                  |
 |----------------|---------------------------------------------------------|
-| `--restart`    | Schedule a detached Hermes gateway restart after the code is exchanged. |
-| `--no-restart` | Compatibility flag that prevents restart scheduling when `--restart` is also present. |
+| `--restart`    | Compatibility flag; activation schedules a detached Hermes gateway restart by default. |
+| `--no-restart` | Skip the detached Hermes gateway restart after activation. |
 
 ### What gets written
 

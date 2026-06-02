@@ -20,12 +20,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--restart",
         action="store_true",
-        help="Schedule a detached Hermes gateway restart after activation.",
+        help="Compatibility flag; activation restarts by default.",
     )
     parser.add_argument(
         "--no-restart",
         action="store_true",
-        help="Compatibility flag; activation does not restart by default.",
+        help="Skip the detached Hermes gateway restart after activation.",
     )
     return parser
 
@@ -70,7 +70,7 @@ async def handle_clawchat_activate_command(raw_args: str) -> str:
     payload = await activate_and_maybe_restart(
         args.code,
         base_url=DEFAULT_BASE_URL,
-        restart=bool(args.restart and not args.no_restart),
+        restart=not args.no_restart,
     )
     lines = [f"clawchat: activation complete for {payload['user_id']}"]
     if payload.get("restart_scheduled"):

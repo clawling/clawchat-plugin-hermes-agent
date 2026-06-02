@@ -19,12 +19,12 @@ def setup_clawchat_cli(parser: argparse.ArgumentParser) -> None:
     activate_parser.add_argument(
         "--restart",
         action="store_true",
-        help="Schedule a detached Hermes gateway restart after activation.",
+        help="Compatibility flag; activation restarts by default.",
     )
     activate_parser.add_argument(
         "--no-restart",
         action="store_true",
-        help="Compatibility flag; activation does not restart by default.",
+        help="Skip the detached Hermes gateway restart after activation.",
     )
     activate_parser.set_defaults(func=handle_clawchat_cli, _parser=parser)
     parser.set_defaults(_parser=parser)
@@ -48,7 +48,7 @@ def handle_clawchat_cli(args: argparse.Namespace) -> int:
             runner(
                 args.code,
                 base_url=DEFAULT_BASE_URL,
-                restart=bool(args.restart and not args.no_restart),
+                restart=not args.no_restart,
             )
         )
     except ClawChatApiError as exc:
