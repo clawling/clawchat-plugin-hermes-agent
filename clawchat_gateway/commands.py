@@ -97,7 +97,15 @@ async def handle_clawchat_output_command(raw_args: str) -> str:
 
     mode = result["mode"]
     runtime_status = "on" if result["runtime_status_messages"] else "off"
+    detail_level = {
+        "minimal": "quiet",
+        "normal": "normal",
+        "full": "verbose",
+    }[mode]
     return (
-        f"clawchat: output visibility set to {mode}\n"
-        f"clawchat: runtime status messages {runtime_status}"
+        "**ClawChat output updated**\n\n"
+        f"- visibility: `{mode}`\n"
+        f"- runtime status: `{runtime_status}`\n"
+        f"- detail level: `{detail_level}`\n\n"
+        "Applies to new ClawChat messages."
     )

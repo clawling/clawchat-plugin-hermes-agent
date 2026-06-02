@@ -183,6 +183,39 @@ async def test_slash_activate_restart_is_explicit(monkeypatch, tmp_path):
     assert "Hermes restart scheduled in 2s" in output
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "runtime_status", "detail_level"),
+    [
+        ("minimal", False, "quiet"),
+        ("normal", False, "normal"),
+        ("full", True, "verbose"),
+    ],
+)
+async def test_slash_output_returns_concise_markdown(
+    monkeypatch, tmp_path, mode, runtime_status, detail_level
+):
+    _load_activate(monkeypatch, tmp_path, {})
+    from clawchat_gateway import commands
+    importlib.reload(commands)
+
+    def fake_apply(requested_mode):
+        assert requested_mode == mode
+        return {"mode": mode, "runtime_status_messages": runtime_status}
+
+    monkeypatch.setattr(commands, "apply_output_visibility", fake_apply)
+
+    output = await commands.handle_clawchat_output_command(mode)
+
+    assert output == (
+        "**ClawChat output updated**\n\n"
+        f"- visibility: `{mode}`\n"
+        f"- runtime status: `{'on' if runtime_status else 'off'}`\n"
+        f"- detail level: `{detail_level}`\n\n"
+        "Applies to new ClawChat messages."
+    )
+
+
 def test_snapshot_preserves_injection_groups_and_llm_request(tmp_path: Path) -> None:
     debugger = ClawChatLlmContextDebug(
         env={

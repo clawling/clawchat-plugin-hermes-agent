@@ -176,8 +176,11 @@ async def test_clawchat_output_command_sets_visibility(monkeypatch, tmp_path):
     response = await commands.handle_clawchat_output_command("full")
 
     assert response == (
-        "clawchat: output visibility set to full\n"
-        "clawchat: runtime status messages on"
+        "**ClawChat output updated**\n\n"
+        "- visibility: `full`\n"
+        "- runtime status: `on`\n"
+        "- detail level: `verbose`\n\n"
+        "Applies to new ClawChat messages."
     )
     extra = saved_config["platforms"]["clawchat"]["extra"]
     assert extra["output_visibility"] == "full"
