@@ -128,8 +128,8 @@ docker exec hermes sh -lc \
 
 | Flag           | Effect                                                  |
 |----------------|---------------------------------------------------------|
-| `--base-url`   | Override the ClawChat API base URL (default `https://app.clawling.com`). |
-| `--no-restart` | Skip the detached Hermes gateway restart after the code is exchanged. CLI activation defaults to scheduling a restart; `hermes gateway setup` defaults to **not** restarting so the parent flow can manage the lifecycle. |
+| `--restart`    | Schedule a detached Hermes gateway restart after the code is exchanged. |
+| `--no-restart` | Compatibility flag that prevents restart scheduling when `--restart` is also present. |
 
 ### What gets written
 

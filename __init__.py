@@ -466,7 +466,7 @@ def _register_commands(ctx) -> None:
         "clawchat-activate",
         handle_clawchat_activate_command,
         description="Activate ClawChat with an activation code.",
-        args_hint="CODE [--base-url URL] [--restart] [--no-restart]",
+        args_hint="CODE [--restart] [--no-restart]",
     )
     register_command(
         "clawchat-output",

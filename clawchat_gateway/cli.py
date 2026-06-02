@@ -16,7 +16,6 @@ def setup_clawchat_cli(parser: argparse.ArgumentParser) -> None:
         help="Activate ClawChat credentials from an activation code",
     )
     activate_parser.add_argument("code", help="ClawChat activation code")
-    activate_parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     activate_parser.add_argument(
         "--restart",
         action="store_true",
@@ -48,7 +47,7 @@ def handle_clawchat_cli(args: argparse.Namespace) -> int:
         payload = asyncio.run(
             runner(
                 args.code,
-                base_url=args.base_url,
+                base_url=DEFAULT_BASE_URL,
                 restart=bool(args.restart and not args.no_restart),
             )
         )

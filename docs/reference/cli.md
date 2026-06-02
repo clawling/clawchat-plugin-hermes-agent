@@ -7,19 +7,18 @@ coroutine; pick whichever matches the host.
 ## In-session slash command
 
 ```text
-/clawchat-activate CODE [--base-url URL] [--no-restart]
+/clawchat-activate CODE [--restart] [--no-restart]
 ```
 
 - Registered through `ctx.register_command("clawchat-activate", ...)`
   (`__init__._register_commands`).
 - Handler: `clawchat_gateway.commands.handle_clawchat_activate_command`.
-- Defaults to scheduling a detached gateway restart after the code is
-  exchanged.
+- Schedules a detached gateway restart only when `--restart` is present.
 
 ## Top-level `hermes clawchat …`
 
 ```bash
-hermes clawchat activate CODE [--base-url URL] [--no-restart]
+hermes clawchat activate CODE [--restart] [--no-restart]
 ```
 
 - Registered through `ctx.register_cli_command("clawchat", ...)`
@@ -31,7 +30,7 @@ hermes clawchat activate CODE [--base-url URL] [--no-restart]
 ## v0.12.0 compatibility script
 
 ```bash
-python "${HERMES_HOME:-$HOME/.hermes}/plugins/clawchat/clawchat_cli.py" activate CODE [--base-url URL] [--no-restart]
+python "${HERMES_HOME:-$HOME/.hermes}/plugins/clawchat/clawchat_cli.py" activate CODE [--restart] [--no-restart]
 ```
 
 - Standalone Python entrypoint at `clawchat_cli.py`.
@@ -56,8 +55,8 @@ hermes gateway setup
 | Flag           | Default                              | Behavior                                                                                  |
 |----------------|--------------------------------------|-------------------------------------------------------------------------------------------|
 | `CODE`         | required                             | Single-use activation code. Use exactly as provided; do not normalize, lowercase, or retry. |
-| `--base-url`   | `https://app.clawling.com`           | Override the REST base URL. The WebSocket URL is derived (`activate._derive_websocket_url`). |
-| `--no-restart` | absent                               | Skip the detached Hermes gateway restart. CLI paths default to `restart=True`; `setup_fn` defaults to `restart=False`. |
+| `--restart`    | absent                               | Schedule a detached Hermes gateway restart after activation. |
+| `--no-restart` | absent                               | Compatibility flag that prevents restart scheduling when `--restart` is also present. |
 
 ## Exit codes
 

@@ -153,6 +153,18 @@ def test_clawchat_cli_activate_defaults_without_restart(monkeypatch, capsys):
     assert "restart scheduled" not in output
 
 
+def test_clawchat_cli_activate_rejects_base_url(capsys):
+    from clawchat_gateway import cli
+
+    parser = argparse.ArgumentParser()
+    cli.setup_clawchat_cli(parser)
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["activate", "CODE", "--base-url", "https://example.test"])
+
+    assert "unrecognized arguments: --base-url" in capsys.readouterr().err
+
+
 @pytest.mark.asyncio
 async def test_slash_activate_restart_is_explicit(monkeypatch, tmp_path):
     _load_activate(monkeypatch, tmp_path, {})
@@ -181,6 +193,20 @@ async def test_slash_activate_restart_is_explicit(monkeypatch, tmp_path):
         }
     ]
     assert "Hermes restart scheduled in 2s" in output
+
+
+@pytest.mark.asyncio
+async def test_slash_activate_rejects_base_url(monkeypatch, tmp_path):
+    _load_activate(monkeypatch, tmp_path, {})
+    from clawchat_gateway import commands
+    importlib.reload(commands)
+
+    output = await commands.handle_clawchat_activate_command(
+        "CODE --base-url https://example.test"
+    )
+
+    assert "usage: /clawchat-activate CODE [--restart] [--no-restart]" in output
+    assert "unrecognized arguments: --base-url" in output
 
 
 @pytest.mark.asyncio

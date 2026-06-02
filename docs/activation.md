@@ -57,8 +57,8 @@ docker exec hermes sh -lc \
 
 | Flag | Effect |
 |---|---|
-| `--base-url` | Override the ClawChat API base URL. The default is `https://app.clawling.com`. |
-| `--no-restart` | Skip the detached Hermes gateway restart after the code is exchanged. CLI activation defaults to scheduling a restart; `hermes gateway setup` does not schedule this restart because the parent flow manages lifecycle. |
+| `--restart` | Schedule a detached Hermes gateway restart after the code is exchanged. |
+| `--no-restart` | Compatibility flag that prevents restart scheduling when `--restart` is also present. |
 
 Successful activation prints `clawchat: activation complete for <user_id>` and
 exits 0. Treat any non-zero exit as a hard failure. Activation codes are
@@ -80,8 +80,8 @@ The Hermes request body is fixed:
 { "code": "<invite>", "platform": "hermes", "type": "clawbot" }
 ```
 
-`base_url` comes from `--base-url` or the interactive setup answer, and
-otherwise defaults to `https://app.clawling.com`.
+`base_url` comes from the interactive setup answer for `hermes gateway setup`;
+the direct activation commands use `https://app.clawling.com`.
 
 The Hermes activation path currently requires the response to include
 `access_token`, `agent.user_id`, `agent.owner_id`, and `conversation.id`.
@@ -119,13 +119,13 @@ The WebSocket URL is derived from `base_url` during activation and written to
 ## Restart Or Reload
 
 CLI activation and in-session slash activation schedule a detached Hermes
-gateway restart by default so the running gateway reloads the new credentials.
+gateway restart only when `--restart` is present.
 
 `hermes gateway setup` exchanges the code without scheduling that detached
 restart because the surrounding setup flow manages start/restart behavior.
 
-Use `--no-restart` only when another supervisor or setup flow will restart the
-gateway after credentials are written.
+`--no-restart` is retained as a compatibility flag for command lines that also
+include `--restart`.
 
 ## Activation Bootstrap
 
