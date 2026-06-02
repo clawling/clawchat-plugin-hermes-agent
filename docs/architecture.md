@@ -32,8 +32,15 @@ These names refer to different layers and are not interchangeable:
 `adapter_factory`, `setup_fn`, `check_fn`, `validate_config`, and
 `is_connected` are passed through `register_platform`. `setup_fn` runs
 the interactive `hermes gateway setup` prompts (`clawchat_gateway.setup`);
-`validate_config` returns true only when both a `websocket_url` and a
-`token` are present.
+`validate_config` returns true when a `websocket_url` is available. Tokens are
+not required at validation time. When Hermes has already loaded the plugin and
+started the ClawChat adapter, a missing token/user credential bundle puts the
+adapter in the waiting-for-activation state; the background connection
+supervisor can then connect after activation writes SQLite credentials. If the
+plugin was only installed and the gateway has not loaded it yet, a normal Hermes
+reload or restart is still required before that waiting state exists. If
+activation cannot persist SQLite credentials, the default activation restart
+lets the next gateway process load credentials from `.env` and `config.yaml`.
 
 ## Self-echo hook (`pre_gateway_dispatch`)
 
