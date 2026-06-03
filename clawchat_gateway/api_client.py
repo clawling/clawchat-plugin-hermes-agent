@@ -4,19 +4,36 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import socket
 import uuid
 from dataclasses import dataclass
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from clawchat_gateway.device_id import get_device_id
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://app.clawling.com"
 DEFAULT_WEBSOCKET_URL = "wss://app.clawling.com/ws"
 AGENTS_CONNECT_PLATFORM = "hermes"
 AGENTS_CONNECT_TYPE = "clawbot"
 DEFAULT_REQUEST_TIMEOUT = 30.0
+
+# Activation talks to a single-use connect code, so a request that may have
+# reached the server must NOT be retried. We use a shorter timeout than the
+# default API client (fail fast on a dead network) and retry only failures that
+# provably never reached the server (DNS / connection refused).
+ACTIVATION_TIMEOUT_SECONDS = 15.0
+ACTIVATION_CONNECT_RETRIES = 2
+ACTIVATION_RETRY_BACKOFF_SECONDS = (1.0, 2.0)
+# Hard per-attempt wall-clock ceiling. urlopen's timeout does NOT bound DNS
+# resolution (getaddrinfo), so a stalled resolver could otherwise hang far past
+# ACTIVATION_TIMEOUT_SECONDS and then be retried. This ceiling guarantees each
+# attempt returns; a hit is ambiguous, so it is surfaced and NOT retried.
+ACTIVATION_ATTEMPT_CEILING_SECONDS = ACTIVATION_TIMEOUT_SECONDS + 5.0
 
 
 @dataclass(frozen=True)
@@ -26,6 +43,11 @@ class ClawChatApiError(Exception):
     status: int | None = None
     path: str | None = None
     code: int | None = None
+    # True only when the request provably never reached the server (DNS failure
+    # or connection refused). Such failures are safe to retry; ambiguous ones
+    # (read timeout, connection reset mid-flight) are NOT, because the server
+    # may already have processed a single-use request such as activation.
+    connect_failed: bool = False
 
     def __str__(self) -> str:
         return self.message
@@ -48,6 +70,7 @@ class ClawChatApiClient:
         token: str = "",
         user_id: str = "",
         device_id: str | None = None,
+        timeout: float | None = None,
     ) -> None:
         if not base_url.startswith(("http://", "https://")):
             raise ClawChatApiError(
@@ -57,6 +80,7 @@ class ClawChatApiClient:
         self._token = token
         self._user_id = user_id
         self._device_id = device_id or get_device_id()
+        self._timeout = timeout if timeout and timeout > 0 else DEFAULT_REQUEST_TIMEOUT
 
     async def get_my_profile(self) -> dict:
         return await self._call_json("GET", "/v1/users/me")
@@ -358,7 +382,7 @@ class ClawChatApiClient:
             headers=self._headers(extra_headers, body),
         )
         try:
-            with urlopen(request, timeout=DEFAULT_REQUEST_TIMEOUT) as response:
+            with urlopen(request, timeout=self._timeout) as response:
                 status = getattr(response, "status", 200)
                 raw = response.read().decode("utf-8")
         except HTTPError as exc:
@@ -375,6 +399,23 @@ class ClawChatApiClient:
                 message = str(exc.reason or exc)
             kind = "auth" if status in (401, 403) else "api"
             raise ClawChatApiError(kind, message, status=status, path=path, code=code) from exc
+        except URLError as exc:
+            # connection-refused / DNS arrive here and prove the request never
+            # reached the server, so they are safe to retry (connect_failed).
+            # NOTE: read/connect timeouts do NOT reach this branch — they are
+            # raised as a bare TimeoutError (see below) and left non-retryable.
+            reason = exc.reason
+            connect_failed = isinstance(reason, (ConnectionRefusedError, socket.gaierror))
+            raise ClawChatApiError(
+                "transport", str(reason or exc), path=path, connect_failed=connect_failed
+            ) from exc
+        except TimeoutError as exc:
+            # A timeout is ambiguous (the server may already have processed a
+            # single-use request), so it is explicitly NOT connect_failed and
+            # will not be retried.
+            raise ClawChatApiError(
+                "transport", str(exc) or "request timed out", path=path, connect_failed=False
+            ) from exc
         except Exception as exc:
             raise ClawChatApiError("transport", str(exc), path=path) from exc
 
@@ -404,3 +445,47 @@ class ClawChatApiClient:
             headers["content-length"] = str(len(body))
         headers.update(extra_headers)
         return headers
+
+
+async def agents_connect_with_retry(
+    client: ClawChatApiClient,
+    *,
+    code: str,
+    retries: int = ACTIVATION_CONNECT_RETRIES,
+    backoff: tuple[float, ...] = ACTIVATION_RETRY_BACKOFF_SECONDS,
+    attempt_ceiling: float | None = ACTIVATION_ATTEMPT_CEILING_SECONDS,
+) -> dict:
+    """Call ``agents_connect`` for a single-use code, retrying ONLY failures that
+    provably never reached the server (``connect_failed``). Ambiguous failures
+    (timeout, reset) are surfaced immediately so the code is never double-spent.
+
+    ``attempt_ceiling`` bounds each attempt's total wall clock (covering DNS
+    resolution, which urlopen's timeout does not); a ceiling hit is ambiguous
+    and therefore not retried.
+    """
+    attempt = 0
+    while True:
+        try:
+            if attempt_ceiling and attempt_ceiling > 0:
+                return await asyncio.wait_for(
+                    client.agents_connect(code=code), timeout=attempt_ceiling
+                )
+            return await client.agents_connect(code=code)
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            # Ceiling hit (e.g. DNS stall): ambiguous, never retry a single-use code.
+            raise ClawChatApiError(
+                "transport", "activation request timed out", connect_failed=False
+            ) from exc
+        except ClawChatApiError as exc:
+            if not exc.connect_failed or attempt >= retries:
+                raise
+            delay = backoff[min(attempt, len(backoff) - 1)] if backoff else 0
+            logger.warning(
+                "clawchat activation connection failed (attempt %d), retrying in %.0fs: %s",
+                attempt + 1,
+                delay,
+                exc,
+            )
+            attempt += 1
+            if delay:
+                await asyncio.sleep(delay)

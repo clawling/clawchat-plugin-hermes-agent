@@ -20,7 +20,13 @@ except Exception as exc:
         "run activation through Hermes so config writes use the official API."
     ) from exc
 
-from clawchat_gateway.api_client import DEFAULT_BASE_URL, DEFAULT_WEBSOCKET_URL, ClawChatApiClient
+from clawchat_gateway.api_client import (
+    ACTIVATION_TIMEOUT_SECONDS,
+    DEFAULT_BASE_URL,
+    DEFAULT_WEBSOCKET_URL,
+    ClawChatApiClient,
+    agents_connect_with_retry,
+)
 from clawchat_gateway.output_visibility import (
     normalize_output_visibility,
     runtime_status_messages_for_visibility,
@@ -194,8 +200,13 @@ def persist_activation(
 
 
 async def activate(code: str, *, base_url: str) -> dict[str, Any]:
-    client = ClawChatApiClient(base_url=base_url.rstrip("/"), token="", user_id="")
-    result = await client.agents_connect(code=code)
+    client = ClawChatApiClient(
+        base_url=base_url.rstrip("/"),
+        token="",
+        user_id="",
+        timeout=ACTIVATION_TIMEOUT_SECONDS,
+    )
+    result = await agents_connect_with_retry(client, code=code)
     agent = result["agent"]
     agent_id = str(agent.get("id") or "")
     user_id = str(agent["user_id"])
