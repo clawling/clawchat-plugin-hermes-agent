@@ -165,6 +165,7 @@ def _read_groups(value: Any) -> dict[str, dict[str, Any]]:
 class ClawChatConfig:
     websocket_url: str
     base_url: str = ""
+    media_base_url: str = ""
     token: str = ""
     refresh_token: str = ""
     user_id: str = ""
@@ -205,6 +206,8 @@ class ClawChatConfig:
             base_url=_get_env("CLAWCHAT_BASE_URL")
             or _get_config_value(extra, "base_url", "")
             or DEFAULT_BASE_URL,
+            media_base_url=_get_env("CLAWCHAT_MEDIA_BASE_URL")
+            or _get_config_value(extra, "media_base_url", ""),
             token=token,
             refresh_token=_get_env("CLAWCHAT_REFRESH_TOKEN"),
             user_id=_get_env("CLAWCHAT_USER_ID")
