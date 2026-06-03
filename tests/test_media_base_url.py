@@ -36,3 +36,24 @@ def test_media_base_url_defaults_empty(monkeypatch):
         SimpleNamespace(extra={"websocket_url": "wss://ws.test/ws"})
     )
     assert config.media_base_url == ""
+
+
+from clawchat_gateway.media_runtime import derive_base_url
+
+
+def test_derive_base_url_prefers_explicit_media_base():
+    assert (
+        derive_base_url(
+            websocket_url="wss://ws.test/ws",
+            base_url="https://api.test",
+            media_base_url="https://media.test:39003/",
+        )
+        == "https://media.test:39003"
+    )
+
+
+def test_derive_base_url_falls_back_to_ws_derivation():
+    assert (
+        derive_base_url(websocket_url="wss://ws.test:39002/ws", base_url="", media_base_url="")
+        == "https://ws.test:39002"
+    )

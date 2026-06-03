@@ -54,7 +54,9 @@ class DownloadedMedia:
     source_url: str
 
 
-def derive_base_url(*, websocket_url: str, base_url: str) -> str:
+def derive_base_url(*, websocket_url: str, base_url: str, media_base_url: str = "") -> str:
+    if media_base_url.strip():
+        return media_base_url.rstrip("/")
     parsed = urlparse(websocket_url)
     if parsed.scheme in {"ws", "wss"} and parsed.netloc:
         scheme = "https" if parsed.scheme == "wss" else "http"
@@ -115,10 +117,13 @@ def _resolve_inbound_media_url(
     *,
     base_url: str,
     websocket_url: str,
+    media_base_url: str = "",
 ) -> str:
     if _is_remote_url(url):
         return url
-    resolved_base_url = derive_base_url(websocket_url=websocket_url, base_url=base_url)
+    resolved_base_url = derive_base_url(
+        websocket_url=websocket_url, base_url=base_url, media_base_url=media_base_url
+    )
     return urljoin(f"{resolved_base_url.rstrip('/')}/", url.lstrip("/"))
 
 
@@ -223,11 +228,14 @@ async def upload_outbound_media(
     token: str,
     media_local_roots: Sequence[str],
     upload_file=None,
+    media_base_url: str = "",
 ) -> list[dict[str, object]]:
     if not urls:
         return []
 
-    resolved_base_url = derive_base_url(websocket_url=websocket_url, base_url=base_url)
+    resolved_base_url = derive_base_url(
+        websocket_url=websocket_url, base_url=base_url, media_base_url=media_base_url
+    )
     uploader = upload_file or _upload_media
     fragments: list[dict[str, object]] = []
     for raw_url in urls:
@@ -270,6 +278,7 @@ async def download_inbound_media(
     token: str,
     download_dir: str | Path,
     download_file=None,
+    media_base_url: str = "",
 ) -> list[DownloadedMedia]:
     if not urls:
         return []
@@ -283,6 +292,7 @@ async def download_inbound_media(
                 url,
                 base_url=base_url,
                 websocket_url=websocket_url,
+                media_base_url=media_base_url,
             )
             item = await asyncio.to_thread(
                 downloader,
