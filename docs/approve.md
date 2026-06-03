@@ -35,11 +35,11 @@ fallback.
 `approval_request` is the structured rich fragment intended for clients that
 support approval buttons and action payloads. The current ClawChat clients may
 not render that fragment and can display it as unsupported content, for example
-`[不支持的内容]`.
+`[unsupported content]`.
 
 Until the client renders `approval_request` correctly, the adapter suppresses
 that rich fragment in approval display messages and sends text only. The
-`[不支持的内容]` marker is the client rendering of an unsupported rich fragment,
+`[unsupported content]` marker is the client rendering of an unsupported rich fragment,
 not text added by the Hermes adapter.
 
 ## Group Approval Routing

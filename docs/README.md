@@ -34,10 +34,9 @@ twenty-two `clawchat_*` tools to the agent.
 3. **`skills/clawchat/SKILL.md`** is a *runtime artefact* loaded by
    Hermes via `ctx.register_skill(...)`. Treat it as agent-facing
    documentation, not as a developer or operator guide.
-4. **`install.md` at the repo root** is the LLM-driven install runbook
-   (used by `openclaw-clawchat-cli` and similar). The human-facing
-   install guide is [`./install.md`](./install.md). Both must be kept
-   consistent.
+4. The install guide is [`./install.md`](./install.md). Keep install and
+   activation instructions there so published docs have one operator-facing
+   source of truth.
 5. The wire protocol is documented in
    [`./client-integration.md`](./client-integration.md) — the authoritative
    Protocol v2 contract for this plugin. This plugin and `openclaw-clawchat`

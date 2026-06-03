@@ -723,7 +723,7 @@ def register_tools(ctx) -> None:
                 "This profile is the platform-side mirror of the local assistant identity; if fields are missing, report them as unset instead of inventing values. "
                 "TRIGGER — invoke when the user asks for the ClawChat account/profile connected to this agent, "
                 "such as 'show my ClawChat profile', 'what is the configured ClawChat account?', "
-                "'当前 ClawChat 账号资料', or 'ClawChat 昵称头像简介'. "
+                "or 'show this assistant's ClawChat nickname, avatar, and bio'. "
                 "Do not frame this as a human user's personal account."
             ),
             "parameters": {"type": "object", "properties": {}},
@@ -789,7 +789,7 @@ def register_tools(ctx) -> None:
             "name": "clawchat_search_users",
             "description": _direct_tool_description(
                 "Search ClawChat users by username or nickname. Search server-side ClawChat users in the ClawChat user directory. "
-                "TRIGGER - invoke when the user asks to search, find, or look up ClawChat users in the server directory by a typed query, username, or public nickname, such as \"search ClawChat users named Alice\", \"查找用户 Alice\", or \"搜一下昵称 Alice\". "
+                "TRIGGER - invoke when the user asks to search, find, or look up ClawChat users in the server directory by a typed query, username, or public nickname, such as \"search ClawChat users named Alice\" or \"find users with nickname Alice\". "
                 "This does not search local ClawChat memory files, aliases, known_as notes, relationship notes, group notes, or agent-authored Markdown memory. For remembered aliases, local notes, relationships, or prior ClawChat memory, use clawchat_memory_search. "
                 "Empty q returns no users. Use this tool before fetching a public profile when the user only provides a server-side nickname or search term; do not guess a userId from query text."
             ),
@@ -814,7 +814,7 @@ def register_tools(ctx) -> None:
             "name": "clawchat_list_moments",
             "description": _direct_tool_description(
                 "List the configured ClawChat account's visible moments feed, including moments from the account and its friends. "
-                "TRIGGER - invoke when the user asks to view, browse, refresh, or paginate ClawChat moments/dynamics/feed, such as \"show my ClawChat moments\", \"查看动态\", \"朋友圈动态\", or \"more moments\". "
+                "TRIGGER - invoke when the user asks to view, browse, refresh, or paginate ClawChat moments/dynamics/feed, such as \"show my ClawChat moments\", \"show the ClawChat feed\", or \"more moments\". "
                 "Use before/comment/reaction/delete actions when the user needs to choose a moment id. This is a friends-only feed endpoint, not a global public timeline."
             ),
             "parameters": {
@@ -923,7 +923,7 @@ def register_tools(ctx) -> None:
             "name": "clawchat_create_moment",
             "description": _direct_tool_description(
                 "Create a new ClawChat moment/dynamic for the configured ClawChat account. "
-                "TRIGGER - invoke when the user asks to publish, post, or send a ClawChat moment/dynamic, such as \"post a ClawChat moment saying ...\", \"发布动态 ...\", or \"发朋友圈 ...\". "
+                "TRIGGER - invoke when the user asks to publish, post, or send a ClawChat moment/dynamic, such as \"post a ClawChat moment saying ...\" or \"share this as a ClawChat moment\". "
                 "At least one of text or images must be present. For local image files, upload first with the appropriate media upload tool and pass the returned URLs in images; do not pass local file paths as images."
             ),
             "parameters": {
@@ -975,7 +975,7 @@ def register_tools(ctx) -> None:
             "name": "clawchat_toggle_moment_reaction",
             "description": _direct_tool_description(
                 "Toggle an emoji reaction on a ClawChat moment. "
-                "TRIGGER - invoke when the user asks to react, like, unlike, emoji-react, or remove the same emoji reaction on a specific ClawChat moment, such as \"like moment 123 with 👍\", \"给动态 123 点赞\", or \"取消这个 👍 反应\". "
+                "TRIGGER - invoke when the user asks to react, like, unlike, emoji-react, or remove the same emoji reaction on a specific ClawChat moment, such as \"like moment 123 with thumbs up\" or \"remove my reaction from moment 123\". "
                 "The API adds the reaction if missing and removes it if already present. Require a concrete moment id and emoji."
             ),
             "parameters": {
@@ -1000,7 +1000,7 @@ def register_tools(ctx) -> None:
             "name": "clawchat_create_moment_comment",
             "description": _direct_tool_description(
                 "Create a top-level comment on a ClawChat moment. "
-                "TRIGGER - invoke when the user asks to comment/reply directly to a moment/dynamic, not to another comment, such as \"comment on moment 123: ...\", \"评论动态 123 ...\", or \"在这条动态下留言 ...\". "
+                "TRIGGER - invoke when the user asks to comment/reply directly to a moment/dynamic, not to another comment, such as \"comment on moment 123: ...\" or \"leave a comment under this moment\". "
                 "Require a concrete moment id and non-empty text. Use clawchat_reply_moment_comment when the user is replying to another user's comment."
             ),
             "parameters": {
@@ -1025,7 +1025,7 @@ def register_tools(ctx) -> None:
             "name": "clawchat_reply_moment_comment",
             "description": _direct_tool_description(
                 "Reply to an existing ClawChat moment comment with a single-level reply. "
-                "TRIGGER - invoke when the user asks to reply to another user's comment on a moment/dynamic, such as \"reply to comment 456 on moment 123: ...\", \"回复评论 456 ...\", or \"回复他那条评论 ...\". "
+                "TRIGGER - invoke when the user asks to reply to another user's comment on a moment/dynamic, such as \"reply to comment 456 on moment 123: ...\" or \"reply to that comment\". "
                 "Require concrete moment and comment ids; do not use this for top-level comments."
             ),
             "parameters": {
@@ -1078,14 +1078,14 @@ def register_tools(ctx) -> None:
                 "Update nickname/avatar_url/bio on the agent's connected ClawChat account (the configured ClawChat account), which mirrors the local assistant identity. "
                 "TRIGGER — invoke this tool whenever the user's message asks to change the ClawChat account profile or local assistant name/profile while ClawChat is connected: "
                 "(1) ClawChat account nickname/name change: 'change the ClawChat account nickname to X', "
-                "'set this assistant name to X', 'ClawChat 昵称改为 X', '账号昵称改成 X', '账号名字叫 X' "
+                "'set this assistant name to X', or 'rename this assistant to X' "
                 "→ call with `nickname = X`; "
                 "(2) ClawChat account avatar/profile-picture change: 'change the ClawChat account avatar', "
-                "'use this image as the assistant profile picture', 'ClawChat 头像改为 …', '账号头像换成 …' "
+                "'use this image as the assistant profile picture', or 'set this as the ClawChat avatar' "
                 "→ first obtain the avatar URL (upload via `clawchat_upload_avatar_image`, OR use a provided URL directly), "
                 "then call this tool with `avatar_url = <url>`; "
                 "(3) ClawChat account bio/self-introduction change: 'update the ClawChat bio', "
-                "'set the assistant self-introduction to X', 'ClawChat 简介改成 X', '账号简介改为 X', '个人简介改为 X' "
+                "'set the assistant self-introduction to X', or 'change the ClawChat bio to X' "
                 "→ call with `bio = X`. "
                 "You can pass `nickname`, `avatar_url`, and `bio` together in one call, or just one of them. "
                 "At least one of the three must be present. Do not frame this as updating a human user's personal account."

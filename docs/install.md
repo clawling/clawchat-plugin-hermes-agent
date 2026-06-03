@@ -1,8 +1,6 @@
 # Install and activate the ClawChat Hermes plugin
 
-This is the human-facing guide. For the deterministic single-shot
-runbook that LLM installers (e.g. `openclaw-clawchat-cli`) follow,
-see [`../install.md`](../install.md) at the repo root.
+This is the install and activation guide for Hermes operators.
 
 ## Compatibility
 

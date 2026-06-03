@@ -68,6 +68,6 @@ hermes gateway setup
 
 ## What activation writes
 
-See [`../install.md`](../install.md) for the file-level summary. The
+See [`../install.md`](../install.md) for the install-level summary. The
 authoritative implementation is in
 `clawchat_gateway/activate.py:persist_activation`.

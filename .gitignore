@@ -7,6 +7,17 @@ build/
 dist/
 .DS_Store
 *.tgz
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite-*
+.coverage
+coverage.xml
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+.pyright/
 tmp
 .worktrees
 
@@ -18,5 +29,6 @@ tmp
 tests/
 deploy/
 scripts/
+docs/superpowers/
 AGENTS.md
 CLAUDE.md

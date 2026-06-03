@@ -23,7 +23,6 @@ npx -y @newbase-clawchat/clawchat-cli@latest install --target hermes
 | Topic                          | Doc                                                                 |
 |--------------------------------|---------------------------------------------------------------------|
 | Install + activate (humans)    | [`docs/install.md`](docs/install.md)                                |
-| Install runbook (LLM driven)   | [`install.md`](install.md)                                          |
 | Hermes integration surface     | [`docs/architecture.md`](docs/architecture.md)                      |
 | Wire protocol contract         | [`docs/client-integration.md`](docs/client-integration.md)          |
 | Env vars and `config.yaml`     | [`docs/configuration.md`](docs/configuration.md)                    |
