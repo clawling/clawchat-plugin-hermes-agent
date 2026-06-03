@@ -4,7 +4,8 @@ import argparse
 import asyncio
 import sys
 
-from clawchat_gateway.api_client import DEFAULT_BASE_URL, ClawChatApiError
+from clawchat_gateway.api_client import ClawChatApiError
+from clawchat_gateway.config import resolve_activation_base_url
 
 activate_and_maybe_restart = None
 
@@ -47,7 +48,7 @@ def handle_clawchat_cli(args: argparse.Namespace) -> int:
         payload = asyncio.run(
             runner(
                 args.code,
-                base_url=DEFAULT_BASE_URL,
+                base_url=resolve_activation_base_url(),
                 restart=not args.no_restart,
             )
         )

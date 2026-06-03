@@ -56,6 +56,17 @@ def _get_env(*names: str) -> str:
     return ""
 
 
+def resolve_activation_base_url() -> str:
+    """Base URL for `clawchat activate`.
+
+    The installer writes the deployment's CLAWCHAT_BASE_URL into the Hermes
+    .env, so activation must honor it (env -> hermes env -> .env file) instead
+    of always hitting the public default — otherwise a connect code minted on a
+    custom backend is sent to app.clawling.com and rejected as invalid.
+    """
+    return _get_env("CLAWCHAT_BASE_URL") or DEFAULT_BASE_URL
+
+
 def _get_config_value(data: dict[str, Any], key: str, default: Any = None) -> Any:
     if key in data:
         return data[key]
