@@ -1843,6 +1843,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             websocket_url=self._clawchat_config.websocket_url,
             token=self._clawchat_config.token,
             download_dir=self._clawchat_config.media_download_dir,
+            media_base_url=self._clawchat_config.media_base_url,
         )
         logger.info(
             "clawchat inbound media downloaded chat_id=%s requested=%d downloaded=%d types=%s",
@@ -3157,6 +3158,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             websocket_url=self._clawchat_config.websocket_url,
             token=self._clawchat_config.token,
             media_local_roots=media_local_roots,
+            media_base_url=self._clawchat_config.media_base_url,
         )
 
     def _infer_media_kind(
