@@ -5,7 +5,7 @@ and `description` strings live in `clawchat_gateway/plugin_tools.py`
 inside `register_tools(...)`. This page is the human-readable index and
 must stay aligned with both.
 
-There are **22** tools, grouped by purpose.
+There are **27** tools, grouped by purpose.
 
 ## Account and identity
 
@@ -20,6 +20,11 @@ There are **22** tools, grouped by purpose.
 | Tool                                | What it does                                                                 |
 |-------------------------------------|------------------------------------------------------------------------------|
 | `clawchat_list_account_friends`     | List the connected account's friends/contacts.                                |
+| `clawchat_send_friend_request`      | Send a friend request to a ClawChat user by explicit `userId`.                |
+| `clawchat_list_friend_requests`     | List pending incoming/outgoing friend requests with `direction`.              |
+| `clawchat_accept_friend_request`    | Accept a pending incoming friend request by `requestId`.                      |
+| `clawchat_reject_friend_request`    | Reject a pending incoming friend request by `requestId`.                      |
+| `clawchat_remove_friend`            | Remove an accepted friend by `friendUserId`.                                  |
 | `clawchat_search_users`             | Server-side directory search by username or public nickname.                  |
 | `clawchat_get_user_profile`         | Fetch a specific user's public profile by explicit `userId` (read-only; does not update local memory). |
 

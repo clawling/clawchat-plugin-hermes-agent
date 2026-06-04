@@ -69,6 +69,38 @@ class ClawChatApiClient:
     async def list_friends(self, *, page: int = 1, page_size: int = 20) -> dict:
         return await self._call_json("GET", "/v1/friendships")
 
+    async def send_friend_request(self, *, user_id: str, greeting: str | None = None) -> dict:
+        if not user_id.strip():
+            raise ClawChatApiError("validation", "user_id is required")
+        payload = {"user_id": user_id}
+        if greeting is not None:
+            payload["greeting"] = greeting
+        return await self._call_json(
+            "POST",
+            "/v1/friendships",
+            body=json.dumps(payload).encode("utf-8"),
+            extra_headers={"content-type": "application/json"},
+        )
+
+    async def list_friend_requests(self, *, direction: str = "incoming") -> dict:
+        if direction not in {"incoming", "outgoing"}:
+            raise ClawChatApiError(
+                "validation",
+                "direction must be incoming or outgoing",
+            )
+        return await self._call_json("GET", f"/v1/friendships/requests/{direction}")
+
+    async def accept_friend_request(self, request_id: int) -> dict:
+        return await self._call_json("POST", f"/v1/friendships/requests/{request_id}/accept")
+
+    async def reject_friend_request(self, request_id: int) -> dict:
+        return await self._call_json("POST", f"/v1/friendships/requests/{request_id}/reject")
+
+    async def remove_friend(self, friend_user_id: str) -> dict:
+        if not friend_user_id.strip():
+            raise ClawChatApiError("validation", "friend_user_id is required")
+        return await self._call_json("DELETE", f"/v1/friendships/{friend_user_id}")
+
     async def search_users(self, *, q: str = "", limit: int | None = None) -> dict:
         params: dict[str, str | int] = {}
         if q:

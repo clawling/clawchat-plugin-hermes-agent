@@ -512,10 +512,90 @@ async def list_account_friends(
         return _unknown_error(exc)
 
 
+async def send_friend_request(user_id: str, greeting: str | None = None) -> dict[str, Any]:
+    if not isinstance(user_id, str) or not user_id.strip():
+        return _validation_error("userId is required")
+    if greeting is not None and not isinstance(greeting, str):
+        return _validation_error("greeting must be a string when provided")
+
+    client, err = _build_client()
+    if err is not None:
+        return err
+    try:
+        return await client.send_friend_request(user_id=user_id.strip(), greeting=greeting)
+    except ClawChatApiError as exc:
+        return _api_error(exc)
+    except Exception as exc:  # noqa: BLE001
+        return _unknown_error(exc)
+
+
+async def list_friend_requests(direction: str | None = None) -> dict[str, Any]:
+    direction_value = direction or "incoming"
+    if direction_value not in {"incoming", "outgoing"}:
+        return _validation_error("direction must be incoming or outgoing")
+
+    client, err = _build_client()
+    if err is not None:
+        return err
+    try:
+        return await client.list_friend_requests(direction=direction_value)
+    except ClawChatApiError as exc:
+        return _api_error(exc)
+    except Exception as exc:  # noqa: BLE001
+        return _unknown_error(exc)
+
+
 def _positive_int(value: Any, field: str) -> tuple[int | None, dict[str, Any] | None]:
     if not isinstance(value, int) or value < 1:
         return None, _validation_error(f"{field} must be an integer >= 1")
     return value, None
+
+
+async def accept_friend_request(request_id: int) -> dict[str, Any]:
+    request_id_value, err = _positive_int(request_id, "requestId")
+    if err is not None or request_id_value is None:
+        return err or _validation_error("requestId is required")
+
+    client, client_err = _build_client()
+    if client_err is not None:
+        return client_err
+    try:
+        return await client.accept_friend_request(request_id_value)
+    except ClawChatApiError as exc:
+        return _api_error(exc)
+    except Exception as exc:  # noqa: BLE001
+        return _unknown_error(exc)
+
+
+async def reject_friend_request(request_id: int) -> dict[str, Any]:
+    request_id_value, err = _positive_int(request_id, "requestId")
+    if err is not None or request_id_value is None:
+        return err or _validation_error("requestId is required")
+
+    client, client_err = _build_client()
+    if client_err is not None:
+        return client_err
+    try:
+        return await client.reject_friend_request(request_id_value)
+    except ClawChatApiError as exc:
+        return _api_error(exc)
+    except Exception as exc:  # noqa: BLE001
+        return _unknown_error(exc)
+
+
+async def remove_friend(friend_user_id: str) -> dict[str, Any]:
+    if not isinstance(friend_user_id, str) or not friend_user_id.strip():
+        return _validation_error("friendUserId is required")
+
+    client, err = _build_client()
+    if err is not None:
+        return err
+    try:
+        return await client.remove_friend(friend_user_id.strip())
+    except ClawChatApiError as exc:
+        return _api_error(exc)
+    except Exception as exc:  # noqa: BLE001
+        return _unknown_error(exc)
 
 
 async def search_users(q: str | None = None, limit: int | None = None) -> dict[str, Any]:

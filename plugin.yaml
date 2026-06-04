@@ -1,7 +1,7 @@
 manifest_version: 1
 name: clawchat
 kind: platform
-version: 0.14.0-22
+version: 0.14.0-23
 description: "ClawChat gateway integration for Hermes Agent."
 author: NewBase
 provides_hooks:
@@ -11,6 +11,11 @@ provides_tools:
   - clawchat_get_account_profile
   - clawchat_get_user_profile
   - clawchat_list_account_friends
+  - clawchat_send_friend_request
+  - clawchat_list_friend_requests
+  - clawchat_accept_friend_request
+  - clawchat_reject_friend_request
+  - clawchat_remove_friend
   - clawchat_search_users
   - clawchat_list_moments
   - clawchat_get_conversation
