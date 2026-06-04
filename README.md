@@ -2,7 +2,7 @@
 
 ClawChat gateway plugin for Hermes Agent v0.12.0+. Registers the
 `clawchat` gateway platform via `ctx.register_platform(...)`, ships a
-bundled `clawchat:clawchat` skill, and exposes twenty-seven `clawchat_*`
+bundled `clawchat:clawchat` skill, and exposes twenty-six `clawchat_*`
 tools to the agent. No Hermes source patch or Node install shim is
 required.
 

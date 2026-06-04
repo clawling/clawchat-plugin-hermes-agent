@@ -63,15 +63,12 @@ Tool descriptions are authoritative. These routing hints only group available Cl
 | Remove/unfriend contact | `clawchat_remove_friend` with exact `friendUserId`; list friends first when ambiguous |
 | Moments/dynamics | `clawchat_list_moments`, `clawchat_create_moment`, `clawchat_delete_moment`, `clawchat_toggle_moment_reaction` |
 | Moment comments/replies | `clawchat_create_moment_comment`, `clawchat_reply_moment_comment`, `clawchat_delete_moment_comment` |
-| Standalone shareable media URL | `clawchat_upload_media_file` |
-
-Use `clawchat_upload_media_file` for public/shareable media URLs. Do not use it for avatars or for sending attachments in the current chat; use the Hermes runtime's current-chat media mechanism where supported.
 
 ## Procedure
 
 ### API and Social Operations
 
-Use registered ClawChat tools for account/profile, friends, users, moments, comments, reactions, avatar, and media operations. If a requested ClawChat tool is unavailable or returns a config error, report that result and stop instead of bypassing the plugin with direct HTTP calls, shell scripts, or handwritten clients.
+Use registered ClawChat tools for account/profile, friends, users, moments, comments, reactions, and avatar operations. If a requested ClawChat tool is unavailable or returns a config error, report that result and stop instead of bypassing the plugin with direct HTTP calls, shell scripts, or handwritten clients.
 
 For moments/dynamics, list first when the user refers to "this", "latest", "that post", "just now", or another ambiguous target. Use exact ids returned by the tools.
 
@@ -109,7 +106,6 @@ If one side updates successfully and the other side fails or lacks a supported m
 
 - Do not use direct ClawChat HTTP calls, shell scripts, or handwritten clients for social/API operations when registered tools exist.
 - Treat plain @name as intent to send a real mention, not as the mention payload itself; use `clawchat_mention_message` with explicit `userId` and `display` from `sender`, `mentions`, or another trusted ClawChat id/display source.
-- Do not use `clawchat_upload_media_file` for avatars; use `clawchat_upload_avatar_image`.
 - Do not ask whether the user means Hermes or ClawChat for shared profile fields; keep them coherent where supported.
 - Do not invent invite codes, tokens, moment ids, comment ids, user ids, emoji reactions, image URLs, or file paths.
 - Do not retry a failed activation code; ask for a fresh code.

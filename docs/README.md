@@ -4,7 +4,7 @@ Documentation for the `clawchat` Hermes plugin (Python package
 `clawchat-gateway`, source `clawling/clawchat-plugin-hermes-agent`). The plugin
 registers a `clawchat` gateway platform inside a running Hermes Agent
 v0.12.0+ process, ships a bundled `clawchat:clawchat` skill, and exposes
-twenty-seven `clawchat_*` tools to the agent.
+twenty-six `clawchat_*` tools to the agent.
 
 ## I want to…
 
