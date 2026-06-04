@@ -71,6 +71,20 @@ def _write_env_values(values: dict[str, str | None]) -> Path:
     return Path(get_env_path())
 
 
+def _read_existing_user_id(config: dict[str, Any]) -> str:
+    platforms = config.get("platforms")
+    if not isinstance(platforms, dict):
+        return ""
+    clawchat = platforms.get("clawchat")
+    if not isinstance(clawchat, dict):
+        return ""
+    extra = clawchat.get("extra")
+    if not isinstance(extra, dict):
+        return ""
+    user_id = extra.get("user_id")
+    return user_id.strip() if isinstance(user_id, str) else ""
+
+
 def _derive_websocket_url(base_url: str) -> str:
     parsed = urlparse(base_url)
     if parsed.netloc == "app.clawling.com":
@@ -195,7 +209,12 @@ def persist_activation(
 
 async def activate(code: str, *, base_url: str) -> dict[str, Any]:
     client = ClawChatApiClient(base_url=base_url.rstrip("/"), token="", user_id="")
-    result = await client.agents_connect(code=code)
+    _config_path, config = _load_config()
+    existing_user_id = _read_existing_user_id(config)
+    connect_kwargs = {"code": code}
+    if existing_user_id:
+        connect_kwargs["user_id"] = existing_user_id
+    result = await client.agents_connect(**connect_kwargs)
     agent = result["agent"]
     agent_id = str(agent.get("id") or "")
     user_id = str(agent["user_id"])

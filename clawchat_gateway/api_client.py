@@ -276,7 +276,13 @@ class ClawChatApiClient:
             extra_headers={"content-type": "application/json"},
         )
 
-    async def agents_connect(self, *, code: str, tools: list[str] | None = None) -> dict:
+    async def agents_connect(
+        self,
+        *,
+        code: str,
+        user_id: str | None = None,
+        tools: list[str] | None = None,
+    ) -> dict:
         if not code.strip():
             raise ClawChatApiError("validation", "invite code is required")
         payload = {
@@ -284,6 +290,8 @@ class ClawChatApiClient:
             "platform": AGENTS_CONNECT_PLATFORM,
             "type": AGENTS_CONNECT_TYPE,
         }
+        if user_id and user_id.strip():
+            payload["user_id"] = user_id.strip()
         if tools:
             payload["tools"] = [tool for tool in tools if isinstance(tool, str) and tool.strip()]
         body = json.dumps(payload).encode("utf-8")

@@ -74,14 +74,16 @@ POST {base_url}/v1/agents/connect
 Content-Type: application/json
 ```
 
-The Hermes request body is fixed:
+The Hermes request body is:
 
 ```json
-{ "code": "<invite>", "platform": "hermes", "type": "clawbot" }
+{ "code": "<invite>", "platform": "hermes", "type": "clawbot", "user_id": "<optional-existing-user_id>" }
 ```
 
 `base_url` comes from the interactive setup answer for `hermes gateway setup`;
-the direct activation commands use `https://app.clawling.com`.
+the direct activation commands use `https://app.clawling.com`. When
+`platforms.clawchat.extra.user_id` already contains a non-empty value,
+activation sends it as optional `user_id`; otherwise the field is omitted.
 
 The Hermes activation path currently requires the response to include
 `access_token`, `agent.user_id`, `agent.owner_id`, and `conversation.id`.
@@ -96,6 +98,9 @@ Activation writes:
 | `$HERMES_HOME/.env` | `CLAWCHAT_TOKEN`, `CLAWCHAT_REFRESH_TOKEN`, optional `CLAWCHAT_HOME_CHANNEL*`. |
 | `$HERMES_HOME/config.yaml` | `platforms.clawchat.enabled=true`, `extra.base_url`, `extra.websocket_url`, `extra.user_id`, `extra.agent_id`, `extra.owner_user_id`, missing `extra.output_visibility=normal`, derived `extra.runtime_status_messages=false`, forced agent quiet defaults (`gateway_notify_interval=0`, `gateway_timeout_warning=0`), forced global ClawChat display defaults (`busy_input_mode=queue`, `busy_ack_enabled=false`, `background_process_notifications=off`, `tool_progress_command=false`), and missing `display.platforms.clawchat.*` normal-preset defaults. Operators may edit the ClawChat platform display block manually after activation. |
 | `$HERMES_HOME/clawchat.sqlite` | Latest activation row, including access token, optional refresh token, user ids, and activation conversation id. |
+
+Returned `.env` tokens and `config.yaml` user ids overwrite any previously
+configured ClawChat activation credentials.
 
 Credential tokens are stored in `.env` for runtime resolution and in plugin
 SQLite for the latest activation record. Runtime resolution uses a complete
