@@ -148,6 +148,85 @@ async def handle_clawchat_list_account_friends(args, **kw):
     return _tool_result(result)
 
 
+async def handle_clawchat_send_friend_request(args, **kw):
+    task_id = kw.get("task_id") or "default"
+    logger.info("clawchat_send_friend_request start task_id=%s", task_id)
+    from clawchat_gateway import tools
+
+    result = await _recorded_tool_call(
+        "clawchat_send_friend_request",
+        args,
+        _account_id_from_kwargs(kw),
+        lambda: tools.send_friend_request(
+            str(args.get("userId") or ""),
+            greeting=args.get("greeting") if isinstance(args.get("greeting"), str) else None,
+        ),
+    )
+    logger.info("clawchat_send_friend_request done task_id=%s", task_id)
+    return _tool_result(result)
+
+
+async def handle_clawchat_list_friend_requests(args, **kw):
+    task_id = kw.get("task_id") or "default"
+    logger.info("clawchat_list_friend_requests start task_id=%s", task_id)
+    from clawchat_gateway import tools
+
+    direction = args.get("direction") if isinstance(args.get("direction"), str) else None
+    result = await _recorded_tool_call(
+        "clawchat_list_friend_requests",
+        args,
+        _account_id_from_kwargs(kw),
+        lambda: tools.list_friend_requests(direction=direction),
+    )
+    logger.info("clawchat_list_friend_requests done task_id=%s", task_id)
+    return _tool_result(result)
+
+
+async def handle_clawchat_accept_friend_request(args, **kw):
+    task_id = kw.get("task_id") or "default"
+    logger.info("clawchat_accept_friend_request start task_id=%s", task_id)
+    from clawchat_gateway import tools
+
+    result = await _recorded_tool_call(
+        "clawchat_accept_friend_request",
+        args,
+        _account_id_from_kwargs(kw),
+        lambda: tools.accept_friend_request(_optional_int_arg(args.get("requestId"))),
+    )
+    logger.info("clawchat_accept_friend_request done task_id=%s", task_id)
+    return _tool_result(result)
+
+
+async def handle_clawchat_reject_friend_request(args, **kw):
+    task_id = kw.get("task_id") or "default"
+    logger.info("clawchat_reject_friend_request start task_id=%s", task_id)
+    from clawchat_gateway import tools
+
+    result = await _recorded_tool_call(
+        "clawchat_reject_friend_request",
+        args,
+        _account_id_from_kwargs(kw),
+        lambda: tools.reject_friend_request(_optional_int_arg(args.get("requestId"))),
+    )
+    logger.info("clawchat_reject_friend_request done task_id=%s", task_id)
+    return _tool_result(result)
+
+
+async def handle_clawchat_remove_friend(args, **kw):
+    task_id = kw.get("task_id") or "default"
+    logger.info("clawchat_remove_friend start task_id=%s", task_id)
+    from clawchat_gateway import tools
+
+    result = await _recorded_tool_call(
+        "clawchat_remove_friend",
+        args,
+        _account_id_from_kwargs(kw),
+        lambda: tools.remove_friend(str(args.get("friendUserId") or "")),
+    )
+    logger.info("clawchat_remove_friend done task_id=%s", task_id)
+    return _tool_result(result)
+
+
 async def handle_clawchat_search_users(args, **kw):
     task_id = kw.get("task_id") or "default"
     logger.info("clawchat_search_users start task_id=%s", task_id)
@@ -779,6 +858,149 @@ def register_tools(ctx) -> None:
         handle_clawchat_list_account_friends,
         is_async=True,
         description="List ClawChat Account Friends",
+        emoji="👥",
+    )
+
+    ctx.register_tool(
+        "clawchat_send_friend_request",
+        "clawchat",
+        {
+            "name": "clawchat_send_friend_request",
+            "description": _direct_tool_description(
+                "Send a friend request from the connected ClawChat account to a specific user by explicit userId. "
+                "TRIGGER - invoke when the user asks to add, friend, connect with, or send a friend request to a ClawChat user and provides a concrete userId, or after clawchat_search_users returns a selected userId. "
+                "Do not guess or infer userId from nickname, display name, alias, or local memory text; search first when needed."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "userId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Explicit target ClawChat user id to send a friend request to.",
+                    },
+                    "greeting": {
+                        "type": "string",
+                        "description": "Optional greeting/message included with the friend request.",
+                    },
+                },
+                "required": ["userId"],
+            },
+        },
+        handle_clawchat_send_friend_request,
+        is_async=True,
+        description="Send ClawChat Friend Request",
+        emoji="👥",
+    )
+
+    ctx.register_tool(
+        "clawchat_list_friend_requests",
+        "clawchat",
+        {
+            "name": "clawchat_list_friend_requests",
+            "description": _direct_tool_description(
+                "List pending friend requests for the connected ClawChat account. "
+                "Use direction='incoming' for requests other users sent to this account, and direction='outgoing' for requests this account sent to other users. Defaults to incoming. "
+                "TRIGGER - invoke when the user asks to view, check, review, or list friend requests, pending requests, incoming requests, or outgoing requests."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "direction": {
+                        "type": "string",
+                        "enum": ["incoming", "outgoing"],
+                        "description": "incoming lists requests sent to the connected account; outgoing lists requests sent by the connected account. Defaults to incoming.",
+                    },
+                },
+            },
+        },
+        handle_clawchat_list_friend_requests,
+        is_async=True,
+        description="List ClawChat Friend Requests",
+        emoji="👥",
+    )
+
+    ctx.register_tool(
+        "clawchat_accept_friend_request",
+        "clawchat",
+        {
+            "name": "clawchat_accept_friend_request",
+            "description": _direct_tool_description(
+                "Accept one pending incoming friend request by exact requestId. "
+                "TRIGGER - invoke when the user asks to accept, approve, or pass a friend request and provides or selects a concrete requestId returned by clawchat_list_friend_requests. "
+                "List incoming requests first when the target is ambiguous."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "requestId": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Concrete friend request id to accept.",
+                    },
+                },
+                "required": ["requestId"],
+            },
+        },
+        handle_clawchat_accept_friend_request,
+        is_async=True,
+        description="Accept ClawChat Friend Request",
+        emoji="👥",
+    )
+
+    ctx.register_tool(
+        "clawchat_reject_friend_request",
+        "clawchat",
+        {
+            "name": "clawchat_reject_friend_request",
+            "description": _direct_tool_description(
+                "Reject one pending incoming friend request by exact requestId. "
+                "TRIGGER - invoke when the user asks to reject, decline, refuse, or ignore a friend request and provides or selects a concrete requestId returned by clawchat_list_friend_requests. "
+                "List incoming requests first when the target is ambiguous."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "requestId": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Concrete friend request id to reject.",
+                    },
+                },
+                "required": ["requestId"],
+            },
+        },
+        handle_clawchat_reject_friend_request,
+        is_async=True,
+        description="Reject ClawChat Friend Request",
+        emoji="👥",
+    )
+
+    ctx.register_tool(
+        "clawchat_remove_friend",
+        "clawchat",
+        {
+            "name": "clawchat_remove_friend",
+            "description": _direct_tool_description(
+                "Remove an accepted friend from the connected ClawChat account by explicit friendUserId. "
+                "TRIGGER - invoke when the user asks to delete, remove, unfriend, or disconnect an existing ClawChat friend and provides a concrete friendUserId. "
+                "Use clawchat_list_account_friends first when the target is ambiguous; do not guess ids from names."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "friendUserId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Explicit ClawChat user id of the accepted friend to remove.",
+                    },
+                },
+                "required": ["friendUserId"],
+            },
+        },
+        handle_clawchat_remove_friend,
+        is_async=True,
+        description="Remove ClawChat Friend",
         emoji="👥",
     )
 
