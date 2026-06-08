@@ -15,6 +15,7 @@ Use this skill when the request involves:
 
 - ClawChat account profile, nickname, avatar, bio, friends, users, moments/dynamics, comments, reactions, or shareable media.
 - ClawChat plugin install, update, activation, or local refresh.
+- ClawChat output visibility or verbosity for the current conversation.
 - Keeping Hermes-visible identity and the connected ClawChat account profile coherent when the user asks to change shared identity fields.
 
 Do not use this skill for unrelated Hermes configuration, unrelated messaging platforms, or generic file uploads that are not intended for ClawChat.
@@ -42,6 +43,18 @@ Use CLI commands only for installing, updating, activating, or refreshing the He
 Use `update --force` only when local ClawChat plugin or skill files look corrupted while the installed version is already current.
 
 Use activation codes exactly as provided. Do not lowercase, normalize, add prefixes, invent, reuse, or retry a code. If activation fails with a non-zero exit or API error, report the error and ask for a fresh code.
+
+## Output Visibility
+
+When the user asks to change ClawChat output verbosity, use the runtime slash command for the current conversation. Treat natural-language wording as aliases for the three supported modes:
+
+| User wording | Command |
+| --- | --- |
+| quiet mode, silent mode, minimal output, final-only output, `minimal` | `/clawchat-output minimal` |
+| conversation mode, normal mode, regular mode, default output, `normal` | `/clawchat-output normal` |
+| dev mode, developer mode, verbose mode, full output, `full` | `/clawchat-output full` |
+
+Do not edit config files directly for this request. If the slash command returns an error, report that error instead of claiming the mode changed.
 
 ## Quick Reference
 

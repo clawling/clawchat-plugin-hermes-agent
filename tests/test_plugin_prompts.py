@@ -24,3 +24,17 @@ def test_prompt_loader_exposes_only_shipped_prompt_files(tmp_path: Path) -> None
     assert not hasattr(plugin_prompts, "user_prompt")
     assert not hasattr(plugin_prompts, "group_prompt")
     assert not hasattr(plugin_prompts, "mode_prompt")
+
+
+def test_clawchat_skill_routes_natural_language_output_visibility() -> None:
+    skill = (Path(__file__).parents[1] / "skills" / "clawchat" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "## Output Visibility" in skill
+    assert "quiet mode" in skill
+    assert "`/clawchat-output minimal`" in skill
+    assert "conversation mode" in skill
+    assert "`/clawchat-output normal`" in skill
+    assert "dev mode" in skill
+    assert "`/clawchat-output full`" in skill
