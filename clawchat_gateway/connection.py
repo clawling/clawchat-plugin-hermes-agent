@@ -28,6 +28,7 @@ from clawchat_gateway.protocol import (
 )
 from clawchat_gateway.device_id import get_device_id
 from clawchat_gateway.storage import get_clawchat_store
+from clawchat_gateway.notify_signal import NotifySignalObserver
 from clawchat_gateway.ws_log import format_ws_log
 from clawchat_gateway.ws_state import ReconnectTracker
 
@@ -104,6 +105,7 @@ class ClawChatConnection:
         self._tracker = ReconnectTracker()
         self._attempt = 0
         self._reconnect_count = 0
+        self._notify_signal_observer = NotifySignalObserver()
         try:
             self._store = get_clawchat_store()
         except Exception:  # noqa: BLE001
@@ -696,6 +698,51 @@ class ClawChatConnection:
             if on_signal is not None:
                 await on_signal(frame)
             return
+        if self._state == ConnectionState.READY and ftype in (None, "event") and frame.get("event") == "notify.signal":
+            # §9.4 reliable system notification. The plugin holds no friend/roster
+            # cache (REST-on-demand), so observe + dedup only — no side effect. The
+            # live frame and its reliable-inbox replay share an event_id and
+            # collapse to one observation. Wire a reaction here if ever needed.
+            payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+            outcome = self._notify_signal_observer.observe(frame)
+            logger.info(
+                format_ws_log(
+                    event="inbound_control",
+                    account_id=self._account_id,
+                    attempt=self._attempt,
+                    reconnect_count=self._reconnect_count,
+                    state=ConnectionState.READY.value,
+                    action="notify_signal",
+                    fields=[
+                        ("event_name", frame.get("event")),
+                        ("trace_id", frame.get("trace_id") or frame.get("id")),
+                        ("signal_type", payload.get("type")),
+                        ("entity_id", payload.get("entity_id")),
+                        ("event_id", payload.get("event_id")),
+                        ("outcome", outcome),
+                    ],
+                )
+            )
+            return
+        if self._state == ConnectionState.READY and ftype in (None, "event") and frame.get("event") == "replay.done":
+            # §11.5 terminal control frame: device replay drained, live begins.
+            # Fires on every reconnect (even zero-backlog). Replayed messages are
+            # processed inline, so this is a logged boundary marker, not a gate.
+            logger.info(
+                format_ws_log(
+                    event="inbound_control",
+                    account_id=self._account_id,
+                    attempt=self._attempt,
+                    reconnect_count=self._reconnect_count,
+                    state=ConnectionState.READY.value,
+                    action="replay_done",
+                    fields=[
+                        ("event_name", frame.get("event")),
+                        ("trace_id", frame.get("trace_id") or frame.get("id")),
+                    ],
+                )
+            )
+            return
         if self._state == ConnectionState.READY and ftype in (None, "event") and frame.get("event") in {"presence.snapshot", "presence.update"}:
             logger.info(
                 format_ws_log(
@@ -864,9 +911,13 @@ class ClawChatConnection:
             nonce=nonce,
             device_id=get_device_id(),
             capabilities={
-                "multi_device": True,
+                # Agent runtime is single-device: multi_device stays off so the
+                # server never self-fans-out this connection's own messages.
+                # notify_signals is advertised now that we handle the frame (§9.4).
+                "multi_device": False,
                 "device_replay": True,
                 "chat_meta_events": True,
+                "notify_signals": True,
             },
         )
         await self._ws.send(encode_frame(connect_req))
