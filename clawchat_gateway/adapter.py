@@ -81,6 +81,7 @@ from clawchat_gateway.protocol import (
     build_message_send_event,
     build_typing_update_event,
     new_frame_id,
+    new_message_id,
 )
 from clawchat_gateway.storage import get_clawchat_store
 from clawchat_gateway.terminal_send import (
@@ -1043,7 +1044,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         except Exception:  # noqa: BLE001
             logger.warning("clawchat activation bootstrap claim release failed", exc_info=True)
 
-    def _trace_inbound_frame(self, frame: dict[str, Any]) -> None:
+    def _trace_inbound_frame(self, frame: dict[str, Any]) -> bool:
         """Pre-parse trace for inbound message.send frames.
 
         Why: hermes-agent has been observed to enter an interrupt-loop where
@@ -1051,6 +1052,12 @@ class ClawChatAdapter(BasePlatformAdapter):
         log line per inbound frame with the fields needed to confirm/refute
         that hypothesis (sender_id vs bot user_id, message_id, text head),
         and warns when the per-chat rate exceeds a sane threshold.
+
+        Returns ``True`` when the frame is a self-echo (``sender.id`` equals
+        this agent's own user id). The caller MUST drop such frames before
+        any business/LLM processing — see :meth:`_on_message`. This mirrors
+        the openclaw adapter's ``inbound.ts`` self-echo guard and is a hard
+        prerequisite for the server's produce-back delivery mode.
         """
         chat_id = frame.get("chat_id") or ""
         chat_type = frame.get("chat_type") or "direct"
@@ -1118,8 +1125,19 @@ class ClawChatAdapter(BasePlatformAdapter):
                 INBOUND_RATE_WINDOW_SECONDS,
             )
 
+        return is_self_echo
+
     async def _on_message(self, frame: dict[str, Any]) -> None:
-        self._trace_inbound_frame(frame)
+        if self._trace_inbound_frame(frame):
+            # Self-echo (sender.id == own user id): drop before it ever reaches
+            # the LLM/business pipeline. Aligns with openclaw inbound.ts guard
+            # and is a hard prerequisite for server produce-back mode.
+            inbound_trace.info(
+                "inbound dropped reason=self_echo chat_id=%s trace_id=%s",
+                frame.get("chat_id"),
+                frame.get("trace_id"),
+            )
+            return
         event_name = str(frame.get("event") or "")
         if event_name == "interaction.submit":
             if not await self._handle_interaction_submit(frame):
@@ -1871,7 +1889,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             text=text,
         )
         validate_mention_payload(fragments, context_mentions)
-        message_id = new_frame_id("msg")
+        message_id = new_message_id()
         frame = build_message_send_event(
             chat_id=chat_id,
             chat_type=chat_type,
@@ -1988,7 +2006,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         fragments: list[dict[str, Any]] = [
             {"kind": "text", "text": _owner_attention_text(group_id, fallback_text)}
         ]
-        message_id = new_frame_id("msg")
+        message_id = new_message_id()
         frame = build_message_reply_event(
             chat_id=owner_chat_id,
             chat_type="direct",
@@ -2032,7 +2050,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             fallback_text = _owner_attention_text(chat_id, fallback_text)
 
         fragments = [{"kind": "text", "text": fallback_text}]
-        message_id = new_frame_id("msg")
+        message_id = new_message_id()
         frame = build_message_reply_event(
             chat_id=target_chat_id,
             chat_type="direct",
@@ -2120,7 +2138,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         if not has_media and self._is_pure_silent_response(fragments):
             logger.info("clawchat silent response suppressed chat_id=%s chat_type=%s", chat_id, chat_type)
             return SendResult(success=True)
-        message_id = new_frame_id("msg")
+        message_id = new_message_id()
         mode = "complete" if is_immediate_media_send else "complete-buffered"
         logger.info(
             "clawchat send start chat_id=%s chat_type=%s mode=%s text_len=%d fragments=%d reply_to=%s",

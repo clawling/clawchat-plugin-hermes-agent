@@ -33,6 +33,37 @@ fallback. The plugin never copies them into `config.yaml`
 |------------------------------------------------------|-----------------|--------------------------------------|-------|
 | `CLAWCHAT_BASE_URL`                                  | `base_url`      | `https://app.clawling.com`           | REST API base. Trailing slashes are stripped. |
 | `CLAWCHAT_WEBSOCKET_URL` (or `CLAWCHAT_WS_URL`)      | `websocket_url` | `wss://app.clawling.com/ws`          | Derived from `base_url` when activation runs (`activate._derive_websocket_url`). |
+| `CLAWCHAT_DEVICE_ID`                                 | —               | derived (see below)                  | **Stable device id for this agent.** When set, it is used verbatim (only sanitized to the allowed `[A-Za-z0-9_.:-]` charset and `hermes-` prefixed if not already). **Strongly recommended to set in any containerized / Kubernetes deployment** — see the durability note below. |
+
+### Device id durability (deployment requirement)
+
+The ClawChat server keeps a **per-device delivery cursor**. A stable device id
+is therefore required for correct offline-message replay, push-badge accuracy,
+and ack-aware inbox pruning. When `CLAWCHAT_DEVICE_ID` is **not** set,
+`clawchat_gateway.device_id.get_device_id` falls back to a host fingerprint
+(macOS `IOPlatformUUID` → Linux `/etc/machine-id` → hostname+MAC hash). In a
+pod that fingerprint changes on every reschedule, which makes the server treat
+each restart as a brand-new device:
+
+- the new device's cursor starts at `0`, forcing a full inbox replay; and
+- the old device's cursor becomes an **orphan** that pins the user's
+  ack-aware prune retention window.
+
+**Deployment requirement:** set `CLAWCHAT_DEVICE_ID` to a fixed, per-agent value
+(e.g. derived from the agent's stable identity) in the pod spec / `.env` /
+`config.yaml` so the device id survives restarts and rescheduling. Example pod
+env:
+
+```yaml
+env:
+  - name: CLAWCHAT_DEVICE_ID
+    value: "hermes-agt-<stable-agent-id>"
+```
+
+The server-assigned `resolved_device_id` from the `hello-ok` handshake is
+recorded in plugin SQLite (`connections.resolved_device_id`) for diagnostics;
+the id the plugin *presents* on connect is always `get_device_id()`, so the env
+var is the durable source of truth.
 
 ## Rich interactions and display
 

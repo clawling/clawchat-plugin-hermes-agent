@@ -56,7 +56,22 @@ def _host_fingerprint() -> str:
 
 @functools.lru_cache(maxsize=1)
 def get_device_id() -> str:
-    """Return a stable ClawChat device id for this Hermes installation."""
+    """Return a stable ClawChat device id for this Hermes installation.
+
+    Resolution order:
+
+    1. ``CLAWCHAT_DEVICE_ID`` env var — used **verbatim** when already a
+       well-formed ``hermes-`` id, otherwise sanitized to the transport-safe
+       charset and ``hermes-`` prefixed. This is the durable, deployment-pinned
+       path: the same env value always yields the same device id across pod
+       restarts/reschedules. **Deployments MUST set this** (see
+       ``docs/configuration.md`` — Device id durability) so the server-side
+       per-device cursor stays stable.
+    2. Host fingerprint fallback (macOS ``IOPlatformUUID`` → Linux
+       ``machine-id`` → hostname+MAC hash) — only when the env var is unset.
+       In a container this fingerprint changes on every reschedule, which the
+       server treats as a brand-new device (full replay + orphan cursor).
+    """
     override = os.getenv("CLAWCHAT_DEVICE_ID", "").strip()
     if override:
         return _safe_id("hermes", override) if not override.startswith("hermes-") else override

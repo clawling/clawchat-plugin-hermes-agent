@@ -1,13 +1,50 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from typing import Any
 
+# Crockford base32 alphabet (ULID spec): excludes I, L, O, U.
+_ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
 
 def new_frame_id(prefix: str = "req") -> str:
     return f"{prefix}-{uuid.uuid4()}"
+
+
+def _encode_base32(value: int, length: int) -> str:
+    chars = [""] * length
+    for i in range(length - 1, -1, -1):
+        chars[i] = _ULID_ALPHABET[value & 0x1F]
+        value >>= 5
+    return "".join(chars)
+
+
+def new_ulid() -> str:
+    """Return a 26-char Crockford-base32 ULID (48-bit time + 80-bit randomness).
+
+    Dependency-free implementation of the ULID spec. Lexicographically
+    sortable by creation time, monotonic enough for client ids; collision
+    probability is negligible (80 random bits per millisecond).
+    """
+    timestamp_ms = int(time.time() * 1000) & ((1 << 48) - 1)
+    randomness = int.from_bytes(os.urandom(10), "big")  # 80 bits
+    return _encode_base32(timestamp_ms, 10) + _encode_base32(randomness, 16)
+
+
+def new_message_id() -> str:
+    """Mint a client message id: ``msg-`` + ULID.
+
+    Required by ClawChat Protocol v2 (§3.1.9): every outbound
+    ``message.send`` / ``message.reply`` MUST carry a client-minted
+    ``payload.message_id`` so the server's ``UNIQUE(recipient, message_id)``
+    absorbs bounded-timeout resends as a single coalesce (the client then
+    dedupes by message_id). A bounded-timeout resend MUST reuse the same id —
+    callers therefore mint once and reuse across resend attempts.
+    """
+    return f"msg-{new_ulid()}"
 
 
 def current_time_ms() -> int:
