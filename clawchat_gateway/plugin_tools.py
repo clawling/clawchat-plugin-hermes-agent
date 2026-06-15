@@ -574,21 +574,6 @@ async def handle_clawchat_upload_avatar_image(args, **kw):
     return _tool_result(result)
 
 
-async def handle_clawchat_upload_media_file(args, **kw):
-    task_id = kw.get("task_id") or "default"
-    logger.info("clawchat_upload_media_file start task_id=%s", task_id)
-    from clawchat_gateway import tools
-
-    result = await _recorded_tool_call(
-        "clawchat_upload_media_file",
-        args,
-        _account_id_from_kwargs(kw),
-        lambda: tools.upload_media_file(str(args.get("filePath") or "")),
-    )
-    logger.info("clawchat_upload_media_file done task_id=%s", task_id)
-    return _tool_result(result)
-
-
 _DIRECT_TOOL_USE_INSTRUCTION = (
     "Use this registered ClawChat plugin tool directly. Do not use execute, shell commands, Python scripts, "
     "curl, handwritten API clients, generic fallback tools, or direct ClawChat HTTP calls "
@@ -1349,29 +1334,4 @@ def register_tools(ctx) -> None:
         is_async=True,
         description="Upload ClawChat Avatar Image",
         emoji="🖼️",
-    )
-
-    ctx.register_tool(
-        "clawchat_upload_media_file",
-        "clawchat",
-        {
-            "name": "clawchat_upload_media_file",
-            "description": _direct_tool_description(
-                "Upload an absolute local file/media path to ClawChat media storage (max 20MB) and return a ClawChat-accessible public/shareable URL. "
-                "TRIGGER — invoke when the user provides an absolute local file path and asks to upload, share, or create a ClawChat-accessible link for that file. "
-                "Do not use this tool to send an attachment in the current chat; use the current runtime's native media-send mechanism instead (for example, MEDIA:/absolute/local/path where supported). "
-                "Do not use this for account avatar changes; use `clawchat_upload_avatar_image` for avatar images. Do not use this just to mirror local assistant identity."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "filePath": {"type": "string", "description": "Absolute local path of the non-avatar media/file to upload to ClawChat for a ClawChat-accessible URL (max 20MB)"},
-                },
-                "required": ["filePath"],
-            },
-        },
-        handle_clawchat_upload_media_file,
-        is_async=True,
-        description="Upload ClawChat Media File",
-        emoji="📎",
     )

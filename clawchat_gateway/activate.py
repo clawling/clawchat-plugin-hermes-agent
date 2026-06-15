@@ -77,6 +77,20 @@ def _write_env_values(values: dict[str, str | None]) -> Path:
     return Path(get_env_path())
 
 
+def _read_existing_user_id(config: dict[str, Any]) -> str:
+    platforms = config.get("platforms")
+    if not isinstance(platforms, dict):
+        return ""
+    clawchat = platforms.get("clawchat")
+    if not isinstance(clawchat, dict):
+        return ""
+    extra = clawchat.get("extra")
+    if not isinstance(extra, dict):
+        return ""
+    user_id = extra.get("user_id")
+    return user_id.strip() if isinstance(user_id, str) else ""
+
+
 def _derive_websocket_url(base_url: str) -> str:
     parsed = urlparse(base_url)
     if parsed.netloc == "app.clawling.com":
@@ -206,7 +220,11 @@ async def activate(code: str, *, base_url: str) -> dict[str, Any]:
         user_id="",
         timeout=ACTIVATION_TIMEOUT_SECONDS,
     )
-    result = await agents_connect_with_retry(client, code=code)
+    _config_path, config = _load_config()
+    existing_user_id = _read_existing_user_id(config)
+    result = await agents_connect_with_retry(
+        client, code=code, user_id=existing_user_id or None
+    )
     agent = result["agent"]
     agent_id = str(agent.get("id") or "")
     user_id = str(agent["user_id"])

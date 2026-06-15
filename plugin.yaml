@@ -28,7 +28,6 @@ provides_tools:
   - clawchat_delete_moment_comment
   - clawchat_update_account_profile
   - clawchat_upload_avatar_image
-  - clawchat_upload_media_file
   - clawchat_memory_search
   - clawchat_memory_read
   - clawchat_memory_write

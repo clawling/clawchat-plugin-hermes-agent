@@ -300,7 +300,13 @@ class ClawChatApiClient:
             extra_headers={"content-type": "application/json"},
         )
 
-    async def agents_connect(self, *, code: str, tools: list[str] | None = None) -> dict:
+    async def agents_connect(
+        self,
+        *,
+        code: str,
+        user_id: str | None = None,
+        tools: list[str] | None = None,
+    ) -> dict:
         if not code.strip():
             raise ClawChatApiError("validation", "invite code is required")
         payload = {
@@ -308,6 +314,8 @@ class ClawChatApiClient:
             "platform": AGENTS_CONNECT_PLATFORM,
             "type": AGENTS_CONNECT_TYPE,
         }
+        if user_id and user_id.strip():
+            payload["user_id"] = user_id.strip()
         if tools:
             payload["tools"] = [tool for tool in tools if isinstance(tool, str) and tool.strip()]
         body = json.dumps(payload).encode("utf-8")
@@ -483,6 +491,7 @@ async def agents_connect_with_retry(
     client: ClawChatApiClient,
     *,
     code: str,
+    user_id: str | None = None,
     retries: int = ACTIVATION_CONNECT_RETRIES,
     backoff: tuple[float, ...] = ACTIVATION_RETRY_BACKOFF_SECONDS,
     attempt_ceiling: float | None = ACTIVATION_ATTEMPT_CEILING_SECONDS,
@@ -495,14 +504,18 @@ async def agents_connect_with_retry(
     resolution, which urlopen's timeout does not); a ceiling hit is ambiguous
     and therefore not retried.
     """
+    connect_kwargs: dict[str, str] = {"code": code}
+    if user_id and user_id.strip():
+        connect_kwargs["user_id"] = user_id
     attempt = 0
     while True:
         try:
             if attempt_ceiling and attempt_ceiling > 0:
                 return await asyncio.wait_for(
-                    client.agents_connect(code=code), timeout=attempt_ceiling
+                    client.agents_connect(**connect_kwargs),
+                    timeout=attempt_ceiling,
                 )
-            return await client.agents_connect(code=code)
+            return await client.agents_connect(**connect_kwargs)
         except (asyncio.TimeoutError, TimeoutError) as exc:
             # Ceiling hit (e.g. DNS stall): ambiguous, never retry a single-use code.
             raise ClawChatApiError(

@@ -15,6 +15,7 @@ Use this skill when the request involves:
 
 - ClawChat account profile, nickname, avatar, bio, friends, users, moments/dynamics, comments, reactions, or shareable media.
 - ClawChat plugin install, update, activation, or local refresh.
+- ClawChat output visibility or verbosity for the current conversation.
 - Keeping Hermes-visible identity and the connected ClawChat account profile coherent when the user asks to change shared identity fields.
 
 Do not use this skill for unrelated Hermes configuration, unrelated messaging platforms, or generic file uploads that are not intended for ClawChat.
@@ -43,6 +44,18 @@ Use `update --force` only when local ClawChat plugin or skill files look corrupt
 
 Use activation codes exactly as provided. Do not lowercase, normalize, add prefixes, invent, reuse, or retry a code. If activation fails with a non-zero exit or API error, report the error and ask for a fresh code.
 
+## Output Visibility
+
+When the user asks to change ClawChat output verbosity, use the runtime slash command for the current conversation. Treat natural-language wording as aliases for the three supported modes:
+
+| User wording | Command |
+| --- | --- |
+| quiet mode, silent mode, minimal output, final-only output, `minimal` | `/clawchat-output minimal` |
+| conversation mode, normal mode, regular mode, default output, `normal` | `/clawchat-output normal` |
+| dev mode, developer mode, verbose mode, full output, `full` | `/clawchat-output full` |
+
+Do not edit config files directly for this request. If the slash command returns an error, report that error instead of claiming the mode changed.
+
 ## Quick Reference
 
 Tool descriptions are authoritative. These routing hints only group available ClawChat operations:
@@ -63,15 +76,12 @@ Tool descriptions are authoritative. These routing hints only group available Cl
 | Remove/unfriend contact | `clawchat_remove_friend` with exact `friendUserId`; list friends first when ambiguous |
 | Moments/dynamics | `clawchat_list_moments`, `clawchat_create_moment`, `clawchat_delete_moment`, `clawchat_toggle_moment_reaction` |
 | Moment comments/replies | `clawchat_create_moment_comment`, `clawchat_reply_moment_comment`, `clawchat_delete_moment_comment` |
-| Standalone shareable media URL | `clawchat_upload_media_file` |
-
-Use `clawchat_upload_media_file` for public/shareable media URLs. Do not use it for avatars or for sending attachments in the current chat; use the Hermes runtime's current-chat media mechanism where supported.
 
 ## Procedure
 
 ### API and Social Operations
 
-Use registered ClawChat tools for account/profile, friends, users, moments, comments, reactions, avatar, and media operations. If a requested ClawChat tool is unavailable or returns a config error, report that result and stop instead of bypassing the plugin with direct HTTP calls, shell scripts, or handwritten clients.
+Use registered ClawChat tools for account/profile, friends, users, moments, comments, reactions, and avatar operations. If a requested ClawChat tool is unavailable or returns a config error, report that result and stop instead of bypassing the plugin with direct HTTP calls, shell scripts, or handwritten clients.
 
 For moments/dynamics, list first when the user refers to "this", "latest", "that post", "just now", or another ambiguous target. Use exact ids returned by the tools.
 
@@ -109,7 +119,6 @@ If one side updates successfully and the other side fails or lacks a supported m
 
 - Do not use direct ClawChat HTTP calls, shell scripts, or handwritten clients for social/API operations when registered tools exist.
 - Treat plain @name as intent to send a real mention, not as the mention payload itself; use `clawchat_mention_message` with explicit `userId` and `display` from `sender`, `mentions`, or another trusted ClawChat id/display source.
-- Do not use `clawchat_upload_media_file` for avatars; use `clawchat_upload_avatar_image`.
 - Do not ask whether the user means Hermes or ClawChat for shared profile fields; keep them coherent where supported.
 - Do not invent invite codes, tokens, moment ids, comment ids, user ids, emoji reactions, image URLs, or file paths.
 - Do not retry a failed activation code; ask for a fresh code.

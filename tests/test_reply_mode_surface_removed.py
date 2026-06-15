@@ -658,6 +658,109 @@ def test_activation_persists_tokens_to_sqlite(monkeypatch, tmp_path):
     ]
 
 
+def test_activation_sends_existing_config_user_id_and_overwrites_credentials(
+    monkeypatch, tmp_path
+):
+    activate, saved_config, env_values = _load_activate(
+        monkeypatch,
+        tmp_path,
+        {
+            "platforms": {
+                "clawchat": {
+                    "extra": {
+                        "user_id": "user-old",
+                        "owner_user_id": "owner-old",
+                    }
+                }
+            }
+        },
+    )
+    calls = []
+
+    class Store:
+        def upsert_activation(self, **kwargs):
+            pass
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def agents_connect(self, *, code, user_id=None):
+            calls.append({"code": code, "user_id": user_id})
+            return {
+                "access_token": "access-new",
+                "refresh_token": "refresh-new",
+                "agent": {
+                    "id": "agent-new",
+                    "user_id": "user-new",
+                    "owner_id": "owner-new",
+                },
+                "conversation": {"id": "conv-activation"},
+            }
+
+    monkeypatch.setattr(activate, "ClawChatApiClient", Client)
+    monkeypatch.setattr(activate, "get_clawchat_store", lambda: Store())
+
+    payload = asyncio.run(activate.activate("CODE", base_url="https://app.clawling.com"))
+
+    assert calls == [{"code": "CODE", "user_id": "user-old"}]
+    assert payload["user_id"] == "user-new"
+    assert saved_config["platforms"]["clawchat"]["extra"]["user_id"] == "user-new"
+    assert saved_config["platforms"]["clawchat"]["extra"]["owner_user_id"] == "owner-new"
+    assert env_values["CLAWCHAT_TOKEN"] == "access-new"
+    assert env_values["CLAWCHAT_REFRESH_TOKEN"] == "refresh-new"
+
+
+def test_agents_connect_includes_optional_existing_user_id(monkeypatch):
+    from clawchat_gateway.api_client import ClawChatApiClient
+
+    calls = []
+
+    async def call_json(self, method, path, *, body=None, extra_headers=None):
+        calls.append(
+            {
+                "method": method,
+                "path": path,
+                "body": json.loads(body.decode("utf-8")),
+                "extra_headers": extra_headers,
+            }
+        )
+        return {
+            "access_token": "access-new",
+            "refresh_token": "refresh-new",
+            "agent": {
+                "id": "agent-new",
+                "user_id": "user-new",
+                "owner_id": "owner-new",
+            },
+            "conversation": {"id": "conv-activation"},
+        }
+
+    monkeypatch.setattr(ClawChatApiClient, "_call_json", call_json)
+
+    result = asyncio.run(
+        ClawChatApiClient(base_url="https://app.clawling.com").agents_connect(
+            code=" CODE ",
+            user_id=" user-old ",
+        )
+    )
+
+    assert result["agent"]["user_id"] == "user-new"
+    assert calls == [
+        {
+            "method": "POST",
+            "path": "/v1/agents/connect",
+            "body": {
+                "code": "CODE",
+                "platform": "hermes",
+                "type": "clawbot",
+                "user_id": "user-old",
+            },
+            "extra_headers": {"content-type": "application/json"},
+        }
+    ]
+
+
 def test_storage_reads_activation_credentials(tmp_path):
     from clawchat_gateway.storage import ClawChatStore
 

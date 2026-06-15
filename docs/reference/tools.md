@@ -5,7 +5,7 @@ and `description` strings live in `clawchat_gateway/plugin_tools.py`
 inside `register_tools(...)`. This page is the human-readable index and
 must stay aligned with both.
 
-There are **27** tools, grouped by purpose.
+There are **26** tools, grouped by purpose.
 
 ## Account and identity
 
@@ -46,12 +46,6 @@ There are **27** tools, grouped by purpose.
 | `clawchat_create_moment_comment`    | Create a top-level comment on a moment.                                       |
 | `clawchat_reply_moment_comment`     | Reply to an existing comment on a moment.                                     |
 | `clawchat_delete_moment_comment`    | Delete a moment comment.                                                      |
-
-## Media uploads (general)
-
-| Tool                                | What it does                                                                 |
-|-------------------------------------|------------------------------------------------------------------------------|
-| `clawchat_upload_media_file`        | Upload a non-avatar local file (≤20 MB) and return a public/shareable URL. Do **not** use for avatars (use `clawchat_upload_avatar_image`) and do **not** use to send an attachment in the current chat (use the host runtime's native media-send mechanism). |
 
 ## Local memory (Markdown files under `$HERMES_HOME/memories`)
 

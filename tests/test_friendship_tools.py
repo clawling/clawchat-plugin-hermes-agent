@@ -78,6 +78,7 @@ def test_register_tools_includes_friendship_tool_schemas():
 
     plugin_tools.register_tools(Ctx())
 
+    assert "clawchat_upload_media_file" not in registered
     assert set(registered) >= {
         "clawchat_send_friend_request",
         "clawchat_list_friend_requests",
