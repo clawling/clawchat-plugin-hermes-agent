@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import mimetypes
 import uuid
 from pathlib import Path
@@ -9,6 +10,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from urllib.parse import unquote, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
+
+logger = logging.getLogger("clawchat_gateway.media_runtime")
 
 
 def infer_media_kind_from_mime(mime: str) -> str:
@@ -209,6 +212,14 @@ def _upload_media_sync(
     with urlopen(request) as response:
         payload = json.loads(response.read().decode("utf-8"))
 
+    # §15.3: branch on the business `code`, not the HTTP status. `code != 0`
+    # is a business error (e.g. 41501 mime not allowed, 41301 too large) and
+    # `data` is absent.
+    if isinstance(payload, dict) and payload.get("code") not in (0, None):
+        msg = payload.get("msg")
+        raise ValueError(
+            f"media upload rejected code={payload.get('code')} msg={msg!r}"
+        )
     data = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(data, dict):
         raise ValueError(f"unexpected upload response: {payload!r}")
@@ -263,9 +274,22 @@ async def upload_outbound_media(
                     "name": loaded.filename,
                 }
             )
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            # Do not drop media silently — surface the failure so an operator
+            # can see why a referenced attachment never made it onto the wire.
             if _is_uploaded_media_url(url):
+                logger.warning(
+                    "clawchat outbound media upload failed; reusing existing url=%s error=%s",
+                    url,
+                    exc,
+                )
                 fragments.append(_uploaded_media_fragment(url))
+            else:
+                logger.warning(
+                    "clawchat outbound media dropped url=%s error=%s",
+                    url,
+                    exc,
+                )
             continue
     return fragments
 

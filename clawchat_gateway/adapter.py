@@ -98,6 +98,8 @@ TYPING_REFRESH_SECONDS = 10.0
 INBOUND_RATE_WINDOW_SECONDS = 30.0
 INBOUND_RATE_WARN_THRESHOLD = 5
 COMPLETED_RUN_CACHE_MAX = 1024
+REPLY_PREVIEW_CACHE_MAX = 512
+REPLY_PREVIEW_TEXT_MAX = 200
 RECONNECT_REFRESH_LIMIT = 20
 METADATA_INVALIDATION_SCOPES = {"behavior", "title", "description"}
 DIRECT_CHAT_TYPES = {"direct", "dm"}
@@ -380,6 +382,11 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._inbound_window: dict[str, deque[float]] = {}
         self._completed_run_ids: set[str] = set()
         self._completed_run_order: deque[str] = deque()
+        # §7.4 reply_preview: snapshot of each inbound message keyed by its
+        # message_id, so an outbound reply can carry the inline-quote preview
+        # ({id, nick_name, fragments}) without a round-trip. Bounded FIFO.
+        self._reply_preview_by_message_id: dict[str, dict[str, Any]] = {}
+        self._reply_preview_order: deque[str] = deque()
         self._auth_failed = False
         self._activation_bootstrap_tasks: set[asyncio.Task[None]] = set()
         self._conversation_refresh_tasks: set[asyncio.Task[None]] = set()
@@ -1197,6 +1204,9 @@ class ClawChatAdapter(BasePlatformAdapter):
                     event_name,
                 )
                 return
+            self._remember_reply_preview(
+                message_id=protocol_message_id, inbound=inbound
+            )
         if await self._handle_owner_forwarded_approval(inbound):
             return
         if inbound.chat_type == "group":
@@ -1897,6 +1907,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             fragments=fragments,
             context_mentions=context_mentions,
             reply_to_message_id=reply_to_message_id,
+            reply_preview=self._reply_preview_for(reply_to_message_id),
             include_message_id=True,
         )
         visible_text = mention_message_text(mentions=normalized_mentions, text=text)
@@ -2177,6 +2188,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             message_id=message_id,
             fragments=fragments,
             reply_to_message_id=reply_to,
+            reply_preview=self._reply_preview_for(reply_to),
             include_message_id=True,
         )
         claimed = self._claim_outbound_message(
@@ -2372,6 +2384,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             message_id=run.message_id,
             fragments=await self._build_fragments(final_content, run.metadata, run.kwargs),
             reply_to_message_id=run.reply_to_message_id,
+            reply_preview=self._reply_preview_for(run.reply_to_message_id),
             include_message_id=True,
         )
         claimed = self._claim_outbound_message(
@@ -2439,6 +2452,42 @@ class ClawChatAdapter(BasePlatformAdapter):
         while len(self._completed_run_order) > COMPLETED_RUN_CACHE_MAX:
             old_message_id = self._completed_run_order.popleft()
             self._completed_run_ids.discard(old_message_id)
+
+    def _remember_reply_preview(
+        self, *, message_id: str | None, inbound: InboundMessage
+    ) -> None:
+        """Cache a §7.4 reply_preview snapshot for a received message.
+
+        Keyed by the inbound ``message_id`` so a later outbound reply that
+        targets it can carry an inline-quote preview. The fragments are a
+        trimmed single text fragment (the rendered inbound text) — "enough for
+        an inline quote, not necessarily complete" per §7.4.
+        """
+        if not message_id:
+            return
+        text = inbound.text or ""
+        if len(text) > REPLY_PREVIEW_TEXT_MAX:
+            text = text[:REPLY_PREVIEW_TEXT_MAX].rstrip() + "…"
+        preview: dict[str, Any] = {
+            "id": inbound.sender_id,
+            "nick_name": inbound.sender_name,
+            "fragments": [{"kind": "text", "text": text}],
+        }
+        if message_id in self._reply_preview_by_message_id:
+            self._reply_preview_by_message_id[message_id] = preview
+            return
+        self._reply_preview_by_message_id[message_id] = preview
+        self._reply_preview_order.append(message_id)
+        while len(self._reply_preview_order) > REPLY_PREVIEW_CACHE_MAX:
+            old_message_id = self._reply_preview_order.popleft()
+            self._reply_preview_by_message_id.pop(old_message_id, None)
+
+    def _reply_preview_for(
+        self, reply_to_message_id: str | None
+    ) -> dict[str, Any] | None:
+        if not reply_to_message_id:
+            return None
+        return self._reply_preview_by_message_id.get(reply_to_message_id)
 
     async def on_run_failed(
         self,

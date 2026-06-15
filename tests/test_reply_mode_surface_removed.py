@@ -964,6 +964,8 @@ def _adapter(monkeypatch, extra=None):
     adapter._active_chat_runs = {}
     adapter._completed_run_ids = set()
     adapter._completed_run_order = []
+    adapter._reply_preview_by_message_id = {}
+    adapter._reply_preview_order = []
     adapter._conversation_metadata_versions = {}
     adapter._run_counter = 0
     return adapter

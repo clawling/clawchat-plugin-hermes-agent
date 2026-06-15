@@ -40,6 +40,27 @@ BACKOFF_RESET_AFTER_SECONDS = 5.0
 ACKABLE_EVENTS = {"message.send", "message.reply"}
 ACTIVATION_CREDENTIAL_POLL_INTERVAL_SECONDS = 2.0
 
+# Protocol v2 §14.1: a `hello-fail` whose reason signals that the upstream auth
+# backend (member-backend) is *unavailable* (upstream 5xx / timeout) means the
+# token may still be valid — the auth service is down. The mandated response is
+# to backoff-reconnect with the SAME token, NOT to discard credentials or
+# trigger a refresh (a 5xx storm must not become a mass token-refresh storm).
+# Every other reason (nonce mismatch, authentication failed, invalid connect)
+# stays terminal per §3.5.
+_TRANSIENT_AUTH_FAILURE_MARKERS = (
+    "remote auth service unavailable",
+    "auth service unavailable",
+    "service unavailable",
+    "temporarily unavailable",
+)
+
+
+def _is_transient_auth_failure(reason: str | None) -> bool:
+    if not reason:
+        return False
+    text = reason.lower()
+    return any(marker in text for marker in _TRANSIENT_AUTH_FAILURE_MARKERS)
+
 
 @dataclass
 class _QueuedFrame:
@@ -959,6 +980,34 @@ class ClawChatConnection:
             trace_id_match = bool(
                 self._pending_connect_id and frame_trace_id == self._pending_connect_id
             )
+            if _is_transient_auth_failure(reason):
+                # §14.1 (5xx / auth backend unavailable): keep the token, do NOT
+                # stop or discard credentials — let the supervisor backoff and
+                # reconnect with the same token.
+                logger.warning(
+                    format_ws_log(
+                        event="auth_unavailable",
+                        account_id=self._account_id,
+                        attempt=self._attempt,
+                        reconnect_count=self._reconnect_count,
+                        state=ConnectionState.HANDSHAKING.value,
+                        action="backoff_reconnect",
+                        fields=[
+                            ("trace_id", frame_trace_id),
+                            ("pending_id", self._pending_connect_id),
+                            ("trace_id_match", trace_id_match),
+                            ("reason", reason),
+                        ],
+                    )
+                )
+                if self._hello_wait is not None and not self._hello_wait.done():
+                    self._hello_wait.set_result(False)
+                if self._ws is not None:
+                    try:
+                        await self._ws.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                return
             using_activation_db_credentials = self._using_activation_db_credentials
             self._auth_failed = True
             if not using_activation_db_credentials:

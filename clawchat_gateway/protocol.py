@@ -140,13 +140,14 @@ def build_message_reply_event(
     message_id: str,
     fragments: list[dict[str, Any]],
     reply_to_message_id: str | None = None,
+    reply_preview: dict[str, Any] | None = None,
     include_message_id: bool = False,
 ) -> dict[str, Any]:
     context: dict[str, Any] = {"mentions": [], "reply": None}
     if reply_to_message_id:
         context["reply"] = {
             "reply_to_msg_id": reply_to_message_id,
-            "reply_preview": None,
+            "reply_preview": reply_preview,
         }
     payload: dict[str, Any] = {
         "message_mode": "normal",
@@ -173,13 +174,14 @@ def build_message_send_event(
     fragments: list[dict[str, Any]],
     context_mentions: list[dict[str, Any]] | None = None,
     reply_to_message_id: str | None = None,
+    reply_preview: dict[str, Any] | None = None,
     include_message_id: bool = False,
 ) -> dict[str, Any]:
     context: dict[str, Any] = {"mentions": context_mentions or [], "reply": None}
     if reply_to_message_id:
         context["reply"] = {
             "reply_to_msg_id": reply_to_message_id,
-            "reply_preview": None,
+            "reply_preview": reply_preview,
         }
     payload: dict[str, Any] = {
         "message_mode": "normal",
