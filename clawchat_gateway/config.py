@@ -272,7 +272,11 @@ class ClawChatConfig:
             if media_roots_env
             else _get_config_value(extra, "media_local_roots", ())
         )
-        token = _get_env("CLAWCHAT_TOKEN")
+        # Backward compat: old configs stored the token under extra.token /
+        # extra.refresh_token. The activation flow now keeps tokens out of
+        # config.yaml (env/.env/SQLite only), but a config written by an older
+        # plugin must still boot — fall back to extra when env is empty.
+        token = _get_env("CLAWCHAT_TOKEN") or _get_config_value(extra, "token", "")
         return cls(
             websocket_url=_get_env("CLAWCHAT_WEBSOCKET_URL", "CLAWCHAT_WS_URL")
             or _get_config_value(extra, "websocket_url", "")
@@ -283,7 +287,8 @@ class ClawChatConfig:
             media_base_url=_get_env("CLAWCHAT_MEDIA_BASE_URL")
             or _get_config_value(extra, "media_base_url", ""),
             token=token,
-            refresh_token=_get_env("CLAWCHAT_REFRESH_TOKEN"),
+            refresh_token=_get_env("CLAWCHAT_REFRESH_TOKEN")
+            or _get_config_value(extra, "refresh_token", ""),
             user_id=_get_env("CLAWCHAT_USER_ID")
             or _get_config_value(extra, "user_id", ""),
             agent_id=_get_env("CLAWCHAT_AGENT_ID")

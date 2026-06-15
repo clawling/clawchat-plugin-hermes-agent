@@ -394,8 +394,10 @@ def test_platform_config_exposes_no_reply_mode_or_stream_tuning(monkeypatch):
     assert not hasattr(config, "stream_max_buffer_chars")
     assert not hasattr(config, "show_tools_output")
     assert not hasattr(config, "show_think_output")
-    assert config.token == ""
-    assert config.refresh_token == ""
+    # Backward compat: when env provides no token, extra.token / extra.refresh_token
+    # are now read as a fallback so an upgraded legacy config still connects.
+    assert config.token == "config-token"
+    assert config.refresh_token == "config-refresh"
     assert config.runtime_status_messages is False
 
 

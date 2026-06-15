@@ -27,6 +27,7 @@ from clawchat_gateway.api_client import (
     ClawChatApiClient,
     agents_connect_with_retry,
 )
+from clawchat_gateway.config import _get_env
 from clawchat_gateway.device_id import get_device_id
 from clawchat_gateway.output_visibility import (
     normalize_output_visibility,
@@ -212,6 +213,107 @@ def persist_activation(
         "restart_required": True,
         "restart_message": "Restart Hermes gateway so ClawChat reloads the new credentials.",
     }
+
+
+def _mask_token(token: str) -> str:
+    """Mask a token for logging — never emit the raw secret."""
+    if not token:
+        return "<empty>"
+    return "***" if len(token) <= 4 else f"***{token[-4:]}"
+
+
+def migrate_legacy_config_tokens() -> dict[str, Any]:
+    """Migrate legacy ``extra.token`` / ``extra.refresh_token`` out of config.yaml.
+
+    Old ClawChat plugin configs stored the auth token under
+    ``platforms.clawchat.extra.token`` (and ``extra.refresh_token``). The current
+    plugin reads tokens ONLY from env / ``.env`` / SQLite, and activation
+    deliberately strips them from config.yaml — so a user upgrading from an old
+    config would silently never connect.
+
+    This one-shot, idempotent, fail-open migration:
+
+    * copies a non-empty ``extra.token`` to ``CLAWCHAT_TOKEN`` in ``.env`` only
+      when the env does not already provide one (env wins — never overwrite);
+    * does the same for ``extra.refresh_token`` → ``CLAWCHAT_REFRESH_TOKEN``
+      (only when non-empty);
+    * always strips ``token`` / ``refresh_token`` from the config's ``extra``;
+    * makes NO writes when there is nothing to migrate.
+
+    Returns a small summary dict and never raises (a failure must not crash
+    plugin registration).
+    """
+    summary = {"migrated_token": False, "migrated_refresh": False, "stripped": False}
+    try:
+        config_path, config = _load_config()
+    except Exception:  # noqa: BLE001
+        logger.warning("clawchat legacy-token migration: failed to load config", exc_info=True)
+        return summary
+
+    try:
+        platforms = config.get("platforms") if isinstance(config, dict) else None
+        if not isinstance(platforms, dict):
+            return summary
+        clawchat = platforms.get("clawchat")
+        if not isinstance(clawchat, dict):
+            return summary
+        extra = clawchat.get("extra")
+        if not isinstance(extra, dict):
+            return summary
+
+        raw_token = extra.get("token")
+        raw_refresh = extra.get("refresh_token")
+        token = raw_token.strip() if isinstance(raw_token, str) else ""
+        refresh = raw_refresh.strip() if isinstance(raw_refresh, str) else ""
+
+        has_token_key = "token" in extra
+        has_refresh_key = "refresh_token" in extra
+        if not token and not refresh and not has_token_key and not has_refresh_key:
+            return summary
+
+        env_values: dict[str, str | None] = {}
+        if token:
+            if _get_env("CLAWCHAT_TOKEN"):
+                logger.info(
+                    "clawchat legacy-token migration: env CLAWCHAT_TOKEN already set, "
+                    "stripping config token without overwrite"
+                )
+            else:
+                env_values["CLAWCHAT_TOKEN"] = token
+                summary["migrated_token"] = True
+        if refresh:
+            if _get_env("CLAWCHAT_REFRESH_TOKEN"):
+                logger.info(
+                    "clawchat legacy-token migration: env CLAWCHAT_REFRESH_TOKEN already "
+                    "set, stripping config refresh token without overwrite"
+                )
+            else:
+                env_values["CLAWCHAT_REFRESH_TOKEN"] = refresh
+                summary["migrated_refresh"] = True
+
+        # Nothing actually present to strip (keys absent) → no-op.
+        if not has_token_key and not has_refresh_key:
+            return summary
+
+        extra.pop("token", None)
+        extra.pop("refresh_token", None)
+        summary["stripped"] = True
+
+        if env_values:
+            _write_env_values(env_values)
+        _write_config(config_path, config)
+
+        logger.info(
+            "clawchat legacy-token migration: stripped config tokens "
+            "(token=%s migrated=%s, refresh=%s migrated=%s)",
+            _mask_token(token),
+            summary["migrated_token"],
+            _mask_token(refresh),
+            summary["migrated_refresh"],
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("clawchat legacy-token migration failed", exc_info=True)
+    return summary
 
 
 def persist_rotated_tokens(

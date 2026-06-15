@@ -304,8 +304,25 @@ def _patch_send_message_media_delivery() -> None:
     send_message_tool._send_to_platform = _send_to_platform_with_clawchat_media
 
 
+def _migrate_legacy_config_tokens() -> None:
+    """Best-effort migration of legacy config.yaml tokens into env/.env.
+
+    Old plugin configs stored the auth token under extra.token; the current
+    plugin reads tokens only from env/.env/SQLite. Run once at plugin load so an
+    upgraded config still connects. Never let a failure break registration.
+    """
+    try:
+        from clawchat_gateway.activate import migrate_legacy_config_tokens
+
+        migrate_legacy_config_tokens()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ClawChat legacy-token migration skipped: %s", exc)
+
+
 def _register_platform(ctx) -> bool:
     from clawchat_gateway.plugin_prompts import platform_prompt
+
+    _migrate_legacy_config_tokens()
 
     register_platform = getattr(ctx, "register_platform", None)
     if not callable(register_platform):
