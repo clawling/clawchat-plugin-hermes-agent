@@ -366,6 +366,41 @@ class ClawChatStore:
 
         return self._write("update_activation_tokens", write)
 
+    def set_activation_device_id(
+        self,
+        *,
+        platform: str,
+        account_id: str,
+        device_id: str,
+        updated_at: int | None = None,
+    ) -> None:
+        """Backfill ``device_id`` on an existing activations row, only if empty.
+
+        Token-refresh spec §E: env-booted agents have a NULL ``device_id`` (they
+        never ran the connect-code activation that persists it). The connection
+        backfills the resolved id (the token's ``did``) at connect so the durable
+        value lives in the DB and survives container recreation. The
+        ``device_id IS NULL OR device_id = ''`` guard makes this idempotent and
+        ensures it NEVER clobbers a value a connect-code activation already set.
+        """
+        device = device_id.strip() if isinstance(device_id, str) and device_id.strip() else None
+        if not device:
+            return
+        updated = updated_at if updated_at is not None else _now_ms()
+
+        def write(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                """
+                UPDATE activations
+                SET device_id = ?, updated_at = ?
+                WHERE platform = ? AND account_id = ?
+                  AND (device_id IS NULL OR device_id = '')
+                """,
+                (device, updated, platform, account_id),
+            )
+
+        self._write("set_activation_device_id", write)
+
     def clear_activation_credentials(
         self,
         *,

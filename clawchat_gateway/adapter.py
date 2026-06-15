@@ -31,7 +31,6 @@ from clawchat_gateway.api_client import (
     ClawChatApiClient,
     ClawChatApiError,
 )
-from clawchat_gateway.device_id import get_device_id
 from clawchat_gateway.clawchat_memory import (
     METADATA_END,
     METADATA_START,
@@ -445,7 +444,10 @@ class ClawChatAdapter(BasePlatformAdapter):
 
     async def _report_plugin_version(self, *, authenticated: bool) -> None:
         cfg = self._clawchat_config
-        device_id = get_device_id()
+        # Key the report on the SAME device id the WS session and refresh use
+        # (the token's `did` for env-booted agents), not a volatile fingerprint,
+        # so the report row links to the device the backend actually tracks (§E).
+        device_id = self._connection.session_device_id()
         try:
             client = ClawChatApiClient(
                 base_url=cfg.base_url or DEFAULT_BASE_URL,

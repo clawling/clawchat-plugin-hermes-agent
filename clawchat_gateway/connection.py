@@ -33,6 +33,7 @@ from clawchat_gateway.protocol import (
     is_hello_ok,
     new_frame_id,
 )
+from clawchat_gateway.config import _jwt_claim
 from clawchat_gateway.device_id import get_device_id, warn_if_device_id_unpinned
 from clawchat_gateway.storage import get_clawchat_store
 from clawchat_gateway.notify_signal import NotifySignalObserver
@@ -236,11 +237,22 @@ class ClawChatConnection:
         )
 
     def _refresh_device_id(self) -> str:
-        """Connect-time device id to send as ``X-Device-Id`` on refresh (§E).
+        """Connect-time device id used as ``X-Device-Id`` on connect AND refresh (§E).
 
-        Prefer the value persisted on the activations row (the exact id presented
-        at connect); fall back to the deterministic ``get_device_id()`` for
-        legacy rows with no stored value.
+        Resolution order:
+
+        1. The value persisted on the activations row (the exact id a connect-code
+           activation presented at connect).
+        2. The ``did`` claim of the current access token. Env-booted deployments
+           have no activations row, but the token carries the device id the
+           backend baked at login — the EXACT id ``/v1/auth/refresh`` expects as
+           ``X-Device-Id``. Using it avoids a 10003 device-mismatch (forced
+           re-login) when the local host fingerprint has drifted, e.g. the
+           container was recreated and ``CLAWCHAT_DEVICE_ID`` is not pinned. It
+           also equals a pinned ``CLAWCHAT_DEVICE_ID`` (that pin was the did at
+           login time).
+        3. The deterministic ``get_device_id()`` fingerprint — only for a truly
+           unpaired process with no stored row and no token yet.
         """
         if self._store is not None:
             try:
@@ -253,7 +265,19 @@ class ClawChatConnection:
             stored = getattr(credentials, "device_id", None) if credentials else None
             if stored:
                 return stored
+        token_did = _jwt_claim(self._cfg.token, "did")
+        if token_did:
+            return token_did
         return get_device_id()
+
+    def session_device_id(self) -> str:
+        """Public accessor for the resolved connect-time device id (§E).
+
+        The plugin-version report must key on the SAME device id the WS session
+        and refresh use, so the report row links to the device the backend tracks
+        (rather than a volatile ``get_device_id()`` fingerprint).
+        """
+        return self._refresh_device_id()
 
     def _refresh_seed_conversation_id(self) -> str | None:
         """Conversation id used to seed an env-only activations row (§C.2).
@@ -1233,11 +1257,24 @@ class ClawChatConnection:
                 ],
             )
         )
+        device_id = self._refresh_device_id()
+        # Persist the resolved device id (e.g. the token's `did` for env-booted
+        # agents) onto the activations row so it survives container recreation
+        # and is observable. Only-if-empty: never clobbers a connect-code value.
+        if self._store is not None and device_id:
+            try:
+                self._store.set_activation_device_id(
+                    platform="hermes",
+                    account_id=self._account_id,
+                    device_id=device_id,
+                )
+            except Exception:  # noqa: BLE001 — best-effort, must not block connect
+                logger.debug("clawchat device id backfill failed")
         connect_req = build_connect_request(
             frame_id=req_id,
             token=self._cfg.token,
             nonce=nonce,
-            device_id=get_device_id(),
+            device_id=device_id,
             capabilities={
                 # Agent runtime is single-device: multi_device stays off so the
                 # server never self-fans-out this connection's own messages.
@@ -1263,7 +1300,7 @@ class ClawChatConnection:
                 action="await_hello",
                 fields=[
                     ("trace_id", req_id),
-                    ("device_id", get_device_id()),
+                    ("device_id", device_id),
                 ],
             )
         )

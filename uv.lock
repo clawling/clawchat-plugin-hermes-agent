@@ -4,7 +4,6 @@ requires-python = ">=3.11"
 
 [[package]]
 name = "clawchat-gateway"
-version = "0.14.0.post24"
 source = { editable = "." }
 dependencies = [
     { name = "pyyaml" },
