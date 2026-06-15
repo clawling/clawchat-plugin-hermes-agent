@@ -77,7 +77,7 @@ which is in use. They MUST treat the token as opaque:
 |---------|-------------------------|
 | `mock` | Pre-seeded test tokens (dev / E2E only) |
 | `jwt` | HS256 or RS256 token; server enforces `exp`, optionally `iss` |
-| `http` | Forwarded to an upstream verifier; server expects `200 {"user_id": "...", "nick_name": "..."}` |
+| `http` | Forwarded to an upstream verifier; server accepts **any 2xx** with body `{"user_id": "...", "nick_name": "..."}` |
 
 Client implication: do not parse, decode, or rely on any structure inside
 the token. Acquire it from your identity provider and forward it verbatim.
@@ -113,11 +113,11 @@ client                                 server
   "event": "connect.challenge",
   "trace_id": "challenge",
   "emitted_at": 1776162600000,
-  "payload": { "nonce": "Wn9hZ3lJZkN1QXBkUEpYbg" }
+  "payload": { "nonce": "Wn9hZ3lJZkN1QXBkUEpYbmNk" }
 }
 ```
 
-`payload.nonce` is an 18-byte base64url string. The client MUST echo it
+`payload.nonce` is an 18-byte base64url string (24 chars, unpadded). The client MUST echo it
 verbatim in the `connect` reply. The challenge frame's `trace_id` is the
 literal string `"challenge"` — it is not correlated with the client's
 `connect` reply, which uses its own `trace_id` that the server echoes on
@@ -133,17 +133,19 @@ literal string `"challenge"` — it is not correlated with the client's
   "emitted_at": 1776162600100,
   "payload": {
     "token": "<bearer token>",
-    "nonce": "Wn9hZ3lJZkN1QXBkUEpYbg",
+    "nonce": "Wn9hZ3lJZkN1QXBkUEpYbmNk",
     "device_id": "stable-device-id-optional",
     "capabilities": {
-      "multi_device":      true,
-      "device_replay":     true,
-      "chat_meta_events":  true,
-      "delivery_receipt":  true,
-      "notify_signals":    true,
-      "permission_events": true,
-      "history_sync":      true,
-      "e2ee":              false
+      "multi_device":         true,
+      "device_replay":        true,
+      "chat_meta_events":     true,
+      "delivery_receipt":     true,
+      "notify_signals":       true,
+      "permission_events":    true,
+      "history_sync":         true,
+      "reliable_delivery":    true,
+      "reliable_delivery_v2": true,
+      "e2ee":                 false
     }
   }
 }
@@ -164,10 +166,12 @@ literal string `"challenge"` — it is not correlated with the client's
 | `device_replay` | (ignored) | **Legacy / forward-compat only.** The server runs device replay (§11) unconditionally regardless of this flag, and stamps `delivery_mode: "device_replay"` on `hello-ok`. Send it for clarity; do not depend on it gating anything. |
 | `chat_meta_events` | off | Opts the client in to server-pushed `chat.metadata.invalidated` (§9.3). A client that does not advertise it never sees the event. |
 | `delivery_receipt` | off | Client both emits `message.delivered` receipts (uplink) and understands them (downlink). The server gates receipt routing to devices that declared it; absent → no receipts in either direction (sender stays "sent"). See §14.4. |
-| `notify_signals` | off | Opts the client in to **live** `notify.signal` system notifications (§9.4). A client that does not advertise it never receives the *live* frame — but the **reliable inbox path still persists** the signal, so the device catches up on the next reconnect via device replay. |
+| `notify_signals` | off | Opts the client in to **live** `notify.signal` system notifications (§9.4). A client that does not advertise it never receives the *live* frame. On **v1 / legacy** the reliable inbox path still replays the signal on the next reconnect regardless of this flag; on **v2** (`reliable_delivery_v2`) the replay path is **also** gated by this flag, so a v2 device that omits it is skipped on replay too. See §9.4. |
 | `permission_events` | off | Opts an owner client in to `permission.request` / `permission.resolved` agent-approval signals (§9.5). A client that does not advertise it never receives these ephemeral frames. |
 | `history_sync` | off | Declares support for `history.transit` sibling-device history transfer (§11.4). **Actively enforced on uplink** — a client that sends `history.transit` without having advertised `history_sync` gets a `message.error` with `code: "capability_missing"` (§14.3). |
-| `e2ee` | off | Declares support for per-device ciphertext-fragment peeling on E2EE envelopes. A capable target receives the matching `ciphertext_fragments[device_id]`; a client that omits it sees only the sender-supplied placeholder payload. E2EE crypto detail is out of this document's scope — see the E2EE specification. |
+| `e2ee` | off | Declares support for per-device ciphertext-fragment peeling on E2EE envelopes. A capable target receives the matching `ciphertext_fragments[device_id]`; a client that omits it sees only the sender-supplied placeholder payload. E2EE crypto detail is out of this document's scope — see [`protocol-v2-reference.md`](./protocol-v2-reference.md). |
+| `reliable_delivery` | off | **v1 reliable delivery.** Client emits `message.cursor_ack` after durably persisting received frames and understands `history.truncated`. The server then advances the replay cursor only on the ack (not on socket-write) and stamps the storage `seq` on downlinks. Absent → legacy advance-on-write. See §11 (reconnect/replay) and §6's `seq`/`dseq` field rows. ⚠️ If you advertise it you **MUST** implement `message.cursor_ack`. |
+| `reliable_delivery_v2` | off | **v2 reliable delivery (dseq).** Successor to `reliable_delivery`: client acks the per-connection dense `dseq` via `message.sync_ack{dseq,epoch}`, verifies dseq density at the socket read layer, echoes the hello-ok `ack_epoch`, and quarantines un-persistable frames instead of stalling. Granted only when the server returns `hello-ok.ack_mode="dseq"`; otherwise fall back to v1/legacy. SHOULD be advertised **together with** `reliable_delivery` so an older server falls back cleanly. See §11. ⚠️ If you advertise it you **MUST** implement `message.sync_ack`. |
 
 Note that `e2ee` is gated by client-side policy (advertised only when E2EE is enabled), whereas `history_sync` is advertised **unconditionally** by current clients because both the E2EE and plaintext history-transfer paths share the same `history.transit` wire (§11.4).
 
@@ -193,6 +197,18 @@ deadline causes the server to close the socket **without** a `hello-fail`.
 `device_id` echoes the resolved id (the supplied one, or `user_id` if
 omitted). `delivery_mode` is `"device_replay"` for all currently accepted
 clients (treat any other value as forward-compatible).
+
+**v2 reliable-delivery negotiation.** If you advertised `reliable_delivery_v2`
+and the server enabled it, `hello-ok.payload` additionally carries
+`ack_mode: "dseq"` and a per-connection `ack_epoch` (a random ULID). Their
+**presence** is the entire v2 grant signal:
+
+- `ack_mode == "dseq"` present → use `message.sync_ack{dseq, epoch}` and echo the
+  `ack_epoch` on every ack (§11). Reset your dseq density baseline and ack
+  high-water state to zero on **every** such `hello-ok` (dseq + epoch are
+  per-connection, starting from 1).
+- `ack_mode` absent → the server did not grant v2; fall back to v1
+  (`message.cursor_ack` over storage `seq`) or legacy advance-on-write.
 
 After `hello-ok`, the server immediately begins device replay (§11) before
 new live messages, then transitions to live delivery.
@@ -263,7 +279,11 @@ Every WebSocket frame is a JSON object with this top level:
 | `chat_type` | string | downlink business events only | `"direct"` or `"group"`. Server-stamped. **Clients MUST omit on uplink** — any client value is dropped. |
 | `to` | object | optional everywhere | UI context only (which conversation row to render under). Never used for routing. Echoed verbatim end-to-end. |
 | `sender` | object | downlink business events | Identifies the originating user. **Clients MUST omit on uplink** — the server stamps it from the authenticated identity. |
-| `origin_device_id` | string | downlink (multi-device) | Server-stamped on `message.*` downlinks when the sender declared `multi_device`; identifies the originating device so the client can filter its own self-echo. **Clients MUST omit on uplink** — any client value is dropped. |
+| `origin_device_id` | string | downlink (multi-device) | Stamped on the `message.send` / `message.reply` and streaming (`message.created`/`add`/`done`/`failed`) downlinks (identifies the originating device) — **not** on `message.ack` or `message.error`. Self-echo **filtering** applies only when `sender.id` equals **your own** `user_id` — your sibling devices use it to suppress the echo to the originating device; from another user it is informational. **Clients MUST omit on uplink** — any client value is dropped. |
+| `seq` | int64 | downlink, **v1** reliable only | OPAQUE, SPARSE, MUTABLE storage coordinate stamped only for clients that advertised `reliable_delivery`. Ack the highest you have durably persisted via `message.cursor_ack` as an opaque high-water mark; **never** wait for "missing" seqs (the space is ~75% holes). Absent on uplink, legacy, and v2-only downlinks. See §11. |
+| `dseq` | int64 | downlink, **v2** reliable only | Per-connection DENSE delivery seq (`1,2,3…`, reset per connection) stamped only when the server granted `reliable_delivery_v2`. Ack the highest contiguous `dseq` via `message.sync_ack{dseq,epoch}`; verify `dseq == lastReadDseq+1` at the read layer. Absent on uplink and v1/legacy downlinks. See §11. |
+| `target_device_id` | string | uplink, `history.transit` only | The sibling device this transfer is for (§11.4). |
+| `ciphertext_fragments` | array | E2EE events | Opaque per-device E2EE payload; server never inspects it (§11.4). |
 | `payload` | object | always | Event-specific body (§6 onward). |
 
 **Auth, ping/pong, and legacy offline events** carry no `chat_id`,
@@ -292,7 +312,10 @@ Every WebSocket frame is a JSON object with this top level:
 
 Routing is driven by **`chat_id` alone**. The server resolves
 `chat_id → {chat_type, members}`, stamps `chat_type` on the downlink, and
-delivers a copy of the envelope to every member **except the sender**.
+delivers a copy of the envelope to every member **except the sender** —
+with one exception: when the sender advertised `multi_device` (§3.3), the
+sender's *own other devices* also receive an echo (filtered via
+`origin_device_id`, §4).
 
 This means:
 
@@ -343,7 +366,11 @@ Full list of `event` values. C = client, S = server.
 | `notify.signal` | S → C | no | no | reliable, inbox-coalesced system notification (§9.4). Live delivery gated by `capabilities.notify_signals`; the reliable inbox path replays it on reconnect regardless. Unknown event values MUST be tolerated. |
 | `permission.request` | S → C | no | no | owner-targeted agent-permission request signal (§9.5). Gated by `capabilities.permission_events`. Ephemeral, single-recipient. Unknown event values MUST be tolerated. |
 | `permission.resolved` | S → C | no | no | owner-targeted agent-permission resolution signal (§9.5). Gated by `capabilities.permission_events`. Ephemeral, single-recipient. Unknown event values MUST be tolerated. |
-| `replay.done` | S → C | no | no | terminal control frame ending device replay (§11.5); fires on every reconnect, even with zero backlog. Unknown event values MUST be tolerated. |
+| `replay.done` | S → C | no | no | terminal control frame ending device replay (§11.5); fires on every reconnect, even with zero backlog. Carries `dseq` on v2 connections (§11.7). Unknown event values MUST be tolerated. |
+| `message.cursor_ack` | C → S | no | no | **no** — v1 reliable-delivery cursor ack (§11.7); only meaningful if you advertised `reliable_delivery`. |
+| `message.sync_ack` | C → S | no | no | **no** — v2 reliable-delivery (dseq) ack (§11.7); replaces `message.cursor_ack`; only meaningful if the server granted `reliable_delivery_v2`. |
+| `sync.mark` | S → C | no | no | v2 skip-coverage advance frame carrying `dseq` (§11.7); record + ack, do not persist. |
+| `history.truncated` | S → C | no | no | reliable-delivery prune boundary (§11.7); render "earlier messages unavailable". |
 | `device.cursor.reset` | C → S | no | no | **no** — server rewinds the cursor and closes the socket; the close is the signal (§11.6) |
 | `offline.batch` | S → C | no | no | **deprecated / legacy** — superseded by device replay + `replay.done` (§11.5); see §11.3 |
 | `offline.ack` | C → S | no | no | **deprecated / legacy** — superseded by device replay + `replay.done` (§11.5); see §11.3 |
@@ -516,6 +543,13 @@ to `"normal"`.
 - **Reuse exception**: a streaming producer that closes a stream with a
   trailing `message.reply` MAY (and usually SHOULD) reuse the same
   `message_id` it used for the stream — see §8.4.
+- **Format contract** (binding): a client-supplied `message_id` MUST match
+  `^msg-[0-9A-HJ-NP-Z]{26}$` (`"msg-"` + a 26-char Crockford base32 ULID) and
+  be **≤ 128 characters**. This is exactly what the server mints, and what
+  mobile / `openclaw-clawchat` / `hermes-clawchat` already produce. Do **not**
+  invent a different id scheme: the server preserves ids verbatim **today**,
+  but planned input-validation hardening (msghub report §7 Phase 4) will start
+  **rejecting** non-conforming ids.
 
 The server **preserves** any client-supplied `message_id` verbatim. Do not
 rely on this to forge a counterfeit identity for someone else's message —
@@ -585,7 +619,7 @@ prefix that distinguishes producer-generated ids from server-minted ones
   "payload": {
     "message_id": "agent-stream-01K...",
     "sequence":   3,
-    "mutation":   { "type": "append", "target_fragment_index": null },
+    "mutation":   { "type": "append", "target_fragment_index": 0 },
     "fragments":  [{ "kind": "text", "text": "Hello, world", "delta": ", world" }],
     "streaming":  {
       "status": "streaming",
@@ -603,7 +637,7 @@ prefix that distinguishes producer-generated ids from server-minted ones
 |-------|----------|-------|
 | `message_id` | yes | Identical across the stream |
 | `sequence` | yes | Monotonic, starts at **0** on the first `add` and increments by 1 per subsequent `add`. (The example above shows `sequence: 3` — i.e. the fourth `add` in the stream.) |
-| `mutation` | yes | Currently `{"type": "append", "target_fragment_index": null}`. The shape exists for future fragment-targeted updates. |
+| `mutation` | yes | Currently `{"type": "append", "target_fragment_index": 0}`. The field is always present (no `omitempty`); current producers send `0`. The shape exists for future fragment-targeted updates. |
 | `fragments` | yes | Cumulative fragment list. Each text fragment carries both `text` (cumulative) and `delta` (new piece). |
 | `streaming` | yes | `status: "streaming"`, `mutation_policy: "append_text_only"` |
 | `added_at` | optional | Producer's clock, ms since epoch |
@@ -852,9 +886,8 @@ changed and local cached copies should be refreshed. The frame carries
 client must fetch the new state from `clawchat-member-backend`. The
 fetch endpoint depends on the scope (see vocabulary table below): group
 title / description changes are read back from
-`/v1/conversations/:cid` (mobile) or `/clawnext/conversations/:cid`
-(web); `behavior` changes are read back from `/v1/agents/:id` against
-the agent paired in that direct conversation.
+`/v1/conversations/:cid`; `behavior` changes are read back from
+`/v1/agents/:id` against the agent paired in that direct conversation.
 
 **Capability-gated.** A client only ever receives this event if its
 `connect` payload (see §3.3) advertised `capabilities.chat_meta_events:
@@ -899,8 +932,8 @@ Currently produced by `clawchat-member-backend`:
 
 | Scope | Triggered by | Refetch from |
 |-------|--------------|--------------|
-| `["title"]` | Successful group rename (`PATCH /v1/conversations/:cid` with `title`). | `GET /v1/conversations/:cid` (mobile) / `GET /clawnext/conversations/:cid` (web). |
-| `["description"]` | Successful group description / system-prompt change (`PATCH /v1/conversations/:cid` with `description`). | `GET /v1/conversations/:cid` (mobile) / `GET /clawnext/conversations/:cid` (web). |
+| `["title"]` | Successful group rename (`PATCH /v1/conversations/:cid` with `title`). | `GET /v1/conversations/:cid`. |
+| `["description"]` | Successful group description / system-prompt change (`PATCH /v1/conversations/:cid` with `description`). | `GET /v1/conversations/:cid`. |
 | `["behavior"]` | Owner edits the per-agent behavior / system prompt (`PATCH /v1/agents/:id` with `behavior`). Fired only when the value actually changes. Fanned over the agent's direct conversation; recipients are the owner and the agent's shadow user. | `GET /v1/agents/:id` against the agent paired in this direct conversation (the agent client typically caches its own id; the owner can resolve it via the conversation's other participant — the agent's shadow `user_id` → `agt_…`). |
 
 A single mutation always emits a single-element scope today; future
@@ -932,8 +965,7 @@ member-backend uses it for both kinds:
 2. Optionally compare `payload.version` against your last-seen version
    for `chat_id`; drop the frame if `version <= last_seen` (idempotent
    refresh — safe to skip if you implement #3 unconditionally).
-3. Issue `GET /v1/conversations/:cid` (mobile) or
-   `GET /clawnext/conversations/:cid` (web) against
+3. Issue `GET /v1/conversations/:cid` against
    `clawchat-member-backend` to fetch the authoritative state. Do
    **not** mutate local state from the signal frame alone — `scope` is
    advisory, not authoritative payload.
@@ -981,12 +1013,15 @@ the signal — exactly once — on its next reconnect via device replay
 (§11). Live delivery on top of that is a best-effort latency
 optimization, gated by `capabilities.notify_signals`.
 
-**Capability-gated (live path only).** A client only receives the *live*
-frame if its `connect` payload advertised `capabilities.notify_signals:
-true`. A client that does not opt in is still served the signal through
-the reliable inbox path on reconnect — but will not get the in-session
-push. Advertise the capability if you want sub-second refetch while
-connected.
+**Capability-gated.** A client only receives the *live* frame if its
+`connect` payload advertised `capabilities.notify_signals: true`. The
+reconnect/replay behavior then depends on the reliability generation
+(§11.7): a **v1 / legacy** client that did not opt in is *still* served
+the signal through the reliable inbox path on reconnect; a **v2**
+(`reliable_delivery_v2`) client that did not opt in is **skipped on
+replay too** — on v2 this capability gates both the live push *and* the
+replayed signal. Advertise it if you want sub-second refetch while
+connected (and, on v2, the replayed signal at all).
 
 **Producer.** `clawchat-member-backend` publishes these via
 `POST /internal/v1/notify-signals`; clients never produce `notify.signal`.
@@ -1051,12 +1086,17 @@ same logical event; use `event_id` to dedup if you process both.
 5. Persist the `version` cursor for step #2.
 
 **Loss tolerance.** This event is **reliable through the inbox,
-best-effort live, and capability-gated on the live path**:
+best-effort live, and capability-gated** (the live path always; the
+replay path too on v2 — see below):
 
 - **Reliable inbox path.** Persisted to `message_inbox_NN` under the
   coalesce key; reconnect / device replay (§11) **redelivers** it
-  exactly once. This is the recovery primitive — a device that misses
-  the live frame still catches up.
+  exactly once — on **v1 / legacy** regardless of the `notify_signals`
+  capability. **v2 exception:** a `reliable_delivery_v2` device that did
+  not advertise `notify_signals` is skipped on replay, so on v2 the
+  capability gates both the live *and* the replay path. This is the
+  recovery primitive for capable devices — one that misses the live
+  frame still catches up.
 - **Best-effort live path.** The hub silently drops the live frame if
   the recipient's send buffer is full (no kick on backpressure for
   signal events) or if the device did not advertise `notify_signals`.
@@ -1204,7 +1244,7 @@ type Fragment =
 | `kind` | Fields |
 |--------|--------|
 | `text` | `text`; `delta` **only** on `message.add` |
-| `mention` | `user_id`, optional `display` |
+| `mention` | optional `user_id`, optional `display` |
 | `image` | `url`, optional `name`, `mime`, `size`, `width`, `height` |
 | `video` | `url`, optional `name`, `mime`, `size`, `width`, `height`, `duration` |
 | `audio` | `url`, optional `name`, `mime`, `size`, `duration` |
@@ -1259,9 +1299,12 @@ new live ones. Replay is keyed by **`(user_id, device_id)`**:
   A client advertising `delivery_receipt` DOES emit `message.delivered` for
   messages received during replay — receipts are not suppressed during replay
   (only self-echo is excluded).
-- The cursor advances only after each WebSocket write succeeds. A
-  connection that closes mid-replay resumes from the same point on the next
-  session.
+- **How the cursor advances depends on the reliability generation you
+  negotiated** (§11.7): **legacy** advances on socket-write success; **v1**
+  (`reliable_delivery`) advances only on your `message.cursor_ack`; **v2**
+  (`reliable_delivery_v2`) advances only on your `message.sync_ack`. In all
+  cases a connection that closes mid-replay resumes from the last advanced point
+  on the next session.
 - Once replay catches up, the connection transitions seamlessly into live
   delivery. At the **seam** (the brief window where the server is catching
   up to the inbox tail), live writes published to the user's Kafka
@@ -1308,7 +1351,7 @@ so the new device starts with backlog the server never had in plaintext.
 This is carried by the `history.transit` event. It is part of the E2EE
 multi-device feature set; full cryptographic detail (X3DH,
 Double-Ratchet, fragment structure) is **out of this document's scope** —
-see the E2EE specification. This section
+see [`protocol-v2-reference.md`](./protocol-v2-reference.md). This section
 documents only the WS wire surface a client needs to route the frame.
 
 **Capability-gated and enforced.** A client MUST advertise
@@ -1450,6 +1493,100 @@ Not capability-gated — any authenticated client may send it. Mobile
 exposes this as a debug "migrate data" / full-resync action. Use
 sparingly: it re-streams the entire retained backlog.
 
+> **v1/v2 interaction.** The reset is in storage-seq space (the durable
+> `device_cursors_NN.last_seq`), shared by both v1 and v2 — v2's in-memory dseq
+> ledger is discarded on the close anyway. A v2 device's reset works identically:
+> cursor → 0, connection closes, and the **new** connection starts a fresh
+> `ack_epoch`/`dseq` stream from 1 while replaying the full inbox.
+
+### 11.7 Reliable delivery — durable cursor models (v1 seq vs v2 dseq)
+
+By default the replay cursor advances on socket-write success — which loses a
+frame if the client crashes after the write but before durably persisting it. To
+close that window, advertise a reliability capability at `connect` (§3.3). There
+are two generations; advertise **both** so an older server cleanly falls back.
+
+> **Two version numbers.** The envelope `"version":"2"` is the **Protocol v2**
+> wire format (every client speaks it; unchanged here). **legacy / v1 / v2** below
+> are generations of the **reliable-delivery mechanism**, chosen by capability —
+> not envelope versions.
+
+**v1 — `reliable_delivery` (storage `seq`, mutable + sparse).**
+
+- The server stamps the per-recipient inbox `seq` on each downlink (top-level
+  `seq`); the cursor advances **only** when you send `message.cursor_ack`.
+- `seq` is an **opaque, sparse, mutable** shard-level coordinate. Ack the highest
+  `seq` you have **durably persisted** as an opaque high-water mark, and **never**
+  wait for "missing" seqs — a recipient's seq space is ~75% holes (other users'
+  rows interleave; coalesce upserts re-bump rows to the shard tail). A client that
+  acks only a strictly-contiguous prefix freezes at the first hole. This is the
+  known v1 cursor-stall; v2 fixes it.
+
+  ```json
+  { "version": "2", "event": "message.cursor_ack", "trace_id": "ack-01",
+    "emitted_at": 1776162710000, "payload": { "seq": 42 } }
+  ```
+
+- `history.truncated{oldest_seq}` arrives at replay start if the inbox was pruned
+  past your cursor; render an "earlier messages unavailable" boundary and accept
+  that the server skips the pruned hole.
+
+**v2 — `reliable_delivery_v2` (per-connection `dseq`, dense + gap-free + epoch-bound).**
+
+Granted only when `hello-ok` carried `ack_mode: "dseq"` (§3.4). Then:
+
+- The server stamps a **dense** per-connection `dseq` (`1,2,3…`) on exactly the
+  ackable downlink events (`message.send`, `message.reply`, `history.transit`,
+  `notify.signal`, `sync.mark`, `replay.done`). You ack the highest **contiguous**
+  `dseq` you have durably persisted, echoing the `ack_epoch`:
+
+  ```json
+  { "version": "2", "event": "message.sync_ack", "trace_id": "sync-ack-01",
+    "emitted_at": 1776162710000,
+    "payload": { "dseq": 42, "epoch": "01JXYZ8K3MNPQRSTVWXYZ0AB" } }
+  ```
+
+- **Density check (MUST).** For every `dseq`-bearing frame, verify
+  `dseq == lastReadDseq + 1` at the socket read layer. On violation: log, count,
+  and **disconnect + reconnect** (fail-safe — replay refills the gap). Because the
+  stream is dense by construction, all structural holes (other users' rows,
+  coalesce bumps, rows you legitimately can't receive) never reach your ack space.
+- **Per-connection baseline (MUST).** `dseq` and `epoch` reset to 1 every
+  connection. On **each** `hello-ok` granting `ack_mode:"dseq"`, zero out
+  `lastReadDseq` **and** your ack high-water/pending state alongside refreshing
+  `epoch`. `lastReadDseq` often lives outside the per-connection ack tracker, so
+  "rebuild the tracker" alone does not cover it — miss this and the first frame
+  (`dseq=1`) fails the density check and loops.
+- **`sync.mark` (S → C).** A `dseq`-bearing frame with `payload.covers_seq` the
+  server emits when it skipped inbox rows for you (self-echo, non-target transit,
+  capability-filtered `notify.signal`) and had no following deliverable frame to
+  carry the coverage. **Record its `dseq` and ack it** like any other; do **not**
+  persist it (`covers_seq` is diagnostic only).
+
+  ```json
+  { "version": "2", "event": "sync.mark", "dseq": 43, "emitted_at": 1776162710500,
+    "payload": { "covers_seq": 15894 } }
+  ```
+
+- **`replay.done` carries `dseq` on v2** — ack it like any other frame, and flush
+  the ack immediately after.
+- **Ack rhythm (MUST):** 200ms debounce after the high-water mark advances; flush
+  after acking `replay.done`; flush on graceful disconnect; and unconditionally
+  resend the current high-water mark **every 30s** while connected (covers a
+  zombie socket that swallowed an ack — the server's GREATEST/idempotent pop makes
+  the resend free).
+- **Persist is always upsert by `message_id`** — "conflict overwrites" counts as
+  persisted, then record the `dseq`. Never "skip the write because the row exists,
+  then ack": that silently drops coalesce re-writes (e.g. an agent's finalize
+  `message.reply` overwriting an earlier row). Any retransmit MUST reuse a stable
+  `payload.message_id`.
+- **Poison-frame quarantine (MUST):** if a `dseq`-bearing frame cannot be
+  persisted (corrupt payload), record the failure out-of-band and **ack its
+  `dseq`** so the stream continues — do not stall the connection on one bad frame.
+- **`history.transit` is delete-on-ack** on v2: the server deletes the inbox row
+  when its `dseq` is acked, so ack only **after** durably persisting the transit
+  payload.
+
 ---
 
 ## 12. Heartbeat — `ping` / `pong`
@@ -1500,7 +1637,7 @@ client value is dropped:
 | `sender` | Stamped from the authenticated identity. Defends against impersonation. |
 | `chat_type` | Stamped from the resolved chat record on every downlink. |
 | `payload.message_id` | Minted (`msg-<ULID>`) when the client omits it on `message.send` / `message.reply`. **Preserved** when the client sets it. |
-| `emitted_at` | Restamped on every server-constructed downlink (materialized `message.send` / `message.reply`, `message.ack`, `message.error`, `typing.update`, all streaming lifecycle events, `presence.snapshot` / `presence.update`). Echoed verbatim only on `pong`. |
+| `emitted_at` | Restamped on every server-constructed downlink (materialized `message.send` / `message.reply`, `message.ack`, `message.error`, `message.delivered`, `typing.update`, all streaming lifecycle events, `presence.snapshot` / `presence.update`). Echoed verbatim only on `pong`. |
 | `payload.message.streaming` | Filled on materialized `message.send` / `message.reply` downlinks. MUST be omitted on uplink. |
 
 > **One exception to the `sender` / `origin_device_id` stamping rule:**
@@ -1548,10 +1685,18 @@ The server may close the connection in several scenarios:
 | Trigger | What the client sees | Recommended response |
 |---------|----------------------|----------------------|
 | Handshake timeout | Close with no `hello-fail` | Reconnect; check token / clock |
-| `hello-fail` then close | `hello-fail` envelope + close | Do not retry without acquiring a fresh token |
+| `hello-fail` — token rejected (upstream auth `4xx`) | `hello-fail` envelope (auth-failure reason) + close | **Acquire a fresh token** (refresh / re-login) before retry. Do not hot-loop the same token. |
+| `hello-fail` — auth service unavailable (upstream `5xx` / timeout) | `hello-fail` with reason `"remote auth service unavailable"` + close | **Backoff-reconnect with the same token** — the token may be valid; the auth backend (member-backend) is down. Do **NOT** trigger token refresh/re-login here (a 5xx storm would otherwise become a mass-refresh storm). |
 | Duplicate session for `(user_id, device_id)` — you are the **older** session | Socket closes without an envelope, no `hello-fail` | A newer instance of you took over; reconnect with backoff. The token is still valid. |
 | Missed pongs | Close when no `Pong` control frame arrives within `ping_interval * max_miss_pong + pong_timeout` (~70 s with defaults) | Reconnect with backoff |
 | Server backpressure | Close (the server kicks slow clients to protect itself) | Reconnect with backoff; messages will replay via §11 |
+
+> **Enforcement status.** The `4xx → fresh token` behavior is current. The
+> **distinct `5xx` reason string + handshake auth deadline** are planned
+> (msghub report §7 Phase 2). Implement the 4xx/5xx branch **now** so the
+> client is ready before the server begins emitting the distinct 5xx reason —
+> until then a 5xx surfaces as a generic `hello-fail` and the safe default is
+> backoff-reconnect (not refresh).
 
 **Reconnection strategy.** Implement exponential backoff with jitter,
 capped at e.g. 30 s. On reconnect, supply the same `device_id` as before
@@ -1609,6 +1754,8 @@ The payload has four fields: `message_id` (mirrors the uplink's
 |---|---|
 | `chat_not_found` | The chat resolver returned no member set for `chat_id`. The send was dropped server-side; do not retry without a corrected `chat_id`. |
 | `capability_missing` | A capability-gated uplink (currently `history.transit`) was sent without the required capability advertised at `connect` (here `history_sync`). The frame was dropped server-side; declare the capability and reconnect before retrying. See §11.4. |
+| `not_member` | The authenticated sender is not a member of the chat it tried to send to (e.g. an agent unpaired/removed from the conversation but still holding a valid JWT). The uplink was dropped (no fanout). Terminal — re-resolve membership before any retry. |
+| `unsupported_version` | The uplink envelope's `version` was not the string `"2"` (missing counts as not-`"2"`). Fires for **every** uplink event, including control frames, before any other handling. Terminal — the client must speak Protocol v2; the connection is **not** closed. |
 
 Clients MUST implement `message.error` — it is the **only** wire-level
 negative ack on the send path. Treating it as an unknown event will
@@ -1674,8 +1821,11 @@ Content-Type: multipart/form-data; boundary=...
 ```
 
 Body: a single multipart part named `file` carrying `Content-Type` and
-`filename`. `filename` is required — its extension (lowercased) is
-preserved in the stored object key.
+`filename`. `filename` is **optional** — if omitted or empty the server
+falls back to a stored object name of `file` (no extension). When
+provided, its extension (lowercased) is preserved in the stored object
+key. (Producers SHOULD still send a meaningful `filename` so the stored
+key and the returned `name` are useful.)
 
 Example (curl):
 
@@ -1779,188 +1929,14 @@ storage backend — a successful `/health` does not imply uploads will work.
 
 ## 16. Canonical wire examples
 
-These are the exact frames asserted by the server's test suite. Use them
-as ground truth.
-
-### 16.1 Handshake
-
-```json
-// S → C
-{ "version": "2", "event": "connect.challenge", "trace_id": "challenge",
-  "emitted_at": 1776162600000, "payload": { "nonce": "Wn9hZ3lJZkN1QXBkUEpYbg" } }
-
-// C → S
-{ "version": "2", "event": "connect", "trace_id": "t1",
-  "emitted_at": 1776162600100,
-  "payload": { "token": "<bearer>", "nonce": "Wn9hZ3lJZkN1QXBkUEpYbg" } }
-
-// S → C (success)
-{ "version": "2", "event": "hello-ok", "trace_id": "t1",
-  "emitted_at": 1776162600200,
-  "payload": { "device_id": "device-alice-001", "delivery_mode": "device_replay" } }
-
-// S → C (failure)
-{ "version": "2", "event": "hello-fail", "trace_id": "t1",
-  "emitted_at": 1776162600200, "payload": { "reason": "nonce mismatch" } }
-```
-
-### 16.2 Send → ack → downlink
-
-```json
-// C → S
-{ "version": "2", "event": "message.send", "trace_id": "trace-send-01",
-  "emitted_at": 1776162600000, "chat_id": "chat-ab",
-  "to": { "id": "chat-ab", "type": "direct" },
-  "payload": {
-    "message_mode": "normal",
-    "message": {
-      "body":    { "fragments": [{ "kind": "text", "text": "hi bob" }] },
-      "context": { "mentions": [], "reply": null }
-    }
-  } }
-
-// S → C (back to sender)
-{ "version": "2", "event": "message.ack", "trace_id": "trace-send-01",
-  "emitted_at": 1776162601000, "chat_id": "chat-ab",
-  "to": { "id": "chat-ab", "type": "direct" },
-  "payload": {
-    "message_id":  "msg-01HVB6S7K8L9M0N1P2Q3R4S5T6",
-    "accepted_at": 1776162601000
-  } }
-
-// S → C (to recipient)
-{ "version": "2", "event": "message.send", "trace_id": "trace-send-downlink-01",
-  "emitted_at": 1776162601500, "chat_id": "chat-ab", "chat_type": "direct",
-  "to":     { "id": "chat-ab",   "type": "direct" },
-  "sender": { "id": "user-alice", "type": "direct", "nick_name": "Alice" },
-  "payload": {
-    "message_id":   "msg-01HVB6S7K8L9M0N1P2Q3R4S5T6",
-    "message_mode": "normal",
-    "message": {
-      "body":      { "fragments": [{ "kind": "text", "text": "hi bob" }] },
-      "context":   { "mentions": [], "reply": null },
-      "streaming": {
-        "status": "static", "sequence": 0, "mutation_policy": "sealed",
-        "started_at": null, "completed_at": null
-      }
-    }
-  } }
-```
-
-### 16.3 Streaming sequence
-
-```jsonc
-// 1) Open the stream
-{ "version": "2", "event": "message.created", "trace_id": "trace-stream-01",
-  "emitted_at": 1776406831000, "chat_id": "chat-alice",
-  "payload": { "message_id": "agent-stream-01K..." } }
-
-// 2) Append fragments — text MUST carry both `text` (cumulative) and `delta` (new)
-{ "version": "2", "event": "message.add", "trace_id": "trace-stream-01",
-  "emitted_at": 1776406831114, "chat_id": "chat-alice",
-  "payload": {
-    "message_id": "agent-stream-01K...",
-    "sequence":   3,
-    "mutation":   { "type": "append", "target_fragment_index": null },
-    "fragments":  [{ "kind": "text", "text": "Hello, world", "delta": ", world" }],
-    "streaming":  { "status": "streaming", "sequence": 3,
-                    "mutation_policy": "append_text_only",
-                    "started_at": null, "completed_at": null },
-    "added_at":   1776406831114
-  } }
-
-// 3) Finalize — fragments cumulative, NO `delta`
-{ "version": "2", "event": "message.done", "trace_id": "trace-stream-01",
-  "emitted_at": 1776406831120, "chat_id": "chat-alice",
-  "payload": {
-    "message_id": "agent-stream-01K...",
-    "fragments":  [{ "kind": "text", "text": "Hello, world" }],
-    "streaming":  { "status": "done", "sequence": 3,
-                    "mutation_policy": "append_text_only",
-                    "started_at": null, "completed_at": 1776406831120 },
-    "completed_at": 1776406831120
-  } }
-
-// 4) (Optional) trailing reply REUSING the stream's id — collapses the offline replay row
-{ "version": "2", "event": "message.reply", "trace_id": "trace-stream-01",
-  "emitted_at": 1776406831125, "chat_id": "chat-alice",
-  "payload": {
-    "message_id":   "agent-stream-01K...",
-    "message_mode": "normal",
-    "message": {
-      "body":    { "fragments": [{ "kind": "text", "text": "Hello, world" }] },
-      "context": {
-        "mentions": [],
-        "reply": {
-          "reply_to_msg_id": "user-msg-01K...",
-          "reply_preview":   {
-            "id":        "user-alice",
-            "nick_name": "Alice",
-            "fragments": [{ "kind": "text", "text": "hi" }]
-          }
-        }
-      }
-    }
-  } }
-```
-
-### 16.4 Typing indicator
-
-```json
-{ "version": "2", "event": "typing.update", "trace_id": "trace-typing-01",
-  "emitted_at": 1776162600000, "chat_id": "chat-ab",
-  "to": { "id": "chat-ab", "type": "direct" },
-  "payload": { "is_typing": true } }
-```
-
-### 16.5 Device replay (post-`hello-ok`)
-
-```jsonc
-// Missed messages stream as ordinary downlink envelopes — no special wrapper.
-{ "version": "2", "event": "message.send", "trace_id": "trace-replay-01",
-  "emitted_at": 1776162700000, "chat_id": "chat-ab", "chat_type": "direct",
-  "to": { "id": "chat-ab", "type": "direct" },
-  "sender": { "id": "user-alice", "type": "direct", "nick_name": "Alice" },
-  "payload": { "message_id": "msg-...", "message_mode": "normal",
-               "message": { "body": { "fragments": [...] },
-                            "context": { "mentions": [], "reply": null },
-                            "streaming": { "status": "static", "sequence": 0,
-                                           "mutation_policy": "sealed",
-                                           "started_at": null, "completed_at": null } } } }
-```
-
-### 16.6 Ping / pong
-
-```json
-{ "version": "2", "event": "ping", "trace_id": "p1", "emitted_at": 1776162600000, "payload": {} }
-{ "version": "2", "event": "pong", "trace_id": "p1", "emitted_at": 1776162600000, "payload": {} }
-```
-
-`pong` echoes the ping's `emitted_at` verbatim — it is not restamped.
-
-### 16.7 Presence subscription
-
-```jsonc
-// C → S — subscribe
-{ "version": "2", "event": "presence.subscribe", "trace_id": "trace-pres-01",
-  "emitted_at": 1776162800000, "payload": { "user_id": "usr_bob" } }
-
-// S → C — snapshot (echoes the subscribe trace_id)
-{ "version": "2", "event": "presence.snapshot", "trace_id": "trace-pres-01",
-  "emitted_at": 1776162800002,
-  "payload": { "user_id": "usr_bob", "online": false,
-               "last_seen_at": "2026-05-13T12:34:56Z" } }
-
-// S → C — live transition (server-minted trace_id)
-{ "version": "2", "event": "presence.update", "trace_id": "trace-pres-fanout-7",
-  "emitted_at": 1776162900000,
-  "payload": { "user_id": "usr_bob", "online": true,
-               "last_seen_at": "2026-05-13T12:35:00Z" } }
-
-// C → S — unsubscribe (no reply)
-{ "version": "2", "event": "presence.unsubscribe", "trace_id": "trace-pres-02",
-  "emitted_at": 1776162950000, "payload": { "user_id": "usr_bob" } }
-```
+The canonical, test-asserted wire frames live in a single source of truth:
+[`protocol-v2-reference.md` §9](./protocol-v2-reference.md#9-wire-examples--the-canonical-set).
+That set covers every client path referenced in this guide — handshake
+(`connect.challenge` / `connect` / `hello-ok` / `hello-fail`),
+send → ack → downlink, `message.error`, the streaming sequence, device
+replay, typing, ping / pong, and the presence subscription lifecycle — and is
+kept in lockstep with the server test suite. There are no client-side wire
+deltas beyond it, so refer to §9 directly rather than a second copy here.
 
 ---
 
@@ -2048,6 +2024,14 @@ Use this list as a final pass before integration testing.
       `device.cursor.reset` (§11.6, empty payload), expect the server to
       close the socket, then reconnect with the **same** `device_id` to
       re-stream the full inbox.
+- [ ] **If you advertise `reliable_delivery*` you MUST implement the matching
+      ack** (§11.7): `message.cursor_ack` (highest durably-persisted storage
+      `seq`, opaque high-water mark, never wait for missing seqs) for v1; or, when
+      `hello-ok` returns `ack_mode:"dseq"`, `message.sync_ack{dseq,epoch}` for v2
+      — with socket-read-layer density check, per-connection baseline reset,
+      200ms/replay.done/disconnect/30s ack rhythm, upsert-by-`message_id`
+      persistence, and poison-frame quarantine. Advertise both flags so an older
+      server falls back to v1.
 - [ ] Implement exponential backoff with jitter for reconnect.
 
 ### E2EE / history sync (if supported)
