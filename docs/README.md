@@ -17,6 +17,7 @@ twenty-six `clawchat_*` tools to the agent.
 | Configure ClawChat output visibility                         | [`./output-visibility.md`](./output-visibility.md)      |
 | Look up an env var or `platforms.clawchat.extra` field       | [`./configuration.md`](./configuration.md)              |
 | Find a specific `clawchat_*` tool                            | [`./reference/tools.md`](./reference/tools.md)          |
+| See every outbound HTTP / WS endpoint the plugin calls       | [`./reference/http-endpoints.md`](./reference/http-endpoints.md) |
 | Use one of the activation CLIs                               | [`./reference/cli.md`](./reference/cli.md)              |
 | Look up a wire-protocol shape (envelope, events, streaming)  | [`./client-integration.md`](./client-integration.md)    |
 | Edit a prompt that ships with the plugin                     | [`./reference/prompts.md`](./reference/prompts.md)      |
