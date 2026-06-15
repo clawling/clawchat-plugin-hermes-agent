@@ -327,7 +327,6 @@ class ClawChatApiClient:
         *,
         code: str,
         user_id: str | None = None,
-        tools: list[str] | None = None,
     ) -> dict:
         if not code.strip():
             raise ClawChatApiError("validation", "invite code is required")
@@ -338,8 +337,6 @@ class ClawChatApiClient:
         }
         if user_id and user_id.strip():
             payload["user_id"] = user_id.strip()
-        if tools:
-            payload["tools"] = [tool for tool in tools if isinstance(tool, str) and tool.strip()]
         body = json.dumps(payload).encode("utf-8")
         return await self._call_json(
             "POST",
