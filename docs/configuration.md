@@ -27,6 +27,13 @@ fallback. The plugin never copies them into `config.yaml`
 (`activate.persist_activation` calls `extra.pop("token", None)` and
 `extra.pop("refresh_token", None)`).
 
+`CLAWCHAT_REFRESH_TOKEN` is no longer dormant: the plugin uses it to refresh
+`CLAWCHAT_TOKEN` automatically before/at its 24h expiry and rewrites the rotated
+pair to **both** `.env` and SQLite (see
+[`./activation.md`](./activation.md#automatic-token-refresh--auto-logout)). On a
+permanent refresh failure both keys are cleared from `.env` and SQLite and a
+re-pair is required.
+
 ## Connection
 
 | Env var                                              | `extra.*` key   | Default                              | Notes |
@@ -64,6 +71,28 @@ The server-assigned `resolved_device_id` from the `hello-ok` handshake is
 recorded in plugin SQLite (`connections.resolved_device_id`) for diagnostics;
 the id the plugin *presents* on connect is always `get_device_id()`, so the env
 var is the durable source of truth.
+
+### Device id is also the token-refresh precondition
+
+The plugin now automatically refreshes its 24h access token (see
+[`./activation.md`](./activation.md#automatic-token-refresh--auto-logout)).
+`POST /v1/auth/refresh` requires an `X-Device-Id` header equal to the
+**connect-time** device id, and the server rejects the refresh outright when it
+does not match. The connect-time id is captured in the `activations.device_id`
+column at activation, so a pinned `CLAWCHAT_DEVICE_ID` keeps refresh working
+across restarts.
+
+If `CLAWCHAT_DEVICE_ID` is **unpinned** and the host fingerprint changes (e.g. a
+pod reschedule), the refresh device id no longer matches the connect-time id, so
+refresh fails with a **device mismatch** — which is a *permanent* refresh
+failure that forces auto-logout and a manual re-pair. The plugin emits a boot
+warning (`clawchat_gateway.device_id.warn_if_device_id_unpinned`) when
+`CLAWCHAT_DEVICE_ID` is unset for exactly this reason.
+
+**Deployment requirement (restated for refresh):** pin `CLAWCHAT_DEVICE_ID` to a
+stable, per-agent `hermes-`-prefixed value in any containerized deployment.
+Beyond the delivery-cursor correctness above, it is what lets unattended token
+refresh survive a reschedule instead of silently logging the agent out.
 
 ## Rich interactions and display
 

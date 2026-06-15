@@ -27,6 +27,7 @@ from clawchat_gateway.api_client import (
     ClawChatApiClient,
     agents_connect_with_retry,
 )
+from clawchat_gateway.device_id import get_device_id
 from clawchat_gateway.output_visibility import (
     normalize_output_visibility,
     runtime_status_messages_for_visibility,
@@ -213,6 +214,87 @@ def persist_activation(
     }
 
 
+def persist_rotated_tokens(
+    *,
+    access_token: str,
+    refresh_token: str,
+    device_id: str | None = None,
+    account_id: str = "default",
+    user_id: str | None = None,
+    owner_user_id: str | None = None,
+    conversation_id: str | None = None,
+) -> bool:
+    """Durably write a refresh-rotated token pair to BOTH .env and SQLite.
+
+    Token-refresh spec §0 + §C.2: this is the persist step that MUST complete
+    before the in-memory token is swapped. It writes the rotated pair to the
+    Hermes ``.env`` (so an env-booted process recovers) AND the SQLite
+    ``activations`` row (so the wait-for-activation loop / a future restart pick
+    it up), without scheduling a gateway restart. Returns True only when BOTH
+    writes succeed.
+
+    For an **env-only deployment** (CLAWCHAT_TOKEN/CLAWCHAT_REFRESH_TOKEN preset
+    in ``.env``, never activated in-pod) there is NO activations row yet, so the
+    SQLite write seeds one from the supplied identity (``user_id`` /
+    ``owner_user_id`` / ``conversation_id`` threaded down from the connection's
+    in-memory config) instead of failing — otherwise the very first refresh would
+    brick the agent (§C.2). The seed never resets bootstrap/activation flags.
+    """
+    env_ok = False
+    try:
+        _write_env_values(
+            {
+                "CLAWCHAT_TOKEN": access_token,
+                "CLAWCHAT_REFRESH_TOKEN": refresh_token or None,
+            }
+        )
+        env_ok = True
+    except Exception:  # noqa: BLE001
+        logger.warning("clawchat rotated-token .env persistence failed", exc_info=True)
+    db_ok = False
+    try:
+        result = get_clawchat_store().update_activation_tokens(
+            platform="hermes",
+            account_id=account_id,
+            access_token=access_token,
+            refresh_token=refresh_token,
+            device_id=device_id,
+            seed_user_id=user_id,
+            seed_owner_user_id=owner_user_id,
+            seed_conversation_id=conversation_id,
+        )
+        db_ok = bool(result)
+    except Exception:  # noqa: BLE001
+        logger.warning("clawchat rotated-token database persistence failed", exc_info=True)
+    return env_ok and db_ok
+
+
+def clear_persisted_credentials(*, account_id: str = "default") -> None:
+    """Remove ClawChat credentials from BOTH .env and SQLite, keeping identity.
+
+    Token-refresh spec §C.1: auto-logout on permanent refresh failure removes
+    ``CLAWCHAT_TOKEN`` / ``CLAWCHAT_REFRESH_TOKEN`` from .env and blanks the
+    token columns of the activations row, while preserving user_id /
+    owner_user_id / conversation_id so re-pair reuses the same identity.
+    """
+    try:
+        _write_env_values(
+            {
+                "CLAWCHAT_TOKEN": None,
+                "CLAWCHAT_REFRESH_TOKEN": None,
+            }
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("clawchat logout .env clear failed", exc_info=True)
+    try:
+        get_clawchat_store().clear_activation_credentials(
+            platform="hermes",
+            account_id=account_id,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("clawchat logout database clear failed", exc_info=True)
+
+
 async def activate(code: str, *, base_url: str) -> dict[str, Any]:
     client = ClawChatApiClient(
         base_url=base_url.rstrip("/"),
@@ -248,6 +330,11 @@ async def activate(code: str, *, base_url: str) -> dict[str, Any]:
             owner_user_id=owner_id,
             access_token=str(result["access_token"]),
             refresh_token=result.get("refresh_token"),
+            # Token-refresh spec §E: persist the EXACT device id presented on
+            # connect (this is the x-device-id baked into the session), so the
+            # later /v1/auth/refresh sends it verbatim and avoids a 10003
+            # device-mismatch on pod reschedule when CLAWCHAT_DEVICE_ID is pinned.
+            device_id=get_device_id(),
         )
     except Exception:  # noqa: BLE001
         logger.warning("clawchat activation database persistence failed")

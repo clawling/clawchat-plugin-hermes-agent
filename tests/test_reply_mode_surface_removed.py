@@ -645,17 +645,20 @@ def test_activation_persists_tokens_to_sqlite(monkeypatch, tmp_path):
     assert payload["user_id"] == "user"
     assert saved_config["platforms"]["clawchat"]["extra"]["user_id"] == "user"
     assert env_values["CLAWCHAT_TOKEN"] == "access-token"
-    assert calls == [
-        {
-            "platform": "hermes",
-            "account_id": "default",
-            "user_id": "user",
-            "conversation_id": "conv-activation",
-            "owner_user_id": "owner",
-            "access_token": "access-token",
-            "refresh_token": "refresh-token",
-        }
-    ]
+    assert len(calls) == 1
+    call = calls[0]
+    # The connect-time device id is persisted on the activations row so a later
+    # /v1/auth/refresh can present it verbatim (token-refresh spec §E).
+    assert call.pop("device_id")
+    assert call == {
+        "platform": "hermes",
+        "account_id": "default",
+        "user_id": "user",
+        "conversation_id": "conv-activation",
+        "owner_user_id": "owner",
+        "access_token": "access-token",
+        "refresh_token": "refresh-token",
+    }
 
 
 def test_activation_sends_existing_config_user_id_and_overwrites_credentials(

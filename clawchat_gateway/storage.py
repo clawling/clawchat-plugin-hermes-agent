@@ -120,12 +120,17 @@ SET owner_user_id = owner_id
 WHERE owner_user_id IS NULL AND owner_id IS NOT NULL;
 """
 
+ACTIVATION_DEVICE_ID_SCHEMA = """
+ALTER TABLE activations ADD COLUMN device_id TEXT;
+"""
+
 MIGRATIONS = [
     (1, "initial_schema", INITIAL_SCHEMA),
     (2, "message_id_dedup", MESSAGE_ID_DEDUP_SCHEMA),
     (3, "activation_bootstrap", ACTIVATION_BOOTSTRAP_SCHEMA),
     (4, "connection_metadata", CONNECTION_METADATA_SCHEMA),
     (5, "activation_owner_user_id", ACTIVATION_OWNER_USER_ID_SCHEMA),
+    (6, "activation_device_id", ACTIVATION_DEVICE_ID_SCHEMA),
 ]
 
 _store: ClawChatStore | None = None
@@ -159,6 +164,8 @@ class ActivationCredentials:
     owner_user_id: str
     access_token: str
     refresh_token: str | None
+    device_id: str | None = None
+    activated_at: int | None = None
 
 
 class ClawChatStore:
@@ -211,6 +218,7 @@ class ClawChatStore:
         owner_user_id: str | None,
         access_token: str | None = None,
         refresh_token: str | None = None,
+        device_id: str | None = None,
         activated_at: int | None = None,
         login_method: str | None = None,
         updated_at: int | None = None,
@@ -227,8 +235,8 @@ class ClawChatStore:
                 INSERT INTO activations(
                   platform, account_id, user_id, access_token, refresh_token,
                   activated_at, login_method, updated_at, conversation_id, owner_user_id,
-                  bootstrap_sent, bootstrap_claimed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
+                  device_id, bootstrap_sent, bootstrap_claimed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
                 ON CONFLICT(platform, account_id) DO UPDATE SET
                   user_id = excluded.user_id,
                   access_token = excluded.access_token,
@@ -238,6 +246,7 @@ class ClawChatStore:
                   updated_at = excluded.updated_at,
                   conversation_id = excluded.conversation_id,
                   owner_user_id = excluded.owner_user_id,
+                  device_id = excluded.device_id,
                   bootstrap_sent = 0,
                   bootstrap_claimed_at = NULL
                 """,
@@ -252,10 +261,138 @@ class ClawChatStore:
                     updated,
                     conversation_id,
                     owner_user_id,
+                    device_id.strip() if isinstance(device_id, str) and device_id.strip() else None,
                 ),
             )
 
         self._write("upsert_activation", write)
+
+    def update_activation_tokens(
+        self,
+        *,
+        platform: str,
+        account_id: str,
+        access_token: str,
+        refresh_token: str,
+        device_id: str | None = None,
+        updated_at: int | None = None,
+        seed_user_id: str | None = None,
+        seed_owner_user_id: str | None = None,
+        seed_conversation_id: str | None = None,
+    ) -> bool | None:
+        """Rotate just the token columns of an existing activation row.
+
+        Used by the refresh routine: it must NOT touch identity columns
+        (user_id / owner_user_id / conversation_id) or reset the bootstrap flags
+        (a refresh is not a re-pair). ``device_id`` is backfilled if provided.
+
+        Token-refresh spec §C.2 (env-only deployment): when NO activations row
+        exists yet (an ``.env``-booted process that never activated in-pod), fall
+        back to seeding the row from the supplied identity so the first refresh
+        does not return rowcount==0 and brick the agent. The seed INSERT keeps
+        ``bootstrap_sent=0`` (the env row was never bootstrapped) and does not
+        reset any activation flags. Returns True when the row was updated OR
+        seeded.
+        """
+        updated = updated_at if updated_at is not None else _now_ms()
+        access = access_token.strip() if access_token and access_token.strip() else None
+        refresh = refresh_token.strip() if refresh_token and refresh_token.strip() else None
+        device = device_id.strip() if isinstance(device_id, str) and device_id.strip() else None
+
+        def write(conn: sqlite3.Connection) -> bool:
+            cursor = conn.execute(
+                """
+                UPDATE activations
+                SET access_token = ?,
+                    refresh_token = ?,
+                    device_id = COALESCE(?, device_id),
+                    updated_at = ?
+                WHERE platform = ? AND account_id = ?
+                """,
+                (
+                    access,
+                    refresh,
+                    device,
+                    updated,
+                    platform,
+                    account_id,
+                ),
+            )
+            if cursor.rowcount == 1:
+                return True
+            # No pre-existing row → env-only deployment. Seed an identity row so
+            # the rotated tokens are durably stored and future refreshes/restart
+            # recovery work (§C.2). conversation_id may be empty (env path derives
+            # the home channel from env vars, not this row).
+            seed_user = seed_user_id.strip() if isinstance(seed_user_id, str) and seed_user_id.strip() else None
+            seed_owner = (
+                seed_owner_user_id.strip()
+                if isinstance(seed_owner_user_id, str) and seed_owner_user_id.strip()
+                else None
+            )
+            seed_conversation = (
+                seed_conversation_id.strip()
+                if isinstance(seed_conversation_id, str) and seed_conversation_id.strip()
+                else None
+            )
+            insert_cursor = conn.execute(
+                """
+                INSERT INTO activations(
+                  platform, account_id, user_id, access_token, refresh_token,
+                  activated_at, login_method, updated_at, conversation_id,
+                  owner_user_id, device_id, bootstrap_sent, bootstrap_claimed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
+                ON CONFLICT(platform, account_id) DO UPDATE SET
+                  access_token = excluded.access_token,
+                  refresh_token = excluded.refresh_token,
+                  device_id = COALESCE(excluded.device_id, activations.device_id),
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    platform,
+                    account_id,
+                    seed_user,
+                    access,
+                    refresh,
+                    updated,
+                    None,
+                    updated,
+                    seed_conversation,
+                    seed_owner,
+                    device,
+                ),
+            )
+            return insert_cursor.rowcount >= 1
+
+        return self._write("update_activation_tokens", write)
+
+    def clear_activation_credentials(
+        self,
+        *,
+        platform: str,
+        account_id: str,
+        updated_at: int | None = None,
+    ) -> bool | None:
+        """Blank the token columns but KEEP identity (re-pair mode).
+
+        Token-refresh spec §C.1: on permanent logout, clear access_token /
+        refresh_token but keep user_id / owner_user_id / conversation_id /
+        device_id so a fresh connect code re-pairs the same identity.
+        """
+        updated = updated_at if updated_at is not None else _now_ms()
+
+        def write(conn: sqlite3.Connection) -> bool:
+            cursor = conn.execute(
+                """
+                UPDATE activations
+                SET access_token = NULL, refresh_token = NULL, updated_at = ?
+                WHERE platform = ? AND account_id = ?
+                """,
+                (updated, platform, account_id),
+            )
+            return cursor.rowcount == 1
+
+        return self._write("clear_activation_credentials", write)
 
     def get_activation_credentials(
         self,
@@ -270,7 +407,8 @@ class ClawChatStore:
         try:
             row = conn.execute(
                 """
-                SELECT user_id, owner_user_id, access_token, refresh_token
+                SELECT user_id, owner_user_id, access_token, refresh_token,
+                       device_id, activated_at
                 FROM activations
                 WHERE platform = ? AND account_id = ?
                 """,
@@ -282,6 +420,11 @@ class ClawChatStore:
             owner_user_id = str(row[1] or "").strip()
             access_token = str(row[2] or "").strip()
             refresh_token = str(row[3] or "").strip() or None
+            device_id = str(row[4] or "").strip() or None
+            try:
+                activated_at = int(row[5]) if row[5] is not None else None
+            except (TypeError, ValueError):
+                activated_at = None
             if not user_id or not owner_user_id or not access_token:
                 return None
             return ActivationCredentials(
@@ -289,6 +432,8 @@ class ClawChatStore:
                 owner_user_id=owner_user_id,
                 access_token=access_token,
                 refresh_token=refresh_token,
+                device_id=device_id,
+                activated_at=activated_at,
             )
         finally:
             conn.close()

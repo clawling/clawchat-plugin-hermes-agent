@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import socket
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -34,6 +36,26 @@ ACTIVATION_RETRY_BACKOFF_SECONDS = (1.0, 2.0)
 # ACTIVATION_TIMEOUT_SECONDS and then be retried. This ceiling guarantees each
 # attempt returns; a hit is ambiguous, so it is surfaced and NOT retried.
 ACTIVATION_ATTEMPT_CEILING_SECONDS = ACTIVATION_TIMEOUT_SECONDS + 5.0
+
+# POST /v1/auth/refresh envelope codes (token-refresh spec §0). The endpoint
+# ALWAYS returns HTTP 200; branch on the envelope `code`, never on HTTP status.
+REFRESH_CODE_SUCCESS = 0
+REFRESH_CODE_INVALID_REFRESH = 10003  # not found / revoked / expired / device mismatch
+REFRESH_CODE_BAD_REQUEST = 400  # bad body / missing or oversized device id
+REFRESH_CODE_INTERNAL = 1  # server internal error (no rotation committed)
+
+# Transient-refresh backoff (spec §B): min(30s, 1s * 2^(n-1)) ± jitter, cap 30s.
+REFRESH_RETRY_BACKOFF_CAP_SECONDS = 30.0
+REFRESH_RETRY_BASE_SECONDS = 1.0
+REFRESH_REQUEST_TIMEOUT_SECONDS = 15.0
+
+
+@dataclass(frozen=True)
+class RefreshResult:
+    """Outcome of POST /v1/auth/refresh, classified by envelope `code`."""
+
+    access_token: str
+    refresh_token: str
 
 
 @dataclass(frozen=True)
@@ -326,6 +348,176 @@ class ClawChatApiClient:
             extra_headers={"content-type": "application/json"},
         )
 
+    async def auth_refresh(
+        self,
+        *,
+        refresh_token: str,
+        device_id: str,
+    ) -> RefreshResult:
+        """Exchange a refresh token for a rotated ``{access_token, refresh_token}``.
+
+        Token-refresh spec §0: ``POST /v1/auth/refresh`` is UNAUTHENTICATED — it
+        sends NO Authorization header; the refresh token in the body is the
+        credential, and ``X-Device-Id`` must equal the connect-time device id.
+        The endpoint always returns HTTP 200; we branch on the envelope ``code``:
+
+        - ``0`` → success (rotated tokens).
+        - ``10003`` → PERMANENT (kind ``auth``): not found / revoked / expired /
+          device mismatch → caller auto-logs-out.
+        - ``400`` → PERMANENT client bug (kind ``validation``) → auto-logout.
+        - ``1`` → TRANSIENT (kind ``api``, retryable) → server internal error.
+        - any non-200 / network error → TRANSIENT (kind ``transport``, retryable).
+        """
+        return await asyncio.to_thread(
+            self._auth_refresh_sync,
+            refresh_token,
+            device_id,
+        )
+
+    def _auth_refresh_sync(
+        self,
+        refresh_token: str,
+        device_id: str,
+    ) -> RefreshResult:
+        if not refresh_token or not refresh_token.strip():
+            raise ClawChatApiError(
+                "validation",
+                "refresh_token is required",
+                path="/v1/auth/refresh",
+                code=REFRESH_CODE_BAD_REQUEST,
+            )
+        if not device_id or not device_id.strip():
+            raise ClawChatApiError(
+                "validation",
+                "device_id is required",
+                path="/v1/auth/refresh",
+                code=REFRESH_CODE_BAD_REQUEST,
+            )
+        body = json.dumps({"refresh_token": refresh_token.strip()}).encode("utf-8")
+        # NO authorization header — the refresh token in the body is the credential.
+        request = Request(
+            f"{self._base_url}/v1/auth/refresh",
+            method="POST",
+            data=body,
+            headers={
+                "content-type": "application/json",
+                "content-length": str(len(body)),
+                "x-device-id": device_id.strip(),
+            },
+        )
+        timeout = REFRESH_REQUEST_TIMEOUT_SECONDS
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                status = getattr(response, "status", 200)
+                raw = response.read().decode("utf-8")
+        except HTTPError as exc:
+            # Non-200 (500 / LB / transport) → TRANSIENT, retryable.
+            try:
+                detail = exc.read().decode("utf-8")
+            except Exception:
+                detail = ""
+            raise ClawChatApiError(
+                "transport",
+                f"refresh HTTP {exc.code}: {detail or exc.reason}",
+                status=exc.code,
+                path="/v1/auth/refresh",
+            ) from exc
+        except URLError as exc:
+            reason = exc.reason
+            connect_failed = isinstance(reason, (ConnectionRefusedError, socket.gaierror))
+            raise ClawChatApiError(
+                "transport",
+                str(reason or exc),
+                path="/v1/auth/refresh",
+                connect_failed=connect_failed,
+            ) from exc
+        except TimeoutError as exc:
+            raise ClawChatApiError(
+                "transport",
+                str(exc) or "refresh request timed out",
+                path="/v1/auth/refresh",
+            ) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise ClawChatApiError("transport", str(exc), path="/v1/auth/refresh") from exc
+
+        if status != 200:
+            # Defensive: any non-200 is TRANSIENT (the contract says always 200).
+            raise ClawChatApiError(
+                "transport",
+                f"refresh non-200 status={status}",
+                status=status,
+                path="/v1/auth/refresh",
+            )
+        try:
+            payload = json.loads(raw)
+        except Exception as exc:
+            raise ClawChatApiError(
+                "transport",
+                "refresh non-JSON response",
+                status=status,
+                path="/v1/auth/refresh",
+            ) from exc
+        code = payload.get("code") if isinstance(payload, dict) else None
+        msg = ""
+        if isinstance(payload, dict):
+            msg = str(payload.get("msg") or payload.get("message") or "")
+        if code == REFRESH_CODE_SUCCESS:
+            data = payload.get("data") if isinstance(payload, dict) else None
+            if not isinstance(data, dict):
+                raise ClawChatApiError(
+                    "transport",
+                    "refresh invalid envelope: missing object data",
+                    status=status,
+                    path="/v1/auth/refresh",
+                    code=code,
+                )
+            access_token = str(data.get("access_token") or "").strip()
+            new_refresh_token = str(data.get("refresh_token") or "").strip()
+            if not access_token or not new_refresh_token:
+                raise ClawChatApiError(
+                    "transport",
+                    "refresh invalid envelope: missing rotated tokens",
+                    status=status,
+                    path="/v1/auth/refresh",
+                    code=code,
+                )
+            return RefreshResult(access_token=access_token, refresh_token=new_refresh_token)
+        if code == REFRESH_CODE_INVALID_REFRESH:
+            # PERMANENT: invalid refresh token (revoked / expired / device mismatch).
+            raise ClawChatApiError(
+                "auth",
+                msg or "refresh token invalid",
+                status=status,
+                path="/v1/auth/refresh",
+                code=code,
+            )
+        if code == REFRESH_CODE_BAD_REQUEST:
+            # PERMANENT (client bug): bad body / missing or oversized device id.
+            raise ClawChatApiError(
+                "validation",
+                msg or "refresh bad request",
+                status=status,
+                path="/v1/auth/refresh",
+                code=code,
+            )
+        if code == REFRESH_CODE_INTERNAL:
+            # TRANSIENT: server internal error, no rotation committed.
+            raise ClawChatApiError(
+                "api",
+                msg or "refresh server internal error",
+                status=status,
+                path="/v1/auth/refresh",
+                code=code,
+            )
+        # Unknown code → treat as TRANSIENT (do not auto-logout on the unexpected).
+        raise ClawChatApiError(
+            "transport",
+            msg or f"refresh unexpected code={code}",
+            status=status,
+            path="/v1/auth/refresh",
+            code=code,
+        )
+
     async def upload_media(
         self,
         *,
@@ -485,6 +677,68 @@ class ClawChatApiClient:
             headers["content-length"] = str(len(body))
         headers.update(extra_headers)
         return headers
+
+
+def is_permanent_refresh_error(exc: ClawChatApiError) -> bool:
+    """Classify a refresh failure as PERMANENT (auto-logout) vs TRANSIENT (retry).
+
+    Per spec §B, only ``code == 10003`` (invalid refresh) and ``code == 400``
+    (client bug) are permanent. ``code == 1`` (internal), non-200, and any
+    network error are transient and must keep retrying — a transient failure
+    never auto-logs-out, because no rotation was committed and the old refresh
+    token is still valid.
+    """
+    return exc.code in (REFRESH_CODE_INVALID_REFRESH, REFRESH_CODE_BAD_REQUEST)
+
+
+def _refresh_backoff_delay(attempt: int) -> float:
+    base = min(
+        REFRESH_RETRY_BACKOFF_CAP_SECONDS,
+        REFRESH_RETRY_BASE_SECONDS * (2 ** max(0, attempt - 1)),
+    )
+    jitter = random.uniform(-base * 0.25, base * 0.25)
+    return max(0.0, min(REFRESH_RETRY_BACKOFF_CAP_SECONDS, base + jitter))
+
+
+async def auth_refresh_with_retry(
+    client: ClawChatApiClient,
+    *,
+    refresh_token: str,
+    device_id: str,
+    max_transient_retries: int | None = None,
+    sleep: Callable[[float], Awaitable[None]] | None = None,
+) -> RefreshResult:
+    """Call ``auth_refresh`` and retry ONLY transient failures with exp backoff.
+
+    Transient failures (``code:1``, non-200, network) retry effectively
+    unbounded but rate-limited (mirroring the WS supervisor that retries
+    forever); ``max_transient_retries`` bounds it only for tests. PERMANENT
+    failures (``code:10003`` / ``code:400``) propagate immediately so the caller
+    can auto-logout. (Spec §B.)
+    """
+    sleeper = sleep if sleep is not None else asyncio.sleep
+    attempt = 0
+    while True:
+        try:
+            return await client.auth_refresh(
+                refresh_token=refresh_token,
+                device_id=device_id,
+            )
+        except ClawChatApiError as exc:
+            if is_permanent_refresh_error(exc):
+                raise
+            attempt += 1
+            if max_transient_retries is not None and attempt > max_transient_retries:
+                raise
+            delay = _refresh_backoff_delay(attempt)
+            logger.warning(
+                "clawchat token refresh transient failure (attempt %d), retrying in %.1fs: %s",
+                attempt,
+                delay,
+                exc,
+            )
+            if delay:
+                await sleeper(delay)
 
 
 async def agents_connect_with_retry(

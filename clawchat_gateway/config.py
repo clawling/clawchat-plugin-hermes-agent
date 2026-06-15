@@ -124,6 +124,69 @@ def _jwt_claim(token: str, claim: str) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+def _jwt_exp(token: str) -> int | None:
+    """Decode the access token's ``exp`` claim (epoch seconds).
+
+    Returns ``None`` when the token is empty / malformed / has no numeric
+    ``exp`` — callers fall back to ``activated_at + 24h`` (spec A.0). No expiry
+    column is persisted: the value is derived from the live token on each load.
+    """
+    if not token:
+        return None
+    parts = token.split(".")
+    if len(parts) < 2:
+        return None
+    payload = parts[1]
+    payload += "=" * (-len(payload) % 4)
+    try:
+        data = json.loads(base64.urlsafe_b64decode(payload.encode()).decode())
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    exp = data.get("exp")
+    if isinstance(exp, bool):
+        return None
+    if isinstance(exp, int):
+        return exp
+    if isinstance(exp, float):
+        return int(exp)
+    if isinstance(exp, str):
+        try:
+            return int(float(exp.strip()))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _jwt_iat(token: str) -> int | None:
+    """Decode the access token's ``iat`` claim (epoch seconds) or ``None``."""
+    if not token:
+        return None
+    parts = token.split(".")
+    if len(parts) < 2:
+        return None
+    payload = parts[1]
+    payload += "=" * (-len(payload) % 4)
+    try:
+        data = json.loads(base64.urlsafe_b64decode(payload.encode()).decode())
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    iat = data.get("iat")
+    if isinstance(iat, bool):
+        return None
+    if isinstance(iat, (int, float)):
+        return int(iat)
+    if isinstance(iat, str):
+        try:
+            return int(float(iat.strip()))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 def _read_group_mode(value: Any) -> str:
     return "mention" if value == "mention" else "all"
 

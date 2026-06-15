@@ -9,7 +9,7 @@ import os
 import re
 import time
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -372,6 +372,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             on_message=self._on_message,
             on_state_change=self._on_state_change,
             on_signal=self._on_signal,
+            on_auth_logout=self._on_auth_logout,
         )
         self._active_runs_by_id: dict[str, _ActiveRun] = {}
         self._active_chat_runs: dict[str, str] = {}
@@ -490,6 +491,38 @@ class ClawChatAdapter(BasePlatformAdapter):
         if frame.get("event") != "chat.metadata.invalidated":
             return
         await self._handle_metadata_invalidated(frame)
+
+    async def _on_auth_logout(self, message: str) -> None:
+        """User-visible notification on permanent token expiry (token-refresh §C.1).
+
+        The refresh manager has already cleared credentials in both stores and
+        flipped the account to not-connected. Here we surface the re-pair prompt
+        to the user, in addition to the connection's logs. The WebSocket is being
+        torn down, so the chat send is best-effort (queued); the warning log is
+        the durable record.
+        """
+        self._auth_failed = True
+        logger.warning("clawchat auth logout: %s", message)
+        owner_chat_id = self._owner_direct_chat_id()
+        if not owner_chat_id:
+            logger.warning(
+                "clawchat auth-logout notification not delivered reason=missing_owner_direct_chat_id"
+            )
+            return
+        try:
+            await self._connection.send_frame(
+                build_message_send_event(
+                    chat_id=owner_chat_id,
+                    chat_type="direct",
+                    message_id=new_message_id(),
+                    fragments=[{"kind": "text", "text": message}],
+                    include_message_id=True,
+                ),
+                wait_for_ack=False,
+                queue_when_unready=False,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat auth-logout notification send failed", exc_info=True)
 
     async def _schedule_reconnect_conversation_refresh(self) -> None:
         if self._store is None:
@@ -664,6 +697,43 @@ class ClawChatAdapter(BasePlatformAdapter):
                 return value
         return None
 
+    def _new_api_client(self) -> ClawChatApiClient:
+        """Build an authenticated REST client from the live in-memory token."""
+        return ClawChatApiClient(
+            base_url=self._clawchat_config.base_url,
+            token=self._clawchat_config.token,
+            user_id=self._clawchat_config.user_id,
+        )
+
+    async def _rest_with_auth_retry(
+        self,
+        call: Callable[[ClawChatApiClient], Awaitable[Any]],
+    ) -> Any:
+        """Run an authenticated REST call with one refresh-and-retry on 401/403.
+
+        Token-refresh spec §A.2.1: on a ``kind=='auth'`` error (REST 401/403) from
+        an authenticated call, run the shared single-flight refresh, rebuild the
+        api client with the new token, and retry the original call ONCE. A
+        permanent refresh routes to the existing auto-logout (the manager already
+        cleared creds + emitted the user message); the original auth error then
+        propagates. Transient/skipped refresh → the original auth error
+        propagates unchanged.
+        """
+        client = self._new_api_client()
+        try:
+            return await call(client)
+        except ClawChatApiError as exc:
+            if exc.kind != "auth":
+                raise
+            outcome = await self._connection.reactive_refresh()
+            if getattr(outcome, "status", None) != "success":
+                # permanent (auto-logout already handled) / transient / skipped:
+                # surface the original auth error to the caller's handling.
+                raise
+            # Rebuild the client with the freshly-swapped token and retry once.
+            self._clawchat_config = self._connection.config
+            return await call(self._new_api_client())
+
     def _is_conversation_not_found_error(self, exc: ClawChatApiError) -> bool:
         if exc.status in (404, 410) or exc.code in (404, 410, 40401):
             return True
@@ -697,16 +767,13 @@ class ClawChatAdapter(BasePlatformAdapter):
             else {}
         )
         try:
-            client = ClawChatApiClient(
-                base_url=self._clawchat_config.base_url,
-                token=self._clawchat_config.token,
-                user_id=self._clawchat_config.user_id,
-            )
-            result = await pull_group_metadata(
-                root,
-                client,
-                conversation_id,
-                skip_user_ids={self._clawchat_config.user_id, self._owner_user_id()},
+            result = await self._rest_with_auth_retry(
+                lambda client: pull_group_metadata(
+                    root,
+                    client,
+                    conversation_id,
+                    skip_user_ids={self._clawchat_config.user_id, self._owner_user_id()},
+                )
             )
         except ClawChatApiError as exc:
             if self._is_conversation_not_found_error(exc):
@@ -760,17 +827,14 @@ class ClawChatAdapter(BasePlatformAdapter):
             else {}
         )
         try:
-            client = ClawChatApiClient(
-                base_url=self._clawchat_config.base_url,
-                token=self._clawchat_config.token,
-                user_id=self._clawchat_config.user_id,
-            )
-            result = await pull_owner_metadata(
-                root,
-                client,
-                agent_id,
-                connected_user_id=self._clawchat_config.user_id,
-                owner_user_id=self._owner_user_id(),
+            result = await self._rest_with_auth_retry(
+                lambda client: pull_owner_metadata(
+                    root,
+                    client,
+                    agent_id,
+                    connected_user_id=self._clawchat_config.user_id,
+                    owner_user_id=self._owner_user_id(),
+                )
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
@@ -941,12 +1005,9 @@ class ClawChatAdapter(BasePlatformAdapter):
         if root is None:
             return False
         try:
-            client = ClawChatApiClient(
-                base_url=self._clawchat_config.base_url,
-                token=self._clawchat_config.token,
-                user_id=self._clawchat_config.user_id,
+            result = await self._rest_with_auth_retry(
+                lambda client: pull_user_metadata(root, client, user_id)
             )
-            result = await pull_user_metadata(root, client, user_id)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "clawchat user profile refresh failed user_id=%s error=%s",

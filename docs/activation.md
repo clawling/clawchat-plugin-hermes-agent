@@ -97,7 +97,7 @@ Activation writes:
 |---|---|
 | `$HERMES_HOME/.env` | `CLAWCHAT_TOKEN`, `CLAWCHAT_REFRESH_TOKEN`, optional `CLAWCHAT_HOME_CHANNEL*`. |
 | `$HERMES_HOME/config.yaml` | `platforms.clawchat.enabled=true`, `extra.base_url`, `extra.websocket_url`, `extra.user_id`, `extra.agent_id`, `extra.owner_user_id`, missing `extra.output_visibility=normal`, derived `extra.runtime_status_messages=false`, forced agent quiet defaults (`gateway_notify_interval=0`, `gateway_timeout_warning=0`), forced global ClawChat display defaults (`busy_input_mode=queue`, `busy_ack_enabled=false`, `background_process_notifications=off`, `tool_progress_command=false`), and missing `display.platforms.clawchat.*` normal-preset defaults. Operators may edit the ClawChat platform display block manually after activation. |
-| `$HERMES_HOME/clawchat.sqlite` | Latest activation row, including access token, optional refresh token, user ids, and activation conversation id. |
+| `$HERMES_HOME/clawchat.sqlite` | Latest activation row, including access token, optional refresh token, user ids, activation conversation id, and the connect-time `device_id` (`activations.device_id`). |
 
 Returned `.env` tokens and `config.yaml` user ids overwrite any previously
 configured ClawChat activation credentials.
@@ -120,6 +120,66 @@ run.
 
 The WebSocket URL is derived from `base_url` during activation and written to
 `platforms.clawchat.extra.websocket_url`.
+
+## Automatic Token Refresh & Auto-Logout
+
+The `access_token` minted at activation expires after **24h**. The plugin now
+uses the stored `refresh_token` to keep the agent connected without a human
+re-pairing it — previously the access token simply expired and the agent went
+dark until manual re-activation.
+
+For the full cross-plugin behavior (refresh timing, the `code` matrix,
+single-flight guards, WebSocket continuation), see the canonical spec
+[`../../docs/token-refresh.md`](../../docs/token-refresh.md). Operator-relevant
+summary:
+
+### How refresh works
+
+The plugin calls `POST /v1/auth/refresh` (unauthenticated; the refresh token in
+the body is the credential, with an `X-Device-Id` header equal to the
+connect-time device id):
+
+- **Proactively** — roughly 2h before the 24h expiry (decoded from the access
+  token's `exp`), so a healthy agent rotates its token before it can fail.
+- **Reactively** — on a REST `401`/`403`, or when the WebSocket handshake fails
+  with a token-rejection `hello-fail`.
+
+On success the rotated `{access_token, refresh_token}` pair is written to **both**
+`$HERMES_HOME/.env` (`CLAWCHAT_TOKEN` / `CLAWCHAT_REFRESH_TOKEN`) and plugin
+SQLite, then the WebSocket reconnects with the new token. Agents no longer die
+at the 24h mark.
+
+### Auto-logout (permanent refresh failure)
+
+When the refresh token is **permanently invalid** — revoked, expired, or a
+device-mismatch (see
+[`./configuration.md`](./configuration.md#device-id-is-also-the-token-refresh-precondition))
+— the plugin cannot mint new tokens. It then:
+
+1. Clears the stored credentials in both stores: removes `CLAWCHAT_TOKEN` /
+   `CLAWCHAT_REFRESH_TOKEN` from `.env` and blanks the access/refresh columns of
+   the SQLite `activations` row (the user/owner/agent identity is **kept**, so a
+   re-pair reuses the same identity).
+2. Surfaces a user-visible message (in addition to logs):
+
+   > ClawChat token expired and could not be refreshed. Re-pair with `/clawchat-activate <code>`.
+
+**Operator recovery:** request a fresh single-use connect code and re-activate
+with any activation entrypoint above (e.g. `/clawchat-activate <CODE>` or
+`hermes clawchat activate <CODE>`). The waiting-for-activation supervisor picks
+up the new credentials without a Hermes restart. Note that an env-booted process
+switches onto the SQLite-credentials path after its first successful refresh, so
+it can self-recover into this waiting state on a later permanent expiry instead
+of requiring a gateway restart.
+
+### Device-id column (SQLite migration)
+
+Refresh requires the same device id that was used at connect time. Activation now
+records it in the `activations.device_id` column (migration `6`,
+`activation_device_id`), and refresh reads it back verbatim for the
+`X-Device-Id` header. Legacy activation rows with no stored value backfill
+automatically from the deterministic connect-time device id. Keep
+`CLAWCHAT_DEVICE_ID` pinned so this value stays stable across restarts.
 
 ## Restart Or Reload
 
@@ -149,9 +209,14 @@ conversation id.
 - `clawchat_gateway/setup.py`: `hermes gateway setup` activation flow.
 - `clawchat_gateway/activate.py`: credential exchange, config and `.env` writes,
   restart scheduling, and SQLite activation upsert.
-- `clawchat_gateway/connection.py`: waiting-for-activation credential polling
-  and WebSocket connection lifecycle.
-- `clawchat_gateway/api_client.py`: `agents_connect` HTTP request.
+- `clawchat_gateway/connection.py`: waiting-for-activation credential polling,
+  WebSocket connection lifecycle, and the auto-logout path (`AUTO_LOGOUT_*`).
+- `clawchat_gateway/token_refresh.py`: proactive/reactive refresh scheduling,
+  single-flight + rejected-token guards, persist-then-swap ordering.
+- `clawchat_gateway/api_client.py`: `agents_connect` and `auth_refresh`
+  (`POST /v1/auth/refresh`) HTTP requests.
+- `clawchat_gateway/device_id.py`: connect-time `X-Device-Id` and the
+  unpinned-`CLAWCHAT_DEVICE_ID` boot warning.
 - `docs/install.md`, `docs/reference/cli.md`, and `docs/configuration.md`:
   operator-facing activation behavior and persisted state.
 - `tests/test_reply_mode_surface_removed.py`: current focused persistence

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import logging
 import os
 import platform
 import re
@@ -9,6 +10,8 @@ import socket
 import subprocess
 import uuid
 from pathlib import Path
+
+logger = logging.getLogger("clawchat_gateway.device_id")
 
 
 def _safe_id(prefix: str, value: str) -> str:
@@ -76,3 +79,28 @@ def get_device_id() -> str:
     if override:
         return _safe_id("hermes", override) if not override.startswith("hermes-") else override
     return _mac_platform_uuid() or _machine_id() or _host_fingerprint()
+
+
+def device_id_is_pinned() -> bool:
+    """True iff ``CLAWCHAT_DEVICE_ID`` is set (the durable, deployment-pinned path)."""
+    return bool(os.getenv("CLAWCHAT_DEVICE_ID", "").strip())
+
+
+def warn_if_device_id_unpinned() -> None:
+    """Emit a boot warning when the device id is a volatile host fingerprint.
+
+    Token-refresh spec §E (decision): the refresh endpoint requires the
+    connect-time ``X-Device-Id``. An unpinned host fingerprint changes on pod
+    reschedule, which the backend then treats as a device mismatch (10003) at
+    refresh time → spurious auto-logout. Deployments MUST pin
+    ``CLAWCHAT_DEVICE_ID``.
+    """
+    if device_id_is_pinned():
+        return
+    logger.warning(
+        "CLAWCHAT_DEVICE_ID is not pinned; using a derived host fingerprint (%s). "
+        "On pod reschedule this changes and the backend rejects /v1/auth/refresh "
+        "with a device mismatch (forcing re-pair). Pin CLAWCHAT_DEVICE_ID in any "
+        "containerized/Kubernetes deployment (see docs/configuration.md).",
+        get_device_id(),
+    )
