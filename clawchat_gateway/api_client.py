@@ -75,6 +75,24 @@ class ClawChatApiError(Exception):
         return self.message
 
 
+def build_plugin_report_payload(
+    *,
+    device_id: str,
+    platform: str,
+    plugin_version: str,
+    runtime_name: str,
+    runtime_version: str,
+) -> dict:
+    """Pure builder for the plugin-report wire body (snake_case keys)."""
+    return {
+        "device_id": device_id,
+        "platform": platform,
+        "plugin_version": plugin_version,
+        "runtime_name": runtime_name,
+        "runtime_version": runtime_version,
+    }
+
+
 @dataclass(frozen=True)
 class UploadResult:
     url: str
@@ -341,6 +359,32 @@ class ClawChatApiClient:
         return await self._call_json(
             "POST",
             "/v1/agents/connect",
+            body=body,
+            extra_headers={"content-type": "application/json"},
+        )
+
+    async def report_plugin(
+        self,
+        *,
+        device_id: str,
+        platform: str,
+        plugin_version: str,
+        runtime_name: str,
+        runtime_version: str,
+        authenticated: bool = False,
+    ) -> dict:
+        payload = build_plugin_report_payload(
+            device_id=device_id,
+            platform=platform,
+            plugin_version=plugin_version,
+            runtime_name=runtime_name,
+            runtime_version=runtime_version,
+        )
+        body = json.dumps(payload).encode("utf-8")
+        path = "/v1/agents/me/plugin-report" if authenticated else "/v1/agents/plugin-report"
+        return await self._call_json(
+            "POST",
+            path,
             body=body,
             extra_headers={"content-type": "application/json"},
         )

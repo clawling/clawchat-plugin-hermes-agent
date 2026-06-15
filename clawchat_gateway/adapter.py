@@ -23,7 +23,15 @@ from gateway.platforms.base import (
     SendResult,
 )
 
-from clawchat_gateway.api_client import ClawChatApiClient, ClawChatApiError
+from platform import python_version as _python_version
+
+from clawchat_gateway import __version__ as _PLUGIN_VERSION
+from clawchat_gateway.api_client import (
+    DEFAULT_BASE_URL,
+    ClawChatApiClient,
+    ClawChatApiError,
+)
+from clawchat_gateway.device_id import get_device_id
 from clawchat_gateway.clawchat_memory import (
     METADATA_END,
     METADATA_START,
@@ -94,6 +102,7 @@ from clawchat_gateway.terminal_send import (
 logger = logging.getLogger("clawchat_gateway.adapter")
 inbound_trace = logging.getLogger("clawchat_gateway.inbound_trace")
 
+CLAWCHAT_PLUGIN_PLATFORM = "hermes"
 TYPING_REFRESH_SECONDS = 10.0
 INBOUND_RATE_WINDOW_SECONDS = 30.0
 INBOUND_RATE_WARN_THRESHOLD = 5
@@ -390,6 +399,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._reply_preview_order: deque[str] = deque()
         self._auth_failed = False
         self._activation_bootstrap_tasks: set[asyncio.Task[None]] = set()
+        self._plugin_report_tasks: set[asyncio.Task[None]] = set()
         self._conversation_refresh_tasks: set[asyncio.Task[None]] = set()
         self._profile_sync_tasks: set[asyncio.Task[None]] = set()
         self._owner_metadata_refresh_task: asyncio.Task[None] | None = None
@@ -407,6 +417,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         set_clawchat_mention_sender(self)
 
     async def connect(self) -> bool:
+        # Best-effort unpaired report: runs even before activation credentials.
+        self._spawn_plugin_report(authenticated=False)
         await self._connection.start()
         if not (
             self._clawchat_config.websocket_url
@@ -421,7 +433,40 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
         if not ready:
             logger.warning("clawchat connect returned before websocket ready")
+        else:
+            # Paired + ready: link the report row via the authenticated endpoint.
+            self._spawn_plugin_report(authenticated=True)
         return ready
+
+    def _spawn_plugin_report(self, *, authenticated: bool) -> None:
+        task = asyncio.ensure_future(self._report_plugin_version(authenticated=authenticated))
+        self._plugin_report_tasks.add(task)
+        task.add_done_callback(self._plugin_report_tasks.discard)
+
+    async def _report_plugin_version(self, *, authenticated: bool) -> None:
+        cfg = self._clawchat_config
+        device_id = get_device_id()
+        try:
+            client = ClawChatApiClient(
+                base_url=cfg.base_url or DEFAULT_BASE_URL,
+                token=cfg.token if authenticated else "",
+                user_id=cfg.user_id,
+                device_id=device_id,
+            )
+            await client.report_plugin(
+                device_id=device_id,
+                platform=CLAWCHAT_PLUGIN_PLATFORM,
+                plugin_version=_PLUGIN_VERSION,
+                runtime_name="python",
+                runtime_version=_python_version(),
+                authenticated=authenticated,
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort; must never break startup
+            logger.debug(
+                "clawchat plugin version report failed (authenticated=%s): %s",
+                authenticated,
+                exc,
+            )
 
     async def disconnect(self) -> None:
         await self._cancel_activation_bootstrap_tasks()

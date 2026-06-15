@@ -972,6 +972,7 @@ def _adapter(monkeypatch, extra=None):
     adapter._reply_preview_by_message_id = {}
     adapter._reply_preview_order = []
     adapter._conversation_metadata_versions = {}
+    adapter._plugin_report_tasks = set()
     adapter._run_counter = 0
     return adapter
 
