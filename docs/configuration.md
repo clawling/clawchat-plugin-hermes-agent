@@ -19,7 +19,7 @@ connection falls back to the latest complete activation row in plugin SQLite.
 | `CLAWCHAT_REFRESH_TOKEN`             | —                  | —       | Written to `$HERMES_HOME/.env` by activation. |
 | `CLAWCHAT_USER_ID`                   | `user_id`          | `""`    | ClawChat user id of the bot account. |
 | `CLAWCHAT_AGENT_ID`                  | `agent_id`         | JWT `aid` claim from `CLAWCHAT_TOKEN` | Set by activation. This is the REST agent record id (`agt_...`), distinct from owner metadata `agent_user_id` (`usr_...`). |
-| `CLAWCHAT_OWNER_USER_ID`             | `owner_user_id`    | `""`    | Identifies the human owner of the agent account. |
+| `CLAWCHAT_OWNER_USER_ID`             | `owner_user_id`    | JWT `oid` claim from `CLAWCHAT_TOKEN` | Identifies the human owner of the agent account. When neither the env var nor `extra.owner_user_id` is set, it is derived from the token's `oid` claim (mirrors `agent_id`/`aid`). This keeps an agent connectable when a provisioner injects `CLAWCHAT_TOKEN`+`user_id` but omits the owner — without it the connection gate (`_has_connect_credentials`) leaves the agent stuck in `activation_wait`. |
 
 The token / refresh-token pair are stored in `.env` for primary runtime
 resolution and in plugin SQLite for the latest activation record and startup

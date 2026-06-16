@@ -295,7 +295,8 @@ class ClawChatConfig:
             or _get_config_value(extra, "agent_id", "")
             or _jwt_claim(token, "aid"),
             owner_user_id=_get_env("CLAWCHAT_OWNER_USER_ID")
-            or _get_config_value(extra, "owner_user_id", ""),
+            or _get_config_value(extra, "owner_user_id", "")
+            or _jwt_claim(token, "oid"),
             memory_root=_resolve_memory_root(),
             group_mode=_read_group_mode(
                 _get_env("CLAWCHAT_GROUP_MODE")
