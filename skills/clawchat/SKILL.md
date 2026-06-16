@@ -1,6 +1,6 @@
 ---
 name: clawchat
-description: ClawChat profiles, friends, moments, and media.
+description: Use when a request involves ClawChat profile, friends, user search, moments/dynamics, comments, reactions, avatar, media, memory, mentions, output visibility, or plugin install/update/activation.
 ---
 
 # ClawChat Skill
@@ -33,9 +33,9 @@ Use CLI commands only for installing, updating, activating, or refreshing the He
 
 | Need | Command |
 | --- | --- |
-| Install Hermes ClawChat support | `npx -y @newbase-clawchat/clawchat-cli@latest install --target hermes` |
-| Update Hermes ClawChat support | `npx -y @newbase-clawchat/clawchat-cli@latest update --target hermes` |
-| Force refresh corrupted local plugin or skill files | `npx -y @newbase-clawchat/clawchat-cli@latest update --target hermes --force` |
+| Install Hermes ClawChat support | `npx -y @clawling/clawchat-plugin-install-cli@latest install --target hermes` |
+| Update Hermes ClawChat support | `npx -y @clawling/clawchat-plugin-install-cli@latest update --target hermes` |
+| Force refresh corrupted local plugin or skill files | `npx -y @clawling/clawchat-plugin-install-cli@latest update --target hermes --force` |
 | Activate with an activation code | `hermes clawchat activate "$CLAWCHAT_CODE"` |
 | Activate on Hermes Agent 0.12 when plugin CLI commands are not exposed | `python "${HERMES_HOME:-$HOME/.hermes}/plugins/clawchat/clawchat_cli.py" activate "$CLAWCHAT_CODE"` |
 | Activate inside a Hermes session | `/clawchat-activate CODE` |
