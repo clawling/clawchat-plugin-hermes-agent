@@ -10,7 +10,7 @@ import random
 import time
 from collections import deque
 from dataclasses import dataclass, replace
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, ClassVar
 
 try:
     from websockets.asyncio.client import connect as _ws_connect_impl
@@ -43,6 +43,11 @@ from clawchat_gateway.ws_state import ReconnectTracker
 logger = logging.getLogger("clawchat_gateway.connection")
 
 HANDSHAKE_TIMEOUT_SECONDS = 10.0
+# Upper bound on the graceful ``ws.close()` in ``stop()``. A half-dead socket can
+# make ``close()`` block until the library's own close handshake gives up; bounding
+# it keeps supersession (``start`` -> prior ``stop``) and the Hermes watcher's ~5s
+# disconnect budget responsive, so a slow close never leaves an orphan behind.
+_WS_CLOSE_TIMEOUT_SECONDS = 5.0
 SEND_QUEUE_MAX = 128
 BACKOFF_RESET_AFTER_SECONDS = 5.0
 ACKABLE_EVENTS = {"message.send", "message.reply"}
@@ -145,6 +150,15 @@ OnAuthLogout = Callable[[str], Awaitable[None]]
 
 
 class ClawChatConnection:
+    # Process-wide guard: at most one live supervisor per ``account_id``. The Hermes
+    # reconnect watcher builds a FRESH adapter (=> new ``ClawChatConnection``) on every
+    # retry and only best-effort disconnects the old one (a ~5s budget it abandons on
+    # timeout; a ``wait_for``-cancelled ``connect()`` never disconnects at all). A
+    # leaked supervisor keeps reconnecting with the SAME ``device_id``, so msghub
+    # mutually kicks the live connection in an endless reconnect storm. Superseding the
+    # prior supervisor when a fresh one starts makes such duplicates impossible.
+    _live_supervisors: ClassVar[dict[str, "ClawChatConnection"]] = {}
+
     def __init__(
         self,
         config: ClawChatConfig,
@@ -207,6 +221,22 @@ class ClawChatConnection:
     async def start(self) -> None:
         if self._supervisor_task is not None:
             return
+        # Supersede any orphaned supervisor for the same account before starting
+        # ours, so only one WS session per account is ever live in this process.
+        prior = ClawChatConnection._live_supervisors.get(self._account_id)
+        if prior is not None and prior is not self:
+            logger.info(
+                format_ws_log(
+                    event="supervisor_superseded",
+                    account_id=self._account_id,
+                    attempt=prior._attempt,
+                    reconnect_count=prior._reconnect_count,
+                    state=prior._state.value,
+                    action="stop",
+                    fields=[("reason", "replaced by fresh connection")],
+                )
+            )
+            await prior.stop()
         self._stopping = False
         self._auth_failed = False
         warn_if_device_id_unpinned()
@@ -216,6 +246,7 @@ class ClawChatConnection:
             self._supervisor(),
             name="clawchat-supervisor",
         )
+        ClawChatConnection._live_supervisors[self._account_id] = self
 
     def _build_refresh_manager(self) -> RefreshManager:
         return RefreshManager(
@@ -358,8 +389,12 @@ class ClawChatConnection:
             self._hello_wait.cancel()
         if self._ws is not None:
             try:
-                await self._ws.close()
-            except Exception:  # noqa: BLE001
+                await asyncio.wait_for(
+                    self._ws.close(), timeout=_WS_CLOSE_TIMEOUT_SECONDS
+                )
+            except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+                # A half-dead socket may never complete the close handshake; don't
+                # let it stall supersession or the host's disconnect budget.
                 pass
         if self._supervisor_task is not None:
             self._supervisor_task.cancel()
@@ -368,6 +403,9 @@ class ClawChatConnection:
             except (asyncio.CancelledError, Exception):
                 pass
             self._supervisor_task = None
+        # Release our slot only if a newer ``start`` hasn't already claimed it.
+        if ClawChatConnection._live_supervisors.get(self._account_id) is self:
+            del ClawChatConnection._live_supervisors[self._account_id]
 
     async def send_frame(
         self,
