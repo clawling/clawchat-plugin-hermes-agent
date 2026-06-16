@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import copy
 import importlib
+from collections import OrderedDict
 import asyncio
 import json
 import logging
@@ -969,6 +970,7 @@ def _adapter(monkeypatch, extra=None):
     adapter._active_chat_runs = {}
     adapter._completed_run_ids = set()
     adapter._completed_run_order = []
+    adapter._recent_emits = OrderedDict()
     adapter._reply_preview_by_message_id = {}
     adapter._reply_preview_order = []
     adapter._conversation_metadata_versions = {}

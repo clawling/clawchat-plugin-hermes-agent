@@ -8,7 +8,7 @@ import logging
 import os
 import re
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -107,6 +107,14 @@ INBOUND_RATE_WINDOW_SECONDS = 30.0
 INBOUND_RATE_WARN_THRESHOLD = 5
 COMPLETED_RUN_CACHE_MAX = 1024
 REPLY_PREVIEW_CACHE_MAX = 512
+# Hermes core can deliver the SAME finished response to the platform twice in one
+# turn (observed in prod: a streaming/output-path send + a platforms.base re-send
+# ~0.3s apart), and each send() mints a fresh message_id so the message_id-keyed
+# outbound claim never dedups them. Collapse identical (chat_id, text) emits within
+# this short window. The window is intentionally well under real inter-turn reply
+# spacing (LLM generation is multi-second) to avoid suppressing genuine repeats.
+DUPLICATE_EMIT_WINDOW_SECONDS = 5.0
+RECENT_EMIT_CACHE_MAX = 256
 REPLY_PREVIEW_TEXT_MAX = 200
 RECONNECT_REFRESH_LIMIT = 20
 METADATA_INVALIDATION_SCOPES = {"behavior", "title", "description"}
@@ -391,6 +399,9 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._inbound_window: dict[str, deque[float]] = {}
         self._completed_run_ids: set[str] = set()
         self._completed_run_order: deque[str] = deque()
+        # (chat_id, visible_text) -> last emit monotonic ts; bounded LRU. Used to
+        # drop hermes-core duplicate re-sends of the same finished response.
+        self._recent_emits: OrderedDict[tuple[str, str], float] = OrderedDict()
         # §7.4 reply_preview: snapshot of each inbound message keyed by its
         # message_id, so an outbound reply can carry the inline-quote preview
         # ({id, nick_name, fragments}) without a round-trip. Bounded FIFO.
@@ -2290,6 +2301,14 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
             return SendResult(success=True, message_id=message_id)
 
+        if not has_media and self._is_duplicate_recent_emit(chat_id, visible_content):
+            logger.info(
+                "clawchat duplicate response suppressed chat_id=%s text_len=%d",
+                chat_id,
+                len(visible_content),
+            )
+            return SendResult(success=True, message_id=message_id)
+
         frame = build_message_reply_event(
             chat_id=chat_id,
             chat_type=chat_type,
@@ -2337,6 +2356,8 @@ class ClawChatAdapter(BasePlatformAdapter):
                 message_id,
             )
             return SendResult(success=False, error=error, message_id=message_id)
+        if not has_media:
+            self._record_emit(chat_id, visible_content)
         logger.info(
             "clawchat send complete reply queued chat_id=%s message_id=%s fragments=%d",
             chat_id,
@@ -2486,6 +2507,17 @@ class ClawChatAdapter(BasePlatformAdapter):
                 run.message_id,
             )
             return SendResult(success=True, message_id=run.message_id)
+        if not self._has_outbound_media(run.metadata, run.kwargs) and self._is_duplicate_recent_emit(
+            run.chat_id, final_content
+        ):
+            self._discard_run(run)
+            self._remember_completed_run(run.message_id)
+            logger.info(
+                "clawchat duplicate response suppressed chat_id=%s message_id=%s",
+                run.chat_id,
+                run.message_id,
+            )
+            return SendResult(success=True, message_id=run.message_id)
         frame = build_message_reply_event(
             chat_id=run.chat_id,
             chat_type=run.chat_type,
@@ -2543,6 +2575,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             raw=frame,
         )
         run.last_text = final_content
+        if not self._has_outbound_media(run.metadata, run.kwargs):
+            self._record_emit(run.chat_id, final_content)
         self._discard_run(run)
         self._remember_completed_run(run.message_id)
         logger.info(
@@ -2551,6 +2585,37 @@ class ClawChatAdapter(BasePlatformAdapter):
             run.message_id,
         )
         return SendResult(success=True, message_id=run.message_id)
+
+    def _duplicate_emit_key(self, chat_id: str, visible_content: str) -> tuple[str, str] | None:
+        text = (visible_content or "").strip()
+        if not chat_id or not text:
+            return None
+        return (chat_id, text)
+
+    def _recent_emits_cache(self) -> "OrderedDict[tuple[str, str], float]":
+        cache = getattr(self, "_recent_emits", None)
+        if cache is None:
+            cache = self._recent_emits = OrderedDict()
+        return cache
+
+    def _is_duplicate_recent_emit(self, chat_id: str, visible_content: str) -> bool:
+        key = self._duplicate_emit_key(chat_id, visible_content)
+        if key is None:
+            return False
+        last = self._recent_emits_cache().get(key)
+        if last is None:
+            return False
+        return (time.monotonic() - last) <= DUPLICATE_EMIT_WINDOW_SECONDS
+
+    def _record_emit(self, chat_id: str, visible_content: str) -> None:
+        key = self._duplicate_emit_key(chat_id, visible_content)
+        if key is None:
+            return
+        cache = self._recent_emits_cache()
+        cache[key] = time.monotonic()
+        cache.move_to_end(key)
+        while len(cache) > RECENT_EMIT_CACHE_MAX:
+            cache.popitem(last=False)
 
     def _remember_completed_run(self, message_id: str) -> None:
         if message_id in self._completed_run_ids:
