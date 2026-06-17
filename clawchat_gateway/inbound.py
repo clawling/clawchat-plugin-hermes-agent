@@ -146,6 +146,12 @@ def parse_inbound_message(
     if chat_type not in {"direct", "group"}:
         return None
 
+    # System messages (sender.id == "system") are server-injected notices
+    # (member joined/left, group renamed, …). Agents must never reply to them.
+    sender_obj = envelope.get("sender")
+    if isinstance(sender_obj, dict) and sender_obj.get("id") == "system":
+        return None
+
     context_mentioned_users = _extract_mentioned_users(context.get("mentions"))
     context_mentioned_user_ids = _mentioned_user_ids(context_mentioned_users)
     fragment_mentioned_users: list[dict[str, str]] = []
