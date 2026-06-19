@@ -15,6 +15,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from clawchat_gateway.device_id import get_device_id
+from clawchat_gateway.group_settings import GroupSettings
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,38 @@ class ClawChatApiClient:
         self._user_id = user_id
         self._device_id = device_id or get_device_id()
         self._timeout = timeout if timeout and timeout > 0 else DEFAULT_REQUEST_TIMEOUT
+
+    async def get_my_group_settings(self) -> list[GroupSettings]:
+        """Fetch per-group agent settings for this agent.
+
+        Returns the list of ``GroupSettings`` rows from
+        ``GET /v1/agents/me/group-settings``.  On HTTP 404 (older backend that
+        does not yet expose this endpoint) returns an empty list instead of
+        raising, so callers can treat it as "no overrides".
+        """
+        try:
+            data = await self._call_json("GET", "/v1/agents/me/group-settings")
+        except ClawChatApiError as exc:
+            if exc.status == 404:
+                return []
+            raise
+        rows: list[GroupSettings] = []
+        for item in data.get("settings") or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                rows.append(
+                    GroupSettings(
+                        conversation_id=str(item["conversation_id"]),
+                        muted=bool(item.get("muted", False)),
+                        reply_mode=str(item.get("reply_mode", "all")),
+                        batch_delay_seconds=int(item.get("batch_delay_seconds", 0)),
+                        version=int(item.get("version", 0)),
+                    )
+                )
+            except (KeyError, TypeError, ValueError):
+                logger.warning("clawchat group-settings: skipping malformed row %r", item)
+        return rows
 
     async def get_my_profile(self) -> dict:
         return await self._call_json("GET", "/v1/users/me")

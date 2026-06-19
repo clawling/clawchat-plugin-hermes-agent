@@ -90,6 +90,7 @@ from clawchat_gateway.protocol import (
     new_frame_id,
     new_message_id,
 )
+from clawchat_gateway.group_settings import GroupSettingsCache
 from clawchat_gateway.storage import get_clawchat_store
 from clawchat_gateway.terminal_send import (
     clear_clawchat_mention_sender,
@@ -389,6 +390,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             on_state_change=self._on_state_change,
             on_signal=self._on_signal,
             on_auth_logout=self._on_auth_logout,
+            on_notify_signal=self._on_notify_signal,
         )
         self._active_runs_by_id: dict[str, _ActiveRun] = {}
         self._active_chat_runs: dict[str, str] = {}
@@ -419,6 +421,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             max_wait_seconds=30.0,
             dispatch=self._handle_inbound,
         )
+        self._group_settings_cache = GroupSettingsCache()
         try:
             self._store = get_clawchat_store()
         except Exception:  # noqa: BLE001
@@ -543,12 +546,27 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._schedule_activation_bootstrap()
             self._schedule_owner_metadata_refresh()
             await self._schedule_reconnect_conversation_refresh()
+            # Re-pull group settings on every (re)connect — best-effort.
+            self._spawn_group_settings_refresh("reconnect")
         logger.info("clawchat state -> %s", state.value)
 
     async def _on_signal(self, frame: dict[str, Any]) -> None:
         if frame.get("event") != "chat.metadata.invalidated":
             return
         await self._handle_metadata_invalidated(frame)
+
+    async def _on_notify_signal(self, frame: dict[str, Any]) -> None:
+        """Handle inbound ``notify.signal`` frames dispatched by the connection.
+
+        Currently reacts to ``agent.config.changed`` by re-pulling the per-group
+        settings cache.  All other signal types are ignored here (the connection
+        already deduped and logged them).
+        """
+        payload = frame.get("payload")
+        if not isinstance(payload, dict):
+            return
+        if payload.get("type") == "agent.config.changed":
+            self._spawn_group_settings_refresh("signal")
 
     async def _on_auth_logout(self, message: str) -> None:
         """User-visible notification on permanent token expiry (token-refresh §C.1).
@@ -581,6 +599,42 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
         except Exception:  # noqa: BLE001
             logger.warning("clawchat auth-logout notification send failed", exc_info=True)
+
+    def _spawn_group_settings_refresh(self, reason: str) -> None:
+        """Fire-and-forget task to re-pull per-group settings from the backend.
+
+        Best-effort: any exception is caught and logged; the connection is never
+        affected.  ``reason`` is used only for structured logging.
+        """
+        task = asyncio.ensure_future(self._refresh_group_settings(reason=reason))
+        task.add_done_callback(lambda t: None)
+
+    async def _refresh_group_settings(self, *, reason: str) -> None:
+        """Pull ``GET /v1/agents/me/group-settings`` and merge into the cache."""
+        cfg = self._clawchat_config
+        if not cfg.token or not cfg.base_url:
+            logger.debug("clawchat group-settings refresh skipped reason=%s (no token/base_url)", reason)
+            return
+        try:
+            client = ClawChatApiClient(
+                base_url=cfg.base_url or DEFAULT_BASE_URL,
+                token=cfg.token,
+                user_id=cfg.user_id,
+                device_id=self._connection.session_device_id(),
+            )
+            rows = await client.get_my_group_settings()
+            self._group_settings_cache.apply_fetched(rows)
+            logger.info(
+                "clawchat group-settings refreshed reason=%s rows=%d",
+                reason,
+                len(rows),
+            )
+        except Exception:  # noqa: BLE001 — best-effort; must never crash the connection
+            logger.warning(
+                "clawchat group-settings refresh failed reason=%s",
+                reason,
+                exc_info=True,
+            )
 
     async def _schedule_reconnect_conversation_refresh(self) -> None:
         if self._store is None:

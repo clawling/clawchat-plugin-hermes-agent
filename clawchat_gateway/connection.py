@@ -147,6 +147,10 @@ OnSignal = Callable[[dict[str, Any]], Awaitable[None]]
 # the user-visible status/chat message (§C.1). Receives the human-readable
 # message text.
 OnAuthLogout = Callable[[str], Awaitable[None]]
+# Called for every freshly-observed ``notify.signal`` frame (after dedup).
+# Receives the full raw frame dict.  Use to react to specific ``payload.type``
+# values (e.g. ``"agent.config.changed"``).
+OnNotifySignal = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 class ClawChatConnection:
@@ -167,6 +171,7 @@ class ClawChatConnection:
         on_state_change: OnStateChange | None = None,
         on_signal: OnSignal | None = None,
         on_auth_logout: OnAuthLogout | None = None,
+        on_notify_signal: OnNotifySignal | None = None,
         account_id: str = "default",
     ) -> None:
         self._cfg = config
@@ -174,6 +179,7 @@ class ClawChatConnection:
         self._on_state_change = on_state_change
         self._on_signal = on_signal
         self._on_auth_logout = on_auth_logout
+        self._on_notify_signal = on_notify_signal
         self._account_id = account_id
         self._state = ConnectionState.DISCONNECTED
         self._ws: Any = None
@@ -1089,10 +1095,8 @@ class ClawChatConnection:
                 await on_signal(frame)
             return
         if self._state == ConnectionState.READY and ftype in (None, "event") and frame.get("event") == "notify.signal":
-            # §9.4 reliable system notification. The plugin holds no friend/roster
-            # cache (REST-on-demand), so observe + dedup only — no side effect. The
-            # live frame and its reliable-inbox replay share an event_id and
-            # collapse to one observation. Wire a reaction here if ever needed.
+            # §9.4 reliable system notification. Dedup by event_id so the live
+            # frame and its reliable-inbox replay collapse to one observation.
             payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
             outcome = self._notify_signal_observer.observe(frame)
             logger.info(
@@ -1113,6 +1117,13 @@ class ClawChatConnection:
                     ],
                 )
             )
+            # Forward freshly-observed signals to the adapter callback so it can
+            # react to specific signal types (e.g. agent.config.changed).
+            if outcome == "observed" and self._on_notify_signal is not None:
+                try:
+                    await self._on_notify_signal(frame)
+                except Exception:  # noqa: BLE001
+                    logger.exception("on_notify_signal raised")
             return
         if self._state == ConnectionState.READY and ftype in (None, "event") and frame.get("event") == "replay.done":
             # §11.5 terminal control frame: device replay drained, live begins.
