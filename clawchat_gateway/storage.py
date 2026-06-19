@@ -910,6 +910,50 @@ class ClawChatStore:
 
         self._write("finish_connection", write)
 
+    def list_recent_group_messages(
+        self,
+        account_id: str,
+        chat_id: str,
+        limit: int,
+    ) -> list[dict]:
+        """Return the last *limit* messages for (account_id, chat_id), oldest-first.
+
+        Uses the ``idx_clawchat_messages_chat_created`` index.  The query
+        selects DESC to get the most-recent rows, then the caller-visible result
+        is reversed so the list is oldest-first (chronological order for context
+        injection).  Returns an empty list when the store is disabled or on any
+        error.
+        """
+        self.initialize()
+        if self._disabled:
+            return []
+        try:
+            conn = sqlite3.connect(self.db_path)
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT message_id, text, created_at
+                    FROM clawchat_messages
+                    WHERE account_id = ? AND chat_id = ?
+                    ORDER BY created_at DESC, rowid DESC
+                    LIMIT ?
+                    """,
+                    (account_id, chat_id, limit),
+                ).fetchall()
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "clawchat database read failed operation=list_recent_group_messages",
+                exc_info=True,
+            )
+            return []
+        # Reverse so result is oldest-first.
+        return [
+            {"message_id": row[0], "text": row[1], "created_at": row[2]}
+            for row in reversed(rows)
+        ]
+
     def record_tool_call(
         self,
         *,

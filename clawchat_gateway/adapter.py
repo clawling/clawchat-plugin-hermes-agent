@@ -104,6 +104,9 @@ logger = logging.getLogger("clawchat_gateway.adapter")
 inbound_trace = logging.getLogger("clawchat_gateway.inbound_trace")
 
 CLAWCHAT_PLUGIN_PLATFORM = "hermes"
+# Number of prior group messages to prepend as context when the agent is @-mentioned.
+# Internal constant; not user-facing.
+MENTION_CONTEXT_N = 10
 TYPING_REFRESH_SECONDS = 10.0
 INBOUND_RATE_WINDOW_SECONDS = 30.0
 INBOUND_RATE_WARN_THRESHOLD = 5
@@ -1457,6 +1460,68 @@ class ClawChatAdapter(BasePlatformAdapter):
             return
         await self._handle_inbound(inbound)
 
+    def _batch_message_ids(self, inbound: InboundMessage) -> set[str]:
+        """Return the set of all constituent message_ids in the current dispatched batch.
+
+        For a coalesced group batch the raw_message contains ``"messages": [frame, ...]``
+        where each frame carries the original ``payload.message_id``.  For a single
+        (non-coalesced) message the raw_message IS the frame.  We collect ALL ids so
+        the prior-context dedup covers every message already present in the turn body.
+        """
+        ids: set[str] = set()
+        raw = inbound.raw_message if isinstance(inbound.raw_message, dict) else {}
+        if raw.get("clawchat_group_batch") is True:
+            frames = raw.get("messages")
+            if isinstance(frames, list):
+                for frame in frames:
+                    if isinstance(frame, dict):
+                        payload = frame.get("payload")
+                        if isinstance(payload, dict):
+                            mid = payload.get("message_id")
+                            if isinstance(mid, str) and mid:
+                                ids.add(mid)
+        else:
+            payload = raw.get("payload")
+            if isinstance(payload, dict):
+                mid = payload.get("message_id")
+                if isinstance(mid, str) and mid:
+                    ids.add(mid)
+        return ids
+
+    def _build_mention_prior_context_text(self, inbound: InboundMessage) -> str | None:
+        """Fetch and format prior context rows for a @-mention turn in a group.
+
+        Returns a formatted string of prior messages (oldest-first), excluding any
+        messages already present in the current dispatched batch, or None when there
+        is nothing to prepend (store unavailable, no rows after dedup, etc.).
+        """
+        if self._store is None:
+            return None
+        account_id = self._account_id()
+        if not account_id or not inbound.chat_id:
+            return None
+        try:
+            rows = self._store.list_recent_group_messages(account_id, inbound.chat_id, MENTION_CONTEXT_N)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "clawchat prior context fetch failed chat_id=%s",
+                inbound.chat_id,
+                exc_info=True,
+            )
+            return None
+        if not rows:
+            return None
+        # Dedupe: exclude any row whose message_id is already in the current batch.
+        batch_ids = self._batch_message_ids(inbound)
+        prior = [row for row in rows if row.get("message_id") not in batch_ids]
+        if not prior:
+            return None
+        lines = ["[ClawChat group prior context — oldest first]"]
+        for row in prior:
+            text = str(row.get("text") or "")
+            lines.append(text)
+        return "\n".join(lines)
+
     async def _handle_inbound(self, inbound: InboundMessage) -> None:
         if inbound.chat_type == "group":
             await self._ensure_group_participants_metadata(inbound.chat_id)
@@ -1473,8 +1538,19 @@ class ClawChatAdapter(BasePlatformAdapter):
         downloaded_media = await self._download_inbound_media(inbound)
         media_urls = [str(item.local_path) for item in downloaded_media]
         media_types = [item.mime for item in downloaded_media]
+        # Prepend prior group context when the agent is @-mentioned.
+        event_text = inbound.text
+        if inbound.chat_type == "group" and inbound.was_mentioned:
+            prior_context = self._build_mention_prior_context_text(inbound)
+            if prior_context:
+                event_text = prior_context + "\n\n" + event_text
+                logger.info(
+                    "clawchat mention prior context injected chat_id=%s rows=%d",
+                    inbound.chat_id,
+                    prior_context.count("\n"),
+                )
         event = MessageEvent(
-            text=inbound.text,
+            text=event_text,
             message_type=MessageType.TEXT,
             source=source,
             raw_message={
