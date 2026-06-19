@@ -306,3 +306,17 @@ async def test_enqueue_passes_batch_delay_as_idle_override(monkeypatch):
     await adapter._on_message(_group_frame())
 
     assert calls == [{"idle_seconds_override": 5.0}]
+
+
+@pytest.mark.asyncio
+async def test_static_mention_fallback_drops_non_mention_when_no_backend_row(monkeypatch):
+    """No backend settings row + static group_mode='mention' + non-mention msg -> claimed but NOT enqueued."""
+    adapter = _make_adapter(monkeypatch, extra={"group_mode": "mention"})  # no group_settings
+    enqueued = []
+    adapter._group_message_coalescer.enqueue = lambda msg, **_kw: enqueued.append(msg)
+
+    await adapter._on_message(_group_frame())  # plain text, no @mention
+
+    assert len(adapter._store.claimed) == 1, "message must be persisted even when static mention gate drops it"
+    assert enqueued == [], "non-mention must NOT be enqueued when static group_mode='mention' and no backend row"
+    assert adapter._dispatched_inbound == []

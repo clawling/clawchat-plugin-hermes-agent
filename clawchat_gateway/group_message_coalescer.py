@@ -104,10 +104,10 @@ class GroupMessageCoalescer:
             await asyncio.gather(*tasks, return_exceptions=True)
         await self.flush(chat_id)
 
-    async def _flush_after_idle(self, chat_id: str, *, idle_seconds: float | None = None) -> None:
+    async def _flush_after_idle(self, chat_id: str, *, idle_seconds: float) -> None:
         task = asyncio.current_task()
         try:
-            await self._sleep(idle_seconds if idle_seconds is not None else self._idle_seconds)
+            await self._sleep(idle_seconds)
             await self.flush(chat_id)
         except asyncio.CancelledError:
             raise
