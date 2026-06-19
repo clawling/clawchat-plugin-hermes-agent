@@ -8,6 +8,8 @@ import logging
 import os
 import re
 import time
+
+from clawchat_gateway.no_reply import is_no_reply_token
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -3243,8 +3245,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             return self._clawchat_config.runtime_status_messages
 
     def _is_noop_response_text(self, content: str) -> bool:
-        text = content.strip()
-        return text in {NO_REPLY_TOKEN, LEGACY_EMPTY_RESPONSE_TOKEN}
+        return is_no_reply_token(content) or content.strip() == LEGACY_EMPTY_RESPONSE_TOKEN
 
     def _is_no_reply_token_prefix(self, content: str) -> bool:
         text = content.strip()
