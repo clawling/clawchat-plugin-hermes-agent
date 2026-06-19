@@ -2398,7 +2398,13 @@ def _group_envelope(
     }
 
 
-def test_group_mention_mode_requires_context_mentions_for_dispatch() -> None:
+def test_group_parse_inbound_message_no_longer_filters_mention_mode() -> None:
+    # Task 11: the static pre-persist mention-mode drop was removed from
+    # parse_inbound_message. Filtering is now dynamic in the adapter
+    # (after claim_message_once), using the backend GroupSettingsCache.
+    # parse_inbound_message now always returns the message regardless of
+    # fragment mentions vs context_mentions; was_mentioned is derived solely
+    # from context_mentions.
     config = ClawChatConfig(
         websocket_url="wss://example.test/ws",
         user_id="usr_agent",
@@ -2416,7 +2422,9 @@ def test_group_mention_mode_requires_context_mentions_for_dispatch() -> None:
         config,
     )
 
-    assert inbound is None
+    # Message is now parsed (not dropped); was_mentioned=False because context_mentions=[]
+    assert inbound is not None
+    assert inbound.was_mentioned is False
 
 
 def test_context_mentions_drive_dispatch_and_fragment_display_drives_llm_context() -> None:

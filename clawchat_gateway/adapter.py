@@ -45,6 +45,7 @@ from clawchat_gateway.clawchat_metadata import (
 from clawchat_gateway.config import (
     ClawChatConfig,
     effective_group_command_mode,
+    effective_group_mode,
     effective_group_sessions_per_user,
 )
 from clawchat_gateway.connection import (
@@ -90,7 +91,7 @@ from clawchat_gateway.protocol import (
     new_frame_id,
     new_message_id,
 )
-from clawchat_gateway.group_settings import GroupSettingsCache
+from clawchat_gateway.group_settings import EffectiveSettings, GroupSettingsCache
 from clawchat_gateway.storage import get_clawchat_store
 from clawchat_gateway.terminal_send import (
     clear_clawchat_mention_sender,
@@ -1380,6 +1381,30 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._remember_reply_preview(
                 message_id=protocol_message_id, inbound=inbound
             )
+        if inbound.chat_type == "group":
+            _static_reply_mode = effective_group_mode(self._clawchat_config, inbound.chat_id)
+            _static_fallback = EffectiveSettings(
+                muted=False,
+                reply_mode=_static_reply_mode,
+                batch_delay_seconds=10,
+            )
+            _eff = self._group_settings_cache.effective(inbound.chat_id, _static_fallback)
+            if _eff.muted:
+                logger.info(
+                    "clawchat group muted chat_id=%s sender_id=%s reason=backend_mute",
+                    inbound.chat_id,
+                    inbound.sender_id,
+                )
+                return
+            if _eff.reply_mode == "mention" and not inbound.was_mentioned:
+                logger.info(
+                    "clawchat group non-mention dropped chat_id=%s sender_id=%s reason=reply_mode_mention",
+                    inbound.chat_id,
+                    inbound.sender_id,
+                )
+                return
+        else:
+            _eff = None
         if await self._handle_owner_forwarded_approval(inbound):
             return
         if inbound.chat_type == "group":
@@ -1410,7 +1435,10 @@ class ClawChatAdapter(BasePlatformAdapter):
                 )
                 await self._handle_inbound(inbound)
                 return
-            self._group_message_coalescer.enqueue(inbound)
+            self._group_message_coalescer.enqueue(
+                inbound,
+                idle_seconds_override=float(_eff.batch_delay_seconds) if _eff is not None else None,
+            )
             if inbound.was_mentioned:
                 logger.info(
                     "clawchat flushing group batch immediately chat_id=%s sender_id=%s text_len=%d reason=agent_mention",

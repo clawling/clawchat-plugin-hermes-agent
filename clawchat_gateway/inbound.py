@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from clawchat_gateway.config import ClawChatConfig, effective_group_mode
+from clawchat_gateway.config import ClawChatConfig
 
 
 @dataclass(frozen=True)
@@ -167,13 +167,6 @@ def parse_inbound_message(
     mentioned_users = _merge_mentioned_users(fragment_mentioned_users, context_mentioned_users)
     mentioned_user_ids = _mentioned_user_ids(mentioned_users)
     was_mentioned = config.user_id in context_mentioned_user_ids
-
-    if (
-        chat_type == "group"
-        and effective_group_mode(config, envelope.get("chat_id") or "") == "mention"
-        and not was_mentioned
-    ):
-        return None
 
     fragments = _coerce_fragments(message)
     text_parts: list[str] = []
