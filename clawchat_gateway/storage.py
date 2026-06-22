@@ -923,6 +923,13 @@ class ClawChatStore:
         is reversed so the list is oldest-first (chronological order for context
         injection).  Returns an empty list when the store is disabled or on any
         error.
+
+        Only real conversation rows are returned: rows are restricted to
+        ``event_type`` in {``message.send``, ``message.reply``}, which excludes
+        ``message.error`` / internal records (issue #2 item 4). Those persist in
+        ``clawchat_messages`` for audit/dedup but must NOT be prepended into the
+        @-mention prior-context prompt as if they were group history. (Mirrors the
+        sibling OpenClaw query filtering to real message kinds.)
         """
         self.initialize()
         if self._disabled:
@@ -935,6 +942,7 @@ class ClawChatStore:
                     SELECT message_id, text, created_at
                     FROM clawchat_messages
                     WHERE account_id = ? AND chat_id = ?
+                      AND event_type IN ('message.send', 'message.reply')
                     ORDER BY created_at DESC, rowid DESC
                     LIMIT ?
                     """,

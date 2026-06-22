@@ -1680,6 +1680,53 @@ async def test_streamed_bracket_no_reply_token_is_suppressed(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_streamed_bare_spaced_no_reply_prefix_then_real_text_is_sent(monkeypatch):
+    """A streamed bare spaced ``clawchat: no-reply`` that continues must send.
+
+    P2 regression: making the complete matcher whitespace-tolerant for the BARE
+    unbracketed form made an intermediate chunk of exactly ``clawchat: no-reply``
+    look like a COMPLETE no-reply token, so ``_is_noop_response_text`` fired in
+    ``edit_message`` and discarded the run before the later text arrived.  The
+    bare spaced form has no terminator and is only a PREFIX of longer real text
+    (``clawchat: no-reply please``); the run must survive the intermediate chunk
+    and the full final text must be delivered.
+    """
+    adapter = _adapter(monkeypatch)
+
+    result = await adapter.send(
+        "chat-1",
+        " ▉",
+        metadata={"notify": True, "chat_type": "direct"},
+    )
+
+    # Intermediate chunk is exactly the bare spaced form — it is NOT a complete
+    # token, so the run must not be discarded here.
+    edit_result = await adapter.edit_message(
+        "chat-1",
+        result.message_id,
+        "clawchat: no-reply",
+    )
+    assert edit_result.success is True
+    assert _sent_events(adapter) == []
+    assert result.message_id in adapter._active_runs_by_id
+
+    final_result = await adapter.edit_message(
+        "chat-1",
+        result.message_id,
+        "clawchat: no-reply please",
+        finalize=True,
+    )
+
+    assert final_result.success is True
+    assert _sent_events(adapter) == ["message.reply"]
+    frame = adapter._connection.frames[0][0]
+    assert frame["payload"]["message"]["body"]["fragments"] == [
+        {"kind": "text", "text": "clawchat: no-reply please"}
+    ]
+    assert not STREAM_LIFECYCLE_EVENTS & set(_sent_events(adapter))
+
+
+@pytest.mark.asyncio
 async def test_group_text_that_resembles_tool_progress_is_not_filtered_by_adapter(monkeypatch):
     adapter = _adapter(monkeypatch)
 

@@ -106,6 +106,57 @@ def test_list_recent_group_messages_empty_when_no_rows(tmp_path):
     assert result == []
 
 
+def _insert_internal_row(
+    store: ClawChatStore,
+    *,
+    account_id: str,
+    chat_id: str,
+    message_id: str,
+    text: str,
+    created_at: int,
+    kind: str = "error",
+    event_type: str = "message.error",
+) -> None:
+    """Insert an internal/error row (the kind that must NOT surface as group history)."""
+    conn = sqlite3.connect(store.db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO clawchat_messages(
+              platform, account_id, kind, direction, event_type,
+              chat_id, message_id, text, raw_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("hermes", account_id, kind, "outbound", event_type,
+             chat_id, message_id, text, None, created_at),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_list_recent_group_messages_excludes_internal_error_rows(tmp_path):
+    """Issue #2 item 4: ``message.error`` / internal rows persist in
+    ``clawchat_messages`` but must NOT be prepended into the @-mention prior
+    context as if they were group history. Only real conversation rows
+    (``event_type`` in {message.send, message.reply}) survive."""
+    store = _store(tmp_path)
+    account_id = "usr_a"
+    chat_id = "cnv_g"
+    _insert_msg(store, account_id=account_id, chat_id=chat_id, message_id="m1", text="real inbound", created_at=1000)
+    # kind='error' internal row routed-to-owner failure note.
+    _insert_internal_row(store, account_id=account_id, chat_id=chat_id, message_id="m2", text="reply failed internal", created_at=1001, kind="error")
+    # kind='message' but event_type='message.error' (transport-drop record).
+    _insert_internal_row(store, account_id=account_id, chat_id=chat_id, message_id="m3", text="dropped transport", created_at=1002, kind="message")
+    _insert_msg(store, account_id=account_id, chat_id=chat_id, message_id="m4", text="another real", created_at=1003)
+
+    result = store.list_recent_group_messages(account_id, chat_id, 10)
+    texts = [row["text"] for row in result]
+    assert texts == ["real inbound", "another real"], (
+        f"internal/error rows must be filtered out of prior context, got {texts}"
+    )
+
+
 def test_list_recent_group_messages_row_shape(tmp_path):
     """Each row dict has at least message_id, text, created_at."""
     store = _store(tmp_path)
