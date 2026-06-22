@@ -28,6 +28,12 @@ REJECT = [
     # Whitespace tolerance must not start matching real chat text.
     "i will reply, no-reply is just a clawchat token",
     "clawchat colon no-reply",
+    # Whitespace must be tolerated only AROUND delimiters, never INSIDE the
+    # literal token words (P3): a space inside ``clawchat`` / ``silent`` or
+    # around the hyphen inside ``no-reply`` is real model output, not a token.
+    "<claw chat:no-reply/>",
+    "<clawchat:si lent/>",
+    "<clawchat:no - reply/>",
 ]
 
 
