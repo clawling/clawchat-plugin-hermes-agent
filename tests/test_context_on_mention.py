@@ -435,6 +435,59 @@ async def test_mention_batch_no_duplicate_batched_messages_in_context(monkeypatc
 
 
 # ---------------------------------------------------------------------------
+# Regression: persist path and read path must agree on account_id
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_mention_prior_context_uses_persist_account_id(monkeypatch, tmp_path):
+    """Persist path writes account_id="default"; the mention read path must use the
+    SAME account_id, not the paired ClawChat user_id.
+
+    Regression for the bug where _build_mention_prior_context_text queried with
+    self._account_id() (the ClawChat user_id) while _record_message /
+    _claim_message_once persist with account_id="default", so the read matched 0
+    rows in any paired adapter and prior context was never prepended.
+
+    Uses the REAL ClawChatStore (not the account_id-ignoring fake) so the mismatch
+    surfaces.
+    """
+    # Real store, populated exactly as the persist path does: account_id="default".
+    store = _store(tmp_path)
+    chat_id = "cnv_group"
+    _insert_msg(store, account_id="default", chat_id=chat_id, message_id="msg_prior_1", text="first prior message", created_at=100)
+    _insert_msg(store, account_id="default", chat_id=chat_id, message_id="msg_prior_2", text="second prior message", created_at=200)
+
+    # Paired adapter: user_id is a real usr_* value, NOT "default".
+    adapter = _make_adapter(monkeypatch)
+    adapter._store = store
+    assert adapter._account_id() == "usr_agent", "precondition: paired user_id != 'default'"
+
+    from clawchat_gateway.inbound import InboundMessage
+    inbound = InboundMessage(
+        chat_id=chat_id,
+        chat_type="group",
+        sender_id="usr_sender",
+        sender_name="Sender",
+        text="@Agent hi",
+        raw_message={
+            "clawchat_group_batch": True,
+            "messages": [_mention_frame()],
+        },
+        was_mentioned=True,
+    )
+
+    await adapter._handle_inbound(inbound)
+
+    assert len(adapter._dispatched_events) == 1
+    event = adapter._dispatched_events[0]
+    assert "first prior message" in event.text, (
+        "prior context (persisted under account_id='default') must be returned to the "
+        "mention read path"
+    )
+    assert "second prior message" in event.text
+
+
+# ---------------------------------------------------------------------------
 # Adapter test 3: non-mention group turn does NOT prepend context
 # ---------------------------------------------------------------------------
 

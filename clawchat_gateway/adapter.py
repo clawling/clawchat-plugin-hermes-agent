@@ -1499,7 +1499,10 @@ class ClawChatAdapter(BasePlatformAdapter):
         """
         if self._store is None:
             return None
-        account_id = self._account_id()
+        # The persist path (_record_message / _claim_message_once) writes rows under
+        # account_id="default"; read with the same value so paired adapters (whose
+        # _account_id() is the ClawChat user_id) still match the stored rows.
+        account_id = "default"
         if not account_id or not inbound.chat_id:
             return None
         try:
