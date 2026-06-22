@@ -20,7 +20,13 @@ def _normalize(text: str) -> str:
 
 
 def is_no_reply_token(text: str) -> bool:
-    return bool(_RE.match(text.strip().lower()))
+    # Normalize first (collapse all internal whitespace, lowercase, strip) so
+    # spacing variants like ``<clawchat: no-reply/>`` or ``<clawchat :no-reply/>``
+    # are recognized and suppressed.  Collapsing whitespace cannot turn real chat
+    # text into a match: ``_RE`` is anchored (``^...$``), so anything with extra
+    # words outside the bracketed token (e.g. ``clawchat: no-reply please``) still
+    # fails to match after the collapse.
+    return bool(_RE.match(_normalize(text)))
 
 
 def is_no_reply_token_prefix(text: str) -> bool:

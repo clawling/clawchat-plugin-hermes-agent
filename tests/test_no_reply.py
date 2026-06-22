@@ -11,6 +11,13 @@ ACCEPT = [
     "clawchat:no-reply",
     "<clawchat:silent/>",
     "[clawchat:silent]",
+    # Whitespace variants around the colon / token boundary must still suppress
+    # (issue #2: a space after the colon used to leak the token as chat text).
+    "<clawchat: no-reply/>",
+    "<clawchat :no-reply/>",
+    "<clawchat : no-reply />",
+    "<clawchat: silent/>",
+    "clawchat: no-reply",
 ]
 
 REJECT = [
@@ -18,6 +25,9 @@ REJECT = [
     "<clawchat:no-reply/> and here is more",
     "the no-reply token is <clawchat:no-reply/>",
     "clawchat: no-reply please",
+    # Whitespace tolerance must not start matching real chat text.
+    "i will reply, no-reply is just a clawchat token",
+    "clawchat colon no-reply",
 ]
 
 
