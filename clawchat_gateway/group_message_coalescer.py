@@ -57,22 +57,22 @@ class GroupMessageCoalescer:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._max_wait_tasks: dict[str, asyncio.Task[None]] = {}
 
-    def enqueue(self, message: InboundMessage) -> None:
+    def enqueue(self, message: InboundMessage, *, idle_seconds_override: float | None = None) -> None:
         batch = self._pending.setdefault(message.chat_id, [])
         batch.append(message)
-        self._reset_idle_task(message.chat_id)
+        self._reset_idle_task(message.chat_id, idle_seconds_override=idle_seconds_override)
         if message.chat_id not in self._max_wait_tasks:
             self._max_wait_tasks[message.chat_id] = asyncio.create_task(
                 self._flush_after_max_wait(message.chat_id),
                 name=f"clawchat-group-coalesce-max-{message.chat_id}",
             )
 
-    def _reset_idle_task(self, chat_id: str) -> None:
+    def _reset_idle_task(self, chat_id: str, *, idle_seconds_override: float | None = None) -> None:
         task = self._tasks.pop(chat_id, None)
         if task is not None:
             task.cancel()
         self._tasks[chat_id] = asyncio.create_task(
-            self._flush_after_idle(chat_id),
+            self._flush_after_idle(chat_id, idle_seconds=idle_seconds_override if idle_seconds_override is not None else self._idle_seconds),
             name=f"clawchat-group-coalesce-idle-{chat_id}",
         )
 
@@ -104,10 +104,10 @@ class GroupMessageCoalescer:
             await asyncio.gather(*tasks, return_exceptions=True)
         await self.flush(chat_id)
 
-    async def _flush_after_idle(self, chat_id: str) -> None:
+    async def _flush_after_idle(self, chat_id: str, *, idle_seconds: float) -> None:
         task = asyncio.current_task()
         try:
-            await self._sleep(self._idle_seconds)
+            await self._sleep(idle_seconds)
             await self.flush(chat_id)
         except asyncio.CancelledError:
             raise

@@ -15,6 +15,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from clawchat_gateway.device_id import get_device_id
+from clawchat_gateway.group_settings import GroupSettings, GroupSettingsFetchResult
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,55 @@ class ClawChatApiClient:
         self._user_id = user_id
         self._device_id = device_id or get_device_id()
         self._timeout = timeout if timeout and timeout > 0 else DEFAULT_REQUEST_TIMEOUT
+
+    async def get_my_group_settings(self) -> GroupSettingsFetchResult:
+        """Fetch per-group agent settings for this agent.
+
+        Returns a :class:`GroupSettingsFetchResult` whose ``authoritative`` flag
+        distinguishes an HTTP 200 (the complete override snapshot, possibly
+        empty — ``authoritative=True``) from every NON-authoritative outcome
+        (HTTP 404 / endpoint-absent / non-2xx / network error —
+        ``authoritative=False``, empty rows). Only authoritative results may
+        replace the cache; an HTTP 200 with an EMPTY list authoritatively means
+        "zero overrides" and clears it, whereas a 404 (older backend without the
+        endpoint) carries no information and must be a no-op.
+
+        Auth (401/403) errors are NOT swallowed: they propagate (``kind ==
+        "auth"``) so the caller's reactive token-refresh-and-retry path runs.
+        """
+        try:
+            data = await self._call_json("GET", "/v1/agents/me/group-settings")
+        except ClawChatApiError as exc:
+            # Auth (401/403) errors MUST propagate so the caller's reactive
+            # token-refresh-and-retry path runs (mirrors the OpenClaw plugin:
+            # auth throws drive refresh). Swallowing them would leave a
+            # mute/reply-mode change unloadable until some unrelated REST call
+            # happened to refresh an expired access token.
+            if exc.kind == "auth":
+                raise
+            # Every OTHER error (404 / non-2xx / network / non-JSON) is
+            # NON-authoritative: it says nothing about the agent's actual
+            # override set, so preserve the cache. Logged here for visibility;
+            # callers treat it as a no-op.
+            logger.debug("clawchat group-settings fetch non-authoritative", exc_info=True)
+            return GroupSettingsFetchResult(authoritative=False)
+        rows: list[GroupSettings] = []
+        for item in data.get("settings") or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                rows.append(
+                    GroupSettings(
+                        conversation_id=str(item["conversation_id"]),
+                        muted=bool(item.get("muted", False)),
+                        reply_mode=str(item.get("reply_mode", "all")),
+                        batch_delay_seconds=int(item.get("batch_delay_seconds", 0)),
+                        version=int(item.get("version", 0)),
+                    )
+                )
+            except (KeyError, TypeError, ValueError):
+                logger.warning("clawchat group-settings: skipping malformed row %r", item)
+        return GroupSettingsFetchResult(authoritative=True, rows=rows)
 
     async def get_my_profile(self) -> dict:
         return await self._call_json("GET", "/v1/users/me")

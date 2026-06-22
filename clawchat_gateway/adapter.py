@@ -8,6 +8,8 @@ import logging
 import os
 import re
 import time
+
+from clawchat_gateway.no_reply import is_no_reply_token, is_no_reply_token_prefix
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -45,6 +47,7 @@ from clawchat_gateway.clawchat_metadata import (
 from clawchat_gateway.config import (
     ClawChatConfig,
     effective_group_command_mode,
+    effective_group_mode,
     effective_group_sessions_per_user,
 )
 from clawchat_gateway.connection import (
@@ -90,6 +93,7 @@ from clawchat_gateway.protocol import (
     new_frame_id,
     new_message_id,
 )
+from clawchat_gateway.group_settings import EffectiveSettings, GroupSettingsCache
 from clawchat_gateway.storage import get_clawchat_store
 from clawchat_gateway.terminal_send import (
     clear_clawchat_mention_sender,
@@ -102,9 +106,16 @@ logger = logging.getLogger("clawchat_gateway.adapter")
 inbound_trace = logging.getLogger("clawchat_gateway.inbound_trace")
 
 CLAWCHAT_PLUGIN_PLATFORM = "hermes"
+# Number of prior group messages to prepend as context when the agent is @-mentioned.
+# Internal constant; not user-facing.
+MENTION_CONTEXT_N = 10
 TYPING_REFRESH_SECONDS = 10.0
 INBOUND_RATE_WINDOW_SECONDS = 30.0
 INBOUND_RATE_WARN_THRESHOLD = 5
+# Max time a group message waits for the first per-group settings refresh to land
+# (or fall back) after (re)connect, before it is dispatched with whatever the cache
+# holds. Bounds the gate so a dead network never stalls group traffic indefinitely.
+GROUP_SETTINGS_READY_TIMEOUT_SECONDS = 5.0
 COMPLETED_RUN_CACHE_MAX = 1024
 REPLY_PREVIEW_CACHE_MAX = 512
 # Hermes core can deliver the SAME finished response to the platform twice in one
@@ -389,6 +400,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             on_state_change=self._on_state_change,
             on_signal=self._on_signal,
             on_auth_logout=self._on_auth_logout,
+            on_notify_signal=self._on_notify_signal,
         )
         self._active_runs_by_id: dict[str, _ActiveRun] = {}
         self._active_chat_runs: dict[str, str] = {}
@@ -419,6 +431,16 @@ class ClawChatAdapter(BasePlatformAdapter):
             max_wait_seconds=30.0,
             dispatch=self._handle_inbound,
         )
+        self._group_settings_cache = GroupSettingsCache()
+        # Monotonic fetch sequence assigned per dispatched settings pull. Passed
+        # into apply_fetched so a stale/out-of-order snapshot (empty or not) can
+        # never roll the cache back; see GroupSettingsCache.apply_fetched.
+        self._group_settings_fetch_seq = 0
+        # Set once the first per-(re)connect settings refresh finishes (success OR
+        # fallback). Group dispatch waits on this so a muted / mention-only group is
+        # never answered via static fallback before the GET lands. Cleared at the
+        # start of each reconnect-triggered refresh; never gates non-group traffic.
+        self._group_settings_ready = asyncio.Event()
         try:
             self._store = get_clawchat_store()
         except Exception:  # noqa: BLE001
@@ -540,8 +562,20 @@ class ClawChatAdapter(BasePlatformAdapter):
         if state == ConnectionState.READY:
             self._clawchat_config = self._connection.config
             self._auth_failed = False
+            # Re-pull group settings on every (re)connect — best-effort. Gate group
+            # dispatch on this first refresh so replayed/live group messages are not
+            # answered from a stale/empty cache before the fresh settings land.
+            #
+            # Clear the gate BEFORE the first await below: the read loop can
+            # dispatch replayed/live group frames concurrently while this handler
+            # is parked on an await, so the gate must already be cleared by then or
+            # those in-flight frames would skip _await_group_settings_ready() and
+            # use the stale cache. The refresh task re-sets it on completion /
+            # fallback. Non-group traffic is never gated.
+            self._group_settings_ready.clear()
             self._schedule_activation_bootstrap()
             self._schedule_owner_metadata_refresh()
+            self._spawn_group_settings_refresh("reconnect")
             await self._schedule_reconnect_conversation_refresh()
         logger.info("clawchat state -> %s", state.value)
 
@@ -549,6 +583,19 @@ class ClawChatAdapter(BasePlatformAdapter):
         if frame.get("event") != "chat.metadata.invalidated":
             return
         await self._handle_metadata_invalidated(frame)
+
+    async def _on_notify_signal(self, frame: dict[str, Any]) -> None:
+        """Handle inbound ``notify.signal`` frames dispatched by the connection.
+
+        Currently reacts to ``agent.config.changed`` by re-pulling the per-group
+        settings cache.  All other signal types are ignored here (the connection
+        already deduped and logged them).
+        """
+        payload = frame.get("payload")
+        if not isinstance(payload, dict):
+            return
+        if payload.get("type") == "agent.config.changed":
+            self._spawn_group_settings_refresh("signal")
 
     async def _on_auth_logout(self, message: str) -> None:
         """User-visible notification on permanent token expiry (token-refresh §C.1).
@@ -581,6 +628,93 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
         except Exception:  # noqa: BLE001
             logger.warning("clawchat auth-logout notification send failed", exc_info=True)
+
+    async def _await_group_settings_ready(self) -> None:
+        """Block until the first per-(re)connect settings refresh has landed/fallen back.
+
+        Bounded by ``GROUP_SETTINGS_READY_TIMEOUT_SECONDS`` so a dead network never
+        stalls group traffic — on timeout we proceed with whatever the cache holds.
+        Tolerant of adapters constructed without ``__init__`` (test harnesses that
+        pre-populate the cache): a missing event means "already ready".
+        """
+        event = getattr(self, "_group_settings_ready", None)
+        if event is None or event.is_set():
+            return
+        try:
+            await asyncio.wait_for(event.wait(), timeout=GROUP_SETTINGS_READY_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "clawchat group-settings gate timed out after %.1fs; proceeding with cached settings",
+                GROUP_SETTINGS_READY_TIMEOUT_SECONDS,
+            )
+
+    def _spawn_group_settings_refresh(self, reason: str) -> None:
+        """Fire-and-forget task to re-pull per-group settings from the backend.
+
+        Best-effort: any exception is caught and logged; the connection is never
+        affected.  ``reason`` is used only for structured logging.
+
+        The monotonic fetch sequence is allocated SYNCHRONOUSLY here — before the
+        task is scheduled — so sequence order matches spawn/dispatch order.
+        Assigning it inside the task body would let a later-spawned refresh whose
+        task happens to run first claim the LOWER sequence; an older snapshot
+        running later with a HIGHER sequence could then overwrite newer settings,
+        defeating the stale-snapshot ordering guard.
+        """
+        self._group_settings_fetch_seq += 1
+        sequence = self._group_settings_fetch_seq
+        task = asyncio.ensure_future(
+            self._refresh_group_settings(reason=reason, sequence=sequence)
+        )
+        task.add_done_callback(lambda t: None)
+
+    async def _refresh_group_settings(self, *, reason: str, sequence: int) -> None:
+        """Pull ``GET /v1/agents/me/group-settings`` and merge into the cache.
+
+        ``sequence`` is the pre-allocated dispatch order assigned by
+        :meth:`_spawn_group_settings_refresh`; it must not be re-derived here.
+        """
+        cfg = self._clawchat_config
+        if not cfg.token or not cfg.base_url:
+            logger.debug("clawchat group-settings refresh skipped reason=%s (no token/base_url)", reason)
+            # No credentials to fetch with: release the gate so group dispatch
+            # falls back to static settings instead of blocking until timeout.
+            self._group_settings_ready.set()
+            return
+        try:
+            # Route through the reactive refresh-and-retry wrapper so a 401/403
+            # (the api client now propagates auth errors) rotates the token and
+            # retries once, instead of being swallowed as non-authoritative.
+            result = await self._rest_with_auth_retry(
+                lambda client: client.get_my_group_settings()
+            )
+            if result.authoritative:
+                # Authoritative HTTP 200 (possibly empty => "zero overrides").
+                self._group_settings_cache.apply_fetched(result.rows, sequence)
+                logger.info(
+                    "clawchat group-settings refreshed reason=%s rows=%d seq=%d",
+                    reason,
+                    len(result.rows),
+                    sequence,
+                )
+            else:
+                # Non-authoritative (404 / endpoint-absent / non-2xx / network):
+                # preserve the cache — this carries no override information.
+                logger.info(
+                    "clawchat group-settings refresh non-authoritative reason=%s seq=%d (cache preserved)",
+                    reason,
+                    sequence,
+                )
+        except Exception:  # noqa: BLE001 — best-effort; must never crash the connection
+            logger.warning(
+                "clawchat group-settings refresh failed reason=%s",
+                reason,
+                exc_info=True,
+            )
+        finally:
+            # Always release the gate (success OR failure/fallback) so group
+            # dispatch never stalls on a refresh that failed.
+            self._group_settings_ready.set()
 
     async def _schedule_reconnect_conversation_refresh(self) -> None:
         if self._store is None:
@@ -757,10 +891,18 @@ class ClawChatAdapter(BasePlatformAdapter):
 
     def _new_api_client(self) -> ClawChatApiClient:
         """Build an authenticated REST client from the live in-memory token."""
+        device_id = None
+        connection = getattr(self, "_connection", None)
+        if connection is not None:
+            try:
+                device_id = connection.session_device_id()
+            except Exception:  # noqa: BLE001
+                device_id = None
         return ClawChatApiClient(
             base_url=self._clawchat_config.base_url,
             token=self._clawchat_config.token,
             user_id=self._clawchat_config.user_id,
+            device_id=device_id,
         )
 
     async def _rest_with_auth_retry(
@@ -1326,6 +1468,35 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._remember_reply_preview(
                 message_id=protocol_message_id, inbound=inbound
             )
+        if inbound.chat_type == "group":
+            # Gate ONLY group dispatch on the first per-(re)connect settings refresh
+            # so a muted / mention-only group is not answered from a stale/empty
+            # cache via static fallback before the GET lands. Bounded so a dead
+            # network never stalls group traffic; non-group traffic is never gated.
+            await self._await_group_settings_ready()
+            _static_reply_mode = effective_group_mode(self._clawchat_config, inbound.chat_id)
+            _static_fallback = EffectiveSettings(
+                muted=False,
+                reply_mode=_static_reply_mode,
+                batch_delay_seconds=10,
+            )
+            _eff = self._group_settings_cache.effective(inbound.chat_id, _static_fallback)
+            if _eff.muted:
+                logger.info(
+                    "clawchat group muted chat_id=%s sender_id=%s reason=backend_mute",
+                    inbound.chat_id,
+                    inbound.sender_id,
+                )
+                return
+            if _eff.reply_mode == "mention" and not inbound.was_mentioned:
+                logger.info(
+                    "clawchat group non-mention dropped chat_id=%s sender_id=%s reason=reply_mode_mention",
+                    inbound.chat_id,
+                    inbound.sender_id,
+                )
+                return
+        else:
+            _eff = None
         if await self._handle_owner_forwarded_approval(inbound):
             return
         if inbound.chat_type == "group":
@@ -1356,7 +1527,10 @@ class ClawChatAdapter(BasePlatformAdapter):
                 )
                 await self._handle_inbound(inbound)
                 return
-            self._group_message_coalescer.enqueue(inbound)
+            self._group_message_coalescer.enqueue(
+                inbound,
+                idle_seconds_override=float(_eff.batch_delay_seconds) if _eff is not None else None,
+            )
             if inbound.was_mentioned:
                 logger.info(
                     "clawchat flushing group batch immediately chat_id=%s sender_id=%s text_len=%d reason=agent_mention",
@@ -1375,9 +1549,91 @@ class ClawChatAdapter(BasePlatformAdapter):
             return
         await self._handle_inbound(inbound)
 
+    def _batch_message_ids(self, inbound: InboundMessage) -> set[str]:
+        """Return the set of all constituent message_ids in the current dispatched batch.
+
+        For a coalesced group batch the raw_message contains ``"messages": [frame, ...]``
+        where each frame carries the original ``payload.message_id``.  For a single
+        (non-coalesced) message the raw_message IS the frame.  We collect ALL ids so
+        the prior-context dedup covers every message already present in the turn body.
+        """
+        ids: set[str] = set()
+        raw = inbound.raw_message if isinstance(inbound.raw_message, dict) else {}
+        if raw.get("clawchat_group_batch") is True:
+            frames = raw.get("messages")
+            if isinstance(frames, list):
+                for frame in frames:
+                    if isinstance(frame, dict):
+                        payload = frame.get("payload")
+                        if isinstance(payload, dict):
+                            mid = payload.get("message_id")
+                            if isinstance(mid, str) and mid:
+                                ids.add(mid)
+        else:
+            payload = raw.get("payload")
+            if isinstance(payload, dict):
+                mid = payload.get("message_id")
+                if isinstance(mid, str) and mid:
+                    ids.add(mid)
+        return ids
+
+    def _build_mention_prior_context_text(self, inbound: InboundMessage) -> str | None:
+        """Fetch and format prior context rows for a @-mention turn in a group.
+
+        Returns a formatted string of prior messages (oldest-first), excluding any
+        messages already present in the current dispatched batch, or None when there
+        is nothing to prepend (store unavailable, no rows after dedup, etc.).
+        """
+        if self._store is None:
+            return None
+        # The persist path (_record_message / _claim_message_once) writes rows under
+        # account_id="default"; read with the same value so paired adapters (whose
+        # _account_id() is the ClawChat user_id) still match the stored rows.
+        account_id = "default"
+        if not account_id or not inbound.chat_id:
+            return None
+        # The current batch's own rows are persisted into clawchat_messages BEFORE
+        # this fetch runs, so a bare LIMIT MENTION_CONTEXT_N would be consumed by
+        # the batch itself (a full N-message batch starves prior context to zero).
+        # Over-fetch by the batch size so MENTION_CONTEXT_N genuine prior rows
+        # remain after the batch's ids are deduped out, then trim.
+        batch_ids = self._batch_message_ids(inbound)
+        fetch_limit = MENTION_CONTEXT_N + len(batch_ids)
+        try:
+            rows = self._store.list_recent_group_messages(account_id, inbound.chat_id, fetch_limit)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "clawchat prior context fetch failed chat_id=%s",
+                inbound.chat_id,
+                exc_info=True,
+            )
+            return None
+        if not rows:
+            return None
+        # Dedupe: exclude any row whose message_id is already in the current batch,
+        # then keep only the most-recent MENTION_CONTEXT_N (oldest-first input).
+        prior = [row for row in rows if row.get("message_id") not in batch_ids]
+        if len(prior) > MENTION_CONTEXT_N:
+            prior = prior[-MENTION_CONTEXT_N:]
+        if not prior:
+            return None
+        lines = ["[ClawChat group prior context — oldest first]"]
+        for row in prior:
+            text = str(row.get("text") or "")
+            lines.append(text)
+        return "\n".join(lines)
+
     async def _handle_inbound(self, inbound: InboundMessage) -> None:
         if inbound.chat_type == "group":
             await self._ensure_group_participants_metadata(inbound.chat_id)
+        # Capture command-ness from the ORIGINAL inbound text before any batch
+        # re-rendering rewrites ``.text`` (a coalesced batch would no longer start
+        # with the slash). The group command-dispatch path sends the raw inbound
+        # here with the slash leading; this flag gates the prior-context prepend.
+        is_group_command = (
+            inbound.chat_type == "group"
+            and _is_known_hermes_slash_command(inbound.text)
+        )
         inbound = self._refresh_group_batch_sender_context(inbound)
         reply_to_message_id, reply_to_text = self._extract_reply_fields(
             inbound.reply_preview
@@ -1391,8 +1647,30 @@ class ClawChatAdapter(BasePlatformAdapter):
         downloaded_media = await self._download_inbound_media(inbound)
         media_urls = [str(item.local_path) for item in downloaded_media]
         media_types = [item.mime for item in downloaded_media]
+        # Prepend prior group context when the agent is @-mentioned.
+        #
+        # A group slash command is dispatched through this same path and MUST
+        # carry a structured mention to clear the reply-mode gate, so it arrives
+        # here with was_mentioned=True. Prepending prior-context text in front of
+        # it would push the leading slash off the start of the turn, so Hermes
+        # would no longer recognize it as a command and would treat it as chat.
+        # Skip the injection for command turns so the slash stays at the start.
+        event_text = inbound.text
+        if (
+            inbound.chat_type == "group"
+            and inbound.was_mentioned
+            and not is_group_command
+        ):
+            prior_context = self._build_mention_prior_context_text(inbound)
+            if prior_context:
+                event_text = prior_context + "\n\n" + event_text
+                logger.info(
+                    "clawchat mention prior context injected chat_id=%s rows=%d",
+                    inbound.chat_id,
+                    prior_context.count("\n"),
+                )
         event = MessageEvent(
-            text=inbound.text,
+            text=event_text,
             message_type=MessageType.TEXT,
             source=source,
             raw_message={
@@ -3085,12 +3363,14 @@ class ClawChatAdapter(BasePlatformAdapter):
             return self._clawchat_config.runtime_status_messages
 
     def _is_noop_response_text(self, content: str) -> bool:
-        text = content.strip()
-        return text in {NO_REPLY_TOKEN, LEGACY_EMPTY_RESPONSE_TOKEN}
+        return is_no_reply_token(content) or content.strip() == LEGACY_EMPTY_RESPONSE_TOKEN
 
     def _is_no_reply_token_prefix(self, content: str) -> bool:
-        text = content.strip()
-        return bool(text) and text != NO_REPLY_TOKEN and NO_REPLY_TOKEN.startswith(text)
+        # Recognize prefixes of *every* accepted no-reply / silent variant
+        # (bracket / case / spacing), not just the canonical NO_REPLY_TOKEN, so a
+        # streamed first chunk like ``[clawchat`` or ``<CLAWCHAT:NO`` is held back
+        # instead of leaking into chat.
+        return is_no_reply_token_prefix(content)
 
     def _is_pure_silent_response(self, fragments: list[dict[str, Any]]) -> bool:
         return (
