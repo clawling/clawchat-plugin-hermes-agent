@@ -1582,6 +1582,14 @@ class ClawChatAdapter(BasePlatformAdapter):
     async def _handle_inbound(self, inbound: InboundMessage) -> None:
         if inbound.chat_type == "group":
             await self._ensure_group_participants_metadata(inbound.chat_id)
+        # Capture command-ness from the ORIGINAL inbound text before any batch
+        # re-rendering rewrites ``.text`` (a coalesced batch would no longer start
+        # with the slash). The group command-dispatch path sends the raw inbound
+        # here with the slash leading; this flag gates the prior-context prepend.
+        is_group_command = (
+            inbound.chat_type == "group"
+            and _is_known_hermes_slash_command(inbound.text)
+        )
         inbound = self._refresh_group_batch_sender_context(inbound)
         reply_to_message_id, reply_to_text = self._extract_reply_fields(
             inbound.reply_preview
@@ -1596,8 +1604,19 @@ class ClawChatAdapter(BasePlatformAdapter):
         media_urls = [str(item.local_path) for item in downloaded_media]
         media_types = [item.mime for item in downloaded_media]
         # Prepend prior group context when the agent is @-mentioned.
+        #
+        # A group slash command is dispatched through this same path and MUST
+        # carry a structured mention to clear the reply-mode gate, so it arrives
+        # here with was_mentioned=True. Prepending prior-context text in front of
+        # it would push the leading slash off the start of the turn, so Hermes
+        # would no longer recognize it as a command and would treat it as chat.
+        # Skip the injection for command turns so the slash stays at the start.
         event_text = inbound.text
-        if inbound.chat_type == "group" and inbound.was_mentioned:
+        if (
+            inbound.chat_type == "group"
+            and inbound.was_mentioned
+            and not is_group_command
+        ):
             prior_context = self._build_mention_prior_context_text(inbound)
             if prior_context:
                 event_text = prior_context + "\n\n" + event_text

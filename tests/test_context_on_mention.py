@@ -270,7 +270,7 @@ def _make_adapter(monkeypatch, *, extra=None, recent_rows: list[dict] | None = N
     )
     adapter._group_settings_cache = GroupSettingsCache()
     if group_settings:
-        adapter._group_settings_cache.apply_fetched(group_settings)
+        adapter._group_settings_cache.apply_fetched(group_settings, sequence=1)
 
     adapter._dispatched_inbound = dispatched_inbound
     adapter._dispatched_events = dispatched_events
@@ -432,6 +432,81 @@ async def test_mention_batch_no_duplicate_batched_messages_in_context(monkeypatc
     assert mention_count == 1, (
         f"'@Agent hi' appeared {mention_count} times — batched message must NOT be duplicated in prior context"
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue 1: a group slash command must NOT get prior-context prepended.
+#
+# A group slash command carries a structured mention (to clear the reply-mode
+# gate) and is dispatched through _handle_inbound with was_mentioned=True. The
+# UNCONDITIONAL prior-context prepend used to push the leading slash off the
+# start of the turn ("prior text\n.../help @Agent"), so Hermes stopped seeing it
+# as a command. The slash must stay at the very start of the dispatched text.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_group_slash_command_not_prefixed_with_prior_context(monkeypatch):
+    """A group /command (mentioned) dispatches WITHOUT prior-context prepended."""
+    recent_rows = [
+        {"message_id": "msg_prior_1", "text": "first prior message", "created_at": 100},
+        {"message_id": "msg_prior_2", "text": "second prior message", "created_at": 200},
+    ]
+    adapter = _make_adapter(monkeypatch, recent_rows=recent_rows)
+
+    from clawchat_gateway.inbound import InboundMessage
+    # The group command-dispatch path forwards the RAW single-frame inbound (not a
+    # coalesced batch) with the slash leading and a structured mention present.
+    command_text = "/help @Agent"
+    inbound = InboundMessage(
+        chat_id="cnv_group",
+        chat_type="group",
+        sender_id="usr_sender",
+        sender_name="Sender",
+        text=command_text,
+        raw_message=_mention_frame(text=command_text),
+        was_mentioned=True,
+    )
+
+    await adapter._handle_inbound(inbound)
+
+    assert len(adapter._dispatched_events) == 1
+    event = adapter._dispatched_events[0]
+    # The slash command must remain the very first thing Hermes sees.
+    assert event.text.lstrip().startswith("/help"), (
+        f"slash command must stay at the start, got: {event.text!r}"
+    )
+    assert event.text == command_text, "command turn must NOT have prior context prepended"
+    assert "first prior message" not in event.text
+    assert "second prior message" not in event.text
+
+
+@pytest.mark.asyncio
+async def test_group_non_command_mention_still_prepends_prior_context(monkeypatch):
+    """Control: a normal (non-command) mention still gets prior context prepended."""
+    recent_rows = [
+        {"message_id": "msg_prior_1", "text": "first prior message", "created_at": 100},
+    ]
+    adapter = _make_adapter(monkeypatch, recent_rows=recent_rows)
+
+    from clawchat_gateway.inbound import InboundMessage
+    inbound = InboundMessage(
+        chat_id="cnv_group",
+        chat_type="group",
+        sender_id="usr_sender",
+        sender_name="Sender",
+        text="@Agent what's up",
+        raw_message={
+            "clawchat_group_batch": True,
+            "messages": [_mention_frame(text="@Agent what's up")],
+        },
+        was_mentioned=True,
+    )
+
+    await adapter._handle_inbound(inbound)
+
+    event = adapter._dispatched_events[0]
+    assert "first prior message" in event.text, "non-command mention must still get prior context"
 
 
 # ---------------------------------------------------------------------------
