@@ -432,6 +432,10 @@ class ClawChatAdapter(BasePlatformAdapter):
             dispatch=self._handle_inbound,
         )
         self._group_settings_cache = GroupSettingsCache()
+        # Monotonic fetch sequence assigned per dispatched settings pull. Passed
+        # into apply_fetched so a stale/out-of-order snapshot (empty or not) can
+        # never roll the cache back; see GroupSettingsCache.apply_fetched.
+        self._group_settings_fetch_seq = 0
         # Set once the first per-(re)connect settings refresh finishes (success OR
         # fallback). Group dispatch waits on this so a muted / mention-only group is
         # never answered via static fallback before the GET lands. Cleared at the
@@ -669,13 +673,29 @@ class ClawChatAdapter(BasePlatformAdapter):
                 user_id=cfg.user_id,
                 device_id=self._connection.session_device_id(),
             )
-            rows = await client.get_my_group_settings()
-            self._group_settings_cache.apply_fetched(rows)
-            logger.info(
-                "clawchat group-settings refreshed reason=%s rows=%d",
-                reason,
-                len(rows),
-            )
+            # Assign the fetch sequence at dispatch so concurrent pulls (e.g. a
+            # reconnect refresh overlapping an agent.config.changed signal) are
+            # ordered: a later-arriving but lower-sequence snapshot is dropped.
+            self._group_settings_fetch_seq += 1
+            sequence = self._group_settings_fetch_seq
+            result = await client.get_my_group_settings()
+            if result.authoritative:
+                # Authoritative HTTP 200 (possibly empty => "zero overrides").
+                self._group_settings_cache.apply_fetched(result.rows, sequence)
+                logger.info(
+                    "clawchat group-settings refreshed reason=%s rows=%d seq=%d",
+                    reason,
+                    len(result.rows),
+                    sequence,
+                )
+            else:
+                # Non-authoritative (404 / endpoint-absent / non-2xx / network):
+                # preserve the cache — this carries no override information.
+                logger.info(
+                    "clawchat group-settings refresh non-authoritative reason=%s seq=%d (cache preserved)",
+                    reason,
+                    sequence,
+                )
         except Exception:  # noqa: BLE001 — best-effort; must never crash the connection
             logger.warning(
                 "clawchat group-settings refresh failed reason=%s",

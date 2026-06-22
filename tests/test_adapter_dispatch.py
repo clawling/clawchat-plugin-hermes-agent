@@ -140,7 +140,7 @@ def _make_adapter(monkeypatch, *, extra=None, group_settings: list[GroupSettings
     )
     adapter._group_settings_cache = GroupSettingsCache()
     if group_settings:
-        adapter._group_settings_cache.apply_fetched(group_settings)
+        adapter._group_settings_cache.apply_fetched(group_settings, sequence=1)
 
     adapter._dispatched_inbound = dispatched_inbound
     return adapter
@@ -351,7 +351,8 @@ async def test_group_dispatch_waits_for_first_settings_refresh(monkeypatch):
         await asyncio.sleep(0)
         await asyncio.sleep(0)
         adapter._group_settings_cache.apply_fetched(
-            [GroupSettings("cnv_group", muted=True, reply_mode="all", batch_delay_seconds=10, version=1)]
+            [GroupSettings("cnv_group", muted=True, reply_mode="all", batch_delay_seconds=10, version=1)],
+            sequence=1,
         )
         adapter._group_settings_ready.set()
 

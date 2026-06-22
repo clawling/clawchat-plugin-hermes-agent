@@ -15,7 +15,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from clawchat_gateway.device_id import get_device_id
-from clawchat_gateway.group_settings import GroupSettings
+from clawchat_gateway.group_settings import GroupSettings, GroupSettingsFetchResult
 
 logger = logging.getLogger(__name__)
 
@@ -123,20 +123,26 @@ class ClawChatApiClient:
         self._device_id = device_id or get_device_id()
         self._timeout = timeout if timeout and timeout > 0 else DEFAULT_REQUEST_TIMEOUT
 
-    async def get_my_group_settings(self) -> list[GroupSettings]:
+    async def get_my_group_settings(self) -> GroupSettingsFetchResult:
         """Fetch per-group agent settings for this agent.
 
-        Returns the list of ``GroupSettings`` rows from
-        ``GET /v1/agents/me/group-settings``.  On HTTP 404 (older backend that
-        does not yet expose this endpoint) returns an empty list instead of
-        raising, so callers can treat it as "no overrides".
+        Returns a :class:`GroupSettingsFetchResult` whose ``authoritative`` flag
+        distinguishes an HTTP 200 (the complete override snapshot, possibly
+        empty — ``authoritative=True``) from every NON-authoritative outcome
+        (HTTP 404 / endpoint-absent / non-2xx / network error —
+        ``authoritative=False``, empty rows). Only authoritative results may
+        replace the cache; an HTTP 200 with an EMPTY list authoritatively means
+        "zero overrides" and clears it, whereas a 404 (older backend without the
+        endpoint) carries no information and must be a no-op.
         """
         try:
             data = await self._call_json("GET", "/v1/agents/me/group-settings")
-        except ClawChatApiError as exc:
-            if exc.status == 404:
-                return []
-            raise
+        except ClawChatApiError:
+            # Any error (404 / non-2xx / network / non-JSON) is NON-authoritative:
+            # it says nothing about the agent's actual override set, so preserve
+            # the cache. Logged here for visibility; callers treat it as a no-op.
+            logger.debug("clawchat group-settings fetch non-authoritative", exc_info=True)
+            return GroupSettingsFetchResult(authoritative=False)
         rows: list[GroupSettings] = []
         for item in data.get("settings") or []:
             if not isinstance(item, dict):
@@ -153,7 +159,7 @@ class ClawChatApiClient:
                 )
             except (KeyError, TypeError, ValueError):
                 logger.warning("clawchat group-settings: skipping malformed row %r", item)
-        return rows
+        return GroupSettingsFetchResult(authoritative=True, rows=rows)
 
     async def get_my_profile(self) -> dict:
         return await self._call_json("GET", "/v1/users/me")
