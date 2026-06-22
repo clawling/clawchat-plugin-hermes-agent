@@ -558,14 +558,21 @@ class ClawChatAdapter(BasePlatformAdapter):
         if state == ConnectionState.READY:
             self._clawchat_config = self._connection.config
             self._auth_failed = False
-            self._schedule_activation_bootstrap()
-            self._schedule_owner_metadata_refresh()
-            await self._schedule_reconnect_conversation_refresh()
             # Re-pull group settings on every (re)connect — best-effort. Gate group
             # dispatch on this first refresh so replayed/live group messages are not
             # answered from a stale/empty cache before the fresh settings land.
+            #
+            # Clear the gate BEFORE the first await below: the read loop can
+            # dispatch replayed/live group frames concurrently while this handler
+            # is parked on an await, so the gate must already be cleared by then or
+            # those in-flight frames would skip _await_group_settings_ready() and
+            # use the stale cache. The refresh task re-sets it on completion /
+            # fallback. Non-group traffic is never gated.
             self._group_settings_ready.clear()
+            self._schedule_activation_bootstrap()
+            self._schedule_owner_metadata_refresh()
             self._spawn_group_settings_refresh("reconnect")
+            await self._schedule_reconnect_conversation_refresh()
         logger.info("clawchat state -> %s", state.value)
 
     async def _on_signal(self, frame: dict[str, Any]) -> None:

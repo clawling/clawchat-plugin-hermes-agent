@@ -403,3 +403,83 @@ async def test_non_group_dispatch_not_gated_by_settings(monkeypatch):
     await asyncio.wait_for(adapter._on_message(direct_frame), timeout=1.0)
 
     assert handled, "direct message must be handled without waiting on the group-settings gate"
+
+
+# ---------------------------------------------------------------------------
+# Reconnect race (Issue 2): the settings-ready gate must be CLEARED before the
+# first await in the READY/reconnect path, so an in-flight group frame dispatched
+# while the state-change handler is parked on an await is gated (waits for the
+# refresh) instead of using the stale cache / static fallback.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reconnect_clears_gate_before_first_await(monkeypatch):
+    """A group message arriving while _on_state_change(READY) is parked on its
+    first await must be gated until the refresh settles (gate cleared up-front)."""
+    import clawchat_gateway.adapter as adapter_module
+    from clawchat_gateway.connection import ConnectionState
+
+    adapter = _make_adapter(
+        monkeypatch,
+        # Pre-seed a stale muted row to simulate a cache that predates reconnect.
+        group_settings=[
+            GroupSettings("cnv_group", muted=True, reply_mode="all", batch_delay_seconds=10, version=1)
+        ],
+    )
+    # Gate starts SET (as it would after a prior connect settled).
+    adapter._group_settings_ready = asyncio.Event()
+    adapter._group_settings_ready.set()
+
+    # Neutralize the sync bootstrap hooks the READY path calls.
+    adapter._schedule_activation_bootstrap = lambda: None
+    adapter._schedule_owner_metadata_refresh = lambda: None
+    adapter._connection.config = adapter._clawchat_config
+
+    # Block the first await so we can observe the gate state mid-handler.
+    enter_await = asyncio.Event()
+    release_await = asyncio.Event()
+
+    async def _blocking_reconnect_refresh():
+        enter_await.set()
+        await release_await.wait()
+
+    adapter._schedule_reconnect_conversation_refresh = _blocking_reconnect_refresh
+
+    # Capture whether the refresh task was dispatched; do NOT let it set the gate
+    # yet — we control the gate release manually to observe the in-flight window.
+    spawned = []
+    adapter._spawn_group_settings_refresh = lambda reason: spawned.append(reason)
+
+    enqueued = []
+    adapter._group_message_coalescer.enqueue = lambda msg, **_kw: enqueued.append(msg)
+
+    state_task = asyncio.ensure_future(adapter._on_state_change(ConnectionState.READY))
+    await asyncio.wait_for(enter_await.wait(), timeout=1.0)
+
+    # The handler is now parked on its first await. The gate MUST already be
+    # cleared, and the refresh MUST already have been dispatched.
+    assert not adapter._group_settings_ready.is_set(), "gate must be cleared before the first await"
+    assert spawned == ["reconnect"], "settings refresh must be dispatched before the awaited reconnect refresh"
+
+    # A group message arriving during this window must be GATED, not enqueued via
+    # the stale cache. Dispatch it and give it a moment to park on the gate.
+    msg_task = asyncio.ensure_future(adapter._on_message(_group_frame()))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert enqueued == [], "in-flight group msg must wait on the gate, not use the stale cache"
+    assert not msg_task.done(), "group dispatch must still be blocked on the gate"
+
+    # Settle the refresh: land a fresh (un-muted) snapshot, set the gate, release.
+    adapter._group_settings_cache.apply_fetched(
+        [GroupSettings("cnv_group", muted=False, reply_mode="all", batch_delay_seconds=5, version=2)],
+        sequence=2,
+    )
+    adapter._group_settings_ready.set()
+    release_await.set()
+
+    await asyncio.wait_for(state_task, timeout=1.0)
+    await asyncio.wait_for(msg_task, timeout=1.0)
+
+    # Now released, the message is processed against the FRESH snapshot.
+    assert enqueued, "after the gate releases, the group msg dispatches against the fresh snapshot"
