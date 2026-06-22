@@ -487,6 +487,91 @@ async def test_mention_prior_context_uses_persist_account_id(monkeypatch, tmp_pa
     assert "second prior message" in event.text
 
 
+@pytest.mark.asyncio
+async def test_mention_batch_fetches_enough_rows_to_cover_batch(monkeypatch, tmp_path):
+    """The current batch is persisted BEFORE prior-context fetch runs.
+
+    A coalesced batch of K messages is written to clawchat_messages with the
+    most-recent timestamps, so they dominate any ``LIMIT N`` fetch.  If the
+    fetch only asks for MENTION_CONTEXT_N rows, the batch's own rows consume the
+    window and genuine prior context is starved (a full N-message batch returns
+    zero prior rows).  The fetch must request batch_size + MENTION_CONTEXT_N rows
+    so that, after removing the batch's ids, MENTION_CONTEXT_N prior rows remain.
+
+    Uses the REAL ClawChatStore so the LIMIT clause is exercised.
+    """
+    adapter = _make_adapter(monkeypatch)  # also installs the gateway import stub
+    from clawchat_gateway.adapter import MENTION_CONTEXT_N
+
+    store = _store(tmp_path)
+    chat_id = "cnv_group"
+
+    # MENTION_CONTEXT_N genuine prior messages (older timestamps).
+    for i in range(MENTION_CONTEXT_N):
+        _insert_msg(
+            store,
+            account_id="default",
+            chat_id=chat_id,
+            message_id=f"msg_prior_{i}",
+            text=f"prior message {i}",
+            created_at=100 + i,
+        )
+
+    # A full coalesced batch of MENTION_CONTEXT_N messages, persisted AFTER the
+    # prior rows (newest timestamps) — exactly what the persist path does before
+    # dispatch.
+    batch_frames = []
+    for j in range(MENTION_CONTEXT_N):
+        mid = f"msg_batch_{j}"
+        _insert_msg(
+            store,
+            account_id="default",
+            chat_id=chat_id,
+            message_id=mid,
+            text=f"batch message {j}",
+            created_at=1000 + j,
+        )
+        batch_frames.append(_group_frame(message_id=mid, text=f"batch message {j}"))
+    # The triggering mention is the last message of the batch.
+    batch_frames.append(_mention_frame(message_id="msg_batch_mention"))
+    _insert_msg(
+        store,
+        account_id="default",
+        chat_id=chat_id,
+        message_id="msg_batch_mention",
+        text="@Agent hi",
+        created_at=2000,
+    )
+
+    adapter._store = store
+
+    from clawchat_gateway.inbound import InboundMessage
+    inbound = InboundMessage(
+        chat_id=chat_id,
+        chat_type="group",
+        sender_id="usr_sender",
+        sender_name="Sender",
+        text="@Agent hi",
+        raw_message={
+            "clawchat_group_batch": True,
+            "messages": batch_frames,
+        },
+        was_mentioned=True,
+    )
+
+    await adapter._handle_inbound(inbound)
+
+    assert len(adapter._dispatched_events) == 1
+    event = adapter._dispatched_events[0]
+
+    # All MENTION_CONTEXT_N genuine prior rows must survive after the batch's own
+    # rows are deduped out — the starved fetch would have returned zero of them.
+    for i in range(MENTION_CONTEXT_N):
+        assert f"prior message {i}" in event.text, (
+            f"prior message {i} missing — batch rows starved the prior-context fetch"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Adapter test 3: non-mention group turn does NOT prepend context
 # ---------------------------------------------------------------------------

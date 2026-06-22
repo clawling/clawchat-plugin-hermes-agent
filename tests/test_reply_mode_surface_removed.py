@@ -1640,6 +1640,46 @@ async def test_empty_response_notice_is_suppressed_on_run_complete(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_streamed_bracket_no_reply_token_is_suppressed(monkeypatch):
+    """A streamed bracket/case variant of the no-reply token must not leak.
+
+    The first partial chunk ``[clawchat`` is a prefix of the accepted bracket
+    variant ``[clawchat:no-reply]``; the streaming guard must hold it (not set
+    run.last_text) so the final-detection suppression still fires when the full
+    token arrives.  Regression for a guard that only recognized prefixes of the
+    canonical ``<clawchat:no-reply/>``.
+    """
+    adapter = _adapter(monkeypatch)
+
+    result = await adapter.send(
+        "chat-1",
+        " ▉",
+        metadata={"notify": True, "chat_type": "direct"},
+    )
+
+    # First partial chunk: prefix of [clawchat:no-reply] — must be held.
+    edit_result = await adapter.edit_message(
+        "chat-1",
+        result.message_id,
+        "[clawchat",
+    )
+    assert edit_result.success is True
+    assert _sent_events(adapter) == []
+
+    final_result = await adapter.edit_message(
+        "chat-1",
+        result.message_id,
+        "[clawchat:no-reply]",
+        finalize=True,
+    )
+
+    assert final_result.success is True
+    assert _sent_events(adapter) == []
+    assert result.message_id not in adapter._active_runs_by_id
+    assert result.message_id in adapter._completed_run_ids
+
+
+@pytest.mark.asyncio
 async def test_group_text_that_resembles_tool_progress_is_not_filtered_by_adapter(monkeypatch):
     adapter = _adapter(monkeypatch)
 

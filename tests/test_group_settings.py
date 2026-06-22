@@ -76,10 +76,40 @@ def test_multiple_conversations_independent() -> None:
 
 
 def test_apply_fetched_empty_list_is_noop() -> None:
+    """Empty fetch is treated as a no-op (404 / no-endpoint safety), NOT a wipe."""
     c = GroupSettingsCache()
     c.apply_fetched([GroupSettings("c1", True, "mention", 30, 3)])
     c.apply_fetched([])
     assert c.effective("c1", STATIC).muted is True
+
+
+def test_full_fetch_clears_rows_absent_from_fresh_fetch() -> None:
+    """A non-empty full fetch is a replacement set: a conversation omitted from the
+    fresh fetch must fall back to static (not keep its stale cached override)."""
+    c = GroupSettingsCache()
+    c.apply_fetched([
+        GroupSettings("c1", True, "mention", 30, 1),
+        GroupSettings("c2", True, "all", 10, 1),
+    ])
+    # Fresh fetch no longer includes c1 (e.g. agent left that group, row deleted).
+    c.apply_fetched([GroupSettings("c2", True, "all", 10, 2)])
+    assert c.effective("c1", STATIC) == STATIC, "omitted row must be cleared"
+    assert c.effective("c2", STATIC).muted is True
+
+
+def test_full_fetch_replacement_preserves_version_monotonicity() -> None:
+    """A row whose fetched version is strictly older than the cached one is kept
+    (guards a refresh racing behind a newer config-changed signal)."""
+    c = GroupSettingsCache()
+    c.apply_fetched([GroupSettings("c1", True, "mention", 30, 5)])
+    # Stale fetch (older version) for c1 alongside a fresh c2.
+    c.apply_fetched([
+        GroupSettings("c1", False, "all", 10, 3),
+        GroupSettings("c2", False, "all", 5, 1),
+    ])
+    assert c.effective("c1", STATIC).muted is True, "stale version must not overwrite"
+    assert c.effective("c1", STATIC).reply_mode == "mention"
+    assert c.effective("c2", STATIC) == EffectiveSettings(False, "all", 5)
 
 
 # ---------------------------------------------------------------------------

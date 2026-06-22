@@ -320,3 +320,86 @@ async def test_static_mention_fallback_drops_non_mention_when_no_backend_row(mon
     assert len(adapter._store.claimed) == 1, "message must be persisted even when static mention gate drops it"
     assert enqueued == [], "non-mention must NOT be enqueued when static group_mode='mention' and no backend row"
     assert adapter._dispatched_inbound == []
+
+
+# ---------------------------------------------------------------------------
+# Group-settings readiness gate (finding #1): a group message that arrives while
+# the first per-(re)connect settings refresh is still in flight must WAIT for the
+# refresh to land, so a muted group is honored instead of being answered via the
+# static fallback before the GET completes.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_group_dispatch_waits_for_first_settings_refresh(monkeypatch):
+    """Muted row lands only after the message arrives -> message must NOT enqueue.
+
+    Reproduces the reconnect race: cache starts empty + gate unset; a background
+    task populates the muted row shortly after. Without the gate, _on_message
+    would enqueue via static-all fallback before the refresh; with the gate it
+    waits and honors the mute.
+    """
+    adapter = _make_adapter(monkeypatch)  # cache empty
+    enqueued = []
+    adapter._group_message_coalescer.enqueue = lambda msg, **_kw: enqueued.append(msg)
+
+    # Simulate "post-reconnect, refresh in flight": gate unset.
+    adapter._group_settings_ready = asyncio.Event()
+
+    async def _land_muted_settings_then_release():
+        # Yield so _on_message is parked on the gate before the cache is filled.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        adapter._group_settings_cache.apply_fetched(
+            [GroupSettings("cnv_group", muted=True, reply_mode="all", batch_delay_seconds=10, version=1)]
+        )
+        adapter._group_settings_ready.set()
+
+    refresh = asyncio.ensure_future(_land_muted_settings_then_release())
+    await adapter._on_message(_group_frame())
+    await refresh
+
+    assert len(adapter._store.claimed) == 1, "message must still be persisted"
+    assert enqueued == [], "muted (landed during gate wait) must be honored, not enqueued via static fallback"
+    assert adapter._dispatched_inbound == []
+
+
+@pytest.mark.asyncio
+async def test_group_dispatch_gate_times_out_and_proceeds(monkeypatch):
+    """If the refresh never releases the gate, group dispatch proceeds after timeout."""
+    import clawchat_gateway.adapter as adapter_module
+
+    adapter = _make_adapter(monkeypatch)
+    enqueued = []
+    adapter._group_message_coalescer.enqueue = lambda msg, **_kw: enqueued.append(msg)
+
+    adapter._group_settings_ready = asyncio.Event()  # never set
+    monkeypatch.setattr(adapter_module, "GROUP_SETTINGS_READY_TIMEOUT_SECONDS", 0.01)
+
+    await adapter._on_message(_group_frame())
+
+    assert len(adapter._store.claimed) == 1
+    assert len(enqueued) == 1, "after timeout, dispatch proceeds with cached (empty -> static all) settings"
+
+
+@pytest.mark.asyncio
+async def test_non_group_dispatch_not_gated_by_settings(monkeypatch):
+    """A direct (non-group) message must NOT block on the group-settings gate."""
+    adapter = _make_adapter(monkeypatch)
+    adapter._group_settings_ready = asyncio.Event()  # unset; would block group msgs
+
+    direct_frame = dict(_group_frame())
+    direct_frame["chat_type"] = "direct"
+
+    # Stub the direct-path handler so we only assert the gate did not block.
+    handled = []
+
+    async def _fake_handle_inbound(inbound):
+        handled.append(inbound)
+
+    adapter._handle_inbound = _fake_handle_inbound
+
+    # Must return promptly without waiting on the (never-set) gate.
+    await asyncio.wait_for(adapter._on_message(direct_frame), timeout=1.0)
+
+    assert handled, "direct message must be handled without waiting on the group-settings gate"

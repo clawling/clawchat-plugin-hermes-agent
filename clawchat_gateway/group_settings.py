@@ -13,9 +13,14 @@ Usage
 Cache contract
 --------------
 - Keyed by ``conversation_id``.
-- Version-monotonic: ``apply_fetched`` silently ignores any row whose ``version``
-  is strictly less than the currently cached version for that conversation.
-  Rows with ``version >= cached`` replace the stored entry.
+- Replacement set: ``get_my_group_settings()`` returns the *complete* snapshot of
+  the agent's rows, so ``apply_fetched`` rebuilds the cache from a non-empty fetch
+  and drops conversations absent from it (a reset / left group must not linger).
+- Empty fetch is a no-op, not a wipe (older backends with no endpoint also return
+  an empty list via HTTP 404 — clearing on that would discard valid overrides).
+- Version-monotonic: ``apply_fetched`` keeps the cached row when a fetched row's
+  ``version`` is strictly less than the cached one (guards a refresh racing behind
+  a newer ``agent.config.changed`` signal).
 - Unknown chats (no backend row) fall through to ``static_fallback``.
 """
 
@@ -61,16 +66,31 @@ class GroupSettingsCache:
         self._rows: dict[str, GroupSettings] = {}
 
     def apply_fetched(self, rows: list[GroupSettings]) -> None:
-        """Merge a fresh list of backend rows into the cache.
+        """Replace the cache with a fresh *complete* fetch of backend rows.
 
-        For each row, if the cache already holds a newer-or-equal version for
-        the same ``conversation_id`` the incoming row is silently discarded.
-        Rows with ``version >= cached_version`` replace the stored entry.
+        ``GET /v1/agents/me/group-settings`` returns the full snapshot of all
+        stored rows for this agent, so a conversation omitted from the fetch no
+        longer has an override and must be dropped — otherwise a stale muted /
+        reply_mode would linger until restart.
+
+        An **empty** fetch is treated as a no-op rather than a wipe: an empty
+        list is also what older backends (no endpoint -> HTTP 404) return, and
+        clearing on that signal would discard valid overrides. Per-conversation
+        version-monotonicity is preserved: a fetched row whose ``version`` is
+        strictly older than the cached one is kept (guards a refresh racing
+        behind a newer ``agent.config.changed`` signal).
         """
+        if not rows:
+            return
+        rebuilt: dict[str, GroupSettings] = {}
         for row in rows:
             existing = self._rows.get(row.conversation_id)
-            if existing is None or row.version >= existing.version:
-                self._rows[row.conversation_id] = row
+            # Keep the newer cached row if this fetch raced behind a signal.
+            if existing is not None and row.version < existing.version:
+                rebuilt[row.conversation_id] = existing
+            else:
+                rebuilt[row.conversation_id] = row
+        self._rows = rebuilt
 
     def effective(self, chat_id: str, static_fallback: EffectiveSettings) -> EffectiveSettings:
         """Return the effective settings for *chat_id*.
