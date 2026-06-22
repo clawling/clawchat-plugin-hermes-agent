@@ -9,15 +9,19 @@ ACCEPT = [
     "  <clawchat:no-reply/>  ",
     "<CLAWCHAT:NO-REPLY/>",
     "clawchat:no-reply",
+    "clawchat:silent",
     "<clawchat:silent/>",
     "[clawchat:silent]",
     # Whitespace variants around the colon / token boundary must still suppress
-    # (issue #2: a space after the colon used to leak the token as chat text).
+    # for BRACKETED forms (issue #2: a space after the colon used to leak the
+    # token as chat text).  Brackets provide a terminator, so completing them
+    # mid-stream is unambiguous and safe.
     "<clawchat: no-reply/>",
     "<clawchat :no-reply/>",
     "<clawchat : no-reply />",
     "<clawchat: silent/>",
-    "clawchat: no-reply",
+    "[clawchat: no-reply]",
+    "<CLAWCHAT: NO-REPLY/>",
 ]
 
 REJECT = [
@@ -28,6 +32,14 @@ REJECT = [
     # Whitespace tolerance must not start matching real chat text.
     "i will reply, no-reply is just a clawchat token",
     "clawchat colon no-reply",
+    # P2 regression: the BARE, BRACKETLESS spaced form has NO terminator and can
+    # be a strict prefix of longer real text (e.g. ``clawchat: no-reply please``),
+    # so it must NOT be accepted as a COMPLETE token.  Only the byte-exact
+    # canonical bare form (no internal/delimiter whitespace) is accepted.
+    "clawchat: no-reply",
+    "clawchat : no-reply",
+    "clawchat: silent",
+    "clawchat :silent",
     # Whitespace must be tolerated only AROUND delimiters, never INSIDE the
     # literal token words (P3): a space inside ``clawchat`` / ``silent`` or
     # around the hyphen inside ``no-reply`` is real model output, not a token.
