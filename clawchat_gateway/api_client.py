@@ -134,13 +134,24 @@ class ClawChatApiClient:
         replace the cache; an HTTP 200 with an EMPTY list authoritatively means
         "zero overrides" and clears it, whereas a 404 (older backend without the
         endpoint) carries no information and must be a no-op.
+
+        Auth (401/403) errors are NOT swallowed: they propagate (``kind ==
+        "auth"``) so the caller's reactive token-refresh-and-retry path runs.
         """
         try:
             data = await self._call_json("GET", "/v1/agents/me/group-settings")
-        except ClawChatApiError:
-            # Any error (404 / non-2xx / network / non-JSON) is NON-authoritative:
-            # it says nothing about the agent's actual override set, so preserve
-            # the cache. Logged here for visibility; callers treat it as a no-op.
+        except ClawChatApiError as exc:
+            # Auth (401/403) errors MUST propagate so the caller's reactive
+            # token-refresh-and-retry path runs (mirrors the OpenClaw plugin:
+            # auth throws drive refresh). Swallowing them would leave a
+            # mute/reply-mode change unloadable until some unrelated REST call
+            # happened to refresh an expired access token.
+            if exc.kind == "auth":
+                raise
+            # Every OTHER error (404 / non-2xx / network / non-JSON) is
+            # NON-authoritative: it says nothing about the agent's actual
+            # override set, so preserve the cache. Logged here for visibility;
+            # callers treat it as a no-op.
             logger.debug("clawchat group-settings fetch non-authoritative", exc_info=True)
             return GroupSettingsFetchResult(authoritative=False)
         rows: list[GroupSettings] = []

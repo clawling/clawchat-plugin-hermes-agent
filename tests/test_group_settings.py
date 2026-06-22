@@ -265,3 +265,57 @@ async def test_get_my_group_settings_parses_rows(monkeypatch) -> None:
     assert rows[0].version == 7
     assert rows[1].conversation_id == "grp_def"
     assert rows[1].muted is False
+
+
+def _patch_urlopen_auth(monkeypatch, status: int):
+    """Monkey-patch api_client.urlopen to raise an HTTP auth error (401/403)."""
+    import io
+
+    import clawchat_gateway.api_client as api_client_mod
+    from urllib.error import HTTPError
+
+    def fake_urlopen(request, timeout=None):
+        raise HTTPError(
+            url=request.full_url,
+            code=status,
+            msg="Unauthorized",
+            hdrs={},  # type: ignore[arg-type]
+            fp=io.BytesIO(b'{"code":401,"msg":"token expired","data":{}}'),
+        )
+
+    monkeypatch.setattr(api_client_mod, "urlopen", fake_urlopen)
+
+
+@pytest.mark.parametrize("status", [401, 403])
+@pytest.mark.asyncio
+async def test_get_my_group_settings_auth_error_propagates(monkeypatch, status: int) -> None:
+    """A 401/403 must PROPAGATE (kind=="auth") so the reactive token-refresh
+    path runs — it must NOT be swallowed into a silent non-authoritative no-op,
+    which would leave settings unloadable until some unrelated REST call
+    refreshes the token."""
+    from clawchat_gateway.api_client import ClawChatApiClient, ClawChatApiError
+
+    _patch_urlopen_auth(monkeypatch, status)
+    client = ClawChatApiClient(base_url="https://api.test", token="tok", device_id="dev-1")
+    with pytest.raises(ClawChatApiError) as excinfo:
+        await client.get_my_group_settings()
+    assert excinfo.value.kind == "auth"
+    assert excinfo.value.status == status
+
+
+@pytest.mark.asyncio
+async def test_get_my_group_settings_network_error_is_non_authoritative(monkeypatch) -> None:
+    """A network error (non-auth, non-2xx) stays a non-authoritative no-op so
+    the cache is preserved."""
+    import clawchat_gateway.api_client as api_client_mod
+    from clawchat_gateway.api_client import ClawChatApiClient
+    from urllib.error import URLError
+
+    def fake_urlopen(request, timeout=None):
+        raise URLError("connection reset")
+
+    monkeypatch.setattr(api_client_mod, "urlopen", fake_urlopen)
+    client = ClawChatApiClient(base_url="https://api.test", token="tok", device_id="dev-1")
+    result = await client.get_my_group_settings()
+    assert result.authoritative is False
+    assert result.rows == []
