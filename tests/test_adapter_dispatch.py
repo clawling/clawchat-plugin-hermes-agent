@@ -484,3 +484,89 @@ async def test_reconnect_clears_gate_before_first_await(monkeypatch):
 
     # Now released, the message is processed against the FRESH snapshot.
     assert enqueued, "after the gate releases, the group msg dispatches against the fresh snapshot"
+
+
+# ---------------------------------------------------------------------------
+# FIX 2: group-settings fetch sequence is allocated SYNCHRONOUSLY at spawn time
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_group_settings_sequence_allocated_at_spawn_not_in_task_body(monkeypatch):
+    """Two refreshes spawned in order must receive sequences in spawn order,
+    regardless of which task body runs first.
+
+    The monotonic sequence must be captured synchronously inside
+    ``_spawn_group_settings_refresh`` (before ``ensure_future``); if it were
+    incremented inside the task body, a later-spawned task that runs first would
+    claim the lower sequence and an older snapshot could overwrite newer state.
+    """
+    adapter = _make_adapter(monkeypatch)
+    adapter._group_settings_fetch_seq = 0
+
+    captured: list[tuple[str, int]] = []
+
+    async def _capture_refresh(*, reason: str, sequence: int) -> None:
+        captured.append((reason, sequence))
+
+    adapter._refresh_group_settings = _capture_refresh
+
+    # Spawn "reconnect" first, then "signal" — sequences must follow spawn order
+    # even though neither task body has run yet at this point.
+    adapter._spawn_group_settings_refresh("reconnect")
+    adapter._spawn_group_settings_refresh("signal")
+
+    # Nothing has run yet, but the sequences are already pinned to spawn order.
+    assert adapter._group_settings_fetch_seq == 2
+
+    # Let the (out-of-order-schedulable) task bodies run.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    by_reason = dict(captured)
+    assert by_reason["reconnect"] == 1, "first spawned refresh must get the lower sequence"
+    assert by_reason["signal"] == 2, "later spawned refresh must get the higher sequence"
+
+
+@pytest.mark.asyncio
+async def test_group_settings_auth_error_drives_reactive_refresh(monkeypatch):
+    """A 401/403 from the group-settings pull must drive the reactive token
+    refresh-and-retry (not be swallowed), then apply the retried snapshot."""
+    from clawchat_gateway.api_client import ClawChatApiError
+    from clawchat_gateway.group_settings import GroupSettingsFetchResult
+
+    adapter = _make_adapter(monkeypatch)
+    adapter._group_settings_ready = asyncio.Event()
+    adapter._group_settings_fetch_seq = 0
+
+    refresh_calls = {"n": 0}
+
+    async def _reactive_refresh():
+        refresh_calls["n"] += 1
+        return SimpleNamespace(status="success")
+
+    adapter._connection.reactive_refresh = _reactive_refresh
+    adapter._connection.config = adapter._clawchat_config
+    adapter._connection.session_device_id = lambda: "dev-1"
+
+    attempts = {"n": 0}
+
+    async def _fake_get_my_group_settings(self):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise ClawChatApiError("auth", "token expired", status=401, path="/v1/agents/me/group-settings")
+        return GroupSettingsFetchResult(
+            authoritative=True,
+            rows=[GroupSettings("cnv_group", muted=True, reply_mode="all", batch_delay_seconds=5, version=3)],
+        )
+
+    monkeypatch.setattr(
+        "clawchat_gateway.api_client.ClawChatApiClient.get_my_group_settings",
+        _fake_get_my_group_settings,
+    )
+
+    await adapter._refresh_group_settings(reason="signal", sequence=1)
+
+    assert refresh_calls["n"] == 1, "auth error must drive exactly one reactive refresh"
+    assert attempts["n"] == 2, "the pull must be retried once after a successful refresh"
+    assert adapter._group_settings_ready.is_set(), "gate must be released after the refresh"

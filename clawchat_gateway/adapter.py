@@ -653,12 +653,27 @@ class ClawChatAdapter(BasePlatformAdapter):
 
         Best-effort: any exception is caught and logged; the connection is never
         affected.  ``reason`` is used only for structured logging.
+
+        The monotonic fetch sequence is allocated SYNCHRONOUSLY here — before the
+        task is scheduled — so sequence order matches spawn/dispatch order.
+        Assigning it inside the task body would let a later-spawned refresh whose
+        task happens to run first claim the LOWER sequence; an older snapshot
+        running later with a HIGHER sequence could then overwrite newer settings,
+        defeating the stale-snapshot ordering guard.
         """
-        task = asyncio.ensure_future(self._refresh_group_settings(reason=reason))
+        self._group_settings_fetch_seq += 1
+        sequence = self._group_settings_fetch_seq
+        task = asyncio.ensure_future(
+            self._refresh_group_settings(reason=reason, sequence=sequence)
+        )
         task.add_done_callback(lambda t: None)
 
-    async def _refresh_group_settings(self, *, reason: str) -> None:
-        """Pull ``GET /v1/agents/me/group-settings`` and merge into the cache."""
+    async def _refresh_group_settings(self, *, reason: str, sequence: int) -> None:
+        """Pull ``GET /v1/agents/me/group-settings`` and merge into the cache.
+
+        ``sequence`` is the pre-allocated dispatch order assigned by
+        :meth:`_spawn_group_settings_refresh`; it must not be re-derived here.
+        """
         cfg = self._clawchat_config
         if not cfg.token or not cfg.base_url:
             logger.debug("clawchat group-settings refresh skipped reason=%s (no token/base_url)", reason)
@@ -667,18 +682,12 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._group_settings_ready.set()
             return
         try:
-            client = ClawChatApiClient(
-                base_url=cfg.base_url or DEFAULT_BASE_URL,
-                token=cfg.token,
-                user_id=cfg.user_id,
-                device_id=self._connection.session_device_id(),
+            # Route through the reactive refresh-and-retry wrapper so a 401/403
+            # (the api client now propagates auth errors) rotates the token and
+            # retries once, instead of being swallowed as non-authoritative.
+            result = await self._rest_with_auth_retry(
+                lambda client: client.get_my_group_settings()
             )
-            # Assign the fetch sequence at dispatch so concurrent pulls (e.g. a
-            # reconnect refresh overlapping an agent.config.changed signal) are
-            # ordered: a later-arriving but lower-sequence snapshot is dropped.
-            self._group_settings_fetch_seq += 1
-            sequence = self._group_settings_fetch_seq
-            result = await client.get_my_group_settings()
             if result.authoritative:
                 # Authoritative HTTP 200 (possibly empty => "zero overrides").
                 self._group_settings_cache.apply_fetched(result.rows, sequence)
@@ -882,10 +891,18 @@ class ClawChatAdapter(BasePlatformAdapter):
 
     def _new_api_client(self) -> ClawChatApiClient:
         """Build an authenticated REST client from the live in-memory token."""
+        device_id = None
+        connection = getattr(self, "_connection", None)
+        if connection is not None:
+            try:
+                device_id = connection.session_device_id()
+            except Exception:  # noqa: BLE001
+                device_id = None
         return ClawChatApiClient(
             base_url=self._clawchat_config.base_url,
             token=self._clawchat_config.token,
             user_id=self._clawchat_config.user_id,
+            device_id=device_id,
         )
 
     async def _rest_with_auth_retry(
