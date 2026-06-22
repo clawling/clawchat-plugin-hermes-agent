@@ -648,6 +648,11 @@ class ClawChatAdapter(BasePlatformAdapter):
         event = getattr(self, "_group_settings_ready", None)
         if event is None or event.is_set():
             return
+        # Snapshot the generation we are waiting on so a stale waiter's timeout can
+        # only release the gate for THAT generation (see the release below). A
+        # missing seq means an adapter built without __init__ (test harness): nothing
+        # spawns refreshes there, so there is no generation to release.
+        waited_sequence = getattr(self, "_group_settings_fetch_seq", None)
         try:
             await asyncio.wait_for(event.wait(), timeout=GROUP_SETTINGS_READY_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
@@ -655,6 +660,17 @@ class ClawChatAdapter(BasePlatformAdapter):
                 "clawchat group-settings gate timed out after %.1fs; proceeding with cached settings",
                 GROUP_SETTINGS_READY_TIMEOUT_SECONDS,
             )
+            # The in-flight refresh's GET is HANGING (its `finally` never ran), so
+            # the gate would stay cleared and EVERY subsequent group message would
+            # re-pay this full timeout. Once the FIRST waiter has decided to fall
+            # back to cached settings, that decision is shared: release the gate so
+            # later waiters proceed immediately. Generation-scoped via the same
+            # guard the refresh uses: if a NEWER refresh was spawned while we waited
+            # (bumping the fetch seq and re-clearing the gate), this stale waiter
+            # must NOT reopen the gate for that newer generation — leave it for the
+            # newer refresh (or its own waiter's timeout) to release.
+            if waited_sequence is not None:
+                self._release_group_settings_gate_if_latest(waited_sequence)
 
     def _spawn_group_settings_refresh(self, reason: str) -> None:
         """Fire-and-forget task to re-pull per-group settings from the backend.

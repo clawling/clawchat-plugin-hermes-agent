@@ -384,6 +384,83 @@ async def test_group_dispatch_gate_times_out_and_proceeds(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_gate_timeout_releases_generation_so_later_waiters_do_not_re_pay(monkeypatch):
+    """Finding A: when a signal-triggered refresh's REST HANGS, the cleared gate is
+    never set by the (parked) refresh `finally`. The FIRST waiter times out and
+    proceeds; subsequent group messages must NOT each re-pay the full timeout —
+    the first timeout/fallback releases the gate for the CURRENT generation."""
+    adapter = _make_adapter(monkeypatch)
+    import clawchat_gateway.adapter as adapter_module
+
+    enqueued = []
+    adapter._group_message_coalescer.enqueue = lambda msg, **_kw: enqueued.append(msg)
+
+    # Post-signal: gate cleared, a refresh (seq 1) is "in flight" but its GET hangs,
+    # so its finally never runs and the gate stays cleared.
+    adapter._group_settings_ready = asyncio.Event()
+    adapter._group_settings_fetch_seq = 1
+
+    waits = {"n": 0}
+    real_wait_for = asyncio.wait_for
+
+    async def _counting_wait_for(aw, timeout):
+        # Only the gate wait uses the (patched, tiny) timeout; count those that
+        # actually have to block on the unset event.
+        if not adapter._group_settings_ready.is_set():
+            waits["n"] += 1
+        return await real_wait_for(aw, timeout)
+
+    monkeypatch.setattr(adapter_module, "GROUP_SETTINGS_READY_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(adapter_module.asyncio, "wait_for", _counting_wait_for)
+
+    # First group message: pays the timeout once, then proceeds (static fallback).
+    await adapter._on_message(_group_frame(message_id="m1"))
+    assert waits["n"] == 1, "first message pays the gate timeout exactly once"
+    assert adapter._group_settings_ready.is_set(), (
+        "after the first timeout/fallback the gate must be released for this generation"
+    )
+
+    # Subsequent group messages must NOT block on the gate again (gate already set).
+    await adapter._on_message(_group_frame(message_id="m2"))
+    await adapter._on_message(_group_frame(message_id="m3"))
+    assert waits["n"] == 1, "later messages must not each re-pay the full gate timeout"
+    assert len(enqueued) == 3, "all three group messages proceed (static fallback)"
+
+
+@pytest.mark.asyncio
+async def test_gate_timeout_release_is_superseded_by_newer_refresh(monkeypatch):
+    """A timeout-driven release must be generation-scoped: if a NEWER refresh was
+    spawned (incrementing the fetch seq and clearing the gate) after this waiter
+    started, the stale waiter's timeout must NOT reopen/set the gate for the newer
+    generation."""
+    adapter = _make_adapter(monkeypatch)
+    import clawchat_gateway.adapter as adapter_module
+
+    adapter._group_settings_ready = asyncio.Event()
+    # Waiter starts under generation 1.
+    adapter._group_settings_fetch_seq = 1
+
+    monkeypatch.setattr(adapter_module, "GROUP_SETTINGS_READY_TIMEOUT_SECONDS", 0.01)
+
+    # A NEWER refresh (generation 2) is spawned while this generation-1 waiter is
+    # parked on the gate: it bumps the fetch seq and (re-)clears the gate. When the
+    # stale waiter times out it must NOT set the gate for generation 2.
+    real_wait_for = asyncio.wait_for
+
+    async def _bump_seq_during_wait(aw, timeout):
+        adapter._group_settings_fetch_seq = 2  # newer refresh supersedes generation 1
+        return await real_wait_for(aw, timeout)
+
+    monkeypatch.setattr(adapter_module.asyncio, "wait_for", _bump_seq_during_wait)
+
+    await adapter._await_group_settings_ready()
+
+    assert not adapter._group_settings_ready.is_set(), (
+        "a stale (generation-1) waiter's timeout must not set the gate for the newer generation 2"
+    )
+
+
+@pytest.mark.asyncio
 async def test_non_group_dispatch_not_gated_by_settings(monkeypatch):
     """A direct (non-group) message must NOT block on the group-settings gate."""
     adapter = _make_adapter(monkeypatch)
