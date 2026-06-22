@@ -537,7 +537,10 @@ async def test_group_settings_auth_error_drives_reactive_refresh(monkeypatch):
 
     adapter = _make_adapter(monkeypatch)
     adapter._group_settings_ready = asyncio.Event()
-    adapter._group_settings_fetch_seq = 0
+    # Latest spawned sequence == the sequence under test (1): the generation guard
+    # releases the gate only for the latest refresh, and the spawn path always
+    # allocates the running sequence as the latest.
+    adapter._group_settings_fetch_seq = 1
 
     refresh_calls = {"n": 0}
 
@@ -570,3 +573,154 @@ async def test_group_settings_auth_error_drives_reactive_refresh(monkeypatch):
     assert refresh_calls["n"] == 1, "auth error must drive exactly one reactive refresh"
     assert attempts["n"] == 2, "the pull must be retried once after a successful refresh"
     assert adapter._group_settings_ready.is_set(), "gate must be released after the refresh"
+
+
+# ---------------------------------------------------------------------------
+# Issue #2 item 1: gate release must be generation-scoped.
+#
+# A slow refresh from a previous signal/reconnect that is still running when a
+# NEWER reconnect clears the gate must NOT set the gate in its `finally`: doing so
+# would release the gate before the newer reconnect's GET lands, letting a group
+# message in that window skip the intended wait. Only the LATEST spawned refresh
+# (sequence == _group_settings_fetch_seq) may release the gate.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stale_refresh_does_not_release_gate(monkeypatch):
+    """An older refresh finishing after a newer one was spawned must leave the
+    gate cleared (it is the newer refresh's job to release it)."""
+    from clawchat_gateway.group_settings import GroupSettingsFetchResult
+
+    adapter = _make_adapter(monkeypatch)
+    adapter._group_settings_ready = asyncio.Event()
+    adapter._group_settings_ready.clear()
+    # Latest spawned sequence is 2 (a newer refresh is in flight); the stale
+    # refresh below carries sequence 1.
+    adapter._group_settings_fetch_seq = 2
+
+    async def _fake_rest(_call):
+        return GroupSettingsFetchResult(authoritative=True, rows=[])
+
+    adapter._rest_with_auth_retry = _fake_rest
+    adapter._connection.config = adapter._clawchat_config
+
+    await adapter._refresh_group_settings(reason="reconnect", sequence=1)
+
+    assert not adapter._group_settings_ready.is_set(), (
+        "a superseded (stale) refresh must NOT set the gate; the latest refresh owns release"
+    )
+
+
+@pytest.mark.asyncio
+async def test_latest_refresh_releases_gate(monkeypatch):
+    """The latest spawned refresh (sequence == latest) releases the gate."""
+    from clawchat_gateway.group_settings import GroupSettingsFetchResult
+
+    adapter = _make_adapter(monkeypatch)
+    adapter._group_settings_ready = asyncio.Event()
+    adapter._group_settings_ready.clear()
+    adapter._group_settings_fetch_seq = 3
+
+    async def _fake_rest(_call):
+        return GroupSettingsFetchResult(authoritative=True, rows=[])
+
+    adapter._rest_with_auth_retry = _fake_rest
+    adapter._connection.config = adapter._clawchat_config
+
+    await adapter._refresh_group_settings(reason="reconnect", sequence=3)
+
+    assert adapter._group_settings_ready.is_set(), "the latest refresh must release the gate"
+
+
+@pytest.mark.asyncio
+async def test_stale_refresh_no_credentials_does_not_release_gate(monkeypatch):
+    """The no-token/base_url early return must also honor the generation guard:
+    a superseded refresh with no creds must not release the gate."""
+    adapter = _make_adapter(monkeypatch, extra={"token": ""})
+    adapter._group_settings_ready = asyncio.Event()
+    adapter._group_settings_ready.clear()
+    adapter._group_settings_fetch_seq = 2
+    # config carries no token -> the early-return path is taken.
+    adapter._clawchat_config = ClawChatConfig.from_platform_config(
+        SimpleNamespace(extra={"websocket_url": "wss://x/ws", "token": "", "user_id": "usr_agent"})
+    )
+
+    await adapter._refresh_group_settings(reason="reconnect", sequence=1)
+
+    assert not adapter._group_settings_ready.is_set(), (
+        "superseded no-credentials refresh must not release the gate"
+    )
+
+
+@pytest.mark.asyncio
+async def test_latest_refresh_no_credentials_releases_gate(monkeypatch):
+    """The latest no-credentials refresh still releases the gate (fallback to
+    static settings instead of blocking until timeout)."""
+    adapter = _make_adapter(monkeypatch)
+    adapter._group_settings_ready = asyncio.Event()
+    adapter._group_settings_ready.clear()
+    adapter._group_settings_fetch_seq = 1
+    adapter._clawchat_config = ClawChatConfig.from_platform_config(
+        SimpleNamespace(extra={"websocket_url": "wss://x/ws", "token": "", "user_id": "usr_agent"})
+    )
+
+    await adapter._refresh_group_settings(reason="reconnect", sequence=1)
+
+    assert adapter._group_settings_ready.is_set(), (
+        "the latest no-credentials refresh must release the gate (static fallback)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Issue #2 item 3: a signal-triggered settings refresh must CLEAR the gate before
+# spawning, so a group message arriving right after a mute/reply-mode change is
+# gated and re-evaluated against the fresh GET (not the stale cache).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_signal_refresh_clears_gate_before_spawn(monkeypatch):
+    """`agent.config.changed` must clear `_group_settings_ready` before spawning
+    the refresh, mirroring the reconnect-path protection."""
+    adapter = _make_adapter(monkeypatch)
+    # Gate starts SET (a prior connect/refresh settled).
+    adapter._group_settings_ready = asyncio.Event()
+    adapter._group_settings_ready.set()
+
+    spawned: list[str] = []
+    gate_state_at_spawn: list[bool] = []
+
+    def _fake_spawn(reason):
+        gate_state_at_spawn.append(adapter._group_settings_ready.is_set())
+        spawned.append(reason)
+
+    adapter._spawn_group_settings_refresh = _fake_spawn
+
+    await adapter._on_notify_signal(
+        {"payload": {"type": "agent.config.changed"}}
+    )
+
+    assert spawned == ["signal"], "config-change signal must spawn a settings refresh"
+    assert gate_state_at_spawn == [False], (
+        "gate must already be CLEARED at the moment the signal refresh is spawned"
+    )
+    assert not adapter._group_settings_ready.is_set(), (
+        "gate stays cleared until the fresh refresh releases it"
+    )
+
+
+@pytest.mark.asyncio
+async def test_non_config_signal_does_not_touch_gate(monkeypatch):
+    """A non-config signal must NOT clear the gate or spawn a refresh."""
+    adapter = _make_adapter(monkeypatch)
+    adapter._group_settings_ready = asyncio.Event()
+    adapter._group_settings_ready.set()
+
+    spawned: list[str] = []
+    adapter._spawn_group_settings_refresh = lambda reason: spawned.append(reason)
+
+    await adapter._on_notify_signal({"payload": {"type": "something.else"}})
+
+    assert spawned == [], "unrelated signals must not spawn a refresh"
+    assert adapter._group_settings_ready.is_set(), "unrelated signals must not clear the gate"

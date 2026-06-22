@@ -595,6 +595,14 @@ class ClawChatAdapter(BasePlatformAdapter):
         if not isinstance(payload, dict):
             return
         if payload.get("type") == "agent.config.changed":
+            # Clear the gate BEFORE spawning the signal-triggered refresh (item 3),
+            # mirroring the reconnect-path protection: a group message arriving
+            # right after a mute/reply-mode change must WAIT for the fresh GET
+            # instead of being evaluated against the stale cache (and getting one
+            # more reply). The generation-scoped release (item 1) is what keeps
+            # this safe when a signal and a reconnect refresh overlap — whichever
+            # was spawned last owns the gate release.
+            self._group_settings_ready.clear()
             self._spawn_group_settings_refresh("signal")
 
     async def _on_auth_logout(self, message: str) -> None:
@@ -668,6 +676,26 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
         task.add_done_callback(lambda t: None)
 
+    def _release_group_settings_gate_if_latest(self, sequence: int) -> None:
+        """Set the settings-ready gate only if *sequence* is the latest spawned.
+
+        Generation-scoped release (issue #2 item 1): a slow refresh from a prior
+        signal/reconnect can still be running when a NEWER reconnect clears the
+        gate and spawns its own refresh. The old refresh's ``finally`` must NOT
+        release the gate before the newer GET lands, or a group message in that
+        window would skip the intended wait. Only the LATEST spawned refresh
+        (``sequence == self._group_settings_fetch_seq``) owns the release; a
+        superseded refresh leaves the gate for the newer one to set.
+        """
+        if sequence == self._group_settings_fetch_seq:
+            self._group_settings_ready.set()
+        else:
+            logger.debug(
+                "clawchat group-settings gate release skipped seq=%d latest=%d (superseded)",
+                sequence,
+                self._group_settings_fetch_seq,
+            )
+
     async def _refresh_group_settings(self, *, reason: str, sequence: int) -> None:
         """Pull ``GET /v1/agents/me/group-settings`` and merge into the cache.
 
@@ -679,7 +707,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             logger.debug("clawchat group-settings refresh skipped reason=%s (no token/base_url)", reason)
             # No credentials to fetch with: release the gate so group dispatch
             # falls back to static settings instead of blocking until timeout.
-            self._group_settings_ready.set()
+            # Generation-scoped: only the latest refresh may release (see item 1).
+            self._release_group_settings_gate_if_latest(sequence)
             return
         try:
             # Route through the reactive refresh-and-retry wrapper so a 401/403
@@ -712,9 +741,11 @@ class ClawChatAdapter(BasePlatformAdapter):
                 exc_info=True,
             )
         finally:
-            # Always release the gate (success OR failure/fallback) so group
-            # dispatch never stalls on a refresh that failed.
-            self._group_settings_ready.set()
+            # Release the gate (success OR failure/fallback) so group dispatch
+            # never stalls on a refresh that failed — but ONLY if this refresh is
+            # still the latest one spawned. A superseded refresh leaves the gate
+            # for the newer refresh to set (generation-scoped release, item 1).
+            self._release_group_settings_gate_if_latest(sequence)
 
     async def _schedule_reconnect_conversation_refresh(self) -> None:
         if self._store is None:
