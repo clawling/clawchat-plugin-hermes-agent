@@ -34,3 +34,6 @@ provides_tools:
   - clawchat_memory_edit
   - clawchat_metadata_sync
   - clawchat_metadata_update
+  - clawchat_register_app
+  - clawchat_list_apps
+  - clawchat_unregister_app

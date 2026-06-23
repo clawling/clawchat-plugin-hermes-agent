@@ -890,6 +890,50 @@ async def upload_avatar_image(file_path: str) -> dict[str, Any]:
         return _unknown_error(exc)
 
 
+async def register_app(name: str, app_id: str, url: str) -> dict[str, Any]:
+    if not isinstance(name, str) or not name.strip():
+        return _validation_error("name is required")
+    if not isinstance(app_id, str) or not app_id.strip():
+        return _validation_error("app_id is required")
+    if not isinstance(url, str) or not url.strip():
+        return _validation_error("url is required")
+    client, err = _build_client()
+    if err is not None:
+        return err
+    try:
+        return await client.register_app(name=name.strip(), app_id=app_id.strip(), url=url.strip())
+    except ClawChatApiError as exc:
+        return _api_error(exc)
+    except Exception as exc:  # noqa: BLE001
+        return _unknown_error(exc)
+
+
+async def list_apps() -> dict[str, Any]:
+    client, err = _build_client()
+    if err is not None:
+        return err
+    try:
+        return await client.list_apps()
+    except ClawChatApiError as exc:
+        return _api_error(exc)
+    except Exception as exc:  # noqa: BLE001
+        return _unknown_error(exc)
+
+
+async def unregister_app(app_id: str) -> dict[str, Any]:
+    if not isinstance(app_id, str) or not app_id.strip():
+        return _validation_error("app_id is required")
+    client, err = _build_client()
+    if err is not None:
+        return err
+    try:
+        return await client.unregister_app(app_id.strip())
+    except ClawChatApiError as exc:
+        return _api_error(exc)
+    except Exception as exc:  # noqa: BLE001
+        return _unknown_error(exc)
+
+
 async def upload_media_file(file_path: str) -> dict[str, Any]:
     path, err = _validate_upload_path(file_path)
     if err is not None:

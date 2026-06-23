@@ -574,6 +574,55 @@ async def handle_clawchat_upload_avatar_image(args, **kw):
     return _tool_result(result)
 
 
+async def handle_clawchat_register_app(args, **kw):
+    task_id = kw.get("task_id") or "default"
+    logger.info("clawchat_register_app start task_id=%s", task_id)
+    from clawchat_gateway import tools
+
+    result = await _recorded_tool_call(
+        "clawchat_register_app",
+        args,
+        _account_id_from_kwargs(kw),
+        lambda: tools.register_app(
+            name=str(args.get("name", "")),
+            app_id=str(args.get("appId", "") or args.get("app_id", "")),
+            url=str(args.get("url", "")),
+        ),
+    )
+    logger.info("clawchat_register_app done task_id=%s", task_id)
+    return _tool_result(result)
+
+
+async def handle_clawchat_list_apps(args, **kw):
+    task_id = kw.get("task_id") or "default"
+    logger.info("clawchat_list_apps start task_id=%s", task_id)
+    from clawchat_gateway import tools
+
+    result = await _recorded_tool_call(
+        "clawchat_list_apps",
+        args,
+        _account_id_from_kwargs(kw),
+        lambda: tools.list_apps(),
+    )
+    logger.info("clawchat_list_apps done task_id=%s", task_id)
+    return _tool_result(result)
+
+
+async def handle_clawchat_unregister_app(args, **kw):
+    task_id = kw.get("task_id") or "default"
+    logger.info("clawchat_unregister_app start task_id=%s", task_id)
+    from clawchat_gateway import tools
+
+    result = await _recorded_tool_call(
+        "clawchat_unregister_app",
+        args,
+        _account_id_from_kwargs(kw),
+        lambda: tools.unregister_app(str(args.get("appId", "") or args.get("app_id", ""))),
+    )
+    logger.info("clawchat_unregister_app done task_id=%s", task_id)
+    return _tool_result(result)
+
+
 _DIRECT_TOOL_USE_INSTRUCTION = (
     "Use this registered ClawChat plugin tool directly. Do not use execute, shell commands, Python scripts, "
     "curl, handwritten API clients, generic fallback tools, or direct ClawChat HTTP calls "
@@ -1334,4 +1383,83 @@ def register_tools(ctx) -> None:
         is_async=True,
         description="Upload ClawChat Avatar Image",
         emoji="🖼️",
+    )
+
+    ctx.register_tool(
+        "clawchat_register_app",
+        "clawchat",
+        {
+            "name": "clawchat_register_app",
+            "description": _direct_tool_description(
+                "Register a liveware-tunneled web app to ClawChat so it shows in the owner's chat. "
+                "Call after `liveware tunnel bind` succeeds."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Human-readable app name shown on the launcher tile.",
+                    },
+                    "appId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "The liveware app id from `liveware app create`/`liveware app list`.",
+                    },
+                    "url": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "The public tunnel URL from `liveware tunnel bind` (http/https).",
+                    },
+                },
+                "required": ["name", "appId", "url"],
+            },
+        },
+        handle_clawchat_register_app,
+        is_async=True,
+        description="Register liveware app",
+        emoji="A",
+    )
+
+    ctx.register_tool(
+        "clawchat_list_apps",
+        "clawchat",
+        {
+            "name": "clawchat_list_apps",
+            "description": _direct_tool_description(
+                "List the liveware web apps this agent has registered to ClawChat."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+        handle_clawchat_list_apps,
+        is_async=True,
+        description="List liveware apps",
+        emoji="A",
+    )
+
+    ctx.register_tool(
+        "clawchat_unregister_app",
+        "clawchat",
+        {
+            "name": "clawchat_unregister_app",
+            "description": _direct_tool_description(
+                "Unregister a previously registered liveware app from ClawChat."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "appId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "The liveware app id to unregister.",
+                    },
+                },
+                "required": ["appId"],
+            },
+        },
+        handle_clawchat_unregister_app,
+        is_async=True,
+        description="Unregister liveware app",
+        emoji="A",
     )
