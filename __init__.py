@@ -382,6 +382,14 @@ def _register_skill(ctx) -> None:
         description="ClawChat profiles, friends, moments, and media.",
     )
 
+    liveware_skill = _plugin_dir() / "skills" / "liveware-app" / "SKILL.md"
+    if liveware_skill.exists():
+        register_skill(
+            "liveware-app",
+            liveware_skill,
+            description="Expose a local web service via liveware and register it to ClawChat.",
+        )
+
 
 def _platform_value(platform) -> str:
     value = getattr(platform, "value", platform)
