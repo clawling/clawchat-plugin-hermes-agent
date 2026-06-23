@@ -623,6 +623,21 @@ async def handle_clawchat_unregister_app(args, **kw):
     return _tool_result(result)
 
 
+async def handle_clawchat_liveware_login(args, **kw):
+    task_id = kw.get("task_id") or "default"
+    logger.info("clawchat_liveware_login start task_id=%s", task_id)
+    from clawchat_gateway import tools
+
+    result = await _recorded_tool_call(
+        "clawchat_liveware_login",
+        args,
+        _account_id_from_kwargs(kw),
+        lambda: tools.liveware_login(),
+    )
+    logger.info("clawchat_liveware_login done task_id=%s ok=%s", task_id, result.get("ok") if isinstance(result, dict) else None)
+    return _tool_result(result)
+
+
 _DIRECT_TOOL_USE_INSTRUCTION = (
     "Use this registered ClawChat plugin tool directly. Do not use execute, shell commands, Python scripts, "
     "curl, handwritten API clients, generic fallback tools, or direct ClawChat HTTP calls "
@@ -1461,5 +1476,22 @@ def register_tools(ctx) -> None:
         handle_clawchat_unregister_app,
         is_async=True,
         description="Unregister liveware app",
+        emoji="A",
+    )
+
+    ctx.register_tool(
+        "clawchat_liveware_login",
+        "clawchat",
+        {
+            "name": "clawchat_liveware_login",
+            "description": _direct_tool_description(
+                "Log in to liveware using the agent's ClawChat account; the plugin resolves the token internally. "
+                "Call before liveware app/tunnel commands."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+        handle_clawchat_liveware_login,
+        is_async=True,
+        description="liveware login",
         emoji="A",
     )

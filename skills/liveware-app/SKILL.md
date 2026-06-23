@@ -1,6 +1,6 @@
 ---
 name: liveware-app
-description: Use when the user wants to expose this agent's local web service to the public internet via the liveware CLI and make it appear as an app in their ClawChat chat with this agent. Covers creating a liveware app, binding a tunnel to a local port, and registering the public URL to ClawChat.
+description: Use when the user wants to expose this agent's local web service to the public internet via the liveware CLI and make it appear as an app in their ClawChat chat with this agent. Covers logging in to liveware with the ClawChat account, creating a liveware app, binding a tunnel to a local port, and registering the public URL to ClawChat.
 ---
 
 # liveware App Hosting
@@ -13,16 +13,23 @@ ClawChat so it shows as an app tile in the owner's chat with this agent.
 1. Run `command -v liveware`. If it prints nothing (liveware is not installed), tell the
    user this environment does not support liveware app hosting and STOP. Do not attempt
    any further step or invent a URL.
-2. The ClawChat access token must be available as the `CLAWCHAT_TOKEN` environment
-   variable (the ClawChat plugin sets it). Never print the token.
+2. Authentication is handled by the ClawChat plugin, not by you. You log in by calling the
+   `clawchat_liveware_login` tool (step 1 below). Never read, print, or pass the ClawChat
+   access token yourself — the plugin holds it in its own credential store and never
+   exposes it to you or puts it in your context.
 
 ## Procedure
 
-1. **Login** (idempotent):
-   `liveware login --access-token "$CLAWCHAT_TOKEN"`
+1. **Login** (idempotent) — call the tool; do NOT run `liveware login` yourself:
+   `clawchat_liveware_login()`
+   The plugin resolves the ClawChat access token from its own credential store and runs
+   the liveware login internally. If it returns an error (liveware missing, ClawChat not
+   activated, or login failed), relay that error to the user and STOP.
 2. **Decide the app name and local port.** Ask the user for the local web service port if
-   not already known (e.g. the port the agent's own web server listens on). The bind target
-   is `http://127.0.0.1:<port>` (or the host:port the user specifies).
+   not already known (the port the agent's own web server listens on). Accept ONLY a plain
+   integer in the range 1–65535. Reject anything that is not purely numeric (e.g.
+   `3000; rm -rf /`) — never paste user-supplied text into a shell command. The bind target
+   is then exactly `http://127.0.0.1:<port>`.
 3. **List existing apps** to avoid duplicates and to recover ids:
    `liveware app list`
 4. **Create the app** (skip if reusing an existing one):
@@ -30,7 +37,9 @@ ClawChat so it shows as an app tile in the owner's chat with this agent.
    - This prints/returns the new **app id**. Capture it.
    - If liveware reports an app-limit / quota error, relay that error to the user verbatim
      and STOP. Do not delete other apps to make room.
-5. **Bind the tunnel** to the local service:
+5. **Bind the tunnel** to the local service. Use only the numeric `<port>` validated in
+   step 2, and pass the bind target as a single argument — do not wrap the command in extra
+   shell that interpolates unvalidated user input:
    `liveware tunnel bind <app id> http://127.0.0.1:<port>`
    - Capture the **public URL** liveware returns.
 6. **Register to ClawChat** so it appears in the owner's chat — call the tool, do NOT

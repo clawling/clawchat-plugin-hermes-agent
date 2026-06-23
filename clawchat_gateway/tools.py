@@ -6,7 +6,9 @@ surface used by both Hermes tool registration and the profile CLI.
 
 from __future__ import annotations
 
+import asyncio
 import mimetypes
+import shutil
 from types import SimpleNamespace
 from pathlib import Path
 from typing import Any
@@ -959,3 +961,58 @@ async def upload_media_file(file_path: str) -> dict[str, Any]:
         return _api_error(exc)
     except Exception as exc:  # noqa: BLE001
         return _unknown_error(exc)
+
+
+_LIVEWARE_LOGIN_TIMEOUT = 30  # seconds
+
+
+async def liveware_login() -> dict[str, Any]:
+    """Log in to liveware using the agent's ClawChat account token.
+
+    The plugin resolves the token from the profile config and passes it to
+    the liveware CLI as --access-token. Call this before liveware app/tunnel
+    commands that require an authenticated session.
+
+    Security note: liveware's documented interface is --access-token, so the
+    token is in child argv briefly; env/stdin preferred if liveware supported
+    it. The token is NEVER logged, printed, or returned to callers — on error,
+    stderr/stdout are scrubbed with token replacement before returning.
+    """
+    try:
+        cfg = load_profile_config()
+    except ProfileConfigError as exc:
+        return _config_error(str(exc))
+
+    token = cfg.token
+
+    if shutil.which("liveware") is None:
+        return _validation_error("liveware CLI not found in PATH")
+
+    proc = await asyncio.create_subprocess_exec(
+        "liveware",
+        "login",
+        "--access-token",
+        token,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=_LIVEWARE_LOGIN_TIMEOUT)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+        return _validation_error("liveware login timed out")
+
+    if proc.returncode == 0:
+        return {"ok": True}
+
+    # Non-zero exit: scrub the token from all output before returning.
+    stderr_text = err.decode(errors="replace").replace(token, "***")
+    stdout_text = out.decode(errors="replace").replace(token, "***")
+    detail = (stderr_text or stdout_text).strip()
+    return {
+        "error": "subprocess",
+        "message": f"liveware login failed (exit {proc.returncode}): {detail}",
+    }

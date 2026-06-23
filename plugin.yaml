@@ -37,3 +37,4 @@ provides_tools:
   - clawchat_register_app
   - clawchat_list_apps
   - clawchat_unregister_app
+  - clawchat_liveware_login
