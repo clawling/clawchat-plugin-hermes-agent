@@ -215,6 +215,29 @@ class ClawChatApiClient:
             raise ClawChatApiError("validation", "friend_user_id is required")
         return await self._call_json("DELETE", f"/v1/friendships/{friend_user_id}")
 
+    async def register_app(self, *, name: str, app_id: str, url: str) -> dict:
+        if not name.strip():
+            raise ClawChatApiError("validation", "name is required")
+        if not app_id.strip():
+            raise ClawChatApiError("validation", "app_id is required")
+        if not url.strip():
+            raise ClawChatApiError("validation", "url is required")
+        payload = {"name": name, "app_id": app_id, "url": url}
+        return await self._call_json(
+            "POST",
+            "/v1/agents/me/apps",
+            body=json.dumps(payload).encode("utf-8"),
+            extra_headers={"content-type": "application/json"},
+        )
+
+    async def list_apps(self) -> dict:
+        return await self._call_json("GET", "/v1/agents/me/apps")
+
+    async def unregister_app(self, app_id: str) -> dict:
+        if not app_id.strip():
+            raise ClawChatApiError("validation", "app_id is required")
+        return await self._call_json("DELETE", f"/v1/agents/me/apps/{app_id}")
+
     async def search_users(self, *, q: str = "", limit: int | None = None) -> dict:
         params: dict[str, str | int] = {}
         if q:
