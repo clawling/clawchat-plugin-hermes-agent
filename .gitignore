@@ -1,0 +1,34 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+build/
+dist/
+.DS_Store
+*.tgz
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite-*
+.coverage
+coverage.xml
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+tmp
+.worktrees
+
+# Local development, tests, and deployment helpers are intentionally
+# excluded from the published Hermes plugin checkout. Hermes installs this
+# repository directly into $HERMES_HOME/plugins/clawchat, so keep GitHub's
+# tracked tree focused on runtime plugin files plus repository documentation.
+.e2e/
+tests/
+deploy/
+scripts/
+docs/superpowers/
+AGENTS.md
+CLAUDE.md

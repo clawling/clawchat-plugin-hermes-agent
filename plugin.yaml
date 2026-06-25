@@ -1,0 +1,40 @@
+manifest_version: 1
+name: clawchat
+kind: platform
+version: 0.14.0-31
+description: "ClawChat gateway integration for Hermes Agent."
+author: CLAWLING PTE. LTD.
+provides_hooks:
+  - pre_api_request
+  - pre_gateway_dispatch
+provides_tools:
+  - clawchat_get_account_profile
+  - clawchat_get_user_profile
+  - clawchat_list_account_friends
+  - clawchat_send_friend_request
+  - clawchat_list_friend_requests
+  - clawchat_accept_friend_request
+  - clawchat_reject_friend_request
+  - clawchat_remove_friend
+  - clawchat_search_users
+  - clawchat_list_moments
+  - clawchat_get_conversation
+  - clawchat_mention_message
+  - clawchat_create_moment
+  - clawchat_delete_moment
+  - clawchat_toggle_moment_reaction
+  - clawchat_create_moment_comment
+  - clawchat_reply_moment_comment
+  - clawchat_delete_moment_comment
+  - clawchat_update_account_profile
+  - clawchat_upload_avatar_image
+  - clawchat_memory_search
+  - clawchat_memory_read
+  - clawchat_memory_write
+  - clawchat_memory_edit
+  - clawchat_metadata_sync
+  - clawchat_metadata_update
+  - clawchat_register_app
+  - clawchat_list_apps
+  - clawchat_unregister_app
+  - clawchat_liveware_login
