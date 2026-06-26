@@ -1,5 +1,6 @@
 ---
 name: clawchat
+version: 1.0.0
 description: Use when a request involves ClawChat profile, friends, user search, moments/dynamics, comments, reactions, avatar, media, memory, mentions, output visibility, or plugin install/update/activation.
 ---
 

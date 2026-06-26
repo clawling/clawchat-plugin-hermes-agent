@@ -367,27 +367,65 @@ def _configure_runtime_defaults() -> None:
         logger.warning("ClawChat could not configure runtime defaults: %s", exc)
 
 
+def _managed_skills_dir() -> Path:
+    """Writable managed skills root ``$HERMES_HOME/clawchat-skills``."""
+    from clawchat_gateway.skill_update import managed_skills_dir
+
+    return managed_skills_dir()
+
+
+def _skill_version(path: Path):
+    """Frontmatter ``version`` of a SKILL.md, or None."""
+    from clawchat_gateway.skill_update import skill_version
+
+    return skill_version(path)
+
+
+def _seed_managed_skill(skill_id: str, bundled: Path) -> Path:
+    """Ensure a writable managed copy exists; return the path to register.
+
+    Delegates to the skill_update module, which atomically seeds from the
+    bundled snapshot when the managed copy is missing/older/corrupt and falls
+    back to the bundled path on any error. This function additionally guards the
+    delegation so a hard import/logic failure can never break plugin load.
+    """
+    try:
+        from clawchat_gateway.skill_update import seed_managed_skill
+
+        return seed_managed_skill(skill_id, bundled)
+    except Exception as exc:  # noqa: BLE001 — never let the skill mechanism crash load
+        logger.warning(
+            "ClawChat managed-skill seeding unavailable for %s (%s); using bundled path",
+            skill_id,
+            exc,
+        )
+        return bundled
+
+
 def _register_skill(ctx) -> None:
     register_skill = getattr(ctx, "register_skill", None)
     if not callable(register_skill):
         return
 
-    skill = _plugin_dir() / "skills" / "clawchat" / "SKILL.md"
-    if not skill.exists():
-        return
-
-    register_skill(
-        "clawchat",
-        skill,
-        description="ClawChat profiles, friends, moments, and media.",
-    )
-
-    liveware_skill = _plugin_dir() / "skills" / "liveware-app" / "SKILL.md"
-    if liveware_skill.exists():
-        register_skill(
+    bundled_skills = (
+        ("clawchat", "ClawChat profiles, friends, moments, and media."),
+        (
             "liveware-app",
-            liveware_skill,
-            description="Expose a local web service via liveware and register it to ClawChat.",
+            "Expose a local web service via liveware and register it to ClawChat.",
+        ),
+    )
+    for skill_id, description in bundled_skills:
+        bundled = _plugin_dir() / "skills" / skill_id / "SKILL.md"
+        if not bundled.exists():
+            continue
+        # Always register the managed (writable) path so a later skill-only hot
+        # update can atomically overwrite it without touching the read-only
+        # plugin source. Seeding falls back to the bundled path on any error.
+        register_path = _seed_managed_skill(skill_id, bundled)
+        register_skill(
+            skill_id,
+            register_path,
+            description=description,
         )
 
 

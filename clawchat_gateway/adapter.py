@@ -94,6 +94,7 @@ from clawchat_gateway.protocol import (
     new_message_id,
 )
 from clawchat_gateway.group_settings import EffectiveSettings, GroupSettingsCache
+from clawchat_gateway import skill_update
 from clawchat_gateway.storage import get_clawchat_store
 from clawchat_gateway.terminal_send import (
     clear_clawchat_mention_sender,
@@ -420,6 +421,10 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._reply_preview_by_message_id: dict[str, dict[str, Any]] = {}
         self._reply_preview_order: deque[str] = deque()
         self._auth_failed = False
+        # In-memory mirror of a pending owner-consent skill update (also persisted
+        # to a small file under the managed skills dir for crash-restart recovery).
+        self._pending_skill_update: Any = None
+        self._skill_update_tasks: set[asyncio.Task[None]] = set()
         self._activation_bootstrap_tasks: set[asyncio.Task[None]] = set()
         self._plugin_report_tasks: set[asyncio.Task[None]] = set()
         self._conversation_refresh_tasks: set[asyncio.Task[None]] = set()
@@ -507,6 +512,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         await self._cancel_activation_bootstrap_tasks()
         await self._cancel_conversation_refresh_tasks()
         await self._cancel_profile_sync_tasks()
+        await self._cancel_skill_update_tasks()
         await self._connection.stop()
         await self._group_message_coalescer.cancel()
         clear_clawchat_mention_sender(self)
@@ -604,6 +610,169 @@ class ClawChatAdapter(BasePlatformAdapter):
             # was spawned last owns the gate release.
             self._group_settings_ready.clear()
             self._spawn_group_settings_refresh("signal")
+        elif payload.get("type") == "clawchat.skill.update.check":
+            # Content-free trigger: check the official skill source for a newer
+            # version and, if any, ask the owner for consent in chat. All network
+            # work runs off the read loop on a tracked task.
+            self._spawn_skill_update_check()
+
+    def _spawn_skill_update_check(self) -> None:
+        task = asyncio.ensure_future(self._handle_skill_update_check())
+        self._skill_update_tasks.add(task)
+        task.add_done_callback(self._skill_update_task_done)
+
+    def _skill_update_task_done(self, task: asyncio.Task[None]) -> None:
+        self._skill_update_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:  # noqa: BLE001 — best-effort; never affect the connection
+            logger.warning("clawchat skill-update check task failed", exc_info=True)
+
+    async def _handle_skill_update_check(self) -> None:
+        """React to a ``clawchat.skill.update.check`` signal.
+
+        Checks the official skill source (in code); if there is a newer version,
+        sends a templated consent prompt to the owner's direct chat and records a
+        pending consent. Silent no-op when there is no update.
+        """
+        try:
+            updates = await asyncio.to_thread(skill_update.check_skill_update)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("clawchat skill-update check failed: %s", exc)
+            return
+        if not updates:
+            logger.info("clawchat skill-update check: no update available")
+            return
+
+        owner_user_id = self._owner_user_id()
+        owner_chat_id = self._owner_direct_chat_id()
+        if not owner_user_id or not owner_chat_id:
+            logger.warning(
+                "clawchat skill-update prompt not delivered reason=missing_owner "
+                "owner_user_id=%s owner_chat_id=%s",
+                bool(owner_user_id),
+                bool(owner_chat_id),
+            )
+            return
+
+        pending = skill_update.PendingConsent(
+            updates=updates,
+            owner_user_id=owner_user_id,
+            chat_id=owner_chat_id,
+        )
+        message = (
+            f"我的技能有更新 {pending.summary()}。"
+            "回复「更新」确认,「取消」忽略。"
+        )
+        try:
+            await self._connection.send_frame(
+                build_message_send_event(
+                    chat_id=owner_chat_id,
+                    chat_type="direct",
+                    message_id=new_message_id(),
+                    fragments=[{"kind": "text", "text": message}],
+                    include_message_id=True,
+                ),
+                wait_for_ack=False,
+                queue_when_unready=False,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat skill-update prompt send failed", exc_info=True)
+            return
+
+        self._pending_skill_update = pending
+        try:
+            skill_update.write_pending(pending)
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat could not persist pending skill update", exc_info=True)
+        logger.info(
+            "clawchat skill-update prompt sent owner=%s updates=%s",
+            owner_user_id,
+            [u.skill_id for u in updates],
+        )
+
+    async def _cancel_skill_update_tasks(self) -> None:
+        tasks = list(self._skill_update_tasks)
+        if not tasks:
+            return
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for task in tasks:
+            self._skill_update_tasks.discard(task)
+
+    def _load_pending_skill_update(self):
+        if self._pending_skill_update is not None:
+            return self._pending_skill_update
+        pending = skill_update.read_pending()
+        self._pending_skill_update = pending
+        return pending
+
+    def _clear_pending_skill_update(self) -> None:
+        self._pending_skill_update = None
+        skill_update.clear_pending()
+
+    async def _maybe_consume_skill_update_consent(self, inbound: InboundMessage) -> bool:
+        """Owner-reply pending-consent gate (runs before normal LLM handling).
+
+        Returns True when this inbound message was consumed as a consent reply
+        (affirm/deny) and must NOT flow to the LLM. Returns False for everything
+        else — including ambiguous replies, which are deliberately passed through
+        while the pending record is kept until it times out.
+        """
+        pending = self._load_pending_skill_update()
+        if pending is None:
+            return False
+        if pending.is_expired():
+            logger.info("clawchat pending skill update expired; clearing")
+            self._clear_pending_skill_update()
+            return False
+        if inbound.chat_type != "direct":
+            return False
+        owner_user_id = self._owner_user_id()
+        if not owner_user_id or inbound.sender_id != owner_user_id:
+            return False
+
+        verdict = skill_update.classify_consent(inbound.text)
+        if verdict == "ambiguous":
+            return False  # do not consume; let the normal LLM handle it
+        if verdict == "deny":
+            self._clear_pending_skill_update()
+            await self._send_owner_text(inbound.chat_id, "已取消")
+            logger.info("clawchat skill update declined by owner")
+            return True
+
+        # verdict == "affirm"
+        updates = list(pending.updates)
+        self._clear_pending_skill_update()
+        try:
+            applied = await asyncio.to_thread(skill_update.apply_skill_update, updates)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("clawchat skill update apply failed: %s", exc, exc_info=True)
+            await self._send_owner_text(inbound.chat_id, "技能更新失败,请稍后再试。")
+            return True
+        targets = "、".join(f"v{u.target}" for u in updates)
+        await self._send_owner_text(inbound.chat_id, f"✅ 已更新到 {targets}")
+        logger.info("clawchat skill update applied skills=%s", applied)
+        return True
+
+    async def _send_owner_text(self, chat_id: str, text: str) -> None:
+        try:
+            await self._connection.send_frame(
+                build_message_send_event(
+                    chat_id=chat_id,
+                    chat_type="direct",
+                    message_id=new_message_id(),
+                    fragments=[{"kind": "text", "text": text}],
+                    include_message_id=True,
+                ),
+                wait_for_ack=False,
+                queue_when_unready=False,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat owner text send failed", exc_info=True)
 
     async def _on_auth_logout(self, message: str) -> None:
         """User-visible notification on permanent token expiry (token-refresh §C.1).
@@ -1671,6 +1840,11 @@ class ClawChatAdapter(BasePlatformAdapter):
         return "\n".join(lines)
 
     async def _handle_inbound(self, inbound: InboundMessage) -> None:
+        # Pending skill-update consent gate: an owner's direct affirm/deny reply
+        # is consumed here (applies/cancels the update) and never reaches the LLM.
+        # Ambiguous replies fall through to normal handling, keeping pending.
+        if await self._maybe_consume_skill_update_consent(inbound):
+            return
         if inbound.chat_type == "group":
             await self._ensure_group_participants_metadata(inbound.chat_id)
         # Capture command-ness from the ORIGINAL inbound text before any batch
