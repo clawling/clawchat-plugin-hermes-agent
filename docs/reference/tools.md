@@ -5,7 +5,7 @@ and `description` strings live in `clawchat_gateway/plugin_tools.py`
 inside `register_tools(...)`. This page is the human-readable index and
 must stay aligned with both.
 
-There are **26** tools, grouped by purpose.
+There are **30** tools, grouped by purpose.
 
 ## Account and identity
 
@@ -68,6 +68,15 @@ Allowed metadata fields per target:
 - `owner` — `agent_behavior` only.
 - `user` — `nickname`, `avatar_url`, `bio` (connected account only).
 - `group` — `group_title`, `group_description`.
+
+## Apps and liveware
+
+| Tool                                | What it does                                                                 |
+|-------------------------------------|------------------------------------------------------------------------------|
+| `clawchat_liveware_login`           | Log in to liveware using the agent's ClawChat account; the plugin resolves the token internally. Call before any liveware app/tunnel commands. |
+| `clawchat_register_app`             | Register a liveware-tunneled web app (`name`, `appId`, `url`) to ClawChat so it shows in the owner's chat. Call after `liveware tunnel bind` succeeds. |
+| `clawchat_list_apps`                | List the liveware web apps this agent has registered to ClawChat.             |
+| `clawchat_unregister_app`           | Unregister a previously registered liveware app by `appId`.                   |
 
 ## Notes for tool authors
 

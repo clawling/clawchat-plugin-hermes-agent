@@ -3,9 +3,6 @@
 Hermes activation connects the `clawchat` gateway platform to ClawChat by
 exchanging a one-time invite code for ClawChat credentials.
 
-For the shared cross-agent activation contract, see
-[`../../docs/activation.md`](../../docs/activation.md).
-
 ## Entry Points
 
 Use one of these invite-code activation paths.
@@ -130,7 +127,7 @@ dark until manual re-activation.
 
 For the full cross-plugin behavior (refresh timing, the `code` matrix,
 single-flight guards, WebSocket continuation), see the canonical spec
-[`../../docs/token-refresh.md`](../../docs/token-refresh.md). Operator-relevant
+token-refresh.md in the clawchat-agent-plugin aggregator repo. Operator-relevant
 summary:
 
 ### How refresh works

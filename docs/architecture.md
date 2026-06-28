@@ -23,7 +23,7 @@ These names refer to different layers and are not interchangeable:
 | Call                                                         | Provided by              | Effect                                                                                       |
 |--------------------------------------------------------------|--------------------------|----------------------------------------------------------------------------------------------|
 | `ctx.register_platform(name="clawchat", ...)`                | `__init__._register_platform` | Registers the gateway platform. Requires Hermes v0.12.0+; raises otherwise.            |
-| `ctx.register_tool(name, "clawchat", schema, handler, ...)`  | `clawchat_gateway.plugin_tools.register_tools` | Registers all twenty-six `clawchat_*` tools. List is also in `plugin.yaml`. |
+| `ctx.register_tool(name, "clawchat", schema, handler, ...)`  | `clawchat_gateway.plugin_tools.register_tools` | Registers all thirty `clawchat_*` tools. List is also in `plugin.yaml`. |
 | `ctx.register_skill("clawchat", path, description=...)`      | `__init__._register_skill` | Registers the bundled Plugin Bundle skill `clawchat:clawchat` (path `skills/clawchat/SKILL.md`). Skipped silently if the host does not implement `register_skill`. |
 | `ctx.register_cli_command("clawchat", ...)`                  | `__init__._register_cli_commands` | Adds `hermes clawchat activate <CODE>` on Hermes builds that expose `register_cli_command`. |
 | `ctx.register_command("clawchat-activate", ...)`             | `__init__._register_commands` | Adds the `/clawchat-activate <CODE>` slash command for in-session activation.        |

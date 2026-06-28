@@ -2,7 +2,7 @@
 
 This module is the Python (Hermes) re-implementation of the cross-language
 skill-update contract documented in
-``clawchat-agent-plugin/docs/skill-dynamic-update-plan.md`` (§6, "H1 variant").
+``ops/agent-plugin/skill-dynamic-update-plan.md`` (§6, "H1 variant").
 It re-implements the semantics of the install-cli TypeScript reference
 (``packages/core/src/skills/check-update.ts`` + ``installers/metadata.ts``)
 WITHOUT taking any dependency on it.
