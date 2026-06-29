@@ -1,8 +1,9 @@
 # How the plugin plugs into Hermes
 
 The plugin is a Python module loaded at runtime by a Hermes Agent
-v0.12.0+ process. Its single public entrypoint is the top-level
-`register(ctx)` function in `__init__.py:449-459`.
+v0.12.0+ process. Its single public entrypoint is the `register(ctx)`
+function in the repo-root `__init__.py` (the Hermes entrypoint module —
+distinct from the package surface `clawchat_gateway/__init__.py`).
 
 ## Naming map
 

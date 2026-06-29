@@ -169,7 +169,7 @@ literal string `"challenge"` — it is not correlated with the client's
 | `notify_signals` | off | Opts the client in to **live** `notify.signal` system notifications (§9.4). A client that does not advertise it never receives the *live* frame. On **v1 / legacy** the reliable inbox path still replays the signal on the next reconnect regardless of this flag; on **v2** (`reliable_delivery_v2`) the replay path is **also** gated by this flag, so a v2 device that omits it is skipped on replay too. See §9.4. |
 | `permission_events` | off | Opts an owner client in to `permission.request` / `permission.resolved` agent-approval signals (§9.5). A client that does not advertise it never receives these ephemeral frames. |
 | `history_sync` | off | Declares support for `history.transit` sibling-device history transfer (§11.4). **Actively enforced on uplink** — a client that sends `history.transit` without having advertised `history_sync` gets a `message.error` with `code: "capability_missing"` (§14.3). |
-| `e2ee` | off | Declares support for per-device ciphertext-fragment peeling on E2EE envelopes. A capable target receives the matching `ciphertext_fragments[device_id]`; a client that omits it sees only the sender-supplied placeholder payload. E2EE crypto detail is out of this document's scope — see [`protocol-v2-reference.md`](./protocol-v2-reference.md). |
+| `e2ee` | off | Declares support for per-device ciphertext-fragment peeling on E2EE envelopes. A capable target receives the matching `ciphertext_fragments[device_id]`; a client that omits it sees only the sender-supplied placeholder payload. E2EE crypto detail is out of this document's scope — see the msghub Protocol v2 reference (owned by msghub). |
 | `reliable_delivery` | off | **v1 reliable delivery.** Client emits `message.cursor_ack` after durably persisting received frames and understands `history.truncated`. The server then advances the replay cursor only on the ack (not on socket-write) and stamps the storage `seq` on downlinks. Absent → legacy advance-on-write. See §11 (reconnect/replay) and §6's `seq`/`dseq` field rows. ⚠️ If you advertise it you **MUST** implement `message.cursor_ack`. |
 | `reliable_delivery_v2` | off | **v2 reliable delivery (dseq).** Successor to `reliable_delivery`: client acks the per-connection dense `dseq` via `message.sync_ack{dseq,epoch}`, verifies dseq density at the socket read layer, echoes the hello-ok `ack_epoch`, and quarantines un-persistable frames instead of stalling. Granted only when the server returns `hello-ok.ack_mode="dseq"`; otherwise fall back to v1/legacy. SHOULD be advertised **together with** `reliable_delivery` so an older server falls back cleanly. See §11. ⚠️ If you advertise it you **MUST** implement `message.sync_ack`. |
 
@@ -1351,7 +1351,7 @@ so the new device starts with backlog the server never had in plaintext.
 This is carried by the `history.transit` event. It is part of the E2EE
 multi-device feature set; full cryptographic detail (X3DH,
 Double-Ratchet, fragment structure) is **out of this document's scope** —
-see [`protocol-v2-reference.md`](./protocol-v2-reference.md). This section
+see the msghub Protocol v2 reference (owned by msghub). This section
 documents only the WS wire surface a client needs to route the frame.
 
 **Capability-gated and enforced.** A client MUST advertise
@@ -1930,7 +1930,7 @@ storage backend — a successful `/health` does not imply uploads will work.
 ## 16. Canonical wire examples
 
 The canonical, test-asserted wire frames live in a single source of truth:
-[`protocol-v2-reference.md` §9](./protocol-v2-reference.md#9-wire-examples--the-canonical-set).
+the msghub Protocol v2 reference, §9 wire examples — the canonical set (owned by msghub).
 That set covers every client path referenced in this guide — handshake
 (`connect.challenge` / `connect` / `hello-ok` / `hello-fail`),
 send → ack → downlink, `message.error`, the streaming sequence, device
