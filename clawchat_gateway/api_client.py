@@ -14,6 +14,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from clawchat_gateway import __version__
 from clawchat_gateway.device_id import get_device_id
 from clawchat_gateway.group_settings import GroupSettings, GroupSettingsFetchResult
 
@@ -425,6 +426,7 @@ class ClawChatApiClient:
             "code": code.strip(),
             "platform": AGENTS_CONNECT_PLATFORM,
             "type": AGENTS_CONNECT_TYPE,
+            "plugin_version": __version__,
         }
         if user_id and user_id.strip():
             payload["user_id"] = user_id.strip()
