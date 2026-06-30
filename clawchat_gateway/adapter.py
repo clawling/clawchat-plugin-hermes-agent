@@ -260,16 +260,21 @@ _HERMES_RUNTIME_STATUS_PREFIXES = (
     "⚠️ The model returned no response after processing tool results.",
     "The model returned no response after processing tool results.",
 )
+# Worded to make the greeting the single required action. Earlier wording
+# ("ClawChat activation bootstrap: ... do both ...") led some agents to treat it
+# as a setup task and write a file instead of replying, so no greeting reached
+# the user. Lead with the chat reply, forbid file/tool detours, and keep the
+# profile update strictly optional and secondary. (Mirrors the openclaw plugin.)
 _CLAWCHAT_ACTIVATION_BOOTSTRAP_PROMPT = (
-    "ClawChat activation bootstrap: You are now connected to this ClawChat direct conversation.\n\n"
-    "Please do both:\n"
-    "1. Send a brief, friendly greeting to the user in this ClawChat direct conversation.\n"
-    "2. If you have local profile information for yourself, such as display name, bio, or avatar, "
-    "update the connected ClawChat account profile using the available ClawChat tools. Use "
-    "`clawchat_update_account_profile` for display name/bio/avatar URL, and use "
-    "`clawchat_upload_avatar_image` first if the avatar is only available as a local image path. "
-    "If you do not have local profile information, skip profile updates and only greet the user.\n\n"
-    "Do not ask the user for profile information just for this bootstrap."
+    "You are now connected to a ClawChat direct conversation with your user.\n\n"
+    "Reply now with one short, friendly greeting message in this conversation: "
+    "introduce yourself and say you are connected and ready.\n"
+    "Send it as a normal chat reply. Do not write or create any files or notes, "
+    "and do not call tools just to greet.\n"
+    "Only if you already have your own profile details (display name, bio, or avatar) "
+    "may you also call `clawchat_update_account_profile` (use `clawchat_upload_avatar_image` "
+    "first for a local avatar image); otherwise skip that and just greet.\n\n"
+    "Do not ask the user for profile information."
 )
 
 
