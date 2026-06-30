@@ -74,13 +74,16 @@ Content-Type: application/json
 The Hermes request body is:
 
 ```json
-{ "code": "<invite>", "platform": "hermes", "type": "clawbot", "user_id": "<optional-existing-user_id>" }
+{ "code": "<invite>", "platform": "hermes", "type": "clawbot", "plugin_version": "<clawchat_gateway.__version__>", "user_id": "<optional-existing-user_id>" }
 ```
 
 `base_url` comes from the interactive setup answer for `hermes gateway setup`;
 the direct activation commands use `https://app.clawling.com`. When
 `platforms.clawchat.extra.user_id` already contains a non-empty value,
 activation sends it as optional `user_id`; otherwise the field is omitted.
+`plugin_version` carries the package `__version__` so the backend can record
+which plugin build paired at connect time (optional, backward-compatible — the
+backend stores it when present and ignores its absence).
 
 The Hermes activation path currently requires the response to include
 `access_token`, `agent.user_id`, `agent.owner_id`, and `conversation.id`.
