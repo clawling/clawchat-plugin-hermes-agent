@@ -25,13 +25,60 @@ def infer_media_kind_from_mime(mime: str) -> str:
     return "file"
 
 
-def ensure_allowed_local_path(path: str, allowed_roots: Sequence[str]) -> Path:
+# Credential / system-path denylist. Outbound files may be sent from ANY
+# directory (``allowed_roots`` no longer scopes delivery — parity with the
+# openclaw plugin), but these locations hold secrets and must never be
+# exfiltrated by a prompt-injected agent. Mirrors the Hermes host denylist in
+# gateway/platforms/base.py so the send_message(media_files=…) path — which
+# bypasses directory scoping in the adapter — is covered here too.
+_DENIED_ABS_PREFIXES: tuple[str, ...] = (
+    "/etc",
+    "/proc",
+    "/sys",
+    "/dev",
+    "/root",
+)
+
+# Denied relative to the user's HOME (e.g. ~/.ssh/id_rsa, ~/.hermes/.env).
+_DENIED_HOME_SUBPATHS: tuple[str, ...] = (
+    ".ssh",
+    ".aws",
+    ".gnupg",
+    ".kube",
+    ".config/gcloud",
+    ".hermes/.env",
+)
+
+
+def _denied_delivery_paths() -> list[Path]:
+    denied = [Path(p) for p in _DENIED_ABS_PREFIXES]
+    try:
+        home = Path.home()
+    except (RuntimeError, OSError):
+        home = None
+    if home is not None:
+        denied.extend(home / sub for sub in _DENIED_HOME_SUBPATHS)
+    return denied
+
+
+def ensure_allowed_local_path(path: str, allowed_roots: Sequence[str] = ()) -> Path:
+    """Resolve ``path`` for outbound delivery, allowing any directory.
+
+    Files may be sent from any directory; ``allowed_roots`` is accepted for
+    backward compatibility but no longer restricts delivery. Only a small
+    credential / system-path denylist is enforced. Symlinks are resolved
+    before the check so the denylist cannot be bypassed via a symlink.
+    """
     resolved = Path(path).expanduser().resolve()
-    roots = [Path(root).expanduser().resolve() for root in allowed_roots]
-    if not roots:
-        raise ValueError("no allowed roots configured")
-    if not any(root == resolved or root in resolved.parents for root in roots):
-        raise ValueError(f"path not under allowed roots: {resolved}")
+    for denied in _denied_delivery_paths():
+        try:
+            denied_resolved = denied.expanduser().resolve()
+        except (RuntimeError, OSError):
+            denied_resolved = denied
+        if resolved == denied_resolved or denied_resolved in resolved.parents:
+            raise ValueError(
+                f"path is under a denied credential/system location: {resolved}"
+            )
     return resolved
 
 
