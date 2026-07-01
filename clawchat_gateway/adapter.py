@@ -463,7 +463,14 @@ class ClawChatAdapter(BasePlatformAdapter):
             logger.warning("clawchat adapter database unavailable")
         set_clawchat_mention_sender(self)
 
-    async def connect(self) -> bool:
+    async def connect(self, *, is_reconnect: bool = False) -> bool:
+        # ``is_reconnect`` is part of the BasePlatformAdapter.connect contract:
+        # False on cold boot, True when the runtime's reconnect watcher
+        # re-establishes the platform after an outage. ClawChat replays offline
+        # messages at the WS protocol layer (device_replay), so nothing extra is
+        # needed here — accept and ignore the flag, but it MUST be accepted or
+        # every reconnect raises TypeError.
+        del is_reconnect
         # Best-effort unpaired report: runs even before activation credentials.
         self._spawn_plugin_report(authenticated=False)
         await self._connection.start()
