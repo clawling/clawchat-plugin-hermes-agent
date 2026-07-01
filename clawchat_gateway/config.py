@@ -262,6 +262,7 @@ class ClawChatConfig:
     media_download_dir: str = "/tmp/clawchat-media"
     enable_rich_interactions: bool = False
     runtime_status_messages: bool = False
+    awareness_note: bool = False
 
     @classmethod
     def from_platform_config(cls, platform_config: Any) -> "ClawChatConfig":
@@ -340,6 +341,13 @@ class ClawChatConfig:
                 _get_config_value(
                     extra,
                     "enable_rich_interactions",
+                    False,
+                )
+            ),
+            awareness_note=bool(
+                _get_config_value(
+                    extra,
+                    "awareness_note",
                     False,
                 )
             ),

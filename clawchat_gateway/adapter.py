@@ -432,6 +432,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         # In-memory mirror of a pending owner-consent skill update (also persisted
         # to a small file under the managed skills dir for crash-restart recovery).
         self._pending_skill_update: Any = None
+        self._pending_awareness_note: bool = False
         self._skill_update_tasks: set[asyncio.Task[None]] = set()
         self._activation_bootstrap_tasks: set[asyncio.Task[None]] = set()
         self._plugin_report_tasks: set[asyncio.Task[None]] = set()
@@ -639,6 +640,44 @@ class ClawChatAdapter(BasePlatformAdapter):
             # version and, if any, ask the owner for consent in chat. All network
             # work runs off the read loop on a tracked task.
             self._spawn_skill_update_check()
+        elif (
+            payload.get("type") in {"friend.added", "friend.removed", "friend.profile_updated"}
+            or (
+                isinstance(payload.get("type"), str)
+                and str(payload["type"]).startswith("conversation.")
+            )
+        ):
+            sig_type = str(payload.get("type") or "")
+            logger.info("clawchat awareness event received: type=%s", sig_type)
+            if self._clawchat_config.awareness_note and not self._pending_awareness_note:
+                self._pending_awareness_note = True
+                asyncio.ensure_future(self._emit_awareness_note())
+
+    async def _emit_awareness_note(self) -> None:
+        """Emit one consolidated low-priority awareness note to the owner's direct chat.
+
+        Scheduled via ``asyncio.ensure_future`` when the first awareness event
+        (friend.added/removed/profile_updated or conversation.*) arrives with
+        ``awareness_note`` enabled. The pending flag is cleared here so subsequent
+        events can schedule a new note after this one completes.
+        """
+        self._pending_awareness_note = False
+        owner_user_id = self._owner_user_id()
+        owner_chat_id = self._owner_direct_chat_id()
+        if not owner_user_id or not owner_chat_id:
+            return
+        inbound = InboundMessage(
+            chat_id=owner_chat_id,
+            chat_type="direct",
+            sender_id="clawchat-awareness",
+            sender_name="ClawChat",
+            text="ClawChat awareness: your contacts or conversations have been updated.",
+            raw_message={"synthetic": True, "awareness": True},
+        )
+        try:
+            await self._handle_inbound(inbound)
+        except Exception:  # noqa: BLE001 — best-effort awareness note
+            logger.debug("clawchat awareness note delivery failed", exc_info=True)
 
     def _spawn_skill_update_check(self) -> None:
         task = asyncio.ensure_future(self._handle_skill_update_check())
