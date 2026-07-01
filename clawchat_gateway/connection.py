@@ -85,9 +85,9 @@ def build_connect_capabilities() -> dict[str, bool]:
         "chat_meta_events": True,
         # notify_signals: receive §9.4 reliable system notification frames.
         "notify_signals": True,
-        # permission_events: forward-compat signal that this client can
-        # receive native ``permission.receipt`` frames (Path-B, Task 12).
-        # Not load-bearing today — added for future protocol readiness.
+        # permission_events: forward-compat: advertises readiness for a future
+        # native ``permission.receipt`` frame; not load-bearing yet — added
+        # for future protocol readiness.
         "permission_events": True,
     }
 

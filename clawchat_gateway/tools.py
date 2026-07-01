@@ -121,8 +121,9 @@ def _permission_gate_result(err: ClawChatApiError, meta: dict[str, Any]) -> dict
 def _extract_request_id(err: ClawChatApiError) -> str | None:
     """Best-effort pull of request_id from the error payload, if one is carried.
 
-    ``ClawChatApiError`` does not currently expose the envelope ``data`` object, so
-    this is defensive: it reads a ``data``/``payload`` attribute only when present.
+    ``ClawChatApiError`` now exposes a ``data`` field carrying the envelope data
+    object; this helper also checks a ``payload`` attribute as a fallback for
+    older error shapes.
     """
     for attr in ("data", "payload"):
         data = getattr(err, attr, None)

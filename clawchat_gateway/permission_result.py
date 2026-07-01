@@ -109,7 +109,10 @@ def handle_permission_result(frame: dict[str, Any]) -> InboundMessage | None:
 def _build_result_text(*, operation: str, outcome: str, reason: str) -> str:
     """Build the agent-facing text for a permission-request result.
 
-    Wording mirrors the OpenClaw plugin's permission-result consumer.
+    Produces wording semantically equivalent to the OpenClaw plugin's
+    ``buildOutcomeNote``: one sentence naming the operation and outcome, a
+    reason clause, and a resolution sentence (approved → action completed;
+    non-approved → no further action taken).
     """
     outcome_label = {
         "approved": "approved",
@@ -118,11 +121,15 @@ def _build_result_text(*, operation: str, outcome: str, reason: str) -> str:
         "failed": "failed",
     }.get(outcome, outcome or "unknown")
 
-    lines = [
-        f"A permission request has been {outcome_label}.",
+    resolution = (
+        "The requested action has been completed."
+        if outcome == "approved"
+        else "No further action was taken."
+    )
+    parts = [
+        f'Permission request for operation "{operation}" has been {outcome_label}.',
     ]
-    if operation:
-        lines.append(f"Operation: {operation}")
     if reason:
-        lines.append(f"Reason: {reason}")
-    return "\n".join(lines)
+        parts.append(f"Reason: {reason}.")
+    parts.append(resolution)
+    return " ".join(parts)

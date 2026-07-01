@@ -604,9 +604,18 @@ class ClawChatAdapter(BasePlatformAdapter):
     async def _on_notify_signal(self, frame: dict[str, Any]) -> None:
         """Handle inbound ``notify.signal`` frames dispatched by the connection.
 
-        Currently reacts to ``agent.config.changed`` by re-pulling the per-group
-        settings cache.  All other signal types are ignored here (the connection
-        already deduped and logged them).
+        Handled signal types:
+
+        * ``agent.config.changed`` — re-pulls the per-group settings cache.
+        * ``agent.permission.changed`` — re-pulls the permission policy cache.
+        * ``friend.request`` — builds a synthetic reasoning turn for the owner.
+        * ``clawchat.skill.update.check`` — checks for a newer skill version.
+        * ``friend.added``, ``friend.removed``, ``friend.profile_updated``,
+          ``conversation.*`` — lightweight awareness events; may emit one
+          consolidated note to the owner when ``awareness_note`` is enabled.
+
+        All other signal types are silently ignored (the connection layer already
+        deduplicates and logs them).
         """
         payload = frame.get("payload")
         if not isinstance(payload, dict):
