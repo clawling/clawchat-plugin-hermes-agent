@@ -618,6 +618,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             # was spawned last owns the gate release.
             self._group_settings_ready.clear()
             self._spawn_group_settings_refresh("signal")
+        elif payload.get("type") == "agent.permission.changed":
+            self._spawn_permissions_refresh("signal")
         elif payload.get("type") == "clawchat.skill.update.check":
             # Content-free trigger: check the official skill source for a newer
             # version and, if any, ask the owner for consent in chat. All network
