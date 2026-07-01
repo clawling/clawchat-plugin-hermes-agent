@@ -17,6 +17,7 @@ from urllib.request import Request, urlopen
 from clawchat_gateway import __version__
 from clawchat_gateway.device_id import get_device_id
 from clawchat_gateway.group_settings import GroupSettings, GroupSettingsFetchResult
+from clawchat_gateway.permissions import PermissionPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +173,29 @@ class ClawChatApiClient:
             except (KeyError, TypeError, ValueError):
                 logger.warning("clawchat group-settings: skipping malformed row %r", item)
         return GroupSettingsFetchResult(authoritative=True, rows=rows)
+
+    async def get_my_permissions(self) -> PermissionPolicy:
+        """Fetch the agent's permission policy from the backend.
+
+        Returns a :class:`PermissionPolicy` parsed from the flat object
+        returned by ``GET /v1/agents/me/permissions``.  Every key except
+        ``"moment.visibility"`` is an operation→state mapping; the array key
+        is placed in :attr:`PermissionPolicy.moment_visibility`.
+
+        Non-200 / endpoint-absent / network errors are NOT swallowed here —
+        callers are responsible for best-effort handling (log + keep stale
+        cache).  Auth (401/403) errors propagate as ``kind == "auth"`` so the
+        caller's reactive token-refresh-and-retry path can run.
+        """
+        data = await self._call_json("GET", "/v1/agents/me/permissions")
+        by_op: dict[str, str] = {}
+        vis: list[str] = []
+        for k, v in (data or {}).items():
+            if k == "moment.visibility":
+                vis = v or []
+            else:
+                by_op[k] = v
+        return PermissionPolicy(by_operation=by_op, moment_visibility=vis)
 
     async def get_my_profile(self) -> dict:
         return await self._call_json("GET", "/v1/users/me")

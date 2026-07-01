@@ -94,6 +94,7 @@ from clawchat_gateway.protocol import (
     new_message_id,
 )
 from clawchat_gateway.group_settings import EffectiveSettings, GroupSettingsCache
+from clawchat_gateway.permissions import PermissionCache
 from clawchat_gateway import skill_update
 from clawchat_gateway.storage import get_clawchat_store
 from clawchat_gateway.terminal_send import (
@@ -446,6 +447,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         # into apply_fetched so a stale/out-of-order snapshot (empty or not) can
         # never roll the cache back; see GroupSettingsCache.apply_fetched.
         self._group_settings_fetch_seq = 0
+        self._permission_cache = PermissionCache()
         # Set once the first per-(re)connect settings refresh finishes (success OR
         # fallback). Group dispatch waits on this so a muted / mention-only group is
         # never answered via static fallback before the GET lands. Cleared at the
@@ -587,6 +589,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._schedule_activation_bootstrap()
             self._schedule_owner_metadata_refresh()
             self._spawn_group_settings_refresh("reconnect")
+            self._spawn_permissions_refresh("reconnect")
             await self._schedule_reconnect_conversation_refresh()
         logger.info("clawchat state -> %s", state.value)
 
@@ -865,6 +868,41 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._refresh_group_settings(reason=reason, sequence=sequence)
         )
         task.add_done_callback(lambda t: None)
+
+    def _spawn_permissions_refresh(self, reason: str) -> None:
+        """Fire-and-forget task to re-pull permission policy from the backend.
+
+        Best-effort: any exception is caught and logged; the stale cache is
+        kept on failure and the connection is never affected.  ``reason`` is
+        used only for structured logging.
+        """
+        task = asyncio.ensure_future(self._refresh_permissions(reason=reason))
+        task.add_done_callback(lambda t: None)
+
+    async def _refresh_permissions(self, *, reason: str) -> None:
+        """Pull ``GET /v1/agents/me/permissions`` and update the cache."""
+        cfg = self._clawchat_config
+        if not cfg.token or not cfg.base_url:
+            logger.debug(
+                "clawchat permissions refresh skipped reason=%s (no token/base_url)", reason
+            )
+            return
+        try:
+            policy = await self._rest_with_auth_retry(
+                lambda client: client.get_my_permissions()
+            )
+            self._permission_cache.set(policy)
+            logger.info(
+                "clawchat permissions refreshed reason=%s ops=%d",
+                reason,
+                len(policy.by_operation),
+            )
+        except Exception:  # noqa: BLE001 — best-effort; stale cache kept on failure
+            logger.warning(
+                "clawchat permissions refresh failed reason=%s (stale cache kept)",
+                reason,
+                exc_info=True,
+            )
 
     def _release_group_settings_gate_if_latest(self, sequence: int) -> None:
         """Set the settings-ready gate only if *sequence* is the latest spawned.
