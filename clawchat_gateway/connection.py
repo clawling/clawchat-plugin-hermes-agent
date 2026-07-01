@@ -68,6 +68,30 @@ _TRANSIENT_AUTH_FAILURE_MARKERS = (
 )
 
 
+def build_connect_capabilities() -> dict[str, bool]:
+    """Return the capability flags advertised in the connect handshake.
+
+    Extracted so tests can assert on the capability set without wiring up a
+    full WebSocket session.  Keep every field in sync with the OpenClaw plugin
+    (``clawchat-plugin-openclaw``).
+    """
+    return {
+        # Agent runtime is single-device: multi_device stays off so the
+        # server never self-fans-out this connection's own messages.
+        "multi_device": False,
+        # device_replay: replay offline messages on reconnect.
+        "device_replay": True,
+        # chat_meta_events: receive chat metadata invalidation frames.
+        "chat_meta_events": True,
+        # notify_signals: receive §9.4 reliable system notification frames.
+        "notify_signals": True,
+        # permission_events: forward-compat signal that this client can
+        # receive native ``permission.receipt`` frames (Path-B, Task 12).
+        # Not load-bearing today — added for future protocol readiness.
+        "permission_events": True,
+    }
+
+
 def _is_transient_auth_failure(reason: str | None) -> bool:
     if not reason:
         return False
@@ -1324,15 +1348,7 @@ class ClawChatConnection:
             token=self._cfg.token,
             nonce=nonce,
             device_id=device_id,
-            capabilities={
-                # Agent runtime is single-device: multi_device stays off so the
-                # server never self-fans-out this connection's own messages.
-                # notify_signals is advertised now that we handle the frame (§9.4).
-                "multi_device": False,
-                "device_replay": True,
-                "chat_meta_events": True,
-                "notify_signals": True,
-            },
+            capabilities=build_connect_capabilities(),
         )
         await self._ws.send(encode_frame(connect_req))
         self._record_connection(
