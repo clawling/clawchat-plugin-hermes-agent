@@ -95,6 +95,7 @@ from clawchat_gateway.protocol import (
 )
 from clawchat_gateway.group_settings import EffectiveSettings, GroupSettingsCache
 from clawchat_gateway.friend_request_turn import build_friend_request_inbound
+from clawchat_gateway.permission_result import handle_permission_result
 from clawchat_gateway.permissions import PermissionCache
 from clawchat_gateway import skill_update
 from clawchat_gateway.storage import get_clawchat_store
@@ -1698,6 +1699,29 @@ class ClawChatAdapter(BasePlatformAdapter):
                     frame.get("chat_id"),
                 )
                 return
+        # Intercept system-message permission receipts before
+        # parse_inbound_message drops all sender.id=="system" frames.
+        # Only permission_result frames produce a synthetic turn; all other
+        # system messages are dropped silently.
+        _sender_obj = frame.get("sender")
+        if isinstance(_sender_obj, dict) and _sender_obj.get("id") == "system":
+            _synthetic = handle_permission_result(frame)
+            if _synthetic is not None:
+                logger.info(
+                    "clawchat permission_result dispatched chat_id=%s request_id=%s operation=%s outcome=%s",
+                    frame.get("chat_id"),
+                    _synthetic.raw_message.get("request_id"),
+                    _synthetic.raw_message.get("operation"),
+                    _synthetic.raw_message.get("outcome"),
+                )
+                await self._handle_inbound(_synthetic)
+            else:
+                logger.debug(
+                    "clawchat system message dropped event=%s chat_id=%s",
+                    event_name,
+                    frame.get("chat_id"),
+                )
+            return
         inbound = parse_inbound_message(frame, self._clawchat_config)
         if inbound is None:
             logger.warning(
