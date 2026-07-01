@@ -1,0 +1,20 @@
+{
+  "name": "awareness event friend.added produces no reasoning turn",
+  "behavior": "awareness",
+  "wire": {
+    "version": "2",
+    "event": "notify.signal",
+    "trace_id": "parity-awareness-friend-added",
+    "emitted_at": 1893456000000,
+    "payload": {
+      "type": "friend.added",
+      "entity_id": "usr_parity_awareness-friend-added",
+      "event_id": "parity-evt-awareness-friend-added",
+      "version": 1,
+      "message_id": "msg-parity-awareness-friend-added"
+    }
+  },
+  "expected": {
+    "reasoning_turns": 0
+  }
+}

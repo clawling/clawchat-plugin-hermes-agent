@@ -1,0 +1,20 @@
+{
+  "name": "awareness event friend.removed produces no reasoning turn",
+  "behavior": "awareness",
+  "wire": {
+    "version": "2",
+    "event": "notify.signal",
+    "trace_id": "parity-awareness-friend-removed",
+    "emitted_at": 1893456000000,
+    "payload": {
+      "type": "friend.removed",
+      "entity_id": "usr_parity_awareness-friend-removed",
+      "event_id": "parity-evt-awareness-friend-removed",
+      "version": 1,
+      "message_id": "msg-parity-awareness-friend-removed"
+    }
+  },
+  "expected": {
+    "reasoning_turns": 0
+  }
+}

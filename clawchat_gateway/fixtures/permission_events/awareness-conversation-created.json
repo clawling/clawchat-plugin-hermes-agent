@@ -1,0 +1,20 @@
+{
+  "name": "awareness event conversation.created produces no reasoning turn",
+  "behavior": "awareness",
+  "wire": {
+    "version": "2",
+    "event": "notify.signal",
+    "trace_id": "parity-awareness-conversation-created",
+    "emitted_at": 1893456000000,
+    "payload": {
+      "type": "conversation.created",
+      "entity_id": "usr_parity_awareness-conversation-created",
+      "event_id": "parity-evt-awareness-conversation-created",
+      "version": 1,
+      "message_id": "msg-parity-awareness-conversation-created"
+    }
+  },
+  "expected": {
+    "reasoning_turns": 0
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "name": "permission_result system-message receipt produces one deduped agent note",
+  "behavior": "permission_result",
+  "wire": {
+    "version": "2",
+    "event": "message.send",
+    "trace_id": "parity-permission-result-approved",
+    "emitted_at": 1893456000000,
+    "chat_id": "chat_owner_parity",
+    "chat_type": "direct",
+    "sender": {
+      "id": "system",
+      "type": "direct",
+      "nick_name": "System"
+    },
+    "payload": {
+      "message_id": "sys-prq_parity_approved",
+      "message_mode": "normal",
+      "message": {
+        "body": {
+          "fragments": [
+            {
+              "kind": "text",
+              "text": "Permission request approved."
+            }
+          ]
+        },
+        "context": {
+          "mentions": [],
+          "reply": null
+        }
+      },
+      "metadata": {
+        "kind": "permission_result",
+        "operation": "friend.add",
+        "outcome": "approved",
+        "reason": "owner_allowed",
+        "request_id": "prq_parity_approved"
+      }
+    }
+  },
+  "expected": {
+    "discriminator_kind": "permission_result",
+    "first_delivery_produces_note": true,
+    "note_contains_operation": "friend.add",
+    "note_contains_outcome": "approved",
+    "duplicate_delivery_produces_note": false
+  }
+}

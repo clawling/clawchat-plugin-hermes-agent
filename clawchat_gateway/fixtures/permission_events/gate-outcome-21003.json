@@ -1,0 +1,16 @@
+{
+  "name": "gate outcome 21003 maps to forbidden_by_owner",
+  "behavior": "gate_outcome",
+  "wire": {
+    "code": 21003,
+    "data": {
+      "operation": "moment.post"
+    }
+  },
+  "expected": {
+    "result": {
+      "status": "forbidden_by_owner",
+      "operation": "moment.post"
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "agent.permission.changed notify.signal triggers a permission re-pull",
+  "behavior": "permission_changed",
+  "wire": {
+    "version": "2",
+    "event": "notify.signal",
+    "trace_id": "parity-agent-permission-changed",
+    "emitted_at": 1893456000000,
+    "payload": {
+      "type": "agent.permission.changed",
+      "entity_id": "agt_parity",
+      "event_id": "parity-evt-agent-permission-changed",
+      "version": 2,
+      "message_id": "msg-parity-agent-permission-changed"
+    }
+  },
+  "expected": {
+    "triggers_permission_repull": true
+  }
+}

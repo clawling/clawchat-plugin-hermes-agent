@@ -1,0 +1,13 @@
+{
+  "name": "gate outcome with an unrelated code maps to nothing",
+  "behavior": "gate_outcome",
+  "wire": {
+    "code": 40001,
+    "data": {
+      "operation": "friend.add"
+    }
+  },
+  "expected": {
+    "result": null
+  }
+}

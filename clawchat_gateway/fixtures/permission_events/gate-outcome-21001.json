@@ -1,0 +1,20 @@
+{
+  "name": "gate outcome 21001 maps to pending_owner_approval",
+  "behavior": "gate_outcome",
+  "wire": {
+    "code": 21001,
+    "data": {
+      "request_id": "prq_parity_21001",
+      "operation": "friend.add",
+      "expires_at": 1893456000
+    }
+  },
+  "expected": {
+    "result": {
+      "status": "pending_owner_approval",
+      "request_id": "prq_parity_21001",
+      "operation": "friend.add",
+      "expires_at": 1893456000
+    }
+  }
+}
