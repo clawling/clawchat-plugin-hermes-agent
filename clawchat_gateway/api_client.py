@@ -73,6 +73,10 @@ class ClawChatApiError(Exception):
     # (read timeout, connection reset mid-flight) are NOT, because the server
     # may already have processed a single-use request such as activation.
     connect_failed: bool = False
+    # The envelope ``data`` dict from the backend response, carried only when
+    # code != 0 so that callers (e.g. gate-outcome mapping) can read fields
+    # like request_id, operation, and expires_at without re-parsing the body.
+    data: dict | None = None
 
     def __str__(self) -> str:
         return self.message
@@ -802,7 +806,15 @@ class ClawChatApiClient:
             msg = str(payload.get("msg") or payload.get("message") or "")
         if code != 0:
             kind = "auth" if status in (401, 403) else "api"
-            raise ClawChatApiError(kind, msg or f"code={code}", status=status, path=path, code=code)
+            gate_data = payload.get("data") if isinstance(payload, dict) else None
+            raise ClawChatApiError(
+                kind,
+                msg or f"code={code}",
+                status=status,
+                path=path,
+                code=code,
+                data=gate_data if isinstance(gate_data, dict) else None,
+            )
         data = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(data, dict):
             raise ClawChatApiError("transport", "invalid envelope: missing object data", status=status, path=path)

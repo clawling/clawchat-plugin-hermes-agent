@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from clawchat_gateway.api_client import ClawChatApiClient, ClawChatApiError
+from clawchat_gateway.gate_outcome import map_gate_outcome
 from clawchat_gateway.liveware_cli import resolve_liveware_path
 from clawchat_gateway.clawchat_memory import (
     delete_clawchat_memory_file,
@@ -527,6 +528,9 @@ async def send_friend_request(user_id: str, greeting: str | None = None) -> dict
     try:
         return await client.send_friend_request(user_id=user_id.strip(), greeting=greeting)
     except ClawChatApiError as exc:
+        outcome = map_gate_outcome(exc.code, exc.data or {})
+        if outcome is not None:
+            return outcome
         return _api_error(exc)
     except Exception as exc:  # noqa: BLE001
         return _unknown_error(exc)
@@ -565,6 +569,9 @@ async def accept_friend_request(request_id: int) -> dict[str, Any]:
     try:
         return await client.accept_friend_request(request_id_value)
     except ClawChatApiError as exc:
+        outcome = map_gate_outcome(exc.code, exc.data or {})
+        if outcome is not None:
+            return outcome
         return _api_error(exc)
     except Exception as exc:  # noqa: BLE001
         return _unknown_error(exc)
@@ -581,6 +588,9 @@ async def reject_friend_request(request_id: int) -> dict[str, Any]:
     try:
         return await client.reject_friend_request(request_id_value)
     except ClawChatApiError as exc:
+        outcome = map_gate_outcome(exc.code, exc.data or {})
+        if outcome is not None:
+            return outcome
         return _api_error(exc)
     except Exception as exc:  # noqa: BLE001
         return _unknown_error(exc)
@@ -596,6 +606,9 @@ async def remove_friend(friend_user_id: str) -> dict[str, Any]:
     try:
         return await client.remove_friend(friend_user_id.strip())
     except ClawChatApiError as exc:
+        outcome = map_gate_outcome(exc.code, exc.data or {})
+        if outcome is not None:
+            return outcome
         return _api_error(exc)
     except Exception as exc:  # noqa: BLE001
         return _unknown_error(exc)
@@ -709,6 +722,9 @@ async def create_moment(
     try:
         return await client.create_moment(text=text, images=images)
     except ClawChatApiError as exc:
+        outcome = map_gate_outcome(exc.code, exc.data or {})
+        if outcome is not None:
+            return outcome
         return _api_error(exc)
     except Exception as exc:  # noqa: BLE001
         return _unknown_error(exc)
@@ -725,6 +741,9 @@ async def delete_moment(moment_id: int) -> dict[str, Any]:
     try:
         return await client.delete_moment(moment_id_value)
     except ClawChatApiError as exc:
+        outcome = map_gate_outcome(exc.code, exc.data or {})
+        if outcome is not None:
+            return outcome
         return _api_error(exc)
     except Exception as exc:  # noqa: BLE001
         return _unknown_error(exc)
@@ -743,6 +762,9 @@ async def toggle_moment_reaction(moment_id: int, emoji: str) -> dict[str, Any]:
     try:
         return await client.toggle_moment_reaction(moment_id=moment_id_value, emoji=emoji)
     except ClawChatApiError as exc:
+        outcome = map_gate_outcome(exc.code, exc.data or {})
+        if outcome is not None:
+            return outcome
         return _api_error(exc)
     except Exception as exc:  # noqa: BLE001
         return _unknown_error(exc)
@@ -761,6 +783,9 @@ async def create_moment_comment(moment_id: int, text: str) -> dict[str, Any]:
     try:
         return await client.create_moment_comment(moment_id=moment_id_value, text=text)
     except ClawChatApiError as exc:
+        outcome = map_gate_outcome(exc.code, exc.data or {})
+        if outcome is not None:
+            return outcome
         return _api_error(exc)
     except Exception as exc:  # noqa: BLE001
         return _unknown_error(exc)
@@ -790,6 +815,9 @@ async def reply_moment_comment(
             text=text,
         )
     except ClawChatApiError as exc:
+        outcome = map_gate_outcome(exc.code, exc.data or {})
+        if outcome is not None:
+            return outcome
         return _api_error(exc)
     except Exception as exc:  # noqa: BLE001
         return _unknown_error(exc)
@@ -812,6 +840,9 @@ async def delete_moment_comment(moment_id: int, comment_id: int) -> dict[str, An
             comment_id=comment_id_value,
         )
     except ClawChatApiError as exc:
+        outcome = map_gate_outcome(exc.code, exc.data or {})
+        if outcome is not None:
+            return outcome
         return _api_error(exc)
     except Exception as exc:  # noqa: BLE001
         return _unknown_error(exc)
