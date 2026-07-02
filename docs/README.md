@@ -21,6 +21,7 @@ thirty `clawchat_*` tools to the agent.
 | Look up a wire-protocol shape (envelope, events, streaming)  | [`./client-integration.md`](./client-integration.md)    |
 | Edit a prompt that ships with the plugin                     | [`./reference/prompts.md`](./reference/prompts.md)      |
 | Understand Hermes prompt injection surfaces                  | [`./reference/prompt-injection.md`](./reference/prompt-injection.md) |
+| Understand dynamic skill updates & skill registration        | [`./skill-updates.md`](./skill-updates.md)              |
 | Hack on the Python source locally                            | [`./development.md`](./development.md)                  |
 | Inspect the Hermes Agent host source                         | [`./hermes-source-lookup.md`](./hermes-source-lookup.md) |
 

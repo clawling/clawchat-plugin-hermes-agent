@@ -17,7 +17,7 @@ connection falls back to the latest complete activation row in plugin SQLite.
 |--------------------------------------|--------------------|---------|-------|
 | `CLAWCHAT_TOKEN`                     | —                  | —       | Required for the gateway to start. Written to `$HERMES_HOME/.env` by activation. |
 | `CLAWCHAT_REFRESH_TOKEN`             | —                  | —       | Written to `$HERMES_HOME/.env` by activation. |
-| `CLAWCHAT_USER_ID`                   | `user_id`          | `""`    | ClawChat user id of the bot account. |
+| `CLAWCHAT_USER_ID`                   | `user_id`          | JWT `sub` claim from `CLAWCHAT_TOKEN` | ClawChat user id of the bot account. The token's `sub` claim is authoritative for the session the token creates: when the token carries `sub`, it **overrides** a disagreeing configured value (with a boot warning) and fills the value when none is configured. A wrong user_id (e.g. the owner's id) silently breaks self-echo detection — every owner message is dropped as the bot's own echo. |
 | `CLAWCHAT_AGENT_ID`                  | `agent_id`         | JWT `aid` claim from `CLAWCHAT_TOKEN` | Set by activation. This is the REST agent record id (`agt_...`), distinct from owner metadata `agent_user_id` (`usr_...`). |
 | `CLAWCHAT_OWNER_USER_ID`             | `owner_user_id`    | JWT `oid` claim from `CLAWCHAT_TOKEN` | Identifies the human owner of the agent account. When neither the env var nor `extra.owner_user_id` is set, it is derived from the token's `oid` claim (mirrors `agent_id`/`aid`). This keeps an agent connectable when a provisioner injects `CLAWCHAT_TOKEN`+`user_id` but omits the owner — without it the connection gate (`_has_connect_credentials`) leaves the agent stuck in `activation_wait`. |
 
@@ -68,9 +68,14 @@ env:
 ```
 
 The server-assigned `resolved_device_id` from the `hello-ok` handshake is
-recorded in plugin SQLite (`connections.resolved_device_id`) for diagnostics;
-the id the plugin *presents* on connect is always `get_device_id()`, so the env
-var is the durable source of truth.
+recorded in plugin SQLite (`connections.resolved_device_id`) for diagnostics.
+The id the plugin *presents* on connect resolves in order: the
+`activations.device_id` persisted in plugin SQLite → the `did` claim of the
+current access token → the `get_device_id()` fingerprint (used only for a
+truly unpaired process, then persisted to SQLite at first connect). The first
+two sources are re-read on every boot, so an already-paired agent keeps a
+stable device id across container recreation even without the env pin —
+provided the SQLite database lives on a persistent volume.
 
 ### Device id is also the token-refresh precondition
 
@@ -86,8 +91,11 @@ If `CLAWCHAT_DEVICE_ID` is **unpinned** and the host fingerprint changes (e.g. a
 pod reschedule), the refresh device id no longer matches the connect-time id, so
 refresh fails with a **device mismatch** — which is a *permanent* refresh
 failure that forces auto-logout and a manual re-pair. The plugin emits a boot
-warning (`clawchat_gateway.device_id.warn_if_device_id_unpinned`) when
-`CLAWCHAT_DEVICE_ID` is unset for exactly this reason.
+warning (`clawchat_gateway.device_id.warn_if_device_id_unpinned`) for exactly
+this reason — but only when device-id resolution actually falls through to the
+volatile fingerprint (no SQLite `activations.device_id`, no token `did` claim,
+no env pin). An already-paired agent whose id is read back from SQLite or the
+token boots without the warning.
 
 **Deployment requirement (restated for refresh):** pin `CLAWCHAT_DEVICE_ID` to a
 stable, per-agent `hermes-`-prefixed value in any containerized deployment.
