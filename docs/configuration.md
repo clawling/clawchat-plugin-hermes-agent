@@ -6,10 +6,15 @@ priority order is documented in [`./architecture.md`](./architecture.md):
 process env → `hermes_cli.config.get_env_value` → `$HERMES_HOME/.env`
 → `platforms.clawchat.extra` → dataclass default.
 
-Credential tokens are the exception: `CLAWCHAT_TOKEN` and
-`CLAWCHAT_REFRESH_TOKEN` are resolved from env-backed sources first, not from
-`platforms.clawchat.extra`. When env-backed credentials are missing, runtime
-connection falls back to the latest complete activation row in plugin SQLite.
+Credential tokens are the exception: at startup the runtime connection first
+adopts the latest complete activation row in plugin SQLite
+(`_load_startup_activation_credentials`) — activation and token rotation
+persist there, so the row is the durable source of truth. Env-backed
+`CLAWCHAT_TOKEN` / `CLAWCHAT_REFRESH_TOKEN` bootstrap the no-row case only:
+they are used to connect and are seeded into a SQLite row on the first token
+refresh (§C.2). To make an agent that already has an activation row pick up
+new env credentials, re-pair (the new activation row wins) or clear the row
+first.
 
 ## Credentials (written by activation)
 
@@ -21,9 +26,10 @@ connection falls back to the latest complete activation row in plugin SQLite.
 | `CLAWCHAT_AGENT_ID`                  | `agent_id`         | JWT `aid` claim from `CLAWCHAT_TOKEN` | Set by activation. This is the REST agent record id (`agt_...`), distinct from owner metadata `agent_user_id` (`usr_...`). |
 | `CLAWCHAT_OWNER_USER_ID`             | `owner_user_id`    | JWT `oid` claim from `CLAWCHAT_TOKEN` | Identifies the human owner of the agent account. When neither the env var nor `extra.owner_user_id` is set, it is derived from the token's `oid` claim (mirrors `agent_id`/`aid`). This keeps an agent connectable when a provisioner injects `CLAWCHAT_TOKEN`+`user_id` but omits the owner — without it the connection gate (`_has_connect_credentials`) leaves the agent stuck in `activation_wait`. |
 
-The token / refresh-token pair are stored in `.env` for primary runtime
-resolution and in plugin SQLite for the latest activation record and startup
-fallback. The plugin never copies them into `config.yaml`
+The token / refresh-token pair are stored in plugin SQLite as the
+authoritative runtime credential record; `.env` holds the bootstrap copy
+written by activation for the no-row case. The plugin never copies them into
+`config.yaml`
 (`activate.persist_activation` calls `extra.pop("token", None)` and
 `extra.pop("refresh_token", None)`).
 

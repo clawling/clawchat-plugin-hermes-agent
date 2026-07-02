@@ -102,12 +102,14 @@ Activation writes:
 Returned `.env` tokens and `config.yaml` user ids overwrite any previously
 configured ClawChat activation credentials.
 
-Credential tokens are stored in `.env` for runtime resolution and in plugin
-SQLite for the latest activation record. Runtime resolution uses a complete
-env-backed credential bundle first. If env-backed credentials are missing, the
-running adapter waits for and then reads the latest SQLite activation row. The
-plugin never copies `CLAWCHAT_TOKEN` or `CLAWCHAT_REFRESH_TOKEN` into
-`config.yaml`.
+Credential tokens are stored in plugin SQLite as the authoritative runtime
+credential record and in `.env` as the bootstrap copy written by activation.
+At startup the runtime connection first adopts the latest complete activation
+row in plugin SQLite (`_load_startup_activation_credentials`). If no such row
+exists, the running adapter falls back to a complete env-backed credential
+bundle to connect, and that bundle is seeded into a SQLite row on the first
+token refresh (§C.2). The plugin never copies `CLAWCHAT_TOKEN` or
+`CLAWCHAT_REFRESH_TOKEN` into `config.yaml`.
 
 When Hermes has registered the ClawChat platform but no complete token/user
 credential bundle is available, the adapter starts in a waiting-for-activation
