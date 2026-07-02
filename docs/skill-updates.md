@@ -107,7 +107,10 @@ a registered skill path in this codebase:
 - Unlike `apply_skill_update`'s all-or-nothing validate-then-write, each
   removal is handled independently: an `OSError` other than
   "not found" during unlink is logged and that one id is skipped (`continue`),
-  it does not abort the rest of the batch.
+  it does not abort the rest of the batch — and since the skipped id's
+  `local.pop(skill_id, None)` never runs, its local manifest entry is left in
+  place, so the next `check_skill_update` still sees it as tombstoned +
+  locally installed and retries the removal.
 - All manifest-entry drops for the batch are written to disk in one
   `write_local_manifest` call at the end, not per-id.
 - Bundled ids reaching this function are refused defensively (same guard as
@@ -176,18 +179,34 @@ explicit-load only (`skill_view`), they do not appear in the system prompt's
 
 ## Parity with the OpenClaw plugin
 
-`clawchat-plugin-openclaw` implements the same publish/check/consent/apply
-contract, including sha-based convergence and tombstone removal (same three
-conditions: tombstoned, locally installed, not bundled — `OPENCLAW_SKILL_IDS`
-there vs. `HERMES_SKILL_IDS` here), but needs **no registration step at all**:
-the OpenClaw host scans and watches its managed skills dir (`~/.openclaw/skills`)
-directly, so writing or deleting the file *is* the delivery/removal —
-including brand-new ids, with no lazy-cleanup step needed on the removal side
-either. The two plugins' owner-facing message wording differs slightly (style
-only, not contract): OpenClaw's update segment uses a colon
-("我的技能有更新:…") where Hermes does not, and OpenClaw shows a missing local
-version as "v无" where Hermes shows "v—" — both express the same three states
-(upgrade, rollback, content-only revision) and the same combined
-updates+removals prompt/consent/ack flow. When changing the manifest contract
-or consent semantics, update both plugins and the install-cli manifest
-generator together.
+`clawchat-plugin-openclaw` implements the same publish/check/consent contract
+through the point where the owner is asked for consent, including sha-based
+convergence and tombstone removal (same three conditions: tombstoned, locally
+installed, not bundled — `OPENCLAW_SKILL_IDS` there vs. `HERMES_SKILL_IDS`
+here), but needs **no registration step at all**: the OpenClaw host scans and
+watches its managed skills dir (`~/.openclaw/skills`) directly, so writing or
+deleting the file *is* the delivery/removal — including brand-new ids, with
+no lazy-cleanup step needed on the removal side either. The two plugins'
+owner-facing message wording differs slightly (style only, not contract):
+OpenClaw's update segment uses a colon ("我的技能有更新:…") where Hermes does
+not, and OpenClaw shows a missing local version as "v无" where Hermes shows
+"v—" — both express the same three states (upgrade, rollback, content-only
+revision) and the same combined updates+removals prompt/consent/ack flow.
+
+The **apply** phase genuinely diverges, though, not just in wording:
+
+- **Failure retry.** Hermes clears the pending record *before* attempting
+  apply (`adapter.py`'s affirm branch calls `_clear_pending_skill_update()`
+  ahead of the `try`), so a failed apply leaves nothing for the owner to
+  retry — they have to wait for the next `check` signal. OpenClaw's
+  `handleOwnerConsentReply` keeps the pending record on a caught apply error,
+  so the owner can just reply "更新" again to retry the same batch.
+- **Removal batching.** Hermes's `apply_skill_removal` is per-id
+  best-effort — an `OSError` unlinking one id is logged and skipped via
+  `continue`, and the rest of the batch still applies (see "Deletion
+  propagation" above). OpenClaw's removals loop in `handleOwnerConsentReply`
+  has no per-id try/catch; one failed `removeManagedSkill` throws out of the
+  loop and aborts whatever removals (and any trailing updates) hadn't run yet.
+
+When changing the manifest contract or consent semantics, update both
+plugins and the install-cli manifest generator together.
