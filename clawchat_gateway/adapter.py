@@ -390,6 +390,24 @@ def check_clawchat_requirements(platform_config: Any) -> bool:
     return True
 
 
+def build_skill_update_prompt(pending: skill_update.PendingConsent) -> str:
+    segments = []
+    if pending.updates:
+        segments.append(f"我的技能有更新 {pending.summary()}")
+    if pending.removals:
+        segments.append(f"以下技能将下线移除:{pending.removal_summary()}")
+    return ";".join(segments) + "。回复「更新」确认,「取消」忽略。"
+
+
+def build_skill_update_ack(applied_targets: list[str], removed_ids: list[str]) -> str:
+    parts = []
+    if applied_targets:
+        parts.append("已更新到 " + "、".join(f"v{t}" for t in applied_targets))
+    if removed_ids:
+        parts.append("已移除 " + "、".join(f"「{i}」" for i in removed_ids))
+    return "✅ " + ";".join(parts)
+
+
 class ClawChatAdapter(BasePlatformAdapter):
     SUPPORTS_MESSAGE_EDITING = True
     REQUIRES_EDIT_FINALIZE = True
@@ -717,12 +735,12 @@ class ClawChatAdapter(BasePlatformAdapter):
         pending consent. Silent no-op when there is no update.
         """
         try:
-            updates = await asyncio.to_thread(skill_update.check_skill_update)
+            result = await asyncio.to_thread(skill_update.check_skill_update)
         except Exception as exc:  # noqa: BLE001
             logger.warning("clawchat skill-update check failed: %s", exc)
             return
-        if not updates:
-            logger.info("clawchat skill-update check: no update available")
+        if not result:
+            logger.info("clawchat skill-update check: nothing to converge")
             return
 
         owner_user_id = self._owner_user_id()
@@ -737,14 +755,12 @@ class ClawChatAdapter(BasePlatformAdapter):
             return
 
         pending = skill_update.PendingConsent(
-            updates=updates,
+            updates=result.updates,
             owner_user_id=owner_user_id,
             chat_id=owner_chat_id,
+            removals=result.removals,
         )
-        message = (
-            f"我的技能有更新 {pending.summary()}。"
-            "回复「更新」确认,「取消」忽略。"
-        )
+        message = build_skill_update_prompt(pending)
         try:
             await self._connection.send_frame(
                 build_message_send_event(
@@ -767,9 +783,10 @@ class ClawChatAdapter(BasePlatformAdapter):
         except Exception:  # noqa: BLE001
             logger.warning("clawchat could not persist pending skill update", exc_info=True)
         logger.info(
-            "clawchat skill-update prompt sent owner=%s updates=%s",
+            "clawchat skill-update prompt sent owner=%s updates=%s removals=%s",
             owner_user_id,
-            [u.skill_id for u in updates],
+            [u.skill_id for u in result.updates],
+            [r.skill_id for r in result.removals],
         )
 
     async def _cancel_skill_update_tasks(self) -> None:
@@ -825,9 +842,11 @@ class ClawChatAdapter(BasePlatformAdapter):
 
         # verdict == "affirm"
         updates = list(pending.updates)
+        removals = list(pending.removals)
         self._clear_pending_skill_update()
         try:
             applied = await asyncio.to_thread(skill_update.apply_skill_update, updates)
+            removed = await asyncio.to_thread(skill_update.apply_skill_removal, removals)
         except Exception as exc:  # noqa: BLE001
             logger.warning("clawchat skill update apply failed: %s", exc, exc_info=True)
             await self._send_owner_text(inbound.chat_id, "技能更新失败,请稍后再试。")
@@ -840,9 +859,13 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
         if registered:
             logger.info("clawchat hot-registered new skills=%s", registered)
-        targets = "、".join(f"v{u.target}" for u in updates)
-        await self._send_owner_text(inbound.chat_id, f"✅ 已更新到 {targets}")
-        logger.info("clawchat skill update applied skills=%s", applied)
+        targets = [u.target for u in updates]
+        await self._send_owner_text(
+            inbound.chat_id, build_skill_update_ack(targets, removed)
+        )
+        logger.info(
+            "clawchat skill update applied skills=%s removed=%s", applied, removed
+        )
         return True
 
     async def _send_owner_text(self, chat_id: str, text: str) -> None:
