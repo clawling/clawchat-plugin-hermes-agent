@@ -600,8 +600,13 @@ def apply_skill_update(
     # Phase 1: fetch + validate everything up front.
     staged: list[tuple[PendingSkillUpdate, str]] = []
     for update in updates:
-        if local.get(update.skill_id) == update.target:
-            continue  # idempotent: already applied
+        if local_skill_sha(update.skill_id) == update.sha256:
+            # Idempotent: on-disk bytes already converged to the manifest.
+            # Keep the local manifest's version in sync anyway.
+            if local.get(update.skill_id) != update.target:
+                local[update.skill_id] = update.target
+                write_local_manifest(local)
+            continue
         content = fetch_skill_markdown(update, fetcher=fetcher, ref=ref)
         staged.append((update, content))
 
@@ -617,6 +622,46 @@ def apply_skill_update(
     write_local_manifest(local)
     logger.info("clawchat applied skill updates: %s", applied)
     return applied
+
+
+def apply_skill_removal(removals: list[PendingSkillRemoval]) -> list[str]:
+    """Delete managed files + local manifest entries for tombstoned skills.
+
+    This is the ONE legitimate delete of a registered skill path: the Hermes
+    host lazily clears a registration whose file is missing, and the next
+    plugin load skips manifest-absent ids. Bundled ids are refused (deleting
+    them would only trigger a reseed). Idempotent: an already-absent file
+    still clears the manifest entry. Returns the removed skill ids.
+    """
+    if not removals:
+        return []
+    local = read_local_manifest()
+    removed: list[str] = []
+    for removal in removals:
+        skill_id = removal.skill_id
+        if skill_id in HERMES_SKILL_IDS:
+            logger.warning("clawchat refusing to remove bundled skill %s", skill_id)
+            continue
+        skill_path = managed_skill_path(skill_id)
+        try:
+            skill_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.warning(
+                "clawchat could not delete managed skill %s", skill_id, exc_info=True
+            )
+            continue
+        try:
+            skill_path.parent.rmdir()
+        except OSError:
+            pass  # non-empty or already gone — best-effort
+        local.pop(skill_id, None)
+        removed.append(skill_id)
+    if removed:
+        write_local_manifest(local)
+        logger.info("clawchat removed tombstoned skills: %s", removed)
+    return removed
 
 
 # --- Host hot-registration ---------------------------------------------------
@@ -741,6 +786,20 @@ def classify_consent(text: str) -> str:
 # --- Pending-consent record (in-memory mirror + small file) -----------------
 
 
+def _describe_update(update: PendingSkillUpdate) -> str:
+    if update.current is None:
+        return f"「{update.skill_id}」v— → v{update.target}"
+    try:
+        cmp = compare_version(update.current, update.target)
+    except SkillUpdateError:
+        cmp = -1
+    if cmp == 0:
+        return f"「{update.skill_id}」v{update.target}(内容修订)"
+    if cmp > 0:
+        return f"「{update.skill_id}」v{update.current} → v{update.target}(回滚)"
+    return f"「{update.skill_id}」v{update.current} → v{update.target}"
+
+
 @dataclass
 class PendingConsent:
     updates: list[PendingSkillUpdate]
@@ -748,17 +807,17 @@ class PendingConsent:
     chat_id: str
     created_at: float = field(default_factory=time.time)
     ttl_seconds: float = PENDING_TTL_SECONDS
+    removals: list[PendingSkillRemoval] = field(default_factory=list)
 
     def is_expired(self, now: float | None = None) -> bool:
         now = time.time() if now is None else now
         return now - self.created_at > self.ttl_seconds
 
     def summary(self) -> str:
-        parts = []
-        for update in self.updates:
-            current = update.current or "—"
-            parts.append(f"「{update.skill_id}」v{current} → v{update.target}")
-        return "、".join(parts)
+        return "、".join(_describe_update(u) for u in self.updates)
+
+    def removal_summary(self) -> str:
+        return "、".join(f"「{r.skill_id}」" for r in self.removals)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -767,6 +826,7 @@ class PendingConsent:
             "chat_id": self.chat_id,
             "created_at": self.created_at,
             "ttl_seconds": self.ttl_seconds,
+            "removals": [r.to_dict() for r in self.removals],
         }
 
     @classmethod
@@ -777,6 +837,7 @@ class PendingConsent:
             chat_id=str(data.get("chat_id") or ""),
             created_at=float(data.get("created_at") or time.time()),
             ttl_seconds=float(data.get("ttl_seconds") or PENDING_TTL_SECONDS),
+            removals=[PendingSkillRemoval.from_dict(r) for r in data.get("removals", [])],
         )
 
 
@@ -797,7 +858,7 @@ def read_pending() -> PendingConsent | None:
         logger.warning("clawchat pending skill-update record unreadable; clearing")
         clear_pending()
         return None
-    if not isinstance(data, dict) or not data.get("updates"):
+    if not isinstance(data, dict) or not (data.get("updates") or data.get("removals")):
         return None
     try:
         return PendingConsent.from_dict(data)
