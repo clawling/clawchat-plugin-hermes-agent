@@ -420,7 +420,7 @@ def _fetch_text(url: str, fetcher: Fetcher) -> str:
 
 @dataclass(frozen=True)
 class PendingSkillUpdate:
-    """One skill that has a newer version available at the official source."""
+    """One skill whose content differs from the official source."""
 
     skill_id: str
     current: str | None
@@ -451,43 +451,88 @@ class PendingSkillUpdate:
         )
 
 
+@dataclass(frozen=True)
+class PendingSkillRemoval:
+    """One locally installed skill tombstoned by the official source."""
+
+    skill_id: str
+    current: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"skill_id": self.skill_id, "current": self.current}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "PendingSkillRemoval":
+        current = data.get("current")
+        return cls(
+            skill_id=str(data["skill_id"]),
+            current=None if current is None else str(current),
+        )
+
+
+@dataclass
+class SkillCheckResult:
+    updates: list[PendingSkillUpdate] = field(default_factory=list)
+    removals: list[PendingSkillRemoval] = field(default_factory=list)
+
+    def __bool__(self) -> bool:
+        return bool(self.updates or self.removals)
+
+
 def check_skill_update(
     *,
     fetcher: Fetcher | None = None,
     ref: str | None = None,
     local_manifest: dict[str, str] | None = None,
-) -> list[PendingSkillUpdate]:
-    """Fetch the official manifest and return the hermes skills that are newer.
+    local_sha: Callable[[str], str | None] | None = None,
+) -> SkillCheckResult:
+    """Fetch the official manifest; report skills to converge and to remove.
 
-    A skill missing from the local manifest is reported as an update (latest is
-    newer than nothing). Raises ``SkillUpdateError`` on any manifest problem.
+    Convergence is sha-based: a skill whose LOCAL managed file bytes hash
+    differently from the manifest entry (or is missing) is an update — this
+    covers upgrades, rollbacks, and same-version content fixes alike. A skill
+    listed in ``removed[hermes]`` that is locally installed (per the local
+    manifest) and not bundled is reported for removal. Raises
+    ``SkillUpdateError`` on any manifest problem.
     """
     fetch = fetcher or _default_fetch
     use_ref = ref or DEFAULT_SKILLS_REF
     local = local_manifest if local_manifest is not None else read_local_manifest()
+    sha_of = local_sha or local_skill_sha
     text = _fetch_text(manifest_url(use_ref), fetch)
     manifest = parse_skills_manifest(text)
     target_skills = manifest.skills.get(TARGET)
-    if not target_skills:
+    if target_skills is None:
         raise SkillUpdateError(f"skills manifest has no entry for target {TARGET}")
 
-    pending: list[PendingSkillUpdate] = []
+    updates: list[PendingSkillUpdate] = []
     for skill_id, entry in target_skills.items():
-        current = local.get(skill_id)
-        has_update = current is None or is_version_older(current, entry.version)
-        if not has_update:
+        if sha_of(skill_id) == entry.sha256:
             continue
-        pending.append(
+        updates.append(
             PendingSkillUpdate(
                 skill_id=skill_id,
-                current=current,
+                current=local.get(skill_id),
                 target=entry.version,
                 path=entry.path,
                 sha256=entry.sha256,
                 bytes=entry.bytes,
             )
         )
-    return pending
+
+    removals: list[PendingSkillRemoval] = []
+    for skill_id in manifest.removed.get(TARGET, ()):
+        if skill_id in HERMES_SKILL_IDS:
+            logger.warning(
+                "clawchat ignoring tombstone for bundled skill %s", skill_id
+            )
+            continue
+        if skill_id not in local:
+            continue
+        removals.append(
+            PendingSkillRemoval(skill_id=skill_id, current=local.get(skill_id))
+        )
+    return SkillCheckResult(updates=updates, removals=removals)
 
 
 def fetch_skill_markdown(
