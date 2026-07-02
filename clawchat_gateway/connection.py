@@ -34,7 +34,11 @@ from clawchat_gateway.protocol import (
     new_frame_id,
 )
 from clawchat_gateway.config import _jwt_claim
-from clawchat_gateway.device_id import get_device_id, warn_if_device_id_unpinned
+from clawchat_gateway.device_id import (
+    device_id_is_pinned,
+    get_device_id,
+    warn_if_device_id_unpinned,
+)
 from clawchat_gateway.storage import get_clawchat_store
 from clawchat_gateway.notify_signal import NotifySignalObserver
 from clawchat_gateway.ws_log import format_ws_log
@@ -269,7 +273,7 @@ class ClawChatConnection:
             await prior.stop()
         self._stopping = False
         self._auth_failed = False
-        warn_if_device_id_unpinned()
+        self._warn_if_device_id_volatile()
         if self._refresh_manager is None:
             self._refresh_manager = self._build_refresh_manager()
         self._supervisor_task = asyncio.create_task(
@@ -297,8 +301,12 @@ class ClawChatConnection:
             device_id=self._refresh_device_id(),
         )
 
-    def _refresh_device_id(self) -> str:
+    def _resolve_device_id(self) -> tuple[str, bool]:
         """Connect-time device id used as ``X-Device-Id`` on connect AND refresh (§E).
+
+        Returns ``(device_id, durable)`` — ``durable`` is True when the id
+        survives container recreation (stored row, token claim, or pinned env),
+        False only for the volatile host-fingerprint fallback.
 
         Resolution order:
 
@@ -325,11 +333,28 @@ class ClawChatConnection:
                 credentials = None
             stored = getattr(credentials, "device_id", None) if credentials else None
             if stored:
-                return stored
+                return stored, True
         token_did = _jwt_claim(self._cfg.token, "did")
         if token_did:
-            return token_did
-        return get_device_id()
+            return token_did, True
+        return get_device_id(), device_id_is_pinned()
+
+    def _refresh_device_id(self) -> str:
+        return self._resolve_device_id()[0]
+
+    def _warn_if_device_id_volatile(self) -> None:
+        """Boot-time gate for the unpinned-``CLAWCHAT_DEVICE_ID`` warning (§E).
+
+        The warning only applies when resolution actually falls through to the
+        volatile host fingerprint. A stored activations-row id or token ``did``
+        is read back from SQLite / the token on every boot, so it stays stable
+        across container recreation even without the env pin — warning then
+        would be a false alarm.
+        """
+        _, durable = self._resolve_device_id()
+        if durable:
+            return
+        warn_if_device_id_unpinned()
 
     def session_device_id(self) -> str:
         """Public accessor for the resolved connect-time device id (§E).

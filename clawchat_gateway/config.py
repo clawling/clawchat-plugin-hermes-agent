@@ -1,11 +1,14 @@
 import base64
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
 from clawchat_gateway.api_client import DEFAULT_BASE_URL, DEFAULT_WEBSOCKET_URL
+
+logger = logging.getLogger("clawchat_gateway.config")
 
 
 def _read_env_file_value(name: str) -> str:
@@ -122,6 +125,37 @@ def _jwt_claim(token: str, claim: str) -> str:
         return ""
     value = data.get(claim) if isinstance(data, dict) else None
     return value.strip() if isinstance(value, str) else ""
+
+
+def _resolve_user_id(token: str, configured: str) -> str:
+    """Bot-account user id, validated against the token's ``sub`` claim.
+
+    The WS session authenticates with the access token, so the backend binds
+    the session to the token's ``sub`` — that IS the bot's user id for this
+    session. Unlike ``owner_user_id`` (explicit config wins over the ``oid``
+    claim), a configured user_id that disagrees with ``sub`` is always wrong
+    for the session this token creates, and it silently breaks self-echo
+    detection: with the OWNER's id here, every owner message is dropped as the
+    bot's own echo (2026-07-02 production incident — a provisioner wrote the
+    owner id into ``extra.user_id``). Token wins; the mismatch is logged.
+
+    Also derives user_id from ``sub`` when nothing is configured, mirroring
+    the ``aid``/``oid`` fallbacks, so a provisioner that injects only
+    CLAWCHAT_TOKEN still passes the ``_has_connect_credentials`` gate.
+    """
+    token_sub = _jwt_claim(token, "sub")
+    if not token_sub:
+        return configured
+    if configured and configured != token_sub:
+        logger.warning(
+            "clawchat user_id mismatch: configured %r does not equal the access "
+            "token's sub claim %r; using the token value. A misconfigured "
+            "user_id (e.g. the owner's id) breaks self-echo detection and "
+            "mention gating — fix CLAWCHAT_USER_ID / extra.user_id.",
+            configured,
+            token_sub,
+        )
+    return token_sub
 
 
 def _jwt_exp(token: str) -> int | None:
@@ -290,8 +324,10 @@ class ClawChatConfig:
             token=token,
             refresh_token=_get_env("CLAWCHAT_REFRESH_TOKEN")
             or _get_config_value(extra, "refresh_token", ""),
-            user_id=_get_env("CLAWCHAT_USER_ID")
-            or _get_config_value(extra, "user_id", ""),
+            user_id=_resolve_user_id(
+                token,
+                _get_env("CLAWCHAT_USER_ID") or _get_config_value(extra, "user_id", ""),
+            ),
             agent_id=_get_env("CLAWCHAT_AGENT_ID")
             or _get_config_value(extra, "agent_id", "")
             or _jwt_claim(token, "aid"),

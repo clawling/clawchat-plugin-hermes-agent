@@ -94,6 +94,12 @@ def warn_if_device_id_unpinned() -> None:
     reschedule, which the backend then treats as a device mismatch (10003) at
     refresh time → spurious auto-logout. Deployments MUST pin
     ``CLAWCHAT_DEVICE_ID``.
+
+    Callers gate this on the actual connect-time resolution
+    (``ClawChatConnection._warn_if_device_id_volatile``): a device id read back
+    from the SQLite activations row or the token's ``did`` claim is durable
+    across container recreation, so the warning is only emitted when resolution
+    truly falls through to this module's fingerprint.
     """
     if device_id_is_pinned():
         return
