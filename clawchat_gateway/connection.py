@@ -553,6 +553,18 @@ class ClawChatConnection:
         reconnect_reason = "-"
         startup_refresh_done = False
         while not self._stopping:
+            if not startup_refresh_done and self._load_startup_activation_credentials():
+                logger.info(
+                    format_ws_log(
+                        event="activation_loaded",
+                        account_id=self._account_id,
+                        attempt=self._attempt,
+                        reconnect_count=self._reconnect_count,
+                        state=self._state.value,
+                        action="connect",
+                        fields=[("source", "sqlite_startup")],
+                    )
+                )
             if not self._has_connect_credentials():
                 loaded = await self._wait_for_activation_credentials()
                 if not loaded:
@@ -560,8 +572,9 @@ class ClawChatConnection:
                 # _wait_for_activation_credentials already applied §A.4.
                 startup_refresh_done = True
             elif not startup_refresh_done:
-                # §A.4 env-credential path: refresh-if-near-expiry before the
-                # FIRST connect (SQLite path is handled in wait-for-activation).
+                # §A.4 startup path (sqlite-first load or env bootstrap):
+                # refresh-if-near-expiry before the FIRST connect (the polling
+                # wait-for-activation path applies its own §A.4).
                 startup_refresh_done = True
                 if (
                     self._refresh_manager is not None
@@ -640,6 +653,43 @@ class ClawChatConnection:
             and self._cfg.user_id
             and self._cfg.owner_user_id
         )
+
+    def _load_startup_activation_credentials(self) -> bool:
+        """SQLite-first startup: adopt the activation row when one exists.
+
+        The activations row is the durable credential source of truth
+        (activation + token rotation land there), so at startup it takes
+        precedence over env/extra credentials. env/extra only bootstrap the
+        no-row case — they connect once and get seeded into a row on the
+        first refresh (§C.2). One-shot and non-blocking: the polling wait
+        path stays in `_wait_for_activation_credentials`.
+        """
+        if self._store is None:
+            return False
+        try:
+            credentials = self._store.get_activation_credentials(
+                platform="hermes",
+                account_id=self._account_id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat activation credential read failed", exc_info=True)
+            return False
+        if credentials is None:
+            return False
+        if credentials.access_token == self._rejected_activation_token:
+            return False
+        self._cfg = replace(
+            self._cfg,
+            token=credentials.access_token,
+            refresh_token=credentials.refresh_token or "",
+            user_id=credentials.user_id,
+            owner_user_id=credentials.owner_user_id,
+        )
+        self._using_activation_db_credentials = True
+        self._activated_at_ms = credentials.activated_at
+        if self._refresh_manager is not None:
+            self._refresh_manager.reset_latch()
+        return True
 
     async def _wait_for_activation_credentials(self) -> bool:
         if not self._activation_wait_logged:
