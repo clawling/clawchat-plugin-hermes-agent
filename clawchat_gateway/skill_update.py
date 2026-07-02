@@ -537,6 +537,57 @@ def apply_skill_update(
     return applied
 
 
+# --- Host hot-registration ---------------------------------------------------
+
+# The host's ``ctx.register_skill``, captured at plugin load. Registration is a
+# plain registry write on the Hermes side, so calling it after load is safe and
+# makes a just-applied skill resolvable via ``skill_view`` without a restart.
+_skill_registrar: Callable[..., None] | None = None
+
+
+def set_skill_registrar(registrar: Callable[..., None] | None) -> None:
+    """Capture ``ctx.register_skill`` for post-apply hot registration."""
+    global _skill_registrar
+    _skill_registrar = registrar if callable(registrar) else None
+
+
+def skill_description(path: Path) -> str:
+    """Frontmatter ``description`` of a SKILL.md, or empty string."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    description = parse_frontmatter(text).get("description")
+    return str(description).strip() if description else ""
+
+
+def hot_register_new_skills(updates: list[PendingSkillUpdate]) -> list[str]:
+    """Register brand-new applied skills with the host; returns registered ids.
+
+    Only skills the local manifest had never seen (``current is None``) need
+    registration — pre-existing ids were registered at plugin load and their
+    managed file was overwritten in place. Per-skill failures are logged and
+    skipped so one bad skill can never break the consent flow.
+    """
+    registrar = _skill_registrar
+    if registrar is None:
+        return []
+    registered: list[str] = []
+    for update in updates:
+        if update.current is not None:
+            continue
+        path = managed_skill_path(update.skill_id)
+        try:
+            registrar(update.skill_id, path, description=skill_description(path))
+        except Exception as exc:  # noqa: BLE001 — never break the consent flow
+            logger.warning(
+                "clawchat hot-register failed for skill %s: %s", update.skill_id, exc
+            )
+            continue
+        registered.append(update.skill_id)
+    return registered
+
+
 # --- Owner-consent classification -------------------------------------------
 
 _AFFIRM_EXACT = {

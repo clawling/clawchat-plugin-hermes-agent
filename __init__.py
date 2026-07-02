@@ -407,6 +407,15 @@ def _register_skill(ctx) -> None:
     if not callable(register_skill):
         return
 
+    # Capture the registrar so a dynamically delivered brand-new skill can be
+    # hot-registered right after the owner-approved apply (no restart needed).
+    try:
+        from clawchat_gateway.skill_update import set_skill_registrar
+
+        set_skill_registrar(register_skill)
+    except Exception as exc:  # noqa: BLE001 — never let the skill mechanism crash load
+        logger.warning("ClawChat skill hot-registrar unavailable: %s", exc)
+
     bundled_skills = (
         ("clawchat", "ClawChat profiles, friends, moments, and media."),
         (
@@ -427,6 +436,31 @@ def _register_skill(ctx) -> None:
             register_path,
             description=description,
         )
+
+    # Skills delivered dynamically (present in the managed manifest but not
+    # bundled with the plugin) must be re-registered on every load, or a
+    # hot-added skill would vanish after a Hermes restart.
+    try:
+        from clawchat_gateway.skill_update import (
+            managed_skill_path,
+            read_local_manifest,
+            skill_description,
+        )
+
+        bundled_ids = {skill_id for skill_id, _ in bundled_skills}
+        for skill_id in read_local_manifest():
+            if skill_id in bundled_ids:
+                continue
+            managed = managed_skill_path(skill_id)
+            if not managed.exists():
+                continue
+            register_skill(
+                skill_id,
+                managed,
+                description=skill_description(managed),
+            )
+    except Exception as exc:  # noqa: BLE001 — never let the skill mechanism crash load
+        logger.warning("ClawChat managed extra-skill registration skipped: %s", exc)
 
 
 def _platform_value(platform) -> str:

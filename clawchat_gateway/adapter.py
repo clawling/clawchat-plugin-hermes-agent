@@ -832,6 +832,14 @@ class ClawChatAdapter(BasePlatformAdapter):
             logger.warning("clawchat skill update apply failed: %s", exc, exc_info=True)
             await self._send_owner_text(inbound.chat_id, "技能更新失败,请稍后再试。")
             return True
+        # A brand-new skill id (never bundled, never applied before) is on disk
+        # now but unknown to the Hermes host — register it immediately so it is
+        # resolvable via skill_view without a restart.
+        registered = await asyncio.to_thread(
+            skill_update.hot_register_new_skills, updates
+        )
+        if registered:
+            logger.info("clawchat hot-registered new skills=%s", registered)
         targets = "、".join(f"v{u.target}" for u in updates)
         await self._send_owner_text(inbound.chat_id, f"✅ 已更新到 {targets}")
         logger.info("clawchat skill update applied skills=%s", applied)
