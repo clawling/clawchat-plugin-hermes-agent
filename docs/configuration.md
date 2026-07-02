@@ -14,7 +14,8 @@ persist there, so the row is the durable source of truth. Env-backed
 they are used to connect and are seeded into a SQLite row on the first token
 refresh (§C.2). To make an agent that already has an activation row pick up
 new env credentials, re-pair (the new activation row wins) or clear the row
-first.
+first — either way, a restart of the agent process is required for the new
+env credentials to take effect.
 
 ## Credentials (written by activation)
 
