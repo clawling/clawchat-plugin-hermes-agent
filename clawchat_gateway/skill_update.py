@@ -228,6 +228,15 @@ def _set_local_version(skill_id: str, version: str) -> None:
     write_local_manifest(manifest)
 
 
+def local_skill_sha(skill_id: str) -> str | None:
+    """sha256 hex of the managed SKILL.md raw bytes, or None when missing."""
+    try:
+        raw = managed_skill_path(skill_id).read_bytes()
+    except OSError:
+        return None
+    return hashlib.sha256(raw).hexdigest()
+
+
 # --- Seeding managed skills from the bundled snapshot -----------------------
 
 
@@ -323,6 +332,14 @@ class SkillManifestEntry:
     bytes: int
 
 
+@dataclass(frozen=True)
+class ParsedSkillsManifest:
+    """Validated ``skills/manifest.json``: live entries + per-target tombstones."""
+
+    skills: dict[str, dict[str, SkillManifestEntry]]
+    removed: dict[str, tuple[str, ...]]
+
+
 def _as_entry(value: Any, where: str) -> SkillManifestEntry:
     if not isinstance(value, dict):
         raise SkillUpdateError(f"skills manifest entry {where} is not an object")
@@ -341,7 +358,7 @@ def _as_entry(value: Any, where: str) -> SkillManifestEntry:
     return SkillManifestEntry(version=version, path=path, sha256=sha256, bytes=raw_bytes)
 
 
-def parse_skills_manifest(text: str) -> dict[str, dict[str, SkillManifestEntry]]:
+def parse_skills_manifest(text: str) -> ParsedSkillsManifest:
     """Parse + validate the raw ``skills/manifest.json`` text."""
     try:
         parsed = json.loads(text)
@@ -364,7 +381,27 @@ def parse_skills_manifest(text: str) -> dict[str, dict[str, SkillManifestEntry]]
             skill_id: _as_entry(entry, f"{target}.{skill_id}")
             for skill_id, entry in entries.items()
         }
-    return out
+
+    removed: dict[str, tuple[str, ...]] = {}
+    removed_raw = parsed.get("removed")
+    if removed_raw is not None:
+        if not isinstance(removed_raw, dict):
+            raise SkillUpdateError("skills manifest `removed` must be an object")
+        for target, ids in removed_raw.items():
+            if not isinstance(ids, list) or not all(
+                isinstance(i, str) and i.strip() for i in ids
+            ):
+                raise SkillUpdateError(
+                    f"skills manifest removed[{target}] must be a list of skill ids"
+                )
+            cleaned = tuple(i.strip() for i in ids)
+            for skill_id in cleaned:
+                if skill_id in out.get(target, {}):
+                    raise SkillUpdateError(
+                        f"skill {target}.{skill_id} is in both skills and removed"
+                    )
+            removed[str(target)] = cleaned
+    return ParsedSkillsManifest(skills=out, removed=removed)
 
 
 def _fetch_text(url: str, fetcher: Fetcher) -> str:
@@ -430,7 +467,7 @@ def check_skill_update(
     local = local_manifest if local_manifest is not None else read_local_manifest()
     text = _fetch_text(manifest_url(use_ref), fetch)
     manifest = parse_skills_manifest(text)
-    target_skills = manifest.get(TARGET)
+    target_skills = manifest.skills.get(TARGET)
     if not target_skills:
         raise SkillUpdateError(f"skills manifest has no entry for target {TARGET}")
 
