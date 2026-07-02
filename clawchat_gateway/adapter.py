@@ -860,9 +860,21 @@ class ClawChatAdapter(BasePlatformAdapter):
         if registered:
             logger.info("clawchat hot-registered new skills=%s", registered)
         targets = [u.target for u in updates]
-        await self._send_owner_text(
-            inbound.chat_id, build_skill_update_ack(targets, removed)
-        )
+        if not targets and not removed and (updates or removals):
+            # Every pending item ended up producing nothing to report — e.g. a
+            # removal-only batch where each removal hit an OSError and was
+            # skipped (apply_skill_removal is per-id best-effort). This is
+            # distinct from the idempotent-skip success path: there,
+            # `updates` is non-empty so `targets` is non-empty too (targets is
+            # derived from the pending request, not from what apply_skill_update
+            # actually wrote), so build_skill_update_ack still names the
+            # already-current versions. Only a genuinely empty ack — bare
+            # "✅ " with nothing after it — needs this failure fallback.
+            await self._send_owner_text(inbound.chat_id, "技能更新失败,请稍后再试。")
+        else:
+            await self._send_owner_text(
+                inbound.chat_id, build_skill_update_ack(targets, removed)
+            )
         logger.info(
             "clawchat skill update applied skills=%s removed=%s", applied, removed
         )

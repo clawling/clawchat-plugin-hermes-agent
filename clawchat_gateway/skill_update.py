@@ -176,6 +176,14 @@ def atomic_write_text(path: Path, text: str) -> None:
 
     NEVER delete-then-write the destination: a transient missing file at a
     registered skill path makes ``hermes`` clear the registration.
+
+    Opens the tmp file with ``newline=""`` for raw-byte fidelity: the bytes
+    written to disk must exactly match the bytes that were downloaded and
+    checksum-verified, because sha convergence (``local_skill_sha`` vs. the
+    manifest ``sha256``) depends on it — with the default universal-newline
+    translation, ``"\\n"`` would be rewritten to ``os.linesep`` on hosts where
+    that differs from ``"\\n"``, permanently diverging the on-disk sha from the
+    manifest sha and livelocking the update check as "needs update" forever.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -184,7 +192,7 @@ def atomic_write_text(path: Path, text: str) -> None:
     )
     tmp = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())

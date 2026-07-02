@@ -192,6 +192,14 @@ OpenClaw's update segment uses a colon ("我的技能有更新:…") where Herme
 not, and OpenClaw shows a missing local version as "v无" where Hermes shows
 "v—" — both express the same three states (upgrade, rollback, content-only
 revision) and the same combined updates+removals prompt/consent/ack flow.
+There is also a separator difference in the **consent prompt's** update
+listing: OpenClaw's `runSkillUpdateCheck` joins multiple pending-update
+descriptions with `;` (`skill-update.ts`, `updates.map(describeUpdate).join(";")`),
+while Hermes's `PendingConsent.summary()` (`skill_update.py`) joins the same
+kind of per-update descriptions with `、` (the Chinese enumeration comma). The
+post-apply **ack** summary itself doesn't diverge this way — both
+`build_skill_update_ack` (Hermes, `adapter.py`) and OpenClaw's applied-summary
+line join with `、`.
 
 The **apply** phase genuinely diverges, though, not just in wording:
 
