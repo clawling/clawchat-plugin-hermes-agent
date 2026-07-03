@@ -87,6 +87,7 @@ def build_plugin_report_payload(
     device_id: str,
     platform: str,
     plugin_version: str,
+    agent_version: str,
     runtime_name: str,
     runtime_version: str,
 ) -> dict:
@@ -95,6 +96,7 @@ def build_plugin_report_payload(
         "device_id": device_id,
         "platform": platform,
         "plugin_version": plugin_version,
+        "agent_version": agent_version,
         "runtime_name": runtime_name,
         "runtime_version": runtime_version,
     }
@@ -472,6 +474,7 @@ class ClawChatApiClient:
         device_id: str,
         platform: str,
         plugin_version: str,
+        agent_version: str,
         runtime_name: str,
         runtime_version: str,
         authenticated: bool = False,
@@ -480,6 +483,7 @@ class ClawChatApiClient:
             device_id=device_id,
             platform=platform,
             plugin_version=plugin_version,
+            agent_version=agent_version,
             runtime_name=runtime_name,
             runtime_version=runtime_version,
         )

@@ -106,6 +106,28 @@ from clawchat_gateway.terminal_send import (
     set_clawchat_mention_sender,
 )
 
+
+def _resolve_host_agent_version() -> str:
+    """Best-effort host hermes-agent version; "" on failure (never raises)."""
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            return version("hermes-agent")
+        except PackageNotFoundError:
+            pass
+    except Exception:  # noqa: BLE001 — best-effort, must never break import
+        pass
+    try:
+        from hermes_cli import __version__ as host_version
+
+        return host_version
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+_HOST_AGENT_VERSION = _resolve_host_agent_version()
+
 logger = logging.getLogger("clawchat_gateway.adapter")
 inbound_trace = logging.getLogger("clawchat_gateway.inbound_trace")
 
@@ -532,6 +554,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 device_id=device_id,
                 platform=CLAWCHAT_PLUGIN_PLATFORM,
                 plugin_version=_PLUGIN_VERSION,
+                agent_version=_HOST_AGENT_VERSION,
                 runtime_name="python",
                 runtime_version=_python_version(),
                 authenticated=authenticated,
