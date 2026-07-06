@@ -214,7 +214,12 @@ conversation id.
 - `clawchat_gateway/connection.py`: waiting-for-activation credential polling,
   WebSocket connection lifecycle, and the auto-logout path (`AUTO_LOGOUT_*`).
 - `clawchat_gateway/token_refresh.py`: proactive/reactive refresh scheduling,
-  single-flight + rejected-token guards, persist-then-swap ordering.
+  single-flight + rejected-token guards, persist-then-swap ordering. Note:
+  proactive refresh is driven by a short poll loop comparing
+  `now >= exp - margin` (`connection.py` credential watch), never by a
+  long-armed one-shot timer — so the OpenClaw plugin's 30-day-token
+  `setTimeout` overflow (delay > 2^31-1 ms fires immediately; fixed there by
+  chunked re-arming) has no analogue here. Audited 2026-07-06.
 - `clawchat_gateway/api_client.py`: `agents_connect` and `auth_refresh`
   (`POST /v1/auth/refresh`) HTTP requests.
 - `clawchat_gateway/device_id.py`: connect-time `X-Device-Id` and the
