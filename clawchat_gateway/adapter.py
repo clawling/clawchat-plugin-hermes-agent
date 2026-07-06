@@ -95,6 +95,7 @@ from clawchat_gateway.protocol import (
 )
 from clawchat_gateway.group_settings import EffectiveSettings, GroupSettingsCache
 from clawchat_gateway.friend_request_turn import build_friend_request_inbound
+from clawchat_gateway.greeting import load_activation_bootstrap_prompt
 from clawchat_gateway.permission_result import handle_permission_result
 from clawchat_gateway.permissions import PermissionCache
 from clawchat_gateway import skill_update
@@ -284,22 +285,6 @@ _HERMES_RUNTIME_STATUS_PREFIXES = (
     "⚠️ Iteration budget exhausted ",
     "⚠️ The model returned no response after processing tool results.",
     "The model returned no response after processing tool results.",
-)
-# Worded to make the greeting the single required action. Earlier wording
-# ("ClawChat activation bootstrap: ... do both ...") led some agents to treat it
-# as a setup task and write a file instead of replying, so no greeting reached
-# the user. Lead with the chat reply, forbid file/tool detours, and keep the
-# profile update strictly optional and secondary. (Mirrors the openclaw plugin.)
-_CLAWCHAT_ACTIVATION_BOOTSTRAP_PROMPT = (
-    "You are now connected to a ClawChat direct conversation with your user.\n\n"
-    "Reply now with one short, friendly greeting message in this conversation: "
-    "introduce yourself and say you are connected and ready.\n"
-    "Send it as a normal chat reply. Do not write or create any files or notes, "
-    "and do not call tools just to greet.\n"
-    "Only if you already have your own profile details (display name, bio, or avatar) "
-    "may you also call `clawchat_update_account_profile` (use `clawchat_upload_avatar_image` "
-    "first for a local avatar image); otherwise skip that and just greet.\n\n"
-    "Do not ask the user for profile information."
 )
 
 
@@ -1661,7 +1646,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             chat_type="direct",
             sender_id=owner_user_id,
             sender_name="",
-            text=_CLAWCHAT_ACTIVATION_BOOTSTRAP_PROMPT,
+            text=load_activation_bootstrap_prompt(),
             raw_message={
                 "synthetic": True,
                 "bootstrap": True,
