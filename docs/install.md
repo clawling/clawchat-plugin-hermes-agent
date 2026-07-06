@@ -60,7 +60,7 @@ After install, the plugin source is at `$HERMES_HOME/plugins/clawchat/`.
 
 - Copy the plugin source into `$HERMES_HOME/plugins/clawchat/`.
 - On `enable`, register the `clawchat` gateway platform via
-  `ctx.register_platform(...)`, register the bundled `clawchat:clawchat`
+  `ctx.register_platform(...)`, register the bundled `clawchat:clawchat-core`
   skill via `ctx.register_skill(...)`, register the thirty
   `clawchat_*` tools, and install the `pre_gateway_dispatch` hook.
 - **No** credentials are written. `CLAWCHAT_TOKEN` and

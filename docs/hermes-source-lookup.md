@@ -18,7 +18,7 @@ Resolve these within this repository first:
 
 - ClawChat Protocol v2 envelopes, event taxonomy, routing, replay, or streaming semantics. Start with `docs/client-integration.md` (the protocol contract) and `docs/architecture.md`. Verify against `clawchat_gateway/`.
 - ClawChat REST, media upload, account profile, and friends behavior. Start with `docs/architecture.md`, `docs/configuration.md`, and the matching modules under `clawchat_gateway/`.
-- The `clawchat:clawchat` skill and the `clawchat_*` tool catalogue. Start with `docs/reference/tools.md`, `docs/reference/prompts.md`, `plugin.yaml`, and `skills/clawchat/SKILL.md`.
+- The `clawchat:clawchat-core` skill and the `clawchat_*` tool catalogue. Start with `docs/reference/tools.md`, `docs/reference/prompts.md`, `plugin.yaml`, and `skills/clawchat-core/SKILL.md`.
 - README, install prose, and ordinary project-description wording.
 - Unit-test or import-time failures whose stack traces only involve this repository's source.
 

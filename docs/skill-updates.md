@@ -7,6 +7,16 @@ Implementation lives in `clawchat_gateway/skill_update.py` (mechanism) plus
 `clawchat_gateway/adapter.py` (trigger + consent gate) and
 `__init__.py::_register_skill` (registration).
 
+**2026-07-06 rename**: the two bundled skill ids were renamed to namespaced
+ids — `clawchat` → `clawchat-core`, `liveware-app` → `clawchat-liveware`
+(`HERMES_SKILL_IDS` in `skill_update.py`, `bundled_skills` in `__init__.py`).
+The install-cli manifest tombstones the old ids, so the tombstone/removal
+guard above deletes stale local copies of `clawchat`/`liveware-app` while the
+new ids are protected as bundled. The Hermes plugin id `clawchat`
+(`register_platform`, `clawchat:` skill-namespace prefix) and the managed
+directory name `clawchat-skills` are unchanged — only the two skill ids
+changed.
+
 ## End-to-end flow
 
 | Step | Actor | Code |
@@ -56,7 +66,7 @@ is expected, not a bug: the managed tree is meant to always converge to
 whatever the official manifest says, never to preserve local edits.
 
 Publish-side constraint: the official manifest's version for a bundled skill
-(`clawchat`, `liveware-app`) must never be **lower** than the version already
+(`clawchat-core`, `clawchat-liveware`) must never be **lower** than the version already
 shipped in the plugin's own bundled snapshot. `seed_managed_skill` reseeds the
 managed copy from the bundled snapshot whenever the managed version is older
 than the bundled one — a manifest that regresses a bundled skill's version
@@ -81,8 +91,8 @@ whatever manifest they actually fetch, independent of the generator.
 1. the id is tombstoned for `hermes` in `removed[hermes]`,
 2. the id is present in the *local* managed manifest (i.e. actually installed
    here — a tombstone for a skill this plugin never had is a no-op), and
-3. the id is **not** one of the bundled ids (`HERMES_SKILL_IDS = ("clawchat",
-   "liveware-app")`) — a tombstone naming a bundled id is ignored with a
+3. the id is **not** one of the bundled ids (`HERMES_SKILL_IDS = ("clawchat-core",
+   "clawchat-liveware")`) — a tombstone naming a bundled id is ignored with a
    `logger.warning`, never acted on, since deleting a bundled skill would only
    trigger `seed_managed_skill` to reseed it right back.
 
@@ -137,7 +147,7 @@ install (`current is None`) rather than a removal.
 
 `__init__.py::_register_skill(ctx)` does three things at plugin load:
 
-1. **Bundled skills** (`clawchat`, `liveware-app`): seed a managed copy and
+1. **Bundled skills** (`clawchat-core`, `clawchat-liveware`): seed a managed copy and
    `ctx.register_skill(id, managed_path, description=...)`.
 2. **Managed extras**: any id present in the managed manifest but not bundled —
    i.e. delivered earlier by a dynamic update — is registered too, with its

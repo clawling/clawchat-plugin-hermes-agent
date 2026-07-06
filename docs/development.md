@@ -17,7 +17,7 @@ same modules Hermes loads.
 ├── MANIFEST.in                  # Bundles prompts/*.md when building a wheel
 ├── clawchat_gateway/            # All runtime modules — adapter, connection, protocol, tools, …
 ├── prompts/                     # Required platform.md + optional defaults
-├── skills/clawchat/SKILL.md     # Bundled Hermes Plugin Bundle skill
+├── skills/clawchat-core/SKILL.md # Bundled Hermes Plugin Bundle skill
 └── docs/                        # This documentation tree
 ```
 
@@ -119,7 +119,7 @@ install.
 ## Packaging caveats
 
 `MANIFEST.in` only ships `prompts/*.md`. The bundled skill at
-`skills/clawchat/SKILL.md` is **not** in `MANIFEST.in`, so a built wheel
+`skills/clawchat-core/SKILL.md` is **not** in `MANIFEST.in`, so a built wheel
 would omit it. This is acceptable today because Hermes installs from
 the source tree, not from a wheel — but if you ever publish to PyPI,
 extend `MANIFEST.in` first.

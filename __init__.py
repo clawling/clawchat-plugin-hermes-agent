@@ -417,9 +417,9 @@ def _register_skill(ctx) -> None:
         logger.warning("ClawChat skill hot-registrar unavailable: %s", exc)
 
     bundled_skills = (
-        ("clawchat", "ClawChat profiles, friends, moments, and media."),
+        ("clawchat-core", "ClawChat profiles, friends, moments, and media."),
         (
-            "liveware-app",
+            "clawchat-liveware",
             "Expose a local web service via liveware and register it to ClawChat.",
         ),
     )

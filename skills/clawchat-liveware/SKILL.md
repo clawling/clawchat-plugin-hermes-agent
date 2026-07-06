@@ -1,5 +1,5 @@
 ---
-name: liveware-app
+name: clawchat-liveware
 version: 1.0.0
 description: Use when the user wants to expose this agent's local web service to the public internet via the liveware CLI and make it appear as an app in their ClawChat chat with this agent. Covers logging in to liveware with the ClawChat account, creating a liveware app, binding a tunnel to a local port, and registering the public URL to ClawChat.
 ---

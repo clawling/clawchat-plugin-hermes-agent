@@ -3,7 +3,7 @@
 Documentation for the `clawchat` Hermes plugin (Python package
 `clawchat-gateway`, source `clawling/clawchat-plugin-hermes-agent`). The plugin
 registers a `clawchat` gateway platform inside a running Hermes Agent
-v0.12.0+ process, ships a bundled `clawchat:clawchat` skill, and exposes
+v0.12.0+ process, ships a bundled `clawchat:clawchat-core` skill, and exposes
 thirty `clawchat_*` tools to the agent.
 
 ## I want to…
@@ -32,7 +32,7 @@ thirty `clawchat_*` tools to the agent.
 2. **`plugin.yaml` is canonical for the tool list** (`provides_tools`).
    `docs/reference/tools.md` is the human catalogue; it must stay in sync
    when tools are added or renamed.
-3. **`skills/clawchat/SKILL.md`** is a *runtime artefact* loaded by
+3. **`skills/clawchat-core/SKILL.md`** is a *runtime artefact* loaded by
    Hermes via `ctx.register_skill(...)`. Treat it as agent-facing
    documentation, not as a developer or operator guide.
 4. The install guide is [`./install.md`](./install.md). Keep install and
