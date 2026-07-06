@@ -41,7 +41,7 @@ def load_activation_bootstrap_prompt(home_dir: Path | None = None) -> str:
         content = greeting_path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return ACTIVATION_BOOTSTRAP_PROMPT
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         logger.warning(
             "clawchat: failed to read greeting override %s: %s", greeting_path, exc
         )
