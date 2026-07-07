@@ -416,6 +416,16 @@ def _register_skill(ctx) -> None:
     except Exception as exc:  # noqa: BLE001 — never let the skill mechanism crash load
         logger.warning("ClawChat skill hot-registrar unavailable: %s", exc)
 
+    # Managed skills only appear in the host's <available_skills> index /
+    # skills_list if the managed dir is listed in skills.external_dirs.
+    # Idempotent: writes the config at most once per config lifetime.
+    try:
+        from clawchat_gateway.skill_update import ensure_external_skills_dir
+
+        ensure_external_skills_dir()
+    except Exception as exc:  # noqa: BLE001 — never let the skill mechanism crash load
+        logger.warning("ClawChat external skills dir setup skipped: %s", exc)
+
     bundled_skills = (
         ("clawchat-core", "ClawChat profiles, friends, moments, and media."),
         (
