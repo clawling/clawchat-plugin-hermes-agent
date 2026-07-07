@@ -60,13 +60,18 @@ def liveware_file_url(file_path: str, ref: str = DEFAULT_SKILLS_REF) -> str:
 
 def parse_livewares_manifest(raw: bytes | str) -> LivewareSampleManifest:
     text = raw.decode() if isinstance(raw, (bytes, bytearray)) else raw
-    parsed = json.loads(text)
-    entry = (
-        (parsed.get("livewares") or {})
-        .get(LIVEWARES_TARGET, {})
-        .get(LIVEWARE_SAMPLE_ID)
-    )
-    if not entry:
+    try:
+        parsed = json.loads(text)
+    except Exception as exc:  # noqa: BLE001
+        raise LivewareSampleError(f"failed to parse livewares manifest: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise LivewareSampleError("livewares manifest must be a JSON object")
+    livewares = parsed.get("livewares")
+    if not isinstance(livewares, dict):
+        raise LivewareSampleError("livewares manifest missing `livewares`")
+    target = livewares.get(LIVEWARES_TARGET)
+    entry = target.get(LIVEWARE_SAMPLE_ID) if isinstance(target, dict) else None
+    if not isinstance(entry, dict):
         raise LivewareSampleError(
             f"livewares manifest missing {LIVEWARES_TARGET}/{LIVEWARE_SAMPLE_ID}"
         )
@@ -85,14 +90,24 @@ def parse_livewares_manifest(raw: bytes | str) -> LivewareSampleManifest:
             raise LivewareSampleError(f"livewares manifest file[{i}] bad path")
         if not _SHA_RE.match(sha):
             raise LivewareSampleError(f"livewares manifest file[{i}] bad sha256")
-        if not isinstance(n, int) or n < 0 or n > MAX_SAMPLE_FILE_BYTES:
+        if (
+            not isinstance(n, int)
+            or isinstance(n, bool)
+            or n < 0
+            or n > MAX_SAMPLE_FILE_BYTES
+        ):
             raise LivewareSampleError(f"livewares manifest file[{i}] bad bytes")
         files.append(LivewareSampleFile(path=p, sha256=sha, bytes=n))
     return LivewareSampleManifest(version=version, files=files)
 
 
 def _fetch_verified(fetch: Fetcher, url: str) -> bytes:
-    raw = fetch(url)
+    try:
+        raw = fetch(url)
+    except LivewareSampleError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise LivewareSampleError(f"fetch {url} failed: {exc}") from exc
     if not isinstance(raw, (bytes, bytearray)):
         raise LivewareSampleError(f"fetch {url} did not return bytes")
     if len(raw) > MAX_SAMPLE_FILE_BYTES:
