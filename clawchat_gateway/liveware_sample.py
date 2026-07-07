@@ -491,14 +491,20 @@ class LivewareSampleSupervisor:
         self._restart_times: list[float] = []
         self._tasks: set[asyncio.Task] = set()
         # Bumped every time children are killed (stop, restart, cap-out) so a
-        # stale _on_child_exit watcher for an already-superseded child can't
-        # double-count a crash or trigger a duplicate restart, and so an
-        # in-flight bootstrap/relaunch can detect that a child it started has
-        # already crashed mid-sequence (via _bail_if_stale) and abort instead
-        # of masking the crash with a status="active" write.
+        # stale watcher for an already-superseded child can't double-count a
+        # crash or trigger a duplicate restart. NOTE: the watch is attached
+        # only after upsert (see _watch_child) - a crash of THIS flow's own
+        # in-progress children before that point does NOT bump the
+        # generation and does NOT trip _bail_if_stale; that was the H8 bug
+        # (tunnel dies right after start_tunnel, before upsert -> the
+        # resulting generation bump used to abort the bootstrap before the
+        # row was ever persisted, orphaning the app card). _bail_if_stale
+        # still matters for stop() responsiveness and for the launch-lock
+        # overlap race (a stale in-flight flow superseded by a fresh one).
         self._generation = 0
-        # ids of child procs already handed to a watcher, so attaching a
-        # watcher per-child (as each is spawned) never double-attaches.
+        # ids of child procs already handed to a watcher, so watching both of
+        # THIS launch's children (once, right after upsert) never
+        # double-attaches even if called more than once.
         self._watched: set[int] = set()
         # Serializes the bounded spawn->register->upsert->attach-watch body of
         # _bootstrap/_relaunch so two launch flows (e.g. a stale in-flight
@@ -558,11 +564,17 @@ class LivewareSampleSupervisor:
         self._watched.clear()
 
     def _bail_if_stale(self, gen: int) -> bool:
-        """Abort the current bootstrap/relaunch step if we were stopped, OR if a
-        child we started has already crashed mid-sequence (which bumps the
-        generation via _kill_children and schedules its own relaunch). Either
-        way kill whatever children are live and return True so the caller stops
-        before writing status="active" over a supervisor that no longer exists."""
+        """Abort the current bootstrap/relaunch step if we were stopped, or if
+        the generation has moved on for a reason unrelated to THIS flow's own
+        in-progress children - e.g. the launch lock let a stale flow resume
+        after a fresh relaunch already superseded it. (A crash of this flow's
+        own server/tunnel is deliberately NOT visible here: the watch is
+        attached only after upsert - see _watch_child - precisely so an early
+        mid-bootstrap crash can't trip this check before the row is
+        persisted; that was the H8 orphan bug.) Either way kill whatever
+        children are live and return True so the caller stops before writing
+        status="active" over a supervisor generation that's no longer
+        current."""
         if self._stopped or gen != self._generation:
             self._kill_children()
             return True
@@ -622,10 +634,6 @@ class LivewareSampleSupervisor:
                 return
             self._server, port, server_drain = await start_sample_server(
                 app_dir=app_dir, port=_DEFAULT_SAMPLE_PORT, spawn=d.spawn)
-            # Watch each child the moment it exists so a crash during the
-            # intermediate awaits (login/app_create/tunnel/register) is observed
-            # rather than masked by the eventual status="active" upsert.
-            self._watch_child(self._server)
             self._spawn_task(server_drain)
             if self._bail_if_stale(gen):
                 return
@@ -638,17 +646,23 @@ class LivewareSampleSupervisor:
                 return
             self._tunnel, public_url, tunnel_drain = await start_tunnel(
                 liveware_path=path, app_id=app_id, port=port, spawn=d.spawn)
-            self._watch_child(self._tunnel)
             self._spawn_task(tunnel_drain)
             if self._bail_if_stale(gen):
                 return
+            # From here on we do NOT bail before persisting: once register_app
+            # has created the app card, a crash of either child must not abort
+            # the flow before the row is written (H8 fix). register -> upsert
+            # -> watch, matching openclaw's ordering, so a mid-bootstrap crash
+            # (e.g. the tunnel dying right after start_tunnel returns, before
+            # upsert) still yields a recoverable persisted row instead of an
+            # orphaned app card with nothing for _delayed_relaunch to find.
             await d.register_app(name=LIVEWARE_SAMPLE_APP_NAME, app_id=app_id, url=public_url)
-            if self._bail_if_stale(gen):
-                return
             d.store.upsert_liveware_sample(
                 platform=d.platform, account_id=d.account_id, app_id=app_id,
                 app_name=LIVEWARE_SAMPLE_APP_NAME, port=port, public_url=public_url,
                 sample_version=version, status="active")
+            self._watch_child(self._server)
+            self._watch_child(self._tunnel)
         await self._deliver_intro()
         self._log.debug("liveware-sample bootstrap complete at %s", public_url)
 
@@ -677,44 +691,68 @@ class LivewareSampleSupervisor:
                 return
             self._server, port, server_drain = await start_sample_server(
                 app_dir=app_dir, port=row.port or _DEFAULT_SAMPLE_PORT, spawn=d.spawn)
-            self._watch_child(self._server)
             self._spawn_task(server_drain)
             if self._bail_if_stale(gen):
                 return
             self._tunnel, public_url, tunnel_drain = await start_tunnel(
                 liveware_path=path, app_id=row.app_id, port=port, spawn=d.spawn)
-            self._watch_child(self._tunnel)
             self._spawn_task(tunnel_drain)
             if self._bail_if_stale(gen):
                 return
+            # See _bootstrap: no bail between register/upsert (H8 fix) so a
+            # crash of either child in this window can't orphan the row.
             if public_url != row.public_url:
                 await d.register_app(
                     name=row.app_name, app_id=row.app_id, url=public_url)
-            if self._bail_if_stale(gen):
-                return
             d.store.upsert_liveware_sample(
                 platform=d.platform, account_id=d.account_id, app_id=row.app_id,
                 app_name=row.app_name, port=port, public_url=public_url,
                 sample_version=version, status="active")
+            self._watch_child(self._server)
+            self._watch_child(self._tunnel)
         if row.intro_sent == 0:
             await self._deliver_intro()
 
     def _watch_child(self, proc) -> None:
-        """Attach a crash watcher to a single child as soon as it is spawned +
-        assigned. Deduped by proc id so the same child is never double-watched
-        (which would let one crash be counted twice). The watcher captures the
-        current generation; _kill_children bumps it so a superseded watcher
-        no-ops."""
+        """Attach a crash watcher to one of THIS launch's children. Called only
+        after upsert (see _bootstrap/_relaunch) so a mid-bootstrap crash of a
+        child spawned earlier in the flow can never bump the generation - and
+        so trip _bail_if_stale - before the row has been persisted (the H8
+        fix: openclaw attaches its equivalent watch at the same point, right
+        after upsert). Deduped by proc id so the same child is never
+        double-watched (which would let one crash be counted twice).
+
+        If the child already exited during the awaits between its own spawn
+        and this attach point, nothing else is driving its wait() future (a
+        real/fake proc's exit is only observed by whatever already called
+        kill()/reaped it) - so check proc.returncode here and, if already
+        set, handle the crash once synchronously instead of awaiting
+        proc.wait(), which could hang forever for an exit we didn't ourselves
+        trigger. This mirrors openclaw's post-attach
+        `exitCode != null || signalCode != null` check."""
         if proc is None or id(proc) in self._watched:
             return
         self._watched.add(id(proc))
-        self._spawn_task(self._on_child_exit(proc, self._generation))
+        gen = self._generation
+        if getattr(proc, "returncode", None) is not None:
+            self._handle_child_exit(gen)
+            return
+        self._spawn_task(self._wait_and_handle_child_exit(proc, gen))
 
-    async def _on_child_exit(self, proc, gen: int) -> None:
+    async def _wait_and_handle_child_exit(self, proc, gen: int) -> None:
         try:
             await proc.wait()
         except asyncio.CancelledError:
             return
+        self._handle_child_exit(gen)
+
+    def _handle_child_exit(self, gen: int) -> None:
+        """Crash-handling body shared by the live-watch path and the
+        already-exited-at-attach-time path in _watch_child above.
+        Generation-guarded so the same crash is never counted twice - e.g. if
+        both children happen to have already exited by attach time, the
+        first call's _kill_children bumps the generation and the second
+        call's now-stale `gen` makes this a no-op."""
         if self._stopped or gen != self._generation:
             return
         self._kill_children()
