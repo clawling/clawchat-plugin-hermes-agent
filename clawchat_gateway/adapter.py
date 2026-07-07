@@ -867,6 +867,10 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
         if registered:
             logger.info("clawchat hot-registered new skills=%s", registered)
+        # The host's rendered <available_skills> index is LRU-cached; drop it
+        # so the applied/removed skills are visible from the next session
+        # without a restart. Cheap in-memory call; covers removals too.
+        skill_update.clear_host_skills_index_cache()
         targets = [u.target for u in updates]
         if not targets and not removed and (updates or removals):
             # Every pending item ended up producing nothing to report — e.g. a

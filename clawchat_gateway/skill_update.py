@@ -772,6 +772,23 @@ def hot_register_new_skills(updates: list[PendingSkillUpdate]) -> list[str]:
     return registered
 
 
+def clear_host_skills_index_cache() -> None:
+    """Drop the host's rendered ``<available_skills>`` index cache.
+
+    The host rebuilds the index from the filesystem (including
+    ``skills.external_dirs``) on the next session, but only after its
+    in-process LRU is invalidated — without this, a just-applied or
+    just-removed managed skill stays invisible until a restart. Safe no-op
+    outside a Hermes host process.
+    """
+    try:
+        from agent.prompt_builder import clear_skills_system_prompt_cache
+
+        clear_skills_system_prompt_cache()
+    except Exception as exc:  # noqa: BLE001 — never break the consent flow
+        logger.debug("clawchat skills index cache clear skipped: %s", exc)
+
+
 # --- Owner-consent classification -------------------------------------------
 
 _AFFIRM_EXACT = {
