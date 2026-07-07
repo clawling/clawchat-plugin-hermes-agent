@@ -53,8 +53,6 @@ DEFAULT_SKILLS_REF = "main"
 MAX_SKILL_BYTES = 256 * 1024
 # Which host's skill set this plugin consumes from ``skills.<target>``.
 TARGET = "hermes"
-# Skill ids this Hermes plugin manages.
-HERMES_SKILL_IDS = ("clawchat-core", "clawchat-liveware")
 # Managed (writable) skills root, relative to ``$HERMES_HOME``.
 MANAGED_DIRNAME = "clawchat-skills"
 # How long an unanswered owner-consent prompt stays pending.
@@ -62,6 +60,19 @@ PENDING_TTL_SECONDS = 30 * 60
 
 # A fetcher takes an absolute URL and returns the raw response bytes.
 Fetcher = Callable[[str], bytes]
+
+
+def bundled_skills_dir() -> Path:
+    """The plugin's read-only bundled skills snapshot (plugin_root/skills)."""
+    return Path(__file__).resolve().parents[1] / "skills"
+
+
+def bundled_skill_ids() -> tuple[str, ...]:
+    """Skill ids bundled with this plugin, discovered by scanning skills/."""
+    try:
+        return tuple(sorted(p.parent.name for p in bundled_skills_dir().glob("*/SKILL.md")))
+    except OSError:
+        return ()
 
 
 class SkillUpdateError(Exception):
@@ -530,7 +541,7 @@ def check_skill_update(
 
     removals: list[PendingSkillRemoval] = []
     for skill_id in manifest.removed.get(TARGET, ()):
-        if skill_id in HERMES_SKILL_IDS:
+        if skill_id in bundled_skill_ids():
             logger.warning(
                 "clawchat ignoring tombstone for bundled skill %s", skill_id
             )
@@ -647,7 +658,7 @@ def apply_skill_removal(removals: list[PendingSkillRemoval]) -> list[str]:
     removed: list[str] = []
     for removal in removals:
         skill_id = removal.skill_id
-        if skill_id in HERMES_SKILL_IDS:
+        if skill_id in bundled_skill_ids():
             logger.warning("clawchat refusing to remove bundled skill %s", skill_id)
             continue
         skill_path = managed_skill_path(skill_id)
@@ -670,6 +681,34 @@ def apply_skill_removal(removals: list[PendingSkillRemoval]) -> list[str]:
         write_local_manifest(local)
         logger.info("clawchat removed tombstoned skills: %s", removed)
     return removed
+
+
+def apply_bundled_tombstones() -> list[str]:
+    """Delete managed copies of ids tombstoned by the bundled manifest snapshot.
+
+    Load-time counterpart of the dynamic removal path: stale ids left in the
+    managed dir from before a rename must not be re-registered on every load.
+    """
+    manifest_path = bundled_skills_dir() / "manifest.json"
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except Exception:  # noqa: BLE001 — a bad snapshot must never break load
+        logger.warning("clawchat bundled manifest snapshot unreadable; skipping tombstones")
+        return []
+    removed_raw = data.get("removed", {})
+    ids = removed_raw.get(TARGET, []) if isinstance(removed_raw, dict) else []
+    bundled = set(bundled_skill_ids())
+    local = read_local_manifest()
+    removals = [
+        PendingSkillRemoval(skill_id=str(skill_id), current=local.get(str(skill_id)))
+        for skill_id in ids
+        if isinstance(skill_id, str)
+        and skill_id not in bundled
+        and (skill_id in local or managed_skill_path(skill_id).exists())
+    ]
+    return apply_skill_removal(removals)
 
 
 # --- Host hot-registration ---------------------------------------------------
