@@ -12,12 +12,15 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from . import skill_update as _skill_update
 from .skill_update import DEFAULT_SKILLS_REF, OFFICIAL_SKILLS_BASE, Fetcher
 
 LIVEWARES_TARGET = "hermes"
@@ -370,3 +373,276 @@ async def liveware_app_create(*, liveware_path, name: str, exec: ExecFn | None =
             f"liveware app create: cannot parse app id from output: {stdout[:500]}"
         )
     return app_id
+
+
+# ---------------------------------------------------------------------------
+# Supervisor
+#
+# Orchestrates the pieces above: first-boot bootstrap, relaunch on reconnect
+# (user-deleted-app detection, URL-refresh re-register, offline fallback to a
+# local copy), bounded crash-restart backoff, and retrying intro delivery.
+# Port of openclaw's liveware-sample supervisor loop.
+# ---------------------------------------------------------------------------
+
+LIVEWARE_SAMPLE_INTRO_TEXT = (
+    "我给你安装了一个 liveware 演示应用「Liveware Sample」，它已经出现在我们的聊天里。"
+    "点开它看看，然后试试对我说：把标题改成 Hello Liveware。"
+    "你在页面上点的按钮、提交的留言我也能看到，随时问我。"
+)
+
+_DEFAULT_SAMPLE_PORT = 43110
+_RESTART_WINDOW_S = 30 * 60
+_MAX_RESTARTS_PER_WINDOW = 5
+_INTRO_RETRY_DELAY_S = 30.0
+_INTRO_MAX_TRIES = 20
+
+
+@dataclass
+class LivewareSampleDeps:
+    platform: str
+    account_id: str
+    enabled: bool
+    store: object
+    sample_root: Path
+    resolve_token: Callable[[], str]
+    resolve_liveware_path: Callable[[], "str | None"]
+    list_apps: Callable[[], Awaitable[dict]]
+    register_app: Callable[..., Awaitable]
+    notify_owner: Callable[[str], Awaitable[bool]]
+    fetch: Fetcher = _skill_update._default_fetch
+    ref: str = DEFAULT_SKILLS_REF
+    spawn: "SpawnFn | None" = None
+    exec: "ExecFn | None" = None
+    log: "logging.Logger | None" = None
+
+
+class LivewareSampleSupervisor:
+    """Bootstraps, relaunches, and supervises the liveware-sample app for one
+    (platform, account_id). Never raises out of start(); stop() tears down
+    all background tasks and child processes it owns."""
+
+    def __init__(self, deps: LivewareSampleDeps) -> None:
+        self._d = deps
+        self._server = None
+        self._tunnel = None
+        self._stopped = False
+        self._restart_times: list[float] = []
+        self._tasks: set[asyncio.Task] = set()
+        # Bumped every time children are killed (stop, restart, cap-out) so a
+        # stale _on_child_exit watcher for an already-superseded child can't
+        # double-count a crash or trigger a duplicate restart.
+        self._generation = 0
+        self._log = deps.log or logging.getLogger("clawchat.liveware_sample")
+
+    # --- lifecycle -------------------------------------------------------
+    async def start(self) -> None:
+        d = self._d
+        try:
+            if not d.enabled:
+                return
+            key = dict(platform=d.platform, account_id=d.account_id)
+            row = d.store.get_liveware_sample(**key)
+            if row is not None and getattr(row, "status", None) == "disabled":
+                return
+            if row is not None:
+                await self._relaunch(row)
+            else:
+                await self._bootstrap()
+        except Exception as exc:  # noqa: BLE001
+            self._kill_children()
+            self._log.warning("liveware-sample start failed: %s", exc)
+
+    async def stop(self) -> None:
+        self._stopped = True
+        for t in list(self._tasks):
+            t.cancel()
+        self._tasks.clear()
+        self._kill_children()
+
+    # --- helpers ---------------------------------------------------------
+    def _kill_children(self) -> None:
+        self._generation += 1
+        for proc in (self._server, self._tunnel):
+            try:
+                if proc is not None:
+                    proc.kill()
+            except Exception:  # noqa: BLE001
+                pass
+        self._server = None
+        self._tunnel = None
+
+    def _bail_if_stopped(self) -> bool:
+        if self._stopped:
+            self._kill_children()
+            return True
+        return False
+
+    def _spawn_task(self, coro) -> None:
+        if self._stopped:
+            coro.close()
+            return
+        t = asyncio.ensure_future(coro)
+        self._tasks.add(t)
+        t.add_done_callback(self._tasks.discard)
+
+    async def _download(self, row_version: "str | None"):
+        d = self._d
+        # relaunch tolerates offline: reuse a local copy if the fetch fails.
+        try:
+            return download_liveware_sample(
+                fetch=d.fetch, sample_root=d.sample_root, ref=d.ref)
+        except Exception as exc:  # noqa: BLE001
+            local = d.sample_root / "app" / "server.mjs"
+            if row_version is not None and local.exists():
+                self._log.debug("liveware-sample download failed, reusing local: %s", exc)
+                return row_version, d.sample_root / "app"
+            raise
+
+    async def _bootstrap(self) -> None:
+        d = self._d
+        path = d.resolve_liveware_path()
+        if not path:
+            return
+        token = d.resolve_token()
+        if not token:
+            return
+        try:
+            apps = await d.list_apps()
+        except Exception as exc:  # noqa: BLE001
+            self._log.debug("liveware-sample list_apps failed; skip bootstrap: %s", exc)
+            return
+        if apps.get("apps"):
+            return
+
+        version, app_dir = await self._download(None)
+        if self._bail_if_stopped():
+            return
+        self._server, port = await start_sample_server(
+            app_dir=app_dir, port=_DEFAULT_SAMPLE_PORT, spawn=d.spawn)
+        if self._bail_if_stopped():
+            return
+        await liveware_login(liveware_path=path, token=token, exec=d.exec)
+        app_id = await liveware_app_create(
+            liveware_path=path, name=LIVEWARE_SAMPLE_APP_NAME, exec=d.exec)
+        self._tunnel, public_url = await start_tunnel(
+            liveware_path=path, app_id=app_id, port=port, spawn=d.spawn)
+        if self._bail_if_stopped():
+            return
+        await d.register_app(name=LIVEWARE_SAMPLE_APP_NAME, app_id=app_id, url=public_url)
+        d.store.upsert_liveware_sample(
+            platform=d.platform, account_id=d.account_id, app_id=app_id,
+            app_name=LIVEWARE_SAMPLE_APP_NAME, port=port, public_url=public_url,
+            sample_version=version, status="active")
+        self._watch_children()
+        await self._deliver_intro()
+        self._log.debug("liveware-sample bootstrap complete at %s", public_url)
+
+    async def _relaunch(self, row) -> None:
+        d = self._d
+        path = d.resolve_liveware_path()
+        if not path:
+            return
+        try:
+            apps = await d.list_apps()
+            if not any(a.get("app_id") == row.app_id for a in apps.get("apps", [])):
+                d.store.update_liveware_sample_status(
+                    platform=d.platform, account_id=d.account_id,
+                    status="disabled", last_error="app removed by user")
+                return
+        except Exception as exc:  # noqa: BLE001
+            self._log.debug("liveware-sample list_apps failed; skip relaunch: %s", exc)
+            return
+
+        version, app_dir = await self._download(row.sample_version)
+        if self._bail_if_stopped():
+            return
+        self._server, port = await start_sample_server(
+            app_dir=app_dir, port=row.port or _DEFAULT_SAMPLE_PORT, spawn=d.spawn)
+        if self._bail_if_stopped():
+            return
+        self._tunnel, public_url = await start_tunnel(
+            liveware_path=path, app_id=row.app_id, port=port, spawn=d.spawn)
+        if self._bail_if_stopped():
+            return
+        if public_url != row.public_url:
+            await d.register_app(
+                name=row.app_name, app_id=row.app_id, url=public_url)
+        d.store.upsert_liveware_sample(
+            platform=d.platform, account_id=d.account_id, app_id=row.app_id,
+            app_name=row.app_name, port=port, public_url=public_url,
+            sample_version=version, status="active")
+        self._watch_children()
+        if row.intro_sent == 0:
+            await self._deliver_intro()
+
+    def _watch_children(self) -> None:
+        gen = self._generation
+        for proc in (self._server, self._tunnel):
+            if proc is None:
+                continue
+            self._spawn_task(self._on_child_exit(proc, gen))
+
+    async def _on_child_exit(self, proc, gen: int) -> None:
+        try:
+            await proc.wait()
+        except asyncio.CancelledError:
+            return
+        if self._stopped or gen != self._generation:
+            return
+        self._kill_children()
+        now = time.monotonic()
+        self._restart_times = [t for t in self._restart_times if now - t < _RESTART_WINDOW_S]
+        if len(self._restart_times) >= _MAX_RESTARTS_PER_WINDOW:
+            self._d.store.update_liveware_sample_status(
+                platform=self._d.platform, account_id=self._d.account_id,
+                status="failed", last_error="sample process crash-looping; restart cap reached")
+            self._log.warning("liveware-sample restart cap reached; marked failed")
+            return
+        n = len(self._restart_times)
+        self._restart_times.append(now)
+        delay = min(5 * 2 ** n, 60)
+        self._spawn_task(self._delayed_relaunch(delay))
+
+    async def _delayed_relaunch(self, delay: float) -> None:
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
+        if self._stopped:
+            return
+        row = self._d.store.get_liveware_sample(
+            platform=self._d.platform, account_id=self._d.account_id)
+        if row is None or row.status == "disabled":
+            return
+        try:
+            await self._relaunch(row)
+        except Exception as exc:  # noqa: BLE001
+            self._kill_children()
+            self._log.warning("liveware-sample relaunch failed: %s", exc)
+            self._d.store.update_liveware_sample_status(
+                platform=self._d.platform, account_id=self._d.account_id,
+                status="failed", last_error=str(exc))
+
+    async def _deliver_intro(self, try_index: int = 0) -> None:
+        if self._stopped:
+            return
+        d = self._d
+        delivered = False
+        try:
+            delivered = await d.notify_owner(LIVEWARE_SAMPLE_INTRO_TEXT)
+        except Exception as exc:  # noqa: BLE001
+            self._log.debug("liveware-sample intro send error: %s", exc)
+        if delivered:
+            d.store.mark_liveware_sample_intro_sent(
+                platform=d.platform, account_id=d.account_id)
+            return
+        if try_index + 1 >= _INTRO_MAX_TRIES:
+            return
+        self._spawn_task(self._retry_intro(try_index + 1))
+
+    async def _retry_intro(self, try_index: int) -> None:
+        try:
+            await asyncio.sleep(_INTRO_RETRY_DELAY_S)
+        except asyncio.CancelledError:
+            return
+        await self._deliver_intro(try_index)
