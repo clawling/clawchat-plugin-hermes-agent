@@ -697,6 +697,9 @@ def apply_bundled_tombstones() -> list[str]:
     except Exception:  # noqa: BLE001 — a bad snapshot must never break load
         logger.warning("clawchat bundled manifest snapshot unreadable; skipping tombstones")
         return []
+    if not isinstance(data, dict):
+        logger.warning("clawchat bundled manifest snapshot is not an object; skipping tombstones")
+        return []
     removed_raw = data.get("removed", {})
     ids = removed_raw.get(TARGET, []) if isinstance(removed_raw, dict) else []
     bundled = set(bundled_skill_ids())
