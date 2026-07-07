@@ -316,6 +316,24 @@ async def start_tunnel(*, liveware_path, app_id, port: int,
     return proc, url
 
 
+async def _communicate(proc, timeout: float, label: str):
+    """Await proc.communicate() under a timeout; kill+raise on timeout.
+
+    Mirrors `_read_until`'s contract: the constraint "超时/早退必 kill 子进程"
+    means a one-shot CLI child must also be killed (not orphaned) when it hangs,
+    and the failure must surface as LivewareSampleError so callers catching
+    narrowly still see it.
+    """
+    try:
+        return await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError as exc:
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+        raise LivewareSampleError(f"{label} timed out after {timeout}s") from exc
+
+
 def _scrub(text: str, token: str) -> str:
     return text.replace(token, "***") if token else text
 
@@ -327,7 +345,7 @@ async def liveware_login(*, liveware_path, token: str, exec: ExecFn | None = Non
         liveware_path, "login", "--access-token", token,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     ))
-    out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    out, err = await _communicate(proc, timeout, "liveware login")
     if proc.returncode:
         detail = _scrub((err or b"").decode(errors="replace")
                         or (out or b"").decode(errors="replace"), token).strip()
@@ -341,7 +359,7 @@ async def liveware_app_create(*, liveware_path, name: str, exec: ExecFn | None =
         liveware_path, "app", "create", name,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     ))
-    out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    out, err = await _communicate(proc, timeout, "liveware app create")
     stdout = (out or b"").decode(errors="replace")
     if proc.returncode:
         detail = ((err or b"").decode(errors="replace") or stdout).strip()
