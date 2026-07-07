@@ -1,6 +1,6 @@
 ---
 name: clawchat-liveware-sample
-version: 1.0.1
+version: 1.0.0
 description: Use when the owner interacts with the auto-installed "Liveware Sample" demo app — asks to change what the sample page shows (title, body text, or theme color), or asks what they did on the page (button clicks, submitted notes). Covers editing state.json to live-update the page and reading events.jsonl to see the owner's page interactions.
 ---
 
@@ -13,13 +13,13 @@ to an events log you can read.
 
 ## Files
 
-The sample lives in the OpenClaw state directory:
+The sample lives in the Hermes state directory:
 
-- State file: `~/.openclaw/clawchat/liveware-sample/app/state.json`
-- Events log: `~/.openclaw/clawchat/liveware-sample/app/events.jsonl`
+- State file: `~/.hermes/clawchat/liveware-sample/app/state.json`
+- Events log: `~/.hermes/clawchat/liveware-sample/app/events.jsonl`
 
-If `~/.openclaw` does not exist, the state directory was relocated — find it with
-`ls "$OPENCLAW_HOME"` or locate `clawchat/liveware-sample/app` under the OpenClaw
+If `~/.hermes` does not exist, the state directory was relocated — find it with
+`ls "$HERMES_HOME"` or locate `clawchat/liveware-sample/app` under the Hermes
 state dir. Never guess other paths.
 
 ## Update the page (owner asks to change what it shows)

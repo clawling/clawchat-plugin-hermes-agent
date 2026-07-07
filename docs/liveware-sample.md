@@ -101,10 +101,12 @@ One row per `(platform, account_id)` in the `liveware_sample` table
 
 ## Lifecycle
 
-- **Every (re)connect**: `_schedule_liveware_sample` re-runs `start()` against
-  whatever row exists (idempotent — a supervisor already held by the adapter
-  instance is reused, not replaced, across reconnects within one process
-  lifetime).
+- **Every (re)connect**: `_on_state_change`'s `READY` branch calls
+  `_schedule_liveware_sample` on every transition, but that call is a no-op
+  whenever a supervisor is already held (`self._liveware_sample_supervisor
+  is not None`). So `start()` actually runs only once per **connect
+  lifecycle** — the first `READY` after the adapter connects (or after a
+  prior `disconnect()`) — not on every reconnect within that lifecycle.
 - **Crash backoff**: each watched child (server or tunnel) that exits
   unexpectedly triggers a relaunch after a delay of `min(5 * 2**n, 60)`
   seconds, where `n` is the number of restarts already counted in the
@@ -114,7 +116,10 @@ One row per `(platform, account_id)` in the `liveware_sample` table
 - **`disconnect()`**: `_stop_liveware_sample` cancels any in-flight
   supervisor start task and calls `LivewareSampleSupervisor.stop()`, which
   kills the sample server and tunnel child processes and cancels its
-  internal watcher/relaunch tasks.
+  internal watcher/relaunch tasks, then clears
+  `self._liveware_sample_supervisor` back to `None` — so the **next**
+  connect after a disconnect builds a fresh supervisor and goes through
+  `start()` again.
 
 ### Owner intro delivery
 
@@ -126,9 +131,10 @@ up silently.
 
 ## Configuration
 
-Set `platforms.clawchat.extra.liveware_sample: false` (or the equivalent env
-override consumed by `ClawChatConfig.from_platform_config`) to turn this
-feature off entirely for an agent. Default is `true`. See
+Set `platforms.clawchat.extra.liveware_sample: false` to turn this feature
+off entirely for an agent. There is no env var override — `ClawChatConfig.
+from_platform_config` (`clawchat_gateway/config.py`) reads this flag only
+from `platforms.clawchat.extra.liveware_sample`. Default is `true`. See
 [`./configuration.md`](./configuration.md#rich-interactions-and-display).
 
 ## Interaction contract (state.json / events.jsonl)
