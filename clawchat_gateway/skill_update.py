@@ -164,6 +164,55 @@ def managed_manifest_path() -> Path:
     return managed_skills_dir() / "manifest.json"
 
 
+def ensure_external_skills_dir() -> bool:
+    """Idempotently list the managed dir in the host's ``skills.external_dirs``.
+
+    Directories in ``skills.external_dirs`` (host config.yaml) are scanned into
+    the system prompt's ``<available_skills>`` index and ``skills_list``, and
+    the host treats them as externally owned (read-only for its autonomous
+    skill lifecycle) — exactly the semantics of the managed dir. The entry is
+    the **relative** form ``clawchat-skills``: the host resolves relative
+    entries against ``HERMES_HOME``, so one value stays correct across
+    containers and home relocations.
+
+    Returns True when the config is known to contain the entry. Any failure
+    (managed-config rejection, IO error, host API absent) is logged and
+    swallowed — degraded behavior is today's behavior (qualified
+    ``skill_view`` only), and the skill mechanism must never break load.
+    """
+    try:
+        from hermes_cli.config import load_config, save_config
+
+        config = load_config()
+        if not isinstance(config, dict):
+            config = {}
+        skills_cfg = config.get("skills")
+        if not isinstance(skills_cfg, dict):
+            skills_cfg = {}
+            config["skills"] = skills_cfg
+        raw = skills_cfg.get("external_dirs")
+        if isinstance(raw, str):
+            dirs: list = [raw]
+        elif isinstance(raw, list):
+            dirs = list(raw)
+        else:
+            dirs = []
+        if MANAGED_DIRNAME in (str(d).strip() for d in dirs):
+            return True
+        dirs.append(MANAGED_DIRNAME)
+        skills_cfg["external_dirs"] = dirs
+        save_config(config)
+        logger.info(
+            "clawchat added %s to skills.external_dirs (managed skills now "
+            "appear in the host skills index)",
+            MANAGED_DIRNAME,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 — never let the skill mechanism crash load
+        logger.warning("clawchat external skills dir config skipped: %s", exc)
+        return False
+
+
 def pending_path() -> Path:
     return managed_skills_dir() / "pending.json"
 
@@ -721,6 +770,23 @@ def hot_register_new_skills(updates: list[PendingSkillUpdate]) -> list[str]:
             continue
         registered.append(update.skill_id)
     return registered
+
+
+def clear_host_skills_index_cache() -> None:
+    """Drop the host's rendered ``<available_skills>`` index cache.
+
+    The host rebuilds the index from the filesystem (including
+    ``skills.external_dirs``) on the next session, but only after its
+    in-process LRU is invalidated — without this, a just-applied or
+    just-removed managed skill stays invisible until a restart. Safe no-op
+    outside a Hermes host process.
+    """
+    try:
+        from agent.prompt_builder import clear_skills_system_prompt_cache
+
+        clear_skills_system_prompt_cache()
+    except Exception as exc:  # noqa: BLE001 — never break the consent flow
+        logger.debug("clawchat skills index cache clear skipped: %s", exc)
 
 
 # --- Owner-consent classification -------------------------------------------
