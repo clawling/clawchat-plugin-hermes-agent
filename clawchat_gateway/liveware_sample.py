@@ -251,8 +251,21 @@ def parse_app_create_output(stdout: str) -> str | None:
     return None
 
 
+def _safe_kill(proc) -> None:
+    """kill() a child, swallowing any error. Used on every abnormal exit path
+    (timeout, early-exit, AND task cancellation) so a just-spawned subprocess is
+    never orphaned before its caller has assigned it to self._server/_tunnel."""
+    try:
+        if proc is not None:
+            proc.kill()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 async def _read_until(proc, match, timeout: float, label: str) -> str:
-    """Accumulate proc.stdout until match(acc) is truthy; kill+raise on timeout/exit."""
+    """Accumulate proc.stdout until match(acc) is truthy; kill+raise on
+    timeout/early-exit AND on cancellation (proc is a local here, so if we don't
+    kill it on an abnormal exit it becomes a true OS orphan)."""
     acc = ""
 
     async def _loop() -> str:
@@ -268,13 +281,11 @@ async def _read_until(proc, match, timeout: float, label: str) -> str:
 
     try:
         return await asyncio.wait_for(_loop(), timeout=timeout)
-    except (asyncio.TimeoutError, LivewareSampleError) as exc:
-        try:
-            proc.kill()
-        except Exception:  # noqa: BLE001
-            pass
-        if isinstance(exc, asyncio.TimeoutError):
-            raise LivewareSampleError(f"{label} timed out after {timeout}s") from exc
+    except asyncio.TimeoutError as exc:
+        _safe_kill(proc)
+        raise LivewareSampleError(f"{label} timed out after {timeout}s") from exc
+    except BaseException:  # LivewareSampleError early-exit, CancelledError, etc.
+        _safe_kill(proc)
         raise
 
 
@@ -330,11 +341,11 @@ async def _communicate(proc, timeout: float, label: str):
     try:
         return await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError as exc:
-        try:
-            proc.kill()
-        except Exception:  # noqa: BLE001
-            pass
+        _safe_kill(proc)
         raise LivewareSampleError(f"{label} timed out after {timeout}s") from exc
+    except BaseException:  # CancelledError (stop() mid-CLI) etc. → don't orphan
+        _safe_kill(proc)
+        raise
 
 
 def _scrub(text: str, token: str) -> str:
@@ -430,8 +441,14 @@ class LivewareSampleSupervisor:
         self._tasks: set[asyncio.Task] = set()
         # Bumped every time children are killed (stop, restart, cap-out) so a
         # stale _on_child_exit watcher for an already-superseded child can't
-        # double-count a crash or trigger a duplicate restart.
+        # double-count a crash or trigger a duplicate restart, and so an
+        # in-flight bootstrap/relaunch can detect that a child it started has
+        # already crashed mid-sequence (via _bail_if_stale) and abort instead
+        # of masking the crash with a status="active" write.
         self._generation = 0
+        # ids of child procs already handed to a watcher, so attaching a
+        # watcher per-child (as each is spawned) never double-attaches.
+        self._watched: set[int] = set()
         self._log = deps.log or logging.getLogger("clawchat.liveware_sample")
 
     # --- lifecycle -------------------------------------------------------
@@ -463,16 +480,18 @@ class LivewareSampleSupervisor:
     def _kill_children(self) -> None:
         self._generation += 1
         for proc in (self._server, self._tunnel):
-            try:
-                if proc is not None:
-                    proc.kill()
-            except Exception:  # noqa: BLE001
-                pass
+            _safe_kill(proc)
         self._server = None
         self._tunnel = None
+        self._watched.clear()
 
-    def _bail_if_stopped(self) -> bool:
-        if self._stopped:
+    def _bail_if_stale(self, gen: int) -> bool:
+        """Abort the current bootstrap/relaunch step if we were stopped, OR if a
+        child we started has already crashed mid-sequence (which bumps the
+        generation via _kill_children and schedules its own relaunch). Either
+        way kill whatever children are live and return True so the caller stops
+        before writing status="active" over a supervisor that no longer exists."""
+        if self._stopped or gen != self._generation:
             self._kill_children()
             return True
         return False
@@ -514,26 +533,37 @@ class LivewareSampleSupervisor:
         if apps.get("apps"):
             return
 
+        gen = self._generation
         version, app_dir = await self._download(None)
-        if self._bail_if_stopped():
+        if self._bail_if_stale(gen):
             return
         self._server, port = await start_sample_server(
             app_dir=app_dir, port=_DEFAULT_SAMPLE_PORT, spawn=d.spawn)
-        if self._bail_if_stopped():
+        # Watch each child the moment it exists so a crash during the
+        # intermediate awaits (login/app_create/tunnel/register) is observed
+        # rather than masked by the eventual status="active" upsert.
+        self._watch_child(self._server)
+        if self._bail_if_stale(gen):
             return
         await liveware_login(liveware_path=path, token=token, exec=d.exec)
+        if self._bail_if_stale(gen):
+            return
         app_id = await liveware_app_create(
             liveware_path=path, name=LIVEWARE_SAMPLE_APP_NAME, exec=d.exec)
+        if self._bail_if_stale(gen):
+            return
         self._tunnel, public_url = await start_tunnel(
             liveware_path=path, app_id=app_id, port=port, spawn=d.spawn)
-        if self._bail_if_stopped():
+        self._watch_child(self._tunnel)
+        if self._bail_if_stale(gen):
             return
         await d.register_app(name=LIVEWARE_SAMPLE_APP_NAME, app_id=app_id, url=public_url)
+        if self._bail_if_stale(gen):
+            return
         d.store.upsert_liveware_sample(
             platform=d.platform, account_id=d.account_id, app_id=app_id,
             app_name=LIVEWARE_SAMPLE_APP_NAME, port=port, public_url=public_url,
             sample_version=version, status="active")
-        self._watch_children()
         await self._deliver_intro()
         self._log.debug("liveware-sample bootstrap complete at %s", public_url)
 
@@ -553,34 +583,42 @@ class LivewareSampleSupervisor:
             self._log.debug("liveware-sample list_apps failed; skip relaunch: %s", exc)
             return
 
+        gen = self._generation
         version, app_dir = await self._download(row.sample_version)
-        if self._bail_if_stopped():
+        if self._bail_if_stale(gen):
             return
         self._server, port = await start_sample_server(
             app_dir=app_dir, port=row.port or _DEFAULT_SAMPLE_PORT, spawn=d.spawn)
-        if self._bail_if_stopped():
+        self._watch_child(self._server)
+        if self._bail_if_stale(gen):
             return
         self._tunnel, public_url = await start_tunnel(
             liveware_path=path, app_id=row.app_id, port=port, spawn=d.spawn)
-        if self._bail_if_stopped():
+        self._watch_child(self._tunnel)
+        if self._bail_if_stale(gen):
             return
         if public_url != row.public_url:
             await d.register_app(
                 name=row.app_name, app_id=row.app_id, url=public_url)
+        if self._bail_if_stale(gen):
+            return
         d.store.upsert_liveware_sample(
             platform=d.platform, account_id=d.account_id, app_id=row.app_id,
             app_name=row.app_name, port=port, public_url=public_url,
             sample_version=version, status="active")
-        self._watch_children()
         if row.intro_sent == 0:
             await self._deliver_intro()
 
-    def _watch_children(self) -> None:
-        gen = self._generation
-        for proc in (self._server, self._tunnel):
-            if proc is None:
-                continue
-            self._spawn_task(self._on_child_exit(proc, gen))
+    def _watch_child(self, proc) -> None:
+        """Attach a crash watcher to a single child as soon as it is spawned +
+        assigned. Deduped by proc id so the same child is never double-watched
+        (which would let one crash be counted twice). The watcher captures the
+        current generation; _kill_children bumps it so a superseded watcher
+        no-ops."""
+        if proc is None or id(proc) in self._watched:
+            return
+        self._watched.add(id(proc))
+        self._spawn_task(self._on_child_exit(proc, self._generation))
 
     async def _on_child_exit(self, proc, gen: int) -> None:
         try:
