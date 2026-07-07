@@ -435,17 +435,25 @@ def _register_skill(ctx) -> None:
     bundled_ids: set[str] = set()
     for bundled in sorted((_plugin_dir() / "skills").glob("*/SKILL.md")):
         skill_id = bundled.parent.name
+        # A failed registration still counts as bundled: keep it out of the
+        # managed-extras loop below either way.
         bundled_ids.add(skill_id)
-        # Always register the managed (writable) path so a later skill-only hot
-        # update can atomically overwrite it without touching the read-only
-        # plugin source. Seeding falls back to the bundled path on any error.
-        register_path = _seed_managed_skill(skill_id, bundled)
-        description = skill_description(register_path) if skill_description else ""
-        register_skill(
-            skill_id,
-            register_path,
-            description=description,
-        )
+        try:
+            # Always register the managed (writable) path so a later skill-only
+            # hot update can atomically overwrite it without touching the
+            # read-only plugin source. Seeding falls back to the bundled path
+            # on any error.
+            register_path = _seed_managed_skill(skill_id, bundled)
+            description = skill_description(register_path) if skill_description else ""
+            register_skill(
+                skill_id,
+                register_path,
+                description=description,
+            )
+        except Exception as exc:  # noqa: BLE001 — never let the skill mechanism crash load
+            logger.warning(
+                "ClawChat bundled skill registration failed for %s: %s", skill_id, exc
+            )
 
     # Skills delivered dynamically (present in the managed manifest but not
     # bundled with the plugin) must be re-registered on every load, or a
