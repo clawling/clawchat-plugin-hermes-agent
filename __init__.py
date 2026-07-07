@@ -416,21 +416,31 @@ def _register_skill(ctx) -> None:
     except Exception as exc:  # noqa: BLE001 — never let the skill mechanism crash load
         logger.warning("ClawChat skill hot-registrar unavailable: %s", exc)
 
-    bundled_skills = (
-        ("clawchat-core", "ClawChat profiles, friends, moments, and media."),
-        (
-            "clawchat-liveware",
-            "Expose a local web service via liveware and register it to ClawChat.",
-        ),
-    )
-    for skill_id, description in bundled_skills:
-        bundled = _plugin_dir() / "skills" / skill_id / "SKILL.md"
-        if not bundled.exists():
-            continue
+    # Discover bundled skills by scanning the snapshot dir — the id list must
+    # never be hard-coded again (that is how clawchat-set-greeting got lost).
+    try:
+        from clawchat_gateway.skill_update import skill_description
+    except Exception:  # noqa: BLE001
+        skill_description = None  # type: ignore[assignment]
+
+    # Purge tombstoned managed ids BEFORE registration so a stale id from an
+    # old install is neither seeded nor re-registered as a managed extra.
+    try:
+        from clawchat_gateway.skill_update import apply_bundled_tombstones
+
+        apply_bundled_tombstones()
+    except Exception as exc:  # noqa: BLE001 — never let cleanup break load
+        logger.warning("ClawChat bundled tombstone cleanup skipped: %s", exc)
+
+    bundled_ids: set[str] = set()
+    for bundled in sorted((_plugin_dir() / "skills").glob("*/SKILL.md")):
+        skill_id = bundled.parent.name
+        bundled_ids.add(skill_id)
         # Always register the managed (writable) path so a later skill-only hot
         # update can atomically overwrite it without touching the read-only
         # plugin source. Seeding falls back to the bundled path on any error.
         register_path = _seed_managed_skill(skill_id, bundled)
+        description = skill_description(register_path) if skill_description else ""
         register_skill(
             skill_id,
             register_path,
@@ -447,7 +457,6 @@ def _register_skill(ctx) -> None:
             skill_description,
         )
 
-        bundled_ids = {skill_id for skill_id, _ in bundled_skills}
         for skill_id in read_local_manifest():
             if skill_id in bundled_ids:
                 continue
