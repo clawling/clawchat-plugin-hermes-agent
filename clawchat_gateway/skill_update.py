@@ -54,7 +54,7 @@ MAX_SKILL_BYTES = 256 * 1024
 # Which host's skill set this plugin consumes from ``skills.<target>``.
 TARGET = "hermes"
 # Skill ids this Hermes plugin manages.
-HERMES_SKILL_IDS = ("clawchat-core", "clawchat-liveware")
+HERMES_SKILL_IDS = ("clawchat-core", "clawchat-liveware", "clawchat-liveware-sample")
 # Managed (writable) skills root, relative to ``$HERMES_HOME``.
 MANAGED_DIRNAME = "clawchat-skills"
 # How long an unanswered owner-consent prompt stays pending.

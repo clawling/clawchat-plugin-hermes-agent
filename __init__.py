@@ -422,6 +422,12 @@ def _register_skill(ctx) -> None:
             "clawchat-liveware",
             "Expose a local web service via liveware and register it to ClawChat.",
         ),
+        (
+            "clawchat-liveware-sample",
+            "Interact with the auto-installed Liveware Sample demo app: edit "
+            "state.json to update the page, read events.jsonl to see the "
+            "owner's interactions.",
+        ),
     )
     for skill_id, description in bundled_skills:
         bundled = _plugin_dir() / "skills" / skill_id / "SKILL.md"

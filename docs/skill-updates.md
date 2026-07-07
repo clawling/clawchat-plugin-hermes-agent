@@ -66,7 +66,7 @@ is expected, not a bug: the managed tree is meant to always converge to
 whatever the official manifest says, never to preserve local edits.
 
 Publish-side constraint: the official manifest's version for a bundled skill
-(`clawchat-core`, `clawchat-liveware`) must never be **lower** than the version already
+(`clawchat-core`, `clawchat-liveware`, `clawchat-liveware-sample`) must never be **lower** than the version already
 shipped in the plugin's own bundled snapshot. `seed_managed_skill` reseeds the
 managed copy from the bundled snapshot whenever the managed version is older
 than the bundled one — a manifest that regresses a bundled skill's version
@@ -92,7 +92,7 @@ whatever manifest they actually fetch, independent of the generator.
 2. the id is present in the *local* managed manifest (i.e. actually installed
    here — a tombstone for a skill this plugin never had is a no-op), and
 3. the id is **not** one of the bundled ids (`HERMES_SKILL_IDS = ("clawchat-core",
-   "clawchat-liveware")`) — a tombstone naming a bundled id is ignored with a
+   "clawchat-liveware", "clawchat-liveware-sample")`) — a tombstone naming a bundled id is ignored with a
    `logger.warning`, never acted on, since deleting a bundled skill would only
    trigger `seed_managed_skill` to reseed it right back.
 
@@ -147,7 +147,7 @@ install (`current is None`) rather than a removal.
 
 `__init__.py::_register_skill(ctx)` does three things at plugin load:
 
-1. **Bundled skills** (`clawchat-core`, `clawchat-liveware`): seed a managed copy and
+1. **Bundled skills** (`clawchat-core`, `clawchat-liveware`, `clawchat-liveware-sample`): seed a managed copy and
    `ctx.register_skill(id, managed_path, description=...)`.
 2. **Managed extras**: any id present in the managed manifest but not bundled —
    i.e. delivered earlier by a dynamic update — is registered too, with its
