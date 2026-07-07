@@ -895,9 +895,14 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
         return True
 
-    async def _send_owner_text(self, chat_id: str, text: str) -> None:
+    async def _send_owner_text(self, chat_id: str, text: str) -> bool:
+        """Send a best-effort direct text to the owner. Returns whether the
+        frame was actually accepted for delivery (``send_frame``'s own
+        result) — False on a dropped/not-ready send or a raised exception, so
+        callers that gate durable state (e.g. liveware-sample's intro-sent
+        flag) don't mistake "we tried" for "it was delivered"."""
         try:
-            await self._connection.send_frame(
+            return await self._connection.send_frame(
                 build_message_send_event(
                     chat_id=chat_id,
                     chat_type="direct",
@@ -910,6 +915,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
         except Exception:  # noqa: BLE001
             logger.warning("clawchat owner text send failed", exc_info=True)
+            return False
 
     async def _on_auth_logout(self, message: str) -> None:
         """User-visible notification on permanent token expiry (token-refresh §C.1).
@@ -1663,8 +1669,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             chat_id = self._owner_direct_chat_id()
             if not chat_id:
                 return False
-            await self._send_owner_text(chat_id, text)
-            return True
+            return await self._send_owner_text(chat_id, text)
 
         def _resolve_token() -> str:
             try:

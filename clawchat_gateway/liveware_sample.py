@@ -263,21 +263,48 @@ def _safe_kill(proc) -> None:
 
 
 async def _read_until(proc, match, timeout: float, label: str) -> str:
-    """Accumulate proc.stdout until match(acc) is truthy; kill+raise on
+    """Accumulate proc.stdout+stderr until match(acc) is truthy; kill+raise on
     timeout/early-exit AND on cancellation (proc is a local here, so if we don't
-    kill it on an abnormal exit it becomes a true OS orphan)."""
+    kill it on an abnormal exit it becomes a true OS orphan).
+
+    Reads BOTH streams concurrently — like openclaw's waitForOutput
+    (liveware-sample.ts's stdout+stderr `data` listeners) — rather than
+    stdout alone. Two reasons: (1) a real CLI can interleave its startup line
+    across stdout/stderr; (2) leaving stderr completely unread lets the OS
+    pipe buffer (64 KiB) fill from a chatty child, which blocks the child on
+    its next stderr write and hangs the whole flow. Once a match is found the
+    caller is expected to hand the still-open proc to `_drain_pipes` as a
+    background task so later output doesn't reintroduce the same problem.
+    """
     acc = ""
 
     async def _loop() -> str:
         nonlocal acc
-        while True:
-            line = await proc.stdout.readline()
-            if not line:  # EOF → process exited early
-                raise LivewareSampleError(f"{label} exited early")
-            acc += line.decode() if isinstance(line, (bytes, bytearray)) else line
-            hit = match(acc)
-            if hit is not None:
-                return hit
+        pending: dict[asyncio.Future, object] = {
+            asyncio.ensure_future(proc.stdout.readline()): proc.stdout,
+            asyncio.ensure_future(proc.stderr.readline()): proc.stderr,
+        }
+        try:
+            while pending:
+                done, _pending_set = await asyncio.wait(
+                    pending, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    stream = pending.pop(task)
+                    line = task.result()
+                    if not line:  # EOF on this stream; the other may still be live
+                        continue
+                    acc += line.decode() if isinstance(line, (bytes, bytearray)) else line
+                    hit = match(acc)
+                    if hit is not None:
+                        return hit
+                    pending[asyncio.ensure_future(stream.readline())] = stream
+            # both stdout and stderr hit EOF with no match -> process exited early
+            raise LivewareSampleError(f"{label} exited early")
+        finally:
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
 
     try:
         return await asyncio.wait_for(_loop(), timeout=timeout)
@@ -287,6 +314,30 @@ async def _read_until(proc, match, timeout: float, label: str) -> str:
     except BaseException:  # LivewareSampleError early-exit, CancelledError, etc.
         _safe_kill(proc)
         raise
+
+
+async def _drain_pipes(proc) -> None:
+    """Background task (spawn via supervisor._spawn_task): after a child's
+    startup line has matched and _read_until stops actively reading, keep
+    reading + discarding any further stdout/stderr to EOF. A long-lived
+    chatty child (e.g. the tunnel CLI's own runtime logging) would otherwise
+    fill the OS pipe buffer once nothing reads it and block on its next
+    write. Naturally ends when the child exits and both fds close (e.g. via
+    _kill_children's proc.kill()) — no explicit cancellation required, though
+    stop() cancels it anyway like every other tracked task."""
+
+    async def _drain_one(stream) -> None:
+        if stream is None:
+            return
+        while True:
+            try:
+                line = await stream.readline()
+            except Exception:  # noqa: BLE001
+                return
+            if not line:
+                return
+
+    await asyncio.gather(_drain_one(proc.stdout), _drain_one(proc.stderr), return_exceptions=True)
 
 
 async def _maybe_await(value):
@@ -315,7 +366,7 @@ async def start_sample_server(*, app_dir, port: int, spawn: SpawnFn | None = Non
         return None
 
     line = await _read_until(proc, _match, timeout, "liveware-sample server start")
-    return proc, int(json.loads(line)["port"])
+    return proc, int(json.loads(line)["port"]), _drain_pipes(proc)
 
 
 async def start_tunnel(*, liveware_path, app_id, port: int,
@@ -327,7 +378,7 @@ async def start_tunnel(*, liveware_path, app_id, port: int,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     ))
     url = await _read_until(proc, parse_tunnel_public_url, timeout, "liveware tunnel bind")
-    return proc, url
+    return proc, url, _drain_pipes(proc)
 
 
 async def _communicate(proc, timeout: float, label: str):
@@ -449,6 +500,18 @@ class LivewareSampleSupervisor:
         # ids of child procs already handed to a watcher, so attaching a
         # watcher per-child (as each is spawned) never double-attaches.
         self._watched: set[int] = set()
+        # Serializes the bounded spawn->register->upsert->attach-watch body of
+        # _bootstrap/_relaunch so two launch flows (e.g. a stale in-flight
+        # relaunch still awaiting start_tunnel, and a fresh _delayed_relaunch
+        # scheduled by its own crash watcher) never interleave. Without this,
+        # the stale flow's post-await _bail_if_stale can fire *after* the new
+        # flow has already assigned self._server/self._tunnel, killing the new
+        # generation's children with nothing left to reschedule a relaunch.
+        # stop() intentionally does NOT acquire this lock: it cancels the task
+        # that may be holding it, which releases it via the `async with`
+        # block's normal cancellation unwind, then stop() kills children
+        # itself — see stop()/start() docstrings.
+        self._launch_lock = asyncio.Lock()
         self._log = deps.log or logging.getLogger("clawchat.liveware_sample")
 
     # --- lifecycle -------------------------------------------------------
@@ -470,6 +533,15 @@ class LivewareSampleSupervisor:
             self._log.warning("liveware-sample start failed: %s", exc)
 
     async def stop(self) -> None:
+        """Tear down all background tasks and children. Deliberately does NOT
+        acquire ``self._launch_lock``: the caller (adapter._stop_liveware_sample)
+        cancels the external start()-task before this runs, so if that task is
+        parked mid-launch holding the lock, cancelling it unwinds the
+        `async with self._launch_lock:` block (released in its __aexit__) before
+        stop() ever needs it. Acquiring the lock here would either deadlock
+        waiting on a task stop() itself must cancel, or (if cancellation raced
+        ahead) be redundant — so we skip it and rely on _kill_children() below
+        for cleanup instead."""
         self._stopped = True
         for t in list(self._tasks):
             t.cancel()
@@ -507,8 +579,13 @@ class LivewareSampleSupervisor:
     async def _download(self, row_version: "str | None"):
         d = self._d
         # relaunch tolerates offline: reuse a local copy if the fetch fails.
+        # download_liveware_sample does blocking network + filesystem I/O
+        # (urllib); run it off the event loop thread like skill_update does,
+        # so a slow/hanging fetch never stalls every other connection this
+        # process is servicing.
         try:
-            return download_liveware_sample(
+            return await asyncio.to_thread(
+                download_liveware_sample,
                 fetch=d.fetch, sample_root=d.sample_root, ref=d.ref)
         except Exception as exc:  # noqa: BLE001
             local = d.sample_root / "app" / "server.mjs"
@@ -533,37 +610,45 @@ class LivewareSampleSupervisor:
         if apps.get("apps"):
             return
 
-        gen = self._generation
-        version, app_dir = await self._download(None)
-        if self._bail_if_stale(gen):
-            return
-        self._server, port = await start_sample_server(
-            app_dir=app_dir, port=_DEFAULT_SAMPLE_PORT, spawn=d.spawn)
-        # Watch each child the moment it exists so a crash during the
-        # intermediate awaits (login/app_create/tunnel/register) is observed
-        # rather than masked by the eventual status="active" upsert.
-        self._watch_child(self._server)
-        if self._bail_if_stale(gen):
-            return
-        await liveware_login(liveware_path=path, token=token, exec=d.exec)
-        if self._bail_if_stale(gen):
-            return
-        app_id = await liveware_app_create(
-            liveware_path=path, name=LIVEWARE_SAMPLE_APP_NAME, exec=d.exec)
-        if self._bail_if_stale(gen):
-            return
-        self._tunnel, public_url = await start_tunnel(
-            liveware_path=path, app_id=app_id, port=port, spawn=d.spawn)
-        self._watch_child(self._tunnel)
-        if self._bail_if_stale(gen):
-            return
-        await d.register_app(name=LIVEWARE_SAMPLE_APP_NAME, app_id=app_id, url=public_url)
-        if self._bail_if_stale(gen):
-            return
-        d.store.upsert_liveware_sample(
-            platform=d.platform, account_id=d.account_id, app_id=app_id,
-            app_name=LIVEWARE_SAMPLE_APP_NAME, port=port, public_url=public_url,
-            sample_version=version, status="active")
+        # Serialize the bounded spawn->register->upsert sequence against any
+        # other in-flight bootstrap/relaunch (see self._launch_lock docstring
+        # in __init__). Intro delivery is intentionally OUTSIDE the lock: its
+        # own retry loop can run for up to _INTRO_RETRY_DELAY_S * _INTRO_MAX_TRIES
+        # (~10 minutes) and must not hold up other launch flows.
+        async with self._launch_lock:
+            gen = self._generation
+            version, app_dir = await self._download(None)
+            if self._bail_if_stale(gen):
+                return
+            self._server, port, server_drain = await start_sample_server(
+                app_dir=app_dir, port=_DEFAULT_SAMPLE_PORT, spawn=d.spawn)
+            # Watch each child the moment it exists so a crash during the
+            # intermediate awaits (login/app_create/tunnel/register) is observed
+            # rather than masked by the eventual status="active" upsert.
+            self._watch_child(self._server)
+            self._spawn_task(server_drain)
+            if self._bail_if_stale(gen):
+                return
+            await liveware_login(liveware_path=path, token=token, exec=d.exec)
+            if self._bail_if_stale(gen):
+                return
+            app_id = await liveware_app_create(
+                liveware_path=path, name=LIVEWARE_SAMPLE_APP_NAME, exec=d.exec)
+            if self._bail_if_stale(gen):
+                return
+            self._tunnel, public_url, tunnel_drain = await start_tunnel(
+                liveware_path=path, app_id=app_id, port=port, spawn=d.spawn)
+            self._watch_child(self._tunnel)
+            self._spawn_task(tunnel_drain)
+            if self._bail_if_stale(gen):
+                return
+            await d.register_app(name=LIVEWARE_SAMPLE_APP_NAME, app_id=app_id, url=public_url)
+            if self._bail_if_stale(gen):
+                return
+            d.store.upsert_liveware_sample(
+                platform=d.platform, account_id=d.account_id, app_id=app_id,
+                app_name=LIVEWARE_SAMPLE_APP_NAME, port=port, public_url=public_url,
+                sample_version=version, status="active")
         await self._deliver_intro()
         self._log.debug("liveware-sample bootstrap complete at %s", public_url)
 
@@ -583,29 +668,34 @@ class LivewareSampleSupervisor:
             self._log.debug("liveware-sample list_apps failed; skip relaunch: %s", exc)
             return
 
-        gen = self._generation
-        version, app_dir = await self._download(row.sample_version)
-        if self._bail_if_stale(gen):
-            return
-        self._server, port = await start_sample_server(
-            app_dir=app_dir, port=row.port or _DEFAULT_SAMPLE_PORT, spawn=d.spawn)
-        self._watch_child(self._server)
-        if self._bail_if_stale(gen):
-            return
-        self._tunnel, public_url = await start_tunnel(
-            liveware_path=path, app_id=row.app_id, port=port, spawn=d.spawn)
-        self._watch_child(self._tunnel)
-        if self._bail_if_stale(gen):
-            return
-        if public_url != row.public_url:
-            await d.register_app(
-                name=row.app_name, app_id=row.app_id, url=public_url)
-        if self._bail_if_stale(gen):
-            return
-        d.store.upsert_liveware_sample(
-            platform=d.platform, account_id=d.account_id, app_id=row.app_id,
-            app_name=row.app_name, port=port, public_url=public_url,
-            sample_version=version, status="active")
+        # See _bootstrap for why this section is lock-serialized and intro
+        # delivery is not.
+        async with self._launch_lock:
+            gen = self._generation
+            version, app_dir = await self._download(row.sample_version)
+            if self._bail_if_stale(gen):
+                return
+            self._server, port, server_drain = await start_sample_server(
+                app_dir=app_dir, port=row.port or _DEFAULT_SAMPLE_PORT, spawn=d.spawn)
+            self._watch_child(self._server)
+            self._spawn_task(server_drain)
+            if self._bail_if_stale(gen):
+                return
+            self._tunnel, public_url, tunnel_drain = await start_tunnel(
+                liveware_path=path, app_id=row.app_id, port=port, spawn=d.spawn)
+            self._watch_child(self._tunnel)
+            self._spawn_task(tunnel_drain)
+            if self._bail_if_stale(gen):
+                return
+            if public_url != row.public_url:
+                await d.register_app(
+                    name=row.app_name, app_id=row.app_id, url=public_url)
+            if self._bail_if_stale(gen):
+                return
+            d.store.upsert_liveware_sample(
+                platform=d.platform, account_id=d.account_id, app_id=row.app_id,
+                app_name=row.app_name, port=port, public_url=public_url,
+                sample_version=version, status="active")
         if row.intro_sent == 0:
             await self._deliver_intro()
 
