@@ -118,8 +118,21 @@ install.
 
 ## Packaging caveats
 
-`MANIFEST.in` only ships `prompts/*.md`. The bundled skill at
-`skills/clawchat-core/SKILL.md` is **not** in `MANIFEST.in`, so a built wheel
-would omit it. This is acceptable today because Hermes installs from
-the source tree, not from a wheel — but if you ever publish to PyPI,
-extend `MANIFEST.in` first.
+`MANIFEST.in` only ships `prompts/*.md`, and `[tool.setuptools.packages.find]`
+in `pyproject.toml` only includes the `clawchat_gateway*` package. The
+top-level `skills/` tree — all three bundled skill directories
+(`skills/clawchat-core/`, `skills/clawchat-liveware/`,
+`skills/clawchat-set-greeting/`, each with a `SKILL.md`) **and**
+`skills/manifest.json` — lives outside that package and is not referenced by
+`MANIFEST.in` either, so none of it is included in a built wheel. A
+wheel-only install therefore has an empty `bundled_skill_ids()` result (the
+glob over `skills/*/SKILL.md` matches nothing) and a no-op load-time
+tombstone sweep (`apply_bundled_tombstones()` finds no `skills/manifest.json`
+and returns `[]`) — no bundled skills register, and no stale managed ids get
+purged. This is acceptable today because Hermes installs from the source
+tree, not from a wheel — every file in the tracked tree, `skills/` included,
+is copied into `$HERMES_HOME/plugins/clawchat/` on install — but if you ever
+publish to PyPI, packaging must be reworked first (extend `MANIFEST.in` and
+the packaging config to carry `skills/` alongside the package, and adjust
+`bundled_skills_dir()`'s path resolution if the layout changes) or a
+wheel-based install will silently ship with zero bundled skills.

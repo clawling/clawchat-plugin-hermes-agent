@@ -8,14 +8,35 @@ Implementation lives in `clawchat_gateway/skill_update.py` (mechanism) plus
 `__init__.py::_register_skill` (registration).
 
 **2026-07-06 rename**: the two bundled skill ids were renamed to namespaced
-ids — `clawchat` → `clawchat-core`, `liveware-app` → `clawchat-liveware`
-(`HERMES_SKILL_IDS` in `skill_update.py`, `bundled_skills` in `__init__.py`).
+ids — `clawchat` → `clawchat-core`, `liveware-app` → `clawchat-liveware`. At
+the time, the bundled id list was a hardcoded `HERMES_SKILL_IDS` constant in
+`skill_update.py` and a `bundled_skills` tuple in `__init__.py`; both have
+since been replaced by auto-discovery (see "Bundled ids are auto-discovered,
+not hardcoded" below) so a future rename or addition needs no code change.
 The install-cli manifest tombstones the old ids, so the tombstone/removal
 guard above deletes stale local copies of `clawchat`/`liveware-app` while the
 new ids are protected as bundled. The Hermes plugin id `clawchat`
 (`register_platform`, `clawchat:` skill-namespace prefix) and the managed
 directory name `clawchat-skills` are unchanged — only the two skill ids
 changed.
+
+## Bundled ids are auto-discovered, not hardcoded
+
+`skill_update.bundled_skill_ids()` returns the set of ids bundled with this
+plugin by scanning the plugin's read-only snapshot directory
+(`bundled_skills_dir()`, `plugin_root/skills`) for `*/SKILL.md` and taking
+each match's parent directory name as the skill id — there is no hardcoded
+id list anywhere in the code. This is what let `clawchat-set-greeting` ship
+simply by adding a new `skills/clawchat-set-greeting/SKILL.md` directory: no
+constant needed updating.
+
+`__init__.py::_register_skill` uses the same scan (`(_plugin_dir() /
+"skills").glob("*/SKILL.md")`) to drive registration, with **per-skill
+failure isolation**: each bundled skill is registered inside its own
+`try`/`except`, so a single missing, unreadable, or malformed skill
+directory logs a warning and is skipped without preventing any other
+bundled skill — or the managed-extras pass, or the platform registration
+that follows — from succeeding.
 
 ## End-to-end flow
 
@@ -91,8 +112,9 @@ whatever manifest they actually fetch, independent of the generator.
 1. the id is tombstoned for `hermes` in `removed[hermes]`,
 2. the id is present in the *local* managed manifest (i.e. actually installed
    here — a tombstone for a skill this plugin never had is a no-op), and
-3. the id is **not** one of the bundled ids (`HERMES_SKILL_IDS = ("clawchat-core",
-   "clawchat-liveware")`) — a tombstone naming a bundled id is ignored with a
+3. the id is **not** one of the bundled ids (`bundled_skill_ids()`, auto-discovered
+   by scanning `skills/*/SKILL.md` — see "Bundled ids are auto-discovered, not
+   hardcoded" above) — a tombstone naming a bundled id is ignored with a
    `logger.warning`, never acted on, since deleting a bundled skill would only
    trigger `seed_managed_skill` to reseed it right back.
 
@@ -143,19 +165,32 @@ that target — at that point it is a normal live manifest entry again, and
 since the local file was deleted, the next check reports it as a fresh
 install (`current is None`) rather than a removal.
 
+**Load-time sweep (`apply_bundled_tombstones`)**: the dynamic removal path
+above only runs after a live manifest fetch + owner consent. A second,
+load-time tombstone sweep runs on **every plugin load**, before skill
+registration (`__init__.py::_register_skill` calls it first, ahead of the
+bundled-skills registration loop): `skill_update.apply_bundled_tombstones()`
+reads the `removed.hermes` list from the **bundled** manifest snapshot
+(`skills/manifest.json`, shipped with the plugin — not a live fetch) and
+deletes any of those ids that are currently present in the managed skills
+dir (`$HERMES_HOME/clawchat-skills/`, i.e. in the local manifest or with an
+on-disk `SKILL.md`), via the same `apply_skill_removal` used by the
+consent-driven path. This is what stops a stale id left over from before a
+rename (e.g. old `clawchat`/`liveware-app` copies) from being re-registered
+as a "managed extra" on every subsequent load, without waiting for a live
+update-check round trip. Currently-bundled ids (`bundled_skill_ids()`) are
+never touched by this sweep, matching the same "bundled ids are exempt from
+removal" rule used everywhere else. If the bundled manifest snapshot is
+missing (`FileNotFoundError`) or fails to parse as the expected JSON object,
+the sweep silently no-ops (returns `[]`, at most logging a warning) — it can
+never break plugin load.
+
 ## Registration: bundled, managed extras, and hot registration
 
-`__init__.py::_register_skill(ctx)` does three things at plugin load:
+`__init__.py::_register_skill(ctx)` does four things at plugin load, in this
+order:
 
-1. **Bundled skills** (`clawchat-core`, `clawchat-liveware`): seed a managed copy and
-   `ctx.register_skill(id, managed_path, description=...)`.
-2. **Managed extras**: any id present in the managed manifest but not bundled —
-   i.e. delivered earlier by a dynamic update — is registered too, with its
-   description read from the SKILL.md frontmatter. Without this, a dynamically
-   delivered skill would vanish from the host on every restart. A tombstoned
-   id has no manifest entry (removed by `apply_skill_removal`), so this pass
-   naturally stops registering it — no separate unregister path is needed.
-3. **Registrar capture**: `skill_update.set_skill_registrar(ctx.register_skill)`
+1. **Registrar capture**: `skill_update.set_skill_registrar(ctx.register_skill)`
    stores the host registrar so step 5 above can *hot-register* a brand-new
    skill immediately after apply (`skill_update.hot_register_new_skills`) —
    the skill becomes resolvable via `skill_view("clawchat:<id>")` in the same
@@ -163,6 +198,23 @@ install (`current is None`) rather than a removal.
    (`current is None`) are hot-registered; updates to existing ids need no
    re-registration because the registered path is unchanged. Removals are
    never hot-registered (there is nothing to register).
+2. **Load-time tombstone sweep**: `skill_update.apply_bundled_tombstones()`
+   runs next, before either registration pass below, so a stale managed id
+   from before a rename is purged and never reaches the bundled or
+   managed-extras registration pass (see "Load-time sweep
+   (`apply_bundled_tombstones`)" above).
+3. **Bundled skills**: discovered by scanning `(_plugin_dir() /
+   "skills").glob("*/SKILL.md")` (the same auto-discovery as
+   `bundled_skill_ids()` — never a hardcoded id list). For each match, seed a
+   managed copy and `ctx.register_skill(id, managed_path, description=...)`,
+   each in its own `try`/`except` — one bad or missing skill directory logs a
+   warning and is skipped without affecting any other bundled skill.
+4. **Managed extras**: any id present in the managed manifest but not bundled —
+   i.e. delivered earlier by a dynamic update — is registered too, with its
+   description read from the SKILL.md frontmatter. Without this, a dynamically
+   delivered skill would vanish from the host on every restart. A tombstoned
+   id has no manifest entry (removed by `apply_skill_removal`), so this pass
+   naturally stops registering it — no separate unregister path is needed.
 
 Historical note: before 2026-07, only bundled ids were ever registered, so a
 brand-new skill delivered by the update flow was written to disk (and confirmed
@@ -192,8 +244,8 @@ explicit-load only (`skill_view`), they do not appear in the system prompt's
 `clawchat-plugin-openclaw` implements the same publish/check/consent contract
 through the point where the owner is asked for consent, including sha-based
 convergence and tombstone removal (same three conditions: tombstoned, locally
-installed, not bundled — `OPENCLAW_SKILL_IDS` there vs. `HERMES_SKILL_IDS`
-here), but needs **no registration step at all**: the OpenClaw host scans and
+installed, not bundled — `OPENCLAW_SKILL_IDS` there vs. the auto-discovered
+`bundled_skill_ids()` here), but needs **no registration step at all**: the OpenClaw host scans and
 watches its managed skills dir (`~/.openclaw/skills`) directly, so writing or
 deleting the file *is* the delivery/removal — including brand-new ids, with
 no lazy-cleanup step needed on the removal side either. The two plugins'
