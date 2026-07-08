@@ -116,7 +116,7 @@ refresh survive a reschedule instead of silently logging the agent out.
 | —                                      | `enable_rich_interactions`     | `false`        |
 | —                                      | `output_visibility`            | `"normal"`     |
 | —                                      | `runtime_status_messages`      | `false`        |
-| —                                      | `liveware_sample`              | `true`         |
+| —                                      | `liveware_sample`              | `false` (temporary) |
 
 `output_visibility` is the ClawChat visibility preset controlled by
 `/clawchat-output minimal|normal|full`. `runtime_status_messages` controls
@@ -132,7 +132,9 @@ See [`./output-visibility.md`](./output-visibility.md) for the complete
 `minimal`, `normal`, and `full` config mappings.
 
 `liveware_sample` controls the Liveware Sample demo-app auto-boot on first
-activation — set it to `false` to disable it for an agent. See
+activation. The default is **temporarily `false`** while the template
+distribution channel is reworked (raw.githubusercontent rate limiting); set it
+to `true` explicitly to enable auto-boot for an agent. See
 [`./liveware-sample.md`](./liveware-sample.md) for the full trigger
 conditions, lifecycle, and troubleshooting.
 
