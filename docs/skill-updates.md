@@ -87,7 +87,7 @@ is expected, not a bug: the managed tree is meant to always converge to
 whatever the official manifest says, never to preserve local edits.
 
 Publish-side constraint: the official manifest's version for a bundled skill
-(`clawchat-core`, `clawchat-liveware`) must never be **lower** than the version already
+(`clawchat-core`, `clawchat-liveware`, `clawchat-liveware-sample`) must never be **lower** than the version already
 shipped in the plugin's own bundled snapshot. `seed_managed_skill` reseeds the
 managed copy from the bundled snapshot whenever the managed version is older
 than the bundled one — a manifest that regresses a bundled skill's version
@@ -187,7 +187,7 @@ never break plugin load.
 
 ## Registration: bundled, managed extras, and hot registration
 
-`__init__.py::_register_skill(ctx)` does four things at plugin load, in this
+`__init__.py::_register_skill(ctx)` does five things at plugin load, in this
 order:
 
 1. **Registrar capture**: `skill_update.set_skill_registrar(ctx.register_skill)`
@@ -198,18 +198,35 @@ order:
    (`current is None`) are hot-registered; updates to existing ids need no
    re-registration because the registered path is unchanged. Removals are
    never hot-registered (there is nothing to register).
-2. **Load-time tombstone sweep**: `skill_update.apply_bundled_tombstones()`
+2. **Skills-index visibility**: `skill_update.ensure_external_skills_dir()`
+   idempotently lists the managed dir (relative entry `clawchat-skills`;
+   the host resolves it against `$HERMES_HOME`) in the host config's
+   `skills.external_dirs`. Directories there are scanned into the system
+   prompt's `<available_skills>` index and `skills_list`, and the host
+   treats them as externally owned (read-only for its autonomous skill
+   lifecycle) — matching the sha256-convergence model. As a result every
+   managed skill is discoverable and loadable by **bare name**
+   (`skill_view("clawchat-set-greeting")`) in addition to the qualified
+   plugin-registry name. The config is written at most once; on any
+   failure (managed config, IO) the step logs a warning and degrades to
+   the previous qualified-name-only behavior. After an owner-approved
+   apply/removal the adapter calls
+   `skill_update.clear_host_skills_index_cache()` (→ host
+   `agent.prompt_builder.clear_skills_system_prompt_cache()`) so the
+   rebuilt index reflects the change from the next session without a
+   restart; in-flight sessions keep their already-built system prompt.
+3. **Load-time tombstone sweep**: `skill_update.apply_bundled_tombstones()`
    runs next, before either registration pass below, so a stale managed id
    from before a rename is purged and never reaches the bundled or
    managed-extras registration pass (see "Load-time sweep
    (`apply_bundled_tombstones`)" above).
-3. **Bundled skills**: discovered by scanning `(_plugin_dir() /
+4. **Bundled skills**: discovered by scanning `(_plugin_dir() /
    "skills").glob("*/SKILL.md")` (the same auto-discovery as
    `bundled_skill_ids()` — never a hardcoded id list). For each match, seed a
    managed copy and `ctx.register_skill(id, managed_path, description=...)`,
    each in its own `try`/`except` — one bad or missing skill directory logs a
    warning and is skipped without affecting any other bundled skill.
-4. **Managed extras**: any id present in the managed manifest but not bundled —
+5. **Managed extras**: any id present in the managed manifest but not bundled —
    i.e. delivered earlier by a dynamic update — is registered too, with its
    description read from the SKILL.md frontmatter. Without this, a dynamically
    delivered skill would vanish from the host on every restart. A tombstoned
@@ -225,7 +242,9 @@ Host-side contract (verify against `tmp/hermes/hermes_cli/plugins.py`
 `register_skill`): plain registry write, callable at any time; requires the
 path to exist and the bare name to match `[a-zA-Z0-9_-]+`; plugin skills are
 explicit-load only (`skill_view`), they do not appear in the system prompt's
-`<available_skills>` index.
+`<available_skills>` index. The `skills.external_dirs` pass above is what closes that visibility gap
+for managed skills: the registry copy stays explicit-load-only, but the
+same files are indexed as external skills under their bare names.
 
 ## Failure behaviour
 

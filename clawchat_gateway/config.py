@@ -297,6 +297,7 @@ class ClawChatConfig:
     enable_rich_interactions: bool = False
     runtime_status_messages: bool = False
     awareness_note: bool = False
+    liveware_sample: bool = True
 
     @classmethod
     def from_platform_config(cls, platform_config: Any) -> "ClawChatConfig":
@@ -385,6 +386,13 @@ class ClawChatConfig:
                     extra,
                     "awareness_note",
                     False,
+                )
+            ),
+            liveware_sample=bool(
+                _get_config_value(
+                    extra,
+                    "liveware_sample",
+                    True,
                 )
             ),
             runtime_status_messages=_read_optional_bool(

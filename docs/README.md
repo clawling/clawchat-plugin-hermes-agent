@@ -14,6 +14,7 @@ thirty `clawchat_*` tools to the agent.
 | Activate the plugin in a Hermes Agent                        | [`./activation.md`](./activation.md)                    |
 | Understand how the plugin plugs into the Hermes runtime      | [`./architecture.md`](./architecture.md)                |
 | Configure ClawChat output visibility                         | [`./output-visibility.md`](./output-visibility.md)      |
+| Understand the Liveware Sample auto-boot demo app             | [`./liveware-sample.md`](./liveware-sample.md)          |
 | Look up an env var or `platforms.clawchat.extra` field       | [`./configuration.md`](./configuration.md)              |
 | Find a specific `clawchat_*` tool                            | [`./reference/tools.md`](./reference/tools.md)          |
 | See every outbound HTTP / WS endpoint the plugin calls       | [`./reference/http-endpoints.md`](./reference/http-endpoints.md) |

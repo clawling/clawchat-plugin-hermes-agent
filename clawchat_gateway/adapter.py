@@ -60,6 +60,8 @@ from clawchat_gateway.group_message_coalescer import (
     format_coalesced_group_text,
 )
 from clawchat_gateway.inbound import InboundMessage, parse_inbound_message
+from clawchat_gateway.liveware_cli import resolve_liveware_path
+from clawchat_gateway.liveware_sample import LivewareSampleDeps, LivewareSampleSupervisor
 try:
     from clawchat_gateway.llm_context_debug import write_llm_context_snapshot
 except ModuleNotFoundError:
@@ -85,6 +87,7 @@ from clawchat_gateway.mention_message import (
     normalize_mention_targets,
     validate_mention_payload,
 )
+from clawchat_gateway.profile import load_profile_config
 from clawchat_gateway.profile_sync import relation_for_sender
 from clawchat_gateway.protocol import (
     build_message_reply_event,
@@ -460,6 +463,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._pending_awareness_note: bool = False
         self._skill_update_tasks: set[asyncio.Task[None]] = set()
         self._activation_bootstrap_tasks: set[asyncio.Task[None]] = set()
+        self._liveware_sample_supervisor: LivewareSampleSupervisor | None = None
+        self._liveware_sample_tasks: set[asyncio.Task[None]] = set()
         self._plugin_report_tasks: set[asyncio.Task[None]] = set()
         self._conversation_refresh_tasks: set[asyncio.Task[None]] = set()
         self._profile_sync_tasks: set[asyncio.Task[None]] = set()
@@ -556,6 +561,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         await self._cancel_conversation_refresh_tasks()
         await self._cancel_profile_sync_tasks()
         await self._cancel_skill_update_tasks()
+        await self._stop_liveware_sample()
         await self._connection.stop()
         await self._group_message_coalescer.cancel()
         clear_clawchat_mention_sender(self)
@@ -623,6 +629,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             # fallback. Non-group traffic is never gated.
             self._group_settings_ready.clear()
             self._schedule_activation_bootstrap()
+            self._schedule_liveware_sample()
             self._schedule_owner_metadata_refresh()
             self._spawn_group_settings_refresh("reconnect")
             self._spawn_permissions_refresh("reconnect")
@@ -867,6 +874,10 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
         if registered:
             logger.info("clawchat hot-registered new skills=%s", registered)
+        # The host's rendered <available_skills> index is LRU-cached; drop it
+        # so the applied/removed skills are visible from the next session
+        # without a restart. Cheap in-memory call; covers removals too.
+        skill_update.clear_host_skills_index_cache()
         targets = [u.target for u in updates]
         if not targets and not removed and (updates or removals):
             # Every pending item ended up producing nothing to report — e.g. a
@@ -888,9 +899,14 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
         return True
 
-    async def _send_owner_text(self, chat_id: str, text: str) -> None:
+    async def _send_owner_text(self, chat_id: str, text: str) -> bool:
+        """Send a best-effort direct text to the owner. Returns whether the
+        frame was actually accepted for delivery (``send_frame``'s own
+        result) — False on a dropped/not-ready send or a raised exception, so
+        callers that gate durable state (e.g. liveware-sample's intro-sent
+        flag) don't mistake "we tried" for "it was delivered"."""
         try:
-            await self._connection.send_frame(
+            return await self._connection.send_frame(
                 build_message_send_event(
                     chat_id=chat_id,
                     chat_type="direct",
@@ -903,6 +919,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
         except Exception:  # noqa: BLE001
             logger.warning("clawchat owner text send failed", exc_info=True)
+            return False
 
     async def _on_auth_logout(self, message: str) -> None:
         """User-visible notification on permanent token expiry (token-refresh §C.1).
@@ -1626,6 +1643,88 @@ class ClawChatAdapter(BasePlatformAdapter):
         await asyncio.gather(*tasks, return_exceptions=True)
         for task in tasks:
             self._activation_bootstrap_tasks.discard(task)
+
+    def _schedule_liveware_sample(self) -> None:
+        """Fire-and-forget bootstrap of the Liveware Sample demo app on READY.
+
+        Never blocks or fails the platform connection:
+        ``LivewareSampleSupervisor.start()`` catches its own errors and never
+        raises. Idempotent per adapter instance — a supervisor already held is
+        reused across reconnects (its own ``start()`` re-checks stored state)
+        rather than replaced.
+        """
+        if self._store is None:
+            return
+        if self._liveware_sample_supervisor is not None:
+            return
+        cfg = self._clawchat_config
+        hermes_home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+        sample_root = hermes_home / "clawchat" / "liveware-sample"
+
+        async def _list_apps() -> dict[str, Any]:
+            return await self._rest_with_auth_retry(lambda client: client.list_apps())
+
+        async def _register_app(*, name: str, app_id: str, url: str) -> dict[str, Any]:
+            return await self._rest_with_auth_retry(
+                lambda client: client.register_app(name=name, app_id=app_id, url=url)
+            )
+
+        async def _notify_owner(text: str) -> bool:
+            chat_id = self._owner_direct_chat_id()
+            if not chat_id:
+                return False
+            return await self._send_owner_text(chat_id, text)
+
+        def _resolve_token() -> str:
+            try:
+                token = load_profile_config().token
+            except Exception:  # noqa: BLE001 — fall back to the live in-memory token
+                token = ""
+            return token or self._clawchat_config.token or ""
+
+        deps = LivewareSampleDeps(
+            platform=CLAWCHAT_PLUGIN_PLATFORM,
+            account_id="default",
+            enabled=bool(cfg.liveware_sample),
+            store=self._store,
+            sample_root=sample_root,
+            resolve_token=_resolve_token,
+            resolve_liveware_path=resolve_liveware_path,
+            list_apps=_list_apps,
+            register_app=_register_app,
+            notify_owner=_notify_owner,
+            log=logger,
+        )
+        self._liveware_sample_supervisor = LivewareSampleSupervisor(deps)
+        task = asyncio.create_task(
+            self._liveware_sample_supervisor.start(),
+            name="clawchat-liveware-sample-start",
+        )
+        self._liveware_sample_tasks.add(task)
+        task.add_done_callback(self._liveware_sample_task_done)
+
+    def _liveware_sample_task_done(self, task: asyncio.Task[None]) -> None:
+        self._liveware_sample_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:  # noqa: BLE001
+            # LivewareSampleSupervisor.start() never raises by contract, but
+            # guard here too so a bug there can't crash the adapter.
+            logger.warning("clawchat liveware-sample start task failed", exc_info=True)
+
+    async def _stop_liveware_sample(self) -> None:
+        tasks = list(self._liveware_sample_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        for task in tasks:
+            self._liveware_sample_tasks.discard(task)
+        if self._liveware_sample_supervisor is not None:
+            await self._liveware_sample_supervisor.stop()
+            self._liveware_sample_supervisor = None
 
     async def _dispatch_activation_bootstrap(self) -> None:
         if self._store is None:

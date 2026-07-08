@@ -124,6 +124,24 @@ ACTIVATION_DEVICE_ID_SCHEMA = """
 ALTER TABLE activations ADD COLUMN device_id TEXT;
 """
 
+LIVEWARE_SAMPLE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS liveware_sample (
+  platform TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  app_id TEXT NOT NULL,
+  app_name TEXT NOT NULL,
+  port INTEGER NOT NULL,
+  public_url TEXT,
+  sample_version TEXT NOT NULL,
+  status TEXT NOT NULL,
+  last_error TEXT,
+  intro_sent INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (platform, account_id)
+);
+"""
+
 MIGRATIONS = [
     (1, "initial_schema", INITIAL_SCHEMA),
     (2, "message_id_dedup", MESSAGE_ID_DEDUP_SCHEMA),
@@ -131,6 +149,7 @@ MIGRATIONS = [
     (4, "connection_metadata", CONNECTION_METADATA_SCHEMA),
     (5, "activation_owner_user_id", ACTIVATION_OWNER_USER_ID_SCHEMA),
     (6, "activation_device_id", ACTIVATION_DEVICE_ID_SCHEMA),
+    (7, "liveware_sample", LIVEWARE_SAMPLE_SCHEMA),
 ]
 
 _store: ClawChatStore | None = None
@@ -166,6 +185,22 @@ class ActivationCredentials:
     refresh_token: str | None
     device_id: str | None = None
     activated_at: int | None = None
+
+
+@dataclass(frozen=True)
+class LivewareSampleRow:
+    platform: str
+    account_id: str
+    app_id: str
+    app_name: str
+    port: int
+    public_url: str | None
+    sample_version: str
+    status: str
+    last_error: str | None
+    intro_sent: int
+    created_at: int
+    updated_at: int
 
 
 class ClawChatStore:
@@ -1001,6 +1036,96 @@ class ClawChatStore:
             return int(cursor.lastrowid)
 
         return self._write("record_tool_call", write)
+
+    def get_liveware_sample(
+        self, *, platform: str, account_id: str
+    ) -> "LivewareSampleRow | None":
+        self.initialize()
+        if self._disabled:
+            return None
+        conn = sqlite3.connect(self.db_path)
+        try:
+            row = conn.execute(
+                """
+                SELECT platform, account_id, app_id, app_name, port, public_url,
+                       sample_version, status, last_error, intro_sent,
+                       created_at, updated_at
+                FROM liveware_sample WHERE platform = ? AND account_id = ?
+                """,
+                (platform, account_id),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        return LivewareSampleRow(
+            platform=str(row[0]), account_id=str(row[1]), app_id=str(row[2]),
+            app_name=str(row[3]), port=int(row[4]),
+            public_url=(str(row[5]) if row[5] is not None else None),
+            sample_version=str(row[6]), status=str(row[7]),
+            last_error=(str(row[8]) if row[8] is not None else None),
+            intro_sent=int(row[9]), created_at=int(row[10]), updated_at=int(row[11]),
+        )
+
+    def upsert_liveware_sample(
+        self, *, platform: str, account_id: str, app_id: str, app_name: str,
+        port: int, public_url: str | None, sample_version: str, status: str,
+        last_error: str | None = None,
+    ) -> None:
+        now = _now_ms()
+
+        def _op(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                """
+                INSERT INTO liveware_sample
+                  (platform, account_id, app_id, app_name, port, public_url,
+                   sample_version, status, last_error, intro_sent,
+                   created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                ON CONFLICT(platform, account_id) DO UPDATE SET
+                  app_id = excluded.app_id,
+                  app_name = excluded.app_name,
+                  port = excluded.port,
+                  public_url = excluded.public_url,
+                  sample_version = excluded.sample_version,
+                  status = excluded.status,
+                  last_error = excluded.last_error,
+                  updated_at = excluded.updated_at
+                """,
+                (platform, account_id, app_id, app_name, port, public_url,
+                 sample_version, status, last_error, now, now),
+            )
+
+        self._write("upsert_liveware_sample", _op)
+
+    def update_liveware_sample_status(
+        self, *, platform: str, account_id: str, status: str,
+        last_error: str | None = None,
+    ) -> None:
+        now = _now_ms()
+
+        def _op(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "UPDATE liveware_sample SET status = ?, last_error = ?, updated_at = ? "
+                "WHERE platform = ? AND account_id = ?",
+                (status, last_error, now, platform, account_id),
+            )
+
+        self._write("update_liveware_sample_status", _op)
+
+    def mark_liveware_sample_intro_sent(
+        self, *, platform: str, account_id: str
+    ) -> None:
+        now = _now_ms()
+
+        def _op(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "UPDATE liveware_sample SET intro_sent = 1, updated_at = ? "
+                "WHERE platform = ? AND account_id = ?",
+                (now, platform, account_id),
+            )
+
+        self._write("mark_liveware_sample_intro_sent", _op)
 
     def _applied_migrations(self, conn: sqlite3.Connection) -> set[int]:
         row = conn.execute(
