@@ -19,21 +19,29 @@ import time
 from clawchat_gateway.inbound import InboundMessage
 
 
-def friend_request_prompt_for(state: str) -> str:
+def friend_request_prompt_for(state: str, requester_user_id: str | None = None) -> str:
     """Return canned prompt text for a friend-request reasoning turn.
 
     - ``deny``  → inform the agent it should decline; no accept instruction.
     - ``ask`` / ``allow`` → instruct the agent to review the pending request.
+
+    The requester's user id is embedded so the agent does not go looking up the
+    synthetic sender ("clawchat-friend-request" is not a real user).
     """
+    arrived = (
+        f"A new friend request has arrived from user {requester_user_id}."
+        if requester_user_id
+        else "A new friend request has arrived."
+    )
     if state == "deny":
         return (
-            "A new friend request has arrived."
+            f"{arrived}"
             " Your current friend-add policy is set to deny."
             " Do not add this contact."
             " You may inform the requester that you cannot add them at this time."
         )
     return (
-        "A new friend request has arrived."
+        f"{arrived}"
         " Please review the pending request by calling `clawchat_list_friend_requests`"
         " and decide whether to accept it."
     )
@@ -48,14 +56,17 @@ def build_friend_request_inbound(
 ) -> InboundMessage:
     """Build a synthetic inbound message that triggers one agent reasoning turn.
 
-    The inbound targets the owner's direct conversation so the agent has context
-    about who it is reasoning for. The ``raw_message`` carries ``"synthetic": True``
-    so downstream guards can distinguish it from real protocol frames.
+    The inbound targets the owner's direct conversation (``cnv_…`` recorded at
+    activation). When no activation conversation is recorded, ``owner_chat_id``
+    may be empty — fall back to ``owner_user_id`` so the turn still runs (the
+    agent can act via tools even though in-turn replies will not be
+    deliverable). The ``raw_message`` carries ``"synthetic": True`` so
+    downstream guards can distinguish it from real protocol frames.
     """
-    text = friend_request_prompt_for(state)
+    text = friend_request_prompt_for(state, requester_user_id=entity_id or None)
     now_ms = int(time.time() * 1000)
     return InboundMessage(
-        chat_id=owner_chat_id,
+        chat_id=owner_chat_id or owner_user_id,
         chat_type="direct",
         sender_id="clawchat-friend-request",
         sender_name="ClawChat",
