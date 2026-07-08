@@ -457,6 +457,9 @@ _RESTART_WINDOW_S = 30 * 60
 _MAX_RESTARTS_PER_WINDOW = 5
 _INTRO_RETRY_DELAY_S = 30.0
 _INTRO_MAX_TRIES = 20
+# Backoff for transient start() failures (template CDN 429s, network blips):
+# a one-shot bootstrap would otherwise stay dormant until the next restart.
+_START_RETRY_DELAYS_S = [30.0, 60.0, 120.0, 300.0]
 
 
 @dataclass
@@ -526,6 +529,12 @@ class LivewareSampleSupervisor:
 
     # --- lifecycle -------------------------------------------------------
     async def start(self) -> None:
+        """Entry point. Never raises; transient failures are retried on the
+        _START_RETRY_DELAYS_S backoff (a one-shot attempt would otherwise stay
+        dormant until the next platform restart)."""
+        await self._start_attempt(0)
+
+    async def _start_attempt(self, attempt: int) -> None:
         d = self._d
         try:
             if not d.enabled:
@@ -546,7 +555,23 @@ class LivewareSampleSupervisor:
                 await self._bootstrap()
         except Exception as exc:  # noqa: BLE001
             self._kill_children()
-            self._log.warning("liveware-sample start failed: %s", exc)
+            delays = _START_RETRY_DELAYS_S
+            if attempt >= len(delays) or self._stopped:
+                self._log.warning(
+                    "liveware-sample start failed (attempt %d, giving up): %s",
+                    attempt + 1, exc)
+                return
+            delay = delays[attempt]
+            self._log.warning(
+                "liveware-sample start failed (attempt %d, retrying in %.0fs): %s",
+                attempt + 1, delay, exc)
+            self._spawn_task(self._retry_start(attempt + 1, delay))
+
+    async def _retry_start(self, attempt: int, delay: float) -> None:
+        await asyncio.sleep(delay)
+        if self._stopped:
+            return
+        await self._start_attempt(attempt)
 
     async def stop(self) -> None:
         """Tear down all background tasks and children. Deliberately does NOT

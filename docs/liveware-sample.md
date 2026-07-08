@@ -41,7 +41,11 @@ decides whether to actually bootstrap:
 
 Any failure along this path (network, CLI, tunnel) is caught inside the
 supervisor; `start()` never raises and never blocks or fails the platform
-connection.
+connection. A failed attempt is retried on a bounded backoff
+(`_START_RETRY_DELAYS_S`: 30s/60s/120s/300s, then gives up until the next
+platform restart) — each attempt is logged at warning level, so a flapping
+template CDN (e.g. a rate-limited egress IP) no longer strands a fresh agent
+without its sample until someone restarts it.
 
 ## Bootstrap flow (fresh agent)
 
