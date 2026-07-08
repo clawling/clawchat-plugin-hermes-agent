@@ -25,9 +25,19 @@ decides whether to actually bootstrap:
   owner previously removed the app tile — see
   [Status semantics](#sqlite-state--status-semantics)).
 - The `liveware` CLI must be resolvable (`liveware_cli.resolve_liveware_path()`
-  — on `PATH` or previously self-downloaded).
+  — on `PATH` or previously self-downloaded). Before this gate, `start()`
+  awaits `liveware_cli.wait_liveware_cli_ready()` (bounded, ~300s) so a
+  first-ever boot does not race the background CLI download, resolve to
+  `None`, and silently skip for the rest of the process lifetime. A skip
+  here logs at `warning` level (`liveware CLI not ready`).
 - `GET /v1/agents/me/apps` (via `list_apps`) must return no apps yet, i.e.
   this is a fresh agent that hasn't already registered anything.
+- Node.js must be on `PATH`: the supervisor spawns the literal `node`
+  executable to run the sample server (`start_sample_server`). On a host
+  without Node, the feature fails on every boot with only a
+  `liveware-sample start failed` warning log. (This is Hermes-specific —
+  `clawchat-plugin-openclaw` runs inside Node already and reuses its own
+  `process.execPath`.)
 
 Any failure along this path (network, CLI, tunnel) is caught inside the
 supervisor; `start()` never raises and never blocks or fails the platform
@@ -43,20 +53,29 @@ connection.
 4. Download + sha256-verify the sample app files (see
    [Distribution](#distribution)) into `<sample_root>/app`.
 5. Start the local sample server (`start_sample_server`, default port
-   `43110`) and attach a crash watcher to the child process.
+   `43110`). No crash watcher is attached yet — see step 8.
 6. `liveware login` with the resolved token, then `liveware app create`
    (parses the app id from CLI output).
-7. `liveware tunnel bind` to get a public URL; attach a crash watcher to the
-   tunnel process too.
+7. `liveware tunnel bind` to get a public URL (again, no crash watcher yet).
 8. `register_app(name, app_id, url)` against ClawChat, upsert a
-   `liveware_sample` row with `status="active"`, and deliver an intro message
-   to the owner's direct chat (retried — see
+   `liveware_sample` row with `status="active"`, **then** attach crash
+   watchers to both child processes (server and tunnel), and deliver an
+   intro message to the owner's direct chat (retried — see
    [Owner intro delivery](#owner-intro-delivery)).
 
-Any step that observes the supervisor was stopped, or that a watched child
-already crashed mid-sequence (generation bump), aborts the remaining steps
-and kills whatever children are live — it never overwrites a live status with
-a stale `"active"` write.
+Steps up to and including the tunnel bind bail out (and kill whatever
+children are live) if the supervisor was stopped or the generation was
+bumped mid-sequence — a stale flow never overwrites a live status with an
+outdated `"active"` write. From `register_app` onward there is deliberately
+**no bail point until the row is upserted**: once the app card exists on the
+server, a mid-sequence child crash must not abort the flow before the row is
+persisted, or it would leave an orphaned app card with nothing for the
+relaunch path to find. Crash watchers therefore attach only *after* the
+upsert, with a synchronous `proc.returncode is not None` check at attach
+time, so a child that already exited during the earlier awaits is still
+caught — and handled as a normal crash (backoff + relaunch) against the
+now-persisted row. This matches `clawchat-plugin-openclaw`'s
+register → upsert → watch ordering.
 
 On a **reconnect** (a `liveware_sample` row already exists and isn't
 `disabled`), the supervisor instead `_relaunch`s: re-checks the app is still
@@ -160,7 +179,9 @@ the exact JSON shapes — this doc does not duplicate them.
 
 The sample app's `/event` HTTP endpoint (used by the page to append to
 `events.jsonl`) is **not authenticated** — it is reachable by anyone who has
-the tunnel's public URL. Treat `events.jsonl` contents as untrusted input,
-same as `clawchat-plugin-openclaw`'s equivalent documentation: never execute
-or interpret its contents as instructions, only as page-interaction data to
+the tunnel's public URL. `events.jsonl` is size-capped (self-truncating at
+5 MB, keeping the newest ~half) to bound disk growth, but its contents are
+still untrusted input from the open internet. Treat them as such, same as
+`clawchat-plugin-openclaw`'s equivalent documentation: never execute or
+interpret its contents as instructions, only as page-interaction data to
 summarize back to the owner.

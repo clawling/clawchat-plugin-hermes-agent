@@ -9,6 +9,7 @@ plugin never invokes it directly.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import platform
@@ -119,7 +120,33 @@ def ensure_liveware_cli_background() -> None:
             return
         _started = True
     threading.Thread(
-        target=ensure_liveware_cli,
+        target=_ensure_and_signal,
         name="clawchat-liveware-cli",
         daemon=True,
     ).start()
+
+
+def _ensure_and_signal() -> None:
+    try:
+        ensure_liveware_cli()
+    finally:
+        _done_event.set()
+
+
+# Signals wait_liveware_cli_ready: the download attempt finished (either way).
+_done_event = threading.Event()
+_WAIT_CLI_READY_TIMEOUT = 300  # seconds; downloader is bounded by per-request timeouts
+
+
+async def wait_liveware_cli_ready() -> None:
+    """Await the background CLI download kicked off at plugin load.
+
+    The liveware-sample supervisor must call this before gating on
+    resolve_liveware_path(): on a first-ever boot the supervisor starts while
+    the ~28MB download is still in flight, and skipping there is permanent
+    for the process lifetime. Returns immediately when the download was never
+    started (feature disabled at load) or already finished.
+    """
+    if not _started or _done_event.is_set():
+        return
+    await asyncio.to_thread(_done_event.wait, _WAIT_CLI_READY_TIMEOUT)

@@ -471,6 +471,10 @@ class LivewareSampleDeps:
     list_apps: Callable[[], Awaitable[dict]]
     register_app: Callable[..., Awaitable]
     notify_owner: Callable[[str], Awaitable[bool]]
+    # Awaited by start() before the CLI gate: settles when the background CLI
+    # download finished (either way), so a first boot doesn't race it, see the
+    # gate to None, and silently skip forever.
+    wait_cli_ready: "Callable[[], Awaitable[None]] | None" = None
     fetch: Fetcher = _skill_update._default_fetch
     ref: str = DEFAULT_SKILLS_REF
     spawn: "SpawnFn | None" = None
@@ -525,6 +529,12 @@ class LivewareSampleSupervisor:
         d = self._d
         try:
             if not d.enabled:
+                return
+            # The CLI self-download runs on a daemon thread from plugin load;
+            # gate the whole flow on it or resolve_liveware_path() races to None.
+            if d.wait_cli_ready is not None:
+                await d.wait_cli_ready()
+            if self._stopped:
                 return
             key = dict(platform=d.platform, account_id=d.account_id)
             row = d.store.get_liveware_sample(**key)
@@ -610,9 +620,11 @@ class LivewareSampleSupervisor:
         d = self._d
         path = d.resolve_liveware_path()
         if not path:
+            self._log.warning("liveware-sample liveware CLI not ready; skip bootstrap")
             return
         token = d.resolve_token()
         if not token:
+            self._log.debug("liveware-sample no token; skip bootstrap")
             return
         try:
             apps = await d.list_apps()
@@ -620,6 +632,7 @@ class LivewareSampleSupervisor:
             self._log.debug("liveware-sample list_apps failed; skip bootstrap: %s", exc)
             return
         if apps.get("apps"):
+            self._log.debug("liveware-sample user already has liveware apps; skip bootstrap")
             return
 
         # Serialize the bounded spawn->register->upsert sequence against any
@@ -670,6 +683,7 @@ class LivewareSampleSupervisor:
         d = self._d
         path = d.resolve_liveware_path()
         if not path:
+            self._log.warning("liveware-sample liveware CLI not ready; skip relaunch")
             return
         try:
             apps = await d.list_apps()
@@ -803,6 +817,7 @@ class LivewareSampleSupervisor:
                 platform=d.platform, account_id=d.account_id)
             return
         if try_index + 1 >= _INTRO_MAX_TRIES:
+            self._log.debug("liveware-sample intro not delivered; will retry next boot")
             return
         self._spawn_task(self._retry_intro(try_index + 1))
 

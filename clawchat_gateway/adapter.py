@@ -60,7 +60,7 @@ from clawchat_gateway.group_message_coalescer import (
     format_coalesced_group_text,
 )
 from clawchat_gateway.inbound import InboundMessage, parse_inbound_message
-from clawchat_gateway.liveware_cli import resolve_liveware_path
+from clawchat_gateway.liveware_cli import resolve_liveware_path, wait_liveware_cli_ready
 from clawchat_gateway.liveware_sample import LivewareSampleDeps, LivewareSampleSupervisor
 try:
     from clawchat_gateway.llm_context_debug import write_llm_context_snapshot
@@ -1690,6 +1690,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             sample_root=sample_root,
             resolve_token=_resolve_token,
             resolve_liveware_path=resolve_liveware_path,
+            wait_cli_ready=wait_liveware_cli_ready,
             list_apps=_list_apps,
             register_app=_register_app,
             notify_owner=_notify_owner,
