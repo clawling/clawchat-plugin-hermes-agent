@@ -21,7 +21,8 @@ Wire shape (``payload.metadata`` is the authoritative discriminator):
         }
     }
 
-``outcome`` is one of ``approved``, ``denied``, ``expired``, ``failed``.
+``outcome`` is one of ``approved``, ``denied``, ``expired``, ``failed``,
+``auto_allowed``, ``auto_denied``.
 
 Mirrors the OpenClaw plugin's permission-result consumer so both adapters
 produce equivalent reasoning turns for the same outcome.
@@ -120,13 +121,23 @@ def _build_result_text(*, operation: str, outcome: str, reason: str) -> str:
         "denied": "denied",
         "expired": "expired",
         "failed": "failed",
+        "auto_allowed": "auto-allowed",
+        "auto_denied": "auto-denied",
     }.get(outcome, outcome or "unknown")
 
-    resolution = (
-        "The requested action has been completed."
-        if outcome == "approved"
-        else "No further action was taken."
-    )
+    if outcome == "approved":
+        resolution = "The requested action has been completed."
+    elif outcome == "auto_allowed":
+        resolution = (
+            "The requested action was auto-allowed by the owner's policy "
+            "and has been completed."
+        )
+    elif outcome == "auto_denied":
+        resolution = (
+            "The requested action was auto-denied by the owner's policy; do not retry."
+        )
+    else:
+        resolution = "No further action was taken."
     parts = [
         f'Permission request for operation "{operation}" has been {outcome_label}.',
     ]
