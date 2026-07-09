@@ -13,6 +13,6 @@ Consumers should import the adapter directly:
 # adapter reports it to the ClawChat backend as the plugin version. Bump it HERE on
 # release; plugin.yaml's manifest version must be kept in lockstep (guarded by
 # tests/test_version_consistency.py).
-__version__ = "0.14.0-47"
+__version__ = "0.14.0-48"
 
 __all__ = ["__version__"]
