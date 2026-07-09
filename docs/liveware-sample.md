@@ -18,8 +18,10 @@ The supervisor is created and `start()`ed once per adapter instance, the
 first time the platform reaches `ConnectionState.READY`. `start()` itself
 decides whether to actually bootstrap:
 
-- `platforms.clawchat.extra.liveware_sample` must not be explicitly `false`
-  (see [Configuration](#configuration) below) — otherwise `start()` returns
+- `platforms.clawchat.extra.liveware_sample` must be explicitly `true` — the
+  default is **temporarily `false`** until the supervisor runs the persistent
+  `liveware agent` data plane (CLI v0.0.11 made `tunnel bind` one-shot; see
+  [Configuration](#configuration) below); otherwise `start()` returns
   immediately.
 - No `liveware_sample` row may already exist with `status="disabled"` (the
   owner previously removed the app tile — see

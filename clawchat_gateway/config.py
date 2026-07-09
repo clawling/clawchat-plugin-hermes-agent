@@ -297,7 +297,13 @@ class ClawChatConfig:
     enable_rich_interactions: bool = False
     runtime_status_messages: bool = False
     awareness_note: bool = False
-    liveware_sample: bool = True
+    # TEMPORARY default-off: liveware CLI v0.0.11 made `tunnel bind` a
+    # one-shot registration (data plane moved to the persistent
+    # `liveware agent` daemon), so the supervisor's long-lived-bind
+    # assumption crash-loops every boot. Flip back to True once the
+    # supervisor runs `liveware agent`. Explicit liveware_sample=true
+    # in extra/env still enables it.
+    liveware_sample: bool = False
 
     @classmethod
     def from_platform_config(cls, platform_config: Any) -> "ClawChatConfig":
@@ -392,7 +398,7 @@ class ClawChatConfig:
                 _get_config_value(
                     extra,
                     "liveware_sample",
-                    True,
+                    False,  # TEMPORARY default-off; see ClawChatConfig.liveware_sample
                 )
             ),
             runtime_status_messages=_read_optional_bool(
