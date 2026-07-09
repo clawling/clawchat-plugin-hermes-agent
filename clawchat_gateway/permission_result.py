@@ -60,7 +60,8 @@ def handle_permission_result(frame: dict[str, Any]) -> InboundMessage | None:
     lifetime) so replayed or retried receipts collapse into one agent turn.
 
     The returned ``InboundMessage`` carries ``raw_message={"synthetic": True, ...}``
-    matching the synthetic path used by ``build_friend_request_inbound``.
+    matching the synthetic-message convention used elsewhere in the adapter
+    (e.g. the awareness note in ``_emit_awareness_note``).
     """
     metadata = _extract_metadata(frame)
     if metadata is None:

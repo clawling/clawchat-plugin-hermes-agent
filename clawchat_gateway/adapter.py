@@ -97,7 +97,6 @@ from clawchat_gateway.protocol import (
     new_message_id,
 )
 from clawchat_gateway.group_settings import EffectiveSettings, GroupSettingsCache
-from clawchat_gateway.friend_request_turn import build_friend_request_inbound
 from clawchat_gateway.greeting import load_activation_bootstrap_prompt
 from clawchat_gateway.permission_result import handle_permission_result
 from clawchat_gateway.permissions import PermissionCache
@@ -648,7 +647,6 @@ class ClawChatAdapter(BasePlatformAdapter):
 
         * ``agent.config.changed`` — re-pulls the per-group settings cache.
         * ``agent.permission.changed`` — re-pulls the permission policy cache.
-        * ``friend.request`` — builds a synthetic reasoning turn for the owner.
         * ``clawchat.skill.update.check`` — checks for a newer skill version.
         * ``friend.added``, ``friend.removed``, ``friend.profile_updated``,
           ``conversation.*`` — lightweight awareness events; may emit one
@@ -672,18 +670,6 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._spawn_group_settings_refresh("signal")
         elif payload.get("type") == "agent.permission.changed":
             self._spawn_permissions_refresh("signal")
-        elif payload.get("type") == "friend.request":
-            # Connection-level NotifySignalObserver already dedups by event_id;
-            # _on_notify_signal is only called for freshly-observed frames.
-            entity_id = str(payload.get("entity_id") or "")
-            state = self._permission_cache.state_of("friend.add")
-            inbound = build_friend_request_inbound(
-                owner_user_id=self._owner_user_id(),
-                owner_chat_id=self._owner_direct_chat_id(),
-                state=state,
-                entity_id=entity_id,
-            )
-            await self._handle_inbound(inbound)
         elif payload.get("type") == "clawchat.skill.update.check":
             # Content-free trigger: check the official skill source for a newer
             # version and, if any, ask the owner for consent in chat. All network
