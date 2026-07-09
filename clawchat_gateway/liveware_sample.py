@@ -369,16 +369,58 @@ async def start_sample_server(*, app_dir, port: int, spawn: SpawnFn | None = Non
     return proc, int(json.loads(line)["port"]), _drain_pipes(proc)
 
 
-async def start_tunnel(*, liveware_path, app_id, port: int,
-                       spawn: SpawnFn | None = None,
-                       timeout: float = _TUNNEL_START_TIMEOUT):
-    spawn = spawn or asyncio.create_subprocess_exec
-    proc = await _maybe_await(spawn(
+async def tunnel_bind(*, liveware_path, app_id, port: int,
+                      exec: "ExecFn | None" = None,
+                      timeout: float = _CLI_TIMEOUT) -> str:
+    """One-shot upstream registration (CLI v0.0.11+): `tunnel bind` writes the
+    app→local-upstream mapping to the control plane, prints the binding table
+    and exits 0. The data plane is carried by the persistent `liveware agent`
+    daemon (see start_tunnel_agent) — bind itself no longer stays running."""
+    exec = exec or asyncio.create_subprocess_exec
+    proc = await _maybe_await(exec(
         liveware_path, "tunnel", "bind", app_id, f"http://127.0.0.1:{port}",
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     ))
-    url = await _read_until(proc, parse_tunnel_public_url, timeout, "liveware tunnel bind")
-    return proc, url, _drain_pipes(proc)
+    out, err = await _communicate(proc, timeout, "liveware tunnel bind")
+    stdout = (out or b"").decode(errors="replace")
+    stderr = (err or b"").decode(errors="replace")
+    if proc.returncode:
+        raise LivewareSampleError(
+            f"liveware tunnel bind failed: {(stderr or stdout).strip()}")
+    url = parse_tunnel_public_url(stdout) or parse_tunnel_public_url(stderr)
+    if not url:
+        raise LivewareSampleError(
+            f"liveware tunnel bind: cannot parse public URL from output: {stdout[:500]}")
+    return url
+
+
+_AGENT_READY_MARKER = "relay grpc control connected"
+
+
+def parse_agent_ready(output: str) -> str | None:
+    """Match the `liveware agent` ready signal: the daemon logs a JSON line
+    once its gRPC control channel to the relay is up — only then can the
+    public URL actually reach the local upstream."""
+    for ln in (output or "").split("\n"):
+        if _AGENT_READY_MARKER in ln:
+            return ln
+    return None
+
+
+async def start_tunnel_agent(*, liveware_path,
+                             spawn: SpawnFn | None = None,
+                             timeout: float = _TUNNEL_START_TIMEOUT):
+    """Spawn the persistent `liveware agent` data-plane daemon (CLI v0.0.11+;
+    replaces the long-lived `tunnel bind` / sibling tunnel-agent binary). It
+    authenticates from the token saved by `liveware login` and serves every
+    app bound via `tunnel bind` for that account."""
+    spawn = spawn or asyncio.create_subprocess_exec
+    proc = await _maybe_await(spawn(
+        liveware_path, "agent",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    ))
+    await _read_until(proc, parse_agent_ready, timeout, "liveware agent start")
+    return proc, _drain_pipes(proc)
 
 
 async def _communicate(proc, timeout: float, label: str):
@@ -503,7 +545,7 @@ class LivewareSampleSupervisor:
         # only after upsert (see _watch_child) - a crash of THIS flow's own
         # in-progress children before that point does NOT bump the
         # generation and does NOT trip _bail_if_stale; that was the H8 bug
-        # (tunnel dies right after start_tunnel, before upsert -> the
+        # (agent dies right after start_tunnel_agent, before upsert -> the
         # resulting generation bump used to abort the bootstrap before the
         # row was ever persisted, orphaning the app card). _bail_if_stale
         # still matters for stop() responsiveness and for the launch-lock
@@ -515,7 +557,7 @@ class LivewareSampleSupervisor:
         self._watched: set[int] = set()
         # Serializes the bounded spawn->register->upsert->attach-watch body of
         # _bootstrap/_relaunch so two launch flows (e.g. a stale in-flight
-        # relaunch still awaiting start_tunnel, and a fresh _delayed_relaunch
+        # relaunch still awaiting start_tunnel_agent, and a fresh _delayed_relaunch
         # scheduled by its own crash watcher) never interleave. Without this,
         # the stale flow's post-await _bail_if_stale can fire *after* the new
         # flow has already assigned self._server/self._tunnel, killing the new
@@ -682,16 +724,20 @@ class LivewareSampleSupervisor:
                 liveware_path=path, name=LIVEWARE_SAMPLE_APP_NAME, exec=d.exec)
             if self._bail_if_stale(gen):
                 return
-            self._tunnel, public_url, tunnel_drain = await start_tunnel(
-                liveware_path=path, app_id=app_id, port=port, spawn=d.spawn)
-            self._spawn_task(tunnel_drain)
+            public_url = await tunnel_bind(
+                liveware_path=path, app_id=app_id, port=port, exec=d.exec)
+            if self._bail_if_stale(gen):
+                return
+            self._tunnel, agent_drain = await start_tunnel_agent(
+                liveware_path=path, spawn=d.spawn)
+            self._spawn_task(agent_drain)
             if self._bail_if_stale(gen):
                 return
             # From here on we do NOT bail before persisting: once register_app
             # has created the app card, a crash of either child must not abort
             # the flow before the row is written (H8 fix). register -> upsert
             # -> watch, matching openclaw's ordering, so a mid-bootstrap crash
-            # (e.g. the tunnel dying right after start_tunnel returns, before
+            # (e.g. the agent dying right after start_tunnel_agent returns, before
             # upsert) still yields a recoverable persisted row instead of an
             # orphaned app card with nothing for _delayed_relaunch to find.
             await d.register_app(name=LIVEWARE_SAMPLE_APP_NAME, app_id=app_id, url=public_url)
@@ -733,9 +779,13 @@ class LivewareSampleSupervisor:
             self._spawn_task(server_drain)
             if self._bail_if_stale(gen):
                 return
-            self._tunnel, public_url, tunnel_drain = await start_tunnel(
-                liveware_path=path, app_id=row.app_id, port=port, spawn=d.spawn)
-            self._spawn_task(tunnel_drain)
+            public_url = await tunnel_bind(
+                liveware_path=path, app_id=row.app_id, port=port, exec=d.exec)
+            if self._bail_if_stale(gen):
+                return
+            self._tunnel, agent_drain = await start_tunnel_agent(
+                liveware_path=path, spawn=d.spawn)
+            self._spawn_task(agent_drain)
             if self._bail_if_stale(gen):
                 return
             # See _bootstrap: no bail between register/upsert (H8 fix) so a

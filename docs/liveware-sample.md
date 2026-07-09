@@ -18,11 +18,9 @@ The supervisor is created and `start()`ed once per adapter instance, the
 first time the platform reaches `ConnectionState.READY`. `start()` itself
 decides whether to actually bootstrap:
 
-- `platforms.clawchat.extra.liveware_sample` must be explicitly `true` — the
-  default is **temporarily `false`** until the supervisor runs the persistent
-  `liveware agent` data plane (CLI v0.0.11 made `tunnel bind` one-shot; see
-  [Configuration](#configuration) below); otherwise `start()` returns
-  immediately.
+- `platforms.clawchat.extra.liveware_sample` must not be `false` (default
+  `true`, see [Configuration](#configuration) below); otherwise `start()`
+  returns immediately.
 - No `liveware_sample` row may already exist with `status="disabled"` (the
   owner previously removed the app tile — see
   [Status semantics](#sqlite-state--status-semantics)).
@@ -62,14 +60,21 @@ without its sample until someone restarts it.
    `43110`). No crash watcher is attached yet — see step 8.
 6. `liveware login` with the resolved token, then `liveware app create`
    (parses the app id from CLI output).
-7. `liveware tunnel bind` to get a public URL (again, no crash watcher yet).
-8. `register_app(name, app_id, url)` against ClawChat, upsert a
+7. `liveware tunnel bind` — a **one-shot** CLI call (CLI v0.0.11+): it
+   registers the app→local-upstream mapping on the control plane, prints the
+   binding table (parsed for the public URL) and exits. It does **not** stay
+   running.
+8. Start the persistent `liveware agent` data-plane daemon
+   (`start_tunnel_agent`) — the long-lived child that actually carries
+   public-URL traffic to the local upstream. Ready once it logs
+   `relay grpc control connected` (again, no crash watcher yet).
+9. `register_app(name, app_id, url)` against ClawChat, upsert a
    `liveware_sample` row with `status="active"`, **then** attach crash
-   watchers to both child processes (server and tunnel), and deliver an
+   watchers to both child processes (server and agent), and deliver an
    intro message to the owner's direct chat (retried — see
    [Owner intro delivery](#owner-intro-delivery)).
 
-Steps up to and including the tunnel bind bail out (and kill whatever
+Steps up to and including the agent start bail out (and kill whatever
 children are live) if the supervisor was stopped or the generation was
 bumped mid-sequence — a stale flow never overwrites a live status with an
 outdated `"active"` write. From `register_app` onward there is deliberately
@@ -132,7 +137,7 @@ One row per `(platform, account_id)` in the `liveware_sample` table
   is not None`). So `start()` actually runs only once per **connect
   lifecycle** — the first `READY` after the adapter connects (or after a
   prior `disconnect()`) — not on every reconnect within that lifecycle.
-- **Crash backoff**: each watched child (server or tunnel) that exits
+- **Crash backoff**: each watched child (server or `liveware agent`) that exits
   unexpectedly triggers a relaunch after a delay of `min(5 * 2**n, 60)`
   seconds, where `n` is the number of restarts already counted in the
   current 30-minute window (5s, 10s, 20s, 40s, 60s, ...). After 5 restarts
