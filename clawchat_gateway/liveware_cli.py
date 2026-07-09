@@ -2,9 +2,7 @@
 
 On startup the plugin ensures a ``liveware`` binary is available; when it is
 not on PATH and not already downloaded, it fetches the OS/arch-matched
-``liveware`` and ``tunnel-agent`` binaries into ``<HERMES_HOME>/clawchat/liveware``.
-``tunnel-agent`` is downloaded only so liveware finds it as a sibling — the
-plugin never invokes it directly.
+``liveware`` binary into ``<HERMES_HOME>/clawchat/liveware``.
 """
 
 from __future__ import annotations
@@ -35,14 +33,14 @@ def _hermes_home() -> Path:
 
 
 def liveware_dir() -> Path:
-    """Directory holding the downloaded binaries: <HERMES_HOME>/clawchat/liveware."""
+    """Directory holding the downloaded binary: <HERMES_HOME>/clawchat/liveware."""
     return _hermes_home() / "clawchat" / "liveware"
 
 
 def platform_assets(
     system: str | None = None, machine: str | None = None
-) -> tuple[str, str] | None:
-    """Map host platform/arch to (liveware_asset, tunne_agent_asset), or None."""
+) -> str | None:
+    """Map host platform/arch to the liveware asset filename, or None."""
     sys_name = (system or platform.system()).lower()
     mach = (machine or platform.machine()).lower()
     os_name = "darwin" if sys_name == "darwin" else "linux" if sys_name == "linux" else None
@@ -55,7 +53,7 @@ def platform_assets(
     )
     if not os_name or not arch:
         return None
-    return (f"liveware-{os_name}-{arch}", f"tunnel-agent-{os_name}-{arch}")
+    return f"liveware-{os_name}-{arch}"
 
 
 def resolve_liveware_path() -> str | None:
@@ -95,8 +93,8 @@ def ensure_liveware_cli() -> None:
         d = liveware_dir()
         if (d / "liveware").exists():
             return
-        assets = platform_assets()
-        if assets is None:
+        liveware_asset = platform_assets()
+        if liveware_asset is None:
             logger.warning(
                 "ClawChat: unsupported platform %s/%s; skipping liveware download",
                 platform.system(),
@@ -104,9 +102,7 @@ def ensure_liveware_cli() -> None:
             )
             return
         d.mkdir(parents=True, exist_ok=True)
-        liveware_asset, tunne_asset = assets
         _download(LIVEWARE_BASE_URL + liveware_asset, d / "liveware")
-        _download(LIVEWARE_BASE_URL + tunne_asset, d / "tunnel-agent")
         logger.info("ClawChat: liveware CLI downloaded to %s", d)
     except Exception as exc:  # noqa: BLE001
         logger.warning("ClawChat: liveware CLI download skipped: %s", exc)
