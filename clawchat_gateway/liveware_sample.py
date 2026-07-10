@@ -349,12 +349,15 @@ async def _maybe_await(value):
 
 
 async def start_sample_server(*, app_dir, port: int, spawn: SpawnFn | None = None,
+                              agent_user_id: "str | None" = None,
                               timeout: float = _SERVER_START_TIMEOUT):
     spawn = spawn or asyncio.create_subprocess_exec
     # node runs the zero-dependency sample server.
+    args = [str(Path(app_dir) / "server.mjs"), "--dir", str(app_dir), "--port", str(port)]
+    if agent_user_id:
+        args += ["--agent-id", agent_user_id]
     proc = await _maybe_await(spawn(
-        "node",
-        str(Path(app_dir) / "server.mjs"), "--dir", str(app_dir), "--port", str(port),
+        "node", *args,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     ))
 
@@ -489,8 +492,9 @@ async def liveware_app_create(*, liveware_path, name: str, exec: ExecFn | None =
 # ---------------------------------------------------------------------------
 
 LIVEWARE_SAMPLE_INTRO_TEXT = (
-    "我给你安装了一个 liveware 演示应用「Liveware Sample」，它已经出现在我们的聊天里。"
-    "点开它看看，然后试试对我说：把标题改成 Hello Liveware。"
+    "我给你安装了一个 liveware 演示应用「Liveware Sample」。"
+    "入口：在我们的对话页面，点右上角的「应用」按钮（✦），在打开的面板里选名为「Liveware Sample」的应用。"
+    "页面上有完整的使用引导，试试对我说：把标题改成 Hello Liveware。"
     "你在页面上点的按钮、提交的留言我也能看到，随时问我。"
 )
 
@@ -516,6 +520,10 @@ class LivewareSampleDeps:
     list_apps: Callable[[], Awaitable[dict]]
     register_app: Callable[..., Awaitable]
     notify_owner: Callable[[str], Awaitable[bool]]
+    # The agent's own ClawChat user id (`usr_…`) — minted into the sample
+    # page's back-to-chat deep link. Read at spawn time; None → the page
+    # renders its text fallback instead of the link.
+    resolve_agent_user_id: "Callable[[], str | None] | None" = None
     # Awaited by start() before the CLI gate: settles when the background CLI
     # download finished (either way), so a first boot doesn't race it, see the
     # gate to None, and silently skip forever.
@@ -713,7 +721,8 @@ class LivewareSampleSupervisor:
             if self._bail_if_stale(gen):
                 return
             self._server, port, server_drain = await start_sample_server(
-                app_dir=app_dir, port=_DEFAULT_SAMPLE_PORT, spawn=d.spawn)
+                app_dir=app_dir, port=_DEFAULT_SAMPLE_PORT, spawn=d.spawn,
+                agent_user_id=(d.resolve_agent_user_id() if d.resolve_agent_user_id else None))
             self._spawn_task(server_drain)
             if self._bail_if_stale(gen):
                 return
@@ -775,7 +784,8 @@ class LivewareSampleSupervisor:
             if self._bail_if_stale(gen):
                 return
             self._server, port, server_drain = await start_sample_server(
-                app_dir=app_dir, port=row.port or _DEFAULT_SAMPLE_PORT, spawn=d.spawn)
+                app_dir=app_dir, port=row.port or _DEFAULT_SAMPLE_PORT, spawn=d.spawn,
+                agent_user_id=(d.resolve_agent_user_id() if d.resolve_agent_user_id else None))
             self._spawn_task(server_drain)
             if self._bail_if_stale(gen):
                 return

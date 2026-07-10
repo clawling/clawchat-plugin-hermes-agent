@@ -57,7 +57,15 @@ without its sample until someone restarts it.
 4. Download + sha256-verify the sample app files (see
    [Distribution](#distribution)) into `<sample_root>/app`.
 5. Start the local sample server (`start_sample_server`, default port
-   `43110`). No crash watcher is attached yet — see step 8.
+   `43110`; requires `node` on `PATH` — see the trigger conditions above).
+   No crash watcher is attached yet — see step 8. The supervisor also passes
+   `--agent-id <cfg.user_id>` (`deps.resolve_agent_user_id`, wired in
+   `adapter.py` from `self._clawchat_config.user_id`) so `server.mjs` can
+   merge the agent's own ClawChat user id into `/state` and its SSE stream as
+   `agentId` — dynamically, never written to `state.json` on disk. The
+   sample page uses that id to render a one-tap `clawchat://u/{id}?chat=1`
+   back-to-chat deep link; with no id (older/relaunched-without-id cases) the
+   page falls back to its plain-text guidance instead of the link.
 6. `liveware login` with the resolved token, then `liveware app create`
    (parses the app id from CLI output).
 7. `liveware tunnel bind` — a **one-shot** CLI call (CLI v0.0.11+): it

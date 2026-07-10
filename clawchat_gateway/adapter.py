@@ -1676,6 +1676,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             sample_root=sample_root,
             resolve_token=_resolve_token,
             resolve_liveware_path=resolve_liveware_path,
+            resolve_agent_user_id=lambda: (self._clawchat_config.user_id or None),
             wait_cli_ready=wait_liveware_cli_ready,
             list_apps=_list_apps,
             register_app=_register_app,
