@@ -201,7 +201,15 @@ class ClawChatConnection:
         on_auth_logout: OnAuthLogout | None = None,
         on_notify_signal: OnNotifySignal | None = None,
         account_id: str = "default",
+        connect_device_id: str | None = None,
     ) -> None:
+        # ``connect_device_id`` overrides the device id presented in the WS
+        # connect payload ONLY. REST refresh keeps the canonical resolved id
+        # (the backend rejects a mismatched X-Device-Id with a 10003 forced
+        # re-login). msghub enforces single-session per (user_id, device_id)
+        # via takeover, so a standalone sender must present a sibling device
+        # id or it kicks a gateway running in another process off the socket.
+        self._connect_device_id = connect_device_id
         self._cfg = config
         self._on_message = on_message
         self._on_state_change = on_state_change
@@ -364,6 +372,20 @@ class ClawChatConnection:
         (rather than a volatile ``get_device_id()`` fingerprint).
         """
         return self._refresh_device_id()
+
+    def use_sibling_connect_device_id(self, suffix: str) -> str:
+        """Present ``<canonical id><suffix>`` as the WS connect device id.
+
+        msghub keys live sessions on (user_id, device_id) with takeover
+        semantics: connecting with the canonical id would kick a gateway
+        running in another process off its socket. A sibling id coexists —
+        the inbox is user-scoped with per-device cursors, so it never steals
+        messages from the real device. REST refresh keeps the canonical id.
+        Must be called before ``start``. Returns the id that will be presented.
+        """
+        sibling = f"{self._refresh_device_id()}{suffix}"
+        self._connect_device_id = sibling
+        return sibling
 
     def _refresh_seed_conversation_id(self) -> str | None:
         """Conversation id used to seed an env-only activations row (§C.2).
@@ -1405,11 +1427,13 @@ class ClawChatConnection:
                 ],
             )
         )
-        device_id = self._refresh_device_id()
+        device_id = self._connect_device_id or self._refresh_device_id()
         # Persist the resolved device id (e.g. the token's `did` for env-booted
         # agents) onto the activations row so it survives container recreation
         # and is observable. Only-if-empty: never clobbers a connect-code value.
-        if self._store is not None and device_id:
+        # An override is a sibling session id, never the canonical device id —
+        # persisting it would poison refresh (§E), so skip the backfill.
+        if self._store is not None and device_id and self._connect_device_id is None:
             try:
                 self._store.set_activation_device_id(
                     platform="hermes",

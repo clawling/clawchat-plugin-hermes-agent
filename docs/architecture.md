@@ -63,6 +63,38 @@ explicit ClawChat conversation ids without changing Hermes source. The
 patch is narrowly scoped and idempotent (it tags itself with
 `_clawchat_target_patch=True`).
 
+## Standalone sender (out-of-process `hermes send` / cron)
+
+`register_platform` also passes `standalone_sender_fn=_clawchat_standalone_send`
+(`__init__` → `clawchat_gateway.standalone_send.standalone_send`). Hermes'
+`send_message` tool falls back to this hook when no live gateway adapter
+exists in the calling process — the `hermes send` CLI and `deliver=clawchat`
+cron jobs running outside the gateway process. On older Hermes builds whose
+`PlatformEntry` lacks the field, registration retries without it (out-of-process
+delivery then stays unavailable).
+
+ClawChat has no REST send endpoint, so the standalone path opens an
+**ephemeral** `ClawChatConnection` (reusing credential loading, the challenge
+handshake, token refresh, and ack tracking), sends one `message.send` frame
+with `wait_for_ack=True`, and closes. Two invariants:
+
+- **Sibling device id.** msghub enforces single-session per
+  `(user_id, device_id)` with takeover semantics — connecting with the
+  canonical device id would kick a gateway daemon running in another process
+  off its socket. The ephemeral session therefore presents
+  `<canonical id>-standalone` on the WS connect payload
+  (`ClawChatConnection.use_sibling_connect_device_id`). Server-side message
+  state is user-scoped with per-device replay cursors, so the sibling session
+  never consumes messages on the real device's behalf; its only durable
+  footprint is its own replay cursor, which the server expires after a period
+  of inactivity.
+- **Canonical refresh id.** `/v1/auth/refresh` rejects a mismatched
+  `X-Device-Id` with a 10003 forced re-login, so token refresh keeps using the
+  canonical resolved device id — only the WS connect payload is overridden.
+
+The standalone path is text-only; media attachments still require the live
+gateway adapter (the media-delivery patch reports this explicitly).
+
 ## Adapter
 
 `clawchat_gateway.adapter.ClawChatAdapter` extends Hermes'

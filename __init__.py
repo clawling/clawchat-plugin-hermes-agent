@@ -174,6 +174,33 @@ def _create_clawchat_adapter(config):
     return ClawChatAdapter(_clawchat_platform_config_with_home_extra(config))
 
 
+async def _clawchat_standalone_send(
+    pconfig,
+    chat_id,
+    message,
+    *,
+    thread_id=None,
+    media_files=None,
+    force_document=False,
+):
+    """``PlatformEntry.standalone_sender_fn`` for ClawChat.
+
+    Lets ``hermes send`` / ``deliver=clawchat`` cron jobs deliver when the
+    gateway is not running in this process (the live-adapter path is tried
+    first by ``tools.send_message_tool._send_via_adapter``).
+    """
+    from clawchat_gateway.standalone_send import standalone_send
+
+    return await standalone_send(
+        _clawchat_platform_config_with_home_extra(pconfig),
+        chat_id,
+        message,
+        thread_id=thread_id,
+        media_files=media_files,
+        force_document=force_document,
+    )
+
+
 def _patch_send_message_target_parser() -> None:
     """Teach Hermes' built-in send_message tool ClawChat conversation ids.
 
@@ -230,8 +257,9 @@ async def _send_clawchat_media_via_live_adapter(
     if adapter is None:
         return {
             "error": (
-                "No live adapter for platform 'clawchat'. Is the gateway "
-                "running with this platform connected?"
+                "ClawChat media delivery needs the gateway running in this "
+                "process with the platform connected (text-only messages can "
+                "be delivered standalone)."
             )
         }
 
@@ -330,7 +358,7 @@ def _register_platform(ctx) -> bool:
             "ClawChat requires Hermes v0.12.0+ with ctx.register_platform support."
         )
 
-    register_platform(
+    register_kwargs = dict(
         name="clawchat",
         label="ClawChat",
         adapter_factory=_create_clawchat_adapter,
@@ -350,6 +378,21 @@ def _register_platform(ctx) -> bool:
         emoji="💬",
         platform_hint=platform_prompt(),
     )
+    try:
+        register_platform(
+            **register_kwargs,
+            standalone_sender_fn=_clawchat_standalone_send,
+        )
+    except TypeError:
+        # Older Hermes: PlatformEntry has no standalone_sender_fn field and the
+        # dataclass constructor raises TypeError on the unknown key. Register
+        # without it — out-of-process `hermes send` then keeps its live-adapter
+        # requirement, everything else works as before.
+        logger.warning(
+            "Hermes PlatformEntry does not support standalone_sender_fn; "
+            "out-of-process `hermes send`/cron delivery for ClawChat disabled."
+        )
+        register_platform(**register_kwargs)
     _patch_send_message_target_parser()
     _patch_send_message_media_delivery()
     logger.info("ClawChat registered Hermes platform via plugin registry")
