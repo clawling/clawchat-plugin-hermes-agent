@@ -39,6 +39,7 @@ _METADATA_FIELDS_BY_TARGET = {
         "agent_owner_nickname",
         "agent_owner_avatar_url",
         "agent_owner_bio",
+        "agent_owner_locale",
         "agent_behavior",
     },
     "user": {

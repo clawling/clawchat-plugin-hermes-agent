@@ -2434,7 +2434,13 @@ class ClawChatAdapter(BasePlatformAdapter):
                 metadata_source["agent_owner_id"] = owner_id
         owner_metadata = self._pick_memory_metadata_fields(
             metadata_source,
-            ("agent_owner_id", "agent_owner_nickname", "agent_owner_avatar_url", "agent_owner_bio"),
+            (
+                "agent_owner_id",
+                "agent_owner_nickname",
+                "agent_owner_avatar_url",
+                "agent_owner_bio",
+                "agent_owner_locale",
+            ),
         )
         if owner_metadata:
             fields = self._format_fields(tuple(owner_metadata.items()))

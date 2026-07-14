@@ -117,6 +117,7 @@ def add_owner_profile_metadata(
     _copy_present(metadata, "agent_owner_nickname", detail, "nickname")
     _copy_present(metadata, "agent_owner_avatar_url", detail, "avatar_url", "avatarUrl")
     _copy_present(metadata, "agent_owner_bio", detail, "bio")
+    _copy_present(metadata, "agent_owner_locale", detail, "locale")
 
 
 def user_metadata_from_profile(result: dict[str, Any], *, user_id: str) -> dict[str, str]:
@@ -212,9 +213,7 @@ async def pull_owner_metadata(
         connected_user_id=connected_user_id,
         owner_user_id=owner_user_id,
     )
-    owner_id = metadata.get("agent_owner_id", "")
-    if owner_id:
-        add_owner_profile_metadata(metadata, await client.get_user_info(owner_id))
+    add_owner_profile_metadata(metadata, await client.get_agent_owner())
     write_clawchat_metadata(root, "owner", "owner", metadata)
     return {"ok": True, "target_type": "owner", "target_id": "owner", "metadata": metadata}
 
@@ -420,9 +419,7 @@ async def update_metadata(
             result,
             connected_user_id=connected_user_id,
         )
-        owner_id = metadata.get("agent_owner_id", "")
-        if owner_id:
-            add_owner_profile_metadata(metadata, await client.get_user_info(owner_id))
+        add_owner_profile_metadata(metadata, await client.get_agent_owner())
         write_clawchat_metadata(root, "owner", "owner", metadata)
     elif target_type == "user":
         result = await client.update_my_profile(**allowed_patch)
