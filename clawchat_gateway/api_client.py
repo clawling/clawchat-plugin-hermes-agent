@@ -211,6 +211,10 @@ class ClawChatApiClient:
             raise ClawChatApiError("validation", "user_id is required")
         return await self._call_json("GET", f"/v1/users/{user_id}")
 
+    async def get_agent_owner(self) -> dict:
+        """Owner profile (incl. locale) of the calling agent, from the agent JWT's oid."""
+        return await self._call_json("GET", "/v1/agents/me/owner")
+
     async def list_friends(self, *, page: int = 1, page_size: int = 20) -> dict:
         return await self._call_json("GET", "/v1/friendships")
 
