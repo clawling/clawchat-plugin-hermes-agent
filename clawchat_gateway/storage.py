@@ -142,6 +142,20 @@ CREATE TABLE IF NOT EXISTS liveware_sample (
 );
 """
 
+OWNER_PROFILE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS owner_profile (
+  platform TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  owner_user_id TEXT,
+  nickname TEXT,
+  avatar_url TEXT,
+  bio TEXT,
+  locale TEXT,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (platform, account_id)
+);
+"""
+
 MIGRATIONS = [
     (1, "initial_schema", INITIAL_SCHEMA),
     (2, "message_id_dedup", MESSAGE_ID_DEDUP_SCHEMA),
@@ -150,6 +164,7 @@ MIGRATIONS = [
     (5, "activation_owner_user_id", ACTIVATION_OWNER_USER_ID_SCHEMA),
     (6, "activation_device_id", ACTIVATION_DEVICE_ID_SCHEMA),
     (7, "liveware_sample", LIVEWARE_SAMPLE_SCHEMA),
+    (8, "owner_profile", OWNER_PROFILE_SCHEMA),
 ]
 
 _store: ClawChatStore | None = None
@@ -185,6 +200,18 @@ class ActivationCredentials:
     refresh_token: str | None
     device_id: str | None = None
     activated_at: int | None = None
+
+
+@dataclass(frozen=True)
+class OwnerProfileRow:
+    platform: str
+    account_id: str
+    owner_user_id: str | None
+    nickname: str | None
+    avatar_url: str | None
+    bio: str | None
+    locale: str | None
+    updated_at: int
 
 
 @dataclass(frozen=True)
@@ -1037,6 +1064,71 @@ class ClawChatStore:
 
         return self._write("record_tool_call", write)
 
+    def get_owner_profile(
+        self, *, platform: str, account_id: str
+    ) -> "OwnerProfileRow | None":
+        self.initialize()
+        if self._disabled:
+            return None
+        conn = sqlite3.connect(self.db_path)
+        try:
+            row = conn.execute(
+                """
+                SELECT platform, account_id, owner_user_id, nickname,
+                       avatar_url, bio, locale, updated_at
+                FROM owner_profile WHERE platform = ? AND account_id = ?
+                """,
+                (platform, account_id),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        return OwnerProfileRow(
+            platform=str(row[0]),
+            account_id=str(row[1]),
+            owner_user_id=(str(row[2]) if row[2] is not None else None),
+            nickname=(str(row[3]) if row[3] is not None else None),
+            avatar_url=(str(row[4]) if row[4] is not None else None),
+            bio=(str(row[5]) if row[5] is not None else None),
+            locale=(str(row[6]) if row[6] is not None else None),
+            updated_at=int(row[7]),
+        )
+
+    def upsert_owner_profile(
+        self,
+        *,
+        platform: str,
+        account_id: str,
+        owner_user_id: str | None,
+        nickname: str | None,
+        avatar_url: str | None,
+        bio: str | None,
+        locale: str | None,
+    ) -> None:
+        now = _now_ms()
+
+        def _op(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                """
+                INSERT INTO owner_profile
+                  (platform, account_id, owner_user_id, nickname,
+                   avatar_url, bio, locale, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(platform, account_id) DO UPDATE SET
+                  owner_user_id = excluded.owner_user_id,
+                  nickname = excluded.nickname,
+                  avatar_url = excluded.avatar_url,
+                  bio = excluded.bio,
+                  locale = excluded.locale,
+                  updated_at = excluded.updated_at
+                """,
+                (platform, account_id, owner_user_id, nickname,
+                 avatar_url, bio, locale, now),
+            )
+
+        self._write("upsert_owner_profile", _op)
+
     def get_liveware_sample(
         self, *, platform: str, account_id: str
     ) -> "LivewareSampleRow | None":
@@ -1172,3 +1264,34 @@ def get_clawchat_store() -> ClawChatStore:
         if _store is None:
             _store = ClawChatStore(default_db_path())
         return _store
+
+
+def make_owner_profile_persister(
+    store: ClawChatStore,
+    *,
+    platform: str = "hermes",
+    account_id: str = "default",
+):
+    """Bind a persist callback for pull_owner_metadata.
+
+    Maps the flat GET /v1/agents/me/owner payload onto the owner_profile
+    cache row. Missing fields are stored as NULL (never empty strings).
+    """
+
+    def _text(value: object) -> str | None:
+        if value is None:
+            return None
+        return value if isinstance(value, str) else str(value)
+
+    def _persist(owner: dict) -> None:
+        store.upsert_owner_profile(
+            platform=platform,
+            account_id=account_id,
+            owner_user_id=_text(owner.get("id")),
+            nickname=_text(owner.get("nickname")),
+            avatar_url=_text(owner.get("avatar_url")),
+            bio=_text(owner.get("bio")),
+            locale=_text(owner.get("locale")),
+        )
+
+    return _persist

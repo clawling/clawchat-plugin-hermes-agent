@@ -31,6 +31,7 @@ from clawchat_gateway.clawchat_metadata import (
     update_metadata as update_clawchat_metadata,
 )
 from clawchat_gateway.config import ClawChatConfig
+from clawchat_gateway.storage import get_clawchat_store, make_owner_profile_persister
 from clawchat_gateway.mention_message import normalize_mention_targets
 from clawchat_gateway.profile import ProfileConfigError, load_profile_config
 from clawchat_gateway.terminal_send import send_clawchat_mention_message
@@ -415,6 +416,7 @@ async def metadata_sync(
                 cfg["agent_id"],
                 connected_user_id=cfg.get("user_id", ""),
                 owner_user_id=cfg.get("owner_user_id", ""),
+                persist_owner_profile=make_owner_profile_persister(get_clawchat_store()),
             )
         if target_type == "user":
             return await pull_user_metadata(root, client, target_id)
@@ -459,6 +461,7 @@ async def metadata_update(
             patch,
             agent_id=cfg["agent_id"],
             connected_user_id=cfg["user_id"],
+            persist_owner_profile=make_owner_profile_persister(get_clawchat_store()),
         )
     except ClawChatApiError as exc:
         return _api_error(exc)
@@ -895,6 +898,7 @@ async def _sync_owner_metadata_after_account_profile_update(
             cfg["agent_id"],
             connected_user_id=cfg.get("user_id", ""),
             owner_user_id=cfg.get("owner_user_id", ""),
+            persist_owner_profile=make_owner_profile_persister(get_clawchat_store()),
         )
     except ClawChatApiError as exc:
         return _api_error(exc)

@@ -101,7 +101,7 @@ from clawchat_gateway.greeting import load_activation_bootstrap_prompt
 from clawchat_gateway.permission_result import handle_permission_result
 from clawchat_gateway.permissions import PermissionCache
 from clawchat_gateway import skill_update
-from clawchat_gateway.storage import get_clawchat_store
+from clawchat_gateway.storage import get_clawchat_store, make_owner_profile_persister
 from clawchat_gateway.terminal_send import (
     clear_clawchat_mention_sender,
     consume_terminal_clawchat_send,
@@ -1422,6 +1422,11 @@ class ClawChatAdapter(BasePlatformAdapter):
                     agent_id,
                     connected_user_id=self._clawchat_config.user_id,
                     owner_user_id=self._owner_user_id(),
+                    persist_owner_profile=(
+                        make_owner_profile_persister(self._store)
+                        if self._store is not None
+                        else None
+                    ),
                 )
             )
         except Exception as exc:  # noqa: BLE001

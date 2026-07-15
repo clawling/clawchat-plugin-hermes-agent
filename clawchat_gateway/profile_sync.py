@@ -9,6 +9,7 @@ from clawchat_gateway.clawchat_metadata import (
     pull_owner_metadata,
     pull_user_metadata,
 )
+from clawchat_gateway.storage import make_owner_profile_persister
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,9 @@ async def refresh_agent_behavior_profile(
             client,
             agent_id,
             connected_user_id=agent_user_id,
+            persist_owner_profile=make_owner_profile_persister(
+                store, platform=platform, account_id=account_id or "default"
+            ),
         )
     except Exception:  # noqa: BLE001
         logger.warning(

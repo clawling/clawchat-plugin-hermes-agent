@@ -196,6 +196,16 @@ def _normalize_skip_user_ids(skip_user_ids: set[str] | list[str] | tuple[str, ..
     return {user_id.strip() for user_id in skip_user_ids if isinstance(user_id, str) and user_id.strip()}
 
 
+def _persist_owner_profile_safe(persist_owner_profile: Any, owner_result: dict[str, Any]) -> None:
+    """Best-effort owner-profile cache write; must never break the pull."""
+    if persist_owner_profile is None:
+        return
+    try:
+        persist_owner_profile(owner_result)
+    except Exception:  # noqa: BLE001
+        logger.warning("clawchat owner profile persist failed", exc_info=True)
+
+
 async def pull_owner_metadata(
     root: str | Path,
     client: Any,
@@ -203,6 +213,7 @@ async def pull_owner_metadata(
     *,
     connected_user_id: str = "",
     owner_user_id: str = "",
+    persist_owner_profile: Any = None,
 ) -> dict[str, Any]:
     if not agent_id:
         raise ValueError("agent_id is required")
@@ -213,7 +224,9 @@ async def pull_owner_metadata(
         connected_user_id=connected_user_id,
         owner_user_id=owner_user_id,
     )
-    add_owner_profile_metadata(metadata, await client.get_agent_owner())
+    owner_result = await client.get_agent_owner()
+    _persist_owner_profile_safe(persist_owner_profile, owner_result)
+    add_owner_profile_metadata(metadata, owner_result)
     write_clawchat_metadata(root, "owner", "owner", metadata)
     return {"ok": True, "target_type": "owner", "target_id": "owner", "metadata": metadata}
 
@@ -401,6 +414,7 @@ async def update_metadata(
     *,
     agent_id: str = "",
     connected_user_id: str = "",
+    persist_owner_profile: Any = None,
 ) -> dict[str, Any]:
     ensure_clawchat_memory_target_safe(root, target_type, target_id)
     allowed_patch = _patch_for_target(
@@ -419,7 +433,9 @@ async def update_metadata(
             result,
             connected_user_id=connected_user_id,
         )
-        add_owner_profile_metadata(metadata, await client.get_agent_owner())
+        owner_result = await client.get_agent_owner()
+        _persist_owner_profile_safe(persist_owner_profile, owner_result)
+        add_owner_profile_metadata(metadata, owner_result)
         write_clawchat_metadata(root, "owner", "owner", metadata)
     elif target_type == "user":
         result = await client.update_my_profile(**allowed_patch)
