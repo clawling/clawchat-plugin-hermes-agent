@@ -97,7 +97,7 @@ Activation writes:
 |---|---|
 | `$HERMES_HOME/.env` | `CLAWCHAT_TOKEN`, `CLAWCHAT_REFRESH_TOKEN`, optional `CLAWCHAT_HOME_CHANNEL*`. |
 | `$HERMES_HOME/config.yaml` | `platforms.clawchat.enabled=true`, `extra.base_url`, `extra.websocket_url`, `extra.user_id`, `extra.agent_id`, `extra.owner_user_id`, missing `extra.output_visibility=normal`, derived `extra.runtime_status_messages=false`, forced agent quiet defaults (`gateway_notify_interval=0`, `gateway_timeout_warning=0`), forced global ClawChat display defaults (`busy_input_mode=queue`, `busy_ack_enabled=false`, `background_process_notifications=off`, `tool_progress_command=false`), and missing `display.platforms.clawchat.*` normal-preset defaults. Operators may edit the ClawChat platform display block manually after activation. |
-| `$HERMES_HOME/clawchat.sqlite` | Latest activation row, including access token, optional refresh token, user ids, activation conversation id, and the connect-time `device_id` (`activations.device_id`). |
+| `$HERMES_HOME/clawchat.sqlite` | Latest activation row, including access token, optional refresh token, user ids, activation conversation id, and the connect-time `device_id` (`activations.device_id`); plus the `owner_profile` cache row (last-known owner nickname/avatar/bio/locale, refreshed on every owner-metadata pull, advisory only). |
 
 Returned `.env` tokens and `config.yaml` user ids overwrite any previously
 configured ClawChat activation credentials.
