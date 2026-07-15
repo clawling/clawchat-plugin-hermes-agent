@@ -627,9 +627,13 @@ class ClawChatAdapter(BasePlatformAdapter):
             # use the stale cache. The refresh task re-sets it on completion /
             # fallback. Non-group traffic is never gated.
             self._group_settings_ready.clear()
+            # Owner-metadata refresh is scheduled BEFORE the activation
+            # bootstrap: the bootstrap dispatch awaits the in-flight refresh
+            # task so the first greeting is generated with owner.md already
+            # holding the owner's profile (incl. agent_owner_locale).
+            self._schedule_owner_metadata_refresh()
             self._schedule_activation_bootstrap()
             self._schedule_liveware_sample()
-            self._schedule_owner_metadata_refresh()
             self._spawn_group_settings_refresh("reconnect")
             self._spawn_permissions_refresh("reconnect")
             await self._schedule_reconnect_conversation_refresh()
@@ -1557,6 +1561,19 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._owner_metadata_refresh_task = None
         self._profile_sync_task_done(task)
 
+    async def _await_owner_metadata_refreshed(self) -> None:
+        """Wait for the in-flight owner-metadata refresh to settle.
+
+        The bootstrap greeting turn's prompt reads owner.md, so the refresh
+        (which lands agent_owner_locale etc.) must finish first. Refresh
+        failures/cancellation are already handled inside the task — the
+        greeting then proceeds with whatever owner.md holds.
+        """
+        task = self._owner_metadata_refresh_task
+        if task is None or task.done():
+            return
+        await asyncio.wait({task})
+
     def _profile_sync_task_done(self, task: asyncio.Task[None]) -> None:
         self._profile_sync_tasks.discard(task)
         if task.cancelled():
@@ -1717,6 +1734,9 @@ class ClawChatAdapter(BasePlatformAdapter):
     async def _dispatch_activation_bootstrap(self) -> None:
         if self._store is None:
             return
+        # Greeting must see the freshest owner metadata (incl. locale) —
+        # wait before claiming so a cancellation here cannot leak the claim.
+        await self._await_owner_metadata_refreshed()
         claim = self._store.claim_pending_activation_bootstrap(
             platform="hermes",
             account_id="default",
