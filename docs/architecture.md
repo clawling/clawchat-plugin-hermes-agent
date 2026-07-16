@@ -92,8 +92,15 @@ with `wait_for_ack=True`, and closes. Two invariants:
   `X-Device-Id` with a 10003 forced re-login, so token refresh keeps using the
   canonical resolved device id — only the WS connect payload is overridden.
 
-The standalone path is text-only; media attachments still require the live
-gateway adapter (the media-delivery patch reports this explicitly).
+Media attachments work on the standalone path too: `/media/upload` is plain
+REST (bearer token only, no live adapter needed), so the ephemeral session
+uploads each file via `media_runtime.upload_outbound_media` — using the
+post-handshake token from the connection config — and attaches the resulting
+fragments to the same `message.send` frame. If every upload fails the send is
+aborted with an error rather than silently degrading to text-only. The
+media-delivery patch (`_send_clawchat_media_via_live_adapter`) prefers the
+live adapter when the gateway runs in-process and falls back to this
+standalone path otherwise.
 
 ## Adapter
 

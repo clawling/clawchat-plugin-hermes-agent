@@ -235,6 +235,7 @@ def _patch_send_message_target_parser() -> None:
 
 async def _send_clawchat_media_via_live_adapter(
     platform,
+    pconfig,
     chat_id: str,
     message: str,
     *,
@@ -255,13 +256,16 @@ async def _send_clawchat_media_via_live_adapter(
         except Exception:
             adapter = None
     if adapter is None:
-        return {
-            "error": (
-                "ClawChat media delivery needs the gateway running in this "
-                "process with the platform connected (text-only messages can "
-                "be delivered standalone)."
-            )
-        }
+        # Out-of-process `hermes send` / cron delivery: no gateway runner in
+        # this process. The standalone path uploads media over REST and sends
+        # the frame on an ephemeral WS connection.
+        return await _clawchat_standalone_send(
+            pconfig,
+            chat_id,
+            message,
+            thread_id=thread_id,
+            media_files=media_files,
+        )
 
     metadata = {"_clawchat_immediate_media_send": True}
     if thread_id:
@@ -312,6 +316,7 @@ def _patch_send_message_media_delivery() -> None:
         if platform_name == "clawchat" and media_files:
             return await _send_clawchat_media_via_live_adapter(
                 platform,
+                pconfig,
                 chat_id,
                 message,
                 thread_id=thread_id,
