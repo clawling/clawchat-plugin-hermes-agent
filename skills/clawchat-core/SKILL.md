@@ -1,7 +1,7 @@
 ---
 name: clawchat-core
 version: 1.0.0
-description: Use when a request involves ClawChat profile, friends, user search, moments/dynamics, comments, reactions, avatar, media, memory, mentions, output visibility, or plugin install/update/activation.
+description: Use when a request involves ClawChat profile, friends, user search, moments/dynamics, comments, reactions, avatar, media, memory, mentions, sending a local file or image as a chat attachment, output visibility, or plugin install/update/activation.
 ---
 
 # ClawChat Skill
@@ -15,11 +15,12 @@ It does not replace the registered `clawchat_*` tool schemas. Treat those schema
 Use this skill when the request involves:
 
 - ClawChat account profile, nickname, avatar, bio, friends, users, moments/dynamics, comments, reactions, or shareable media.
+- Sending a local file or image to the current ClawChat conversation as an attachment (e.g. "send me the file", "把文件发给我").
 - ClawChat plugin install, update, activation, or local refresh.
 - ClawChat output visibility or verbosity for the current conversation.
 - Keeping Hermes-visible identity and the connected ClawChat account profile coherent when the user asks to change shared identity fields.
 
-Do not use this skill for unrelated Hermes configuration, unrelated messaging platforms, or generic file uploads that are not intended for ClawChat.
+Do not use this skill for unrelated Hermes configuration, unrelated messaging platforms, or file uploads meant for a system other than ClawChat. Sending a local file or image into the current ClawChat conversation *is* covered here (see "Sending a File or Image Attachment").
 
 ## Prerequisites
 
@@ -64,6 +65,7 @@ Tool descriptions are authoritative. These routing hints only group available Cl
 | Request area | Tool family |
 | --- | --- |
 | Connected account profile, nickname, avatar, or bio | `clawchat_get_account_profile`, `clawchat_update_account_profile`, `clawchat_upload_avatar_image` |
+| Send a local file or image to the conversation as an attachment | Put `MEDIA:<absolute_local_path>` in your reply text (not a `clawchat_*` tool); add `[[as_document]]` to force document form. See "Sending a File or Image Attachment". |
 | Remembered person, alias, relationship, prior ClawChat memory, or group rule | `clawchat_memory_search`, then `clawchat_memory_read` |
 | Server-side public user search/profile | `clawchat_search_users`, then `clawchat_get_user_profile` |
 | Known local memory target by id | `clawchat_memory_read` |
@@ -85,6 +87,21 @@ Tool descriptions are authoritative. These routing hints only group available Cl
 Use registered ClawChat tools for account/profile, friends, users, moments, comments, reactions, and avatar operations. If a requested ClawChat tool is unavailable or returns a config error, report that result and stop instead of bypassing the plugin with direct HTTP calls, shell scripts, or handwritten clients.
 
 For moments/dynamics, list first when the user refers to "this", "latest", "that post", "just now", or another ambiguous target. Use exact ids returned by the tools.
+
+### Sending a File or Image Attachment
+
+To deliver a local file or image to the current ClawChat conversation as a native attachment, include a `MEDIA:<absolute_local_path>` marker in your reply text. Hermes uploads the file and ClawChat renders it as an attachment (routed through the ClawChat adapter's `send_document`). This is the only supported way to attach a file — there is no `clawchat_*` tool for it.
+
+- Use the real saved path — e.g. the path you just wrote with `write_file` — never an invented one.
+- Non-image files (`.md`, `.pdf`, `.zip`, …) are delivered as downloadable documents automatically. Add `[[as_document]]` to force an image to be sent as a file instead of an inline image.
+- Send several files by including multiple `MEDIA:` markers. Any non-`MEDIA:` text in the same reply becomes the message body / caption.
+- Do **not** substitute a real attachment by pasting the file's contents into the message or claiming you cannot send attachments. If delivery fails, report the failure.
+
+Example reply to "把 md 文件发给我" after saving `/opt/data/春游作文.md`:
+
+```text
+这是春游作文，请查收～ MEDIA:/opt/data/春游作文.md
+```
 
 ### Coherent Profile Sync
 

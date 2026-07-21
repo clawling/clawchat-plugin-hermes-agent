@@ -337,6 +337,44 @@ def _patch_send_message_media_delivery() -> None:
     send_message_tool._send_to_platform = _send_to_platform_with_clawchat_media
 
 
+def _patch_media_delivery_accept_all_exts() -> None:
+    """Deliver a ``MEDIA:<path>`` attachment of ANY file type, not just the
+    built-in extension allowlist.
+
+    Hermes only recognizes a ``MEDIA:`` tag whose path ends in one of
+    ``MEDIA_DELIVERY_EXTS`` (documents / media / data / archives). Source-code
+    and other types (``.py``, ``.sh``, ``.ts``, ``.go`` …) are silently left as
+    text and never delivered. ClawChat wants any file the user asks for to
+    arrive as a native attachment, so widen the anchored ``MEDIA:`` cleanup
+    regex to accept any ``.<ext>``.
+
+    This changes only which file *types* are deliverable — not access. Security
+    is unchanged: ``validate_media_delivery_path`` still requires the file to
+    exist and still blocks the credential / system-path denylist (``/etc``,
+    ``~/.ssh``, ``~/.aws``, ``~/.hermes/.env`` …), so secrets stay unreachable.
+    """
+    try:
+        import re
+        from gateway.platforms import base
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("ClawChat could not patch media delivery extensions: %s", exc)
+        return
+    if getattr(base, "_clawchat_all_exts_patch", False):
+        return
+    try:
+        base.MEDIA_TAG_CLEANUP_RE = re.compile(
+            r'''[`"']?MEDIA:\s*'''
+            r'''(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|'''
+            r'''(?:~/|/|[A-Za-z]:[/\\])\S+(?:[^\S\n]+\S+)*?\.[A-Za-z0-9]+)'''
+            r'''(?=[\s`"',;:)\]}]|$)[`"']?''',
+            re.IGNORECASE,
+        )
+        base._clawchat_all_exts_patch = True
+        logger.info("ClawChat: MEDIA: attachment delivery widened to all file types")
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("ClawChat could not install all-exts media regex: %s", exc)
+
+
 def _migrate_legacy_config_tokens() -> None:
     """Best-effort migration of legacy config.yaml tokens into env/.env.
 
@@ -400,6 +438,7 @@ def _register_platform(ctx) -> bool:
         register_platform(**register_kwargs)
     _patch_send_message_target_parser()
     _patch_send_message_media_delivery()
+    _patch_media_delivery_accept_all_exts()
     logger.info("ClawChat registered Hermes platform via plugin registry")
     return True
 
