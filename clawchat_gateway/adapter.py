@@ -168,6 +168,11 @@ DEBUG_EVENT_TEXT_END = "----- END CLAWCHAT DEBUG EVENT TEXT -----"
 DEBUG_HERMES_OUTPUT_BEGIN = "----- BEGIN CLAWCHAT DEBUG HERMES OUTPUT -----"
 DEBUG_HERMES_OUTPUT_END = "----- END CLAWCHAT DEBUG HERMES OUTPUT -----"
 IMMEDIATE_MEDIA_SEND_METADATA_KEY = "_clawchat_immediate_media_send"
+# Fragment kinds that represent an uploaded attachment (as opposed to text /
+# mention / interaction fragments). Used to detect when an outbound send
+# requested media but the upload was dropped, so the failure is surfaced to
+# the caller instead of a misleading text-only frame going on the wire.
+OUTBOUND_MEDIA_FRAGMENT_KINDS = frozenset({"image", "audio", "video", "file"})
 SILENT_RESPONSE_TOKEN = "<clawchat:silent/>"
 NO_REPLY_TOKEN = "<clawchat:no-reply/>"
 GROUP_OWNER_ATTENTION_TITLE = "requires owner attention"
@@ -3057,6 +3062,32 @@ class ClawChatAdapter(BasePlatformAdapter):
             fragments = await self._build_fragments(visible_content, metadata, kwargs)
             fragment_count = len(fragments)
             has_media = self._has_outbound_media(metadata, kwargs)
+            if has_media:
+                # media_runtime drops a failed upload with only a warning; here
+                # the media was uploaded synchronously, so a shortfall means the
+                # attachment never reached the media service. Surface it instead
+                # of sending a text-only frame the caller would read as success.
+                requested_media = len(self._extract_media_urls(metadata, kwargs))
+                delivered_media = sum(
+                    1
+                    for fragment in fragments
+                    if fragment.get("kind") in OUTBOUND_MEDIA_FRAGMENT_KINDS
+                )
+                if delivered_media < requested_media:
+                    logger.warning(
+                        "clawchat outbound media upload failed chat_id=%s "
+                        "requested=%d delivered=%d; message not sent",
+                        chat_id,
+                        requested_media,
+                        delivered_media,
+                    )
+                    return SendResult(
+                        success=False,
+                        error=(
+                            f"media upload failed: {delivered_media}/{requested_media} "
+                            "attachment(s) uploaded; message not sent"
+                        ),
+                    )
         else:
             fragments = self._build_non_media_fragments(visible_content, metadata, kwargs)
             media_urls = self._extract_media_urls(metadata, kwargs)
