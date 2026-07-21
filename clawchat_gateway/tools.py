@@ -669,6 +669,22 @@ async def get_conversation(conversation_id: str) -> dict[str, Any]:
         return _unknown_error(exc)
 
 
+async def leave_group(conversation_id: str) -> dict[str, Any]:
+    if not isinstance(conversation_id, str) or not conversation_id.strip():
+        return _validation_error("conversationId is required")
+
+    conversation_id_value = conversation_id.strip()
+    client, err = _build_client()
+    if err is not None:
+        return err
+    try:
+        return await client.leave_conversation(conversation_id_value)
+    except ClawChatApiError as exc:
+        return _api_error(exc)
+    except Exception as exc:  # noqa: BLE001
+        return _unknown_error(exc)
+
+
 async def mention_message(
     chat_id: Any,
     *,
