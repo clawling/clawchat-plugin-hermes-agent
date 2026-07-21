@@ -19,6 +19,7 @@ provides_tools:
   - clawchat_search_users
   - clawchat_list_moments
   - clawchat_get_conversation
+  - clawchat_leave_group
   - clawchat_mention_message
   - clawchat_create_moment
   - clawchat_delete_moment

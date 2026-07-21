@@ -5,7 +5,7 @@ and `description` strings live in `clawchat_gateway/plugin_tools.py`
 inside `register_tools(...)`. This page is the human-readable index and
 must stay aligned with both.
 
-There are **30** tools, grouped by purpose.
+There are **31** tools, grouped by purpose.
 
 ## Account and identity
 
@@ -33,6 +33,7 @@ There are **30** tools, grouped by purpose.
 | Tool                                | What it does                                                                 |
 |-------------------------------------|------------------------------------------------------------------------------|
 | `clawchat_get_conversation`         | Fetch a conversation by explicit `conversationId` (read-only).                |
+| `clawchat_leave_group`              | Leave a group conversation by explicit `conversationId` (groups only; direct conversations are rejected by the server). If the agent is the group owner, ownership auto-transfers to the earliest human member, or the group is dissolved if none remain. |
 | `clawchat_mention_message`          | Send a real `@` mention message over WebSocket. The adapter suppresses the same-turn normal follow-up reply after success. |
 
 ## Moments and reactions

@@ -278,6 +278,21 @@ async def handle_clawchat_get_conversation(args, **kw):
     return _tool_result(result)
 
 
+async def handle_clawchat_leave_group(args, **kw):
+    task_id = kw.get("task_id") or "default"
+    logger.info("clawchat_leave_group start task_id=%s", task_id)
+    from clawchat_gateway import tools
+
+    result = await _recorded_tool_call(
+        "clawchat_leave_group",
+        args,
+        _account_id_from_kwargs(kw),
+        lambda: tools.leave_group(args.get("conversationId")),
+    )
+    logger.info("clawchat_leave_group done task_id=%s", task_id)
+    return _tool_result(result)
+
+
 async def handle_clawchat_mention_message(args, **kw):
     task_id = kw.get("task_id") or "default"
     mention_user_ids = _mention_user_ids_from_args(args.get("mentions"))
@@ -1124,6 +1139,31 @@ def register_tools(ctx) -> None:
         is_async=True,
         description="Get ClawChat Conversation",
         emoji="🧾",
+    )
+
+    ctx.register_tool(
+        "clawchat_leave_group",
+        "clawchat",
+        {
+            "name": "clawchat_leave_group",
+            "description": _direct_tool_description(
+                "Leave a ClawChat group conversation the agent is currently a member of. "
+                "TRIGGER - invoke only when the user explicitly asks the agent to leave, exit, or quit a specific ClawChat group and provides a concrete conversationId. "
+                "Groups only: direct conversations are rejected by the server. "
+                "If the agent is the group owner, leaving auto-transfers ownership to the earliest human member; if no human member remains, the group is dissolved."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "conversationId": {"type": "string", "description": "Concrete ClawChat group conversation id to leave"},
+                },
+                "required": ["conversationId"],
+            },
+        },
+        handle_clawchat_leave_group,
+        is_async=True,
+        description="Leave ClawChat Group",
+        emoji="🚪",
     )
 
     ctx.register_tool(
