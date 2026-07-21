@@ -3583,6 +3583,51 @@ class ClawChatAdapter(BasePlatformAdapter):
             metadata=merged_metadata,
         )
 
+    async def send_document(
+        self,
+        chat_id: str,
+        file_path: str,
+        caption: str | None = None,
+        file_name: str | None = None,
+        reply_to: str | None = None,
+        metadata: Any = None,
+        **kwargs: Any,
+    ) -> SendResult:
+        """Deliver a non-image file attachment natively.
+
+        Hermes' run.py routes non-image ``MEDIA:`` attachments here with no
+        hasattr guard; without this override the base fallback only posts a
+        "couldn't deliver" notice and the file never reaches ClawChat. Upload
+        the file through the immediate media-send path (parity with
+        ``send_image_file``). If the upload is dropped, ``send`` withholds the
+        misleading media frame, so preserve the base-class contract and post
+        the notice instead of going silent — never echoing ``file_path``, which
+        is a host filesystem path.
+        """
+        merged_metadata = dict(metadata or {})
+        merged_metadata["media_urls"] = [normalize_outbound_media_reference(file_path)]
+        merged_metadata[IMMEDIATE_MEDIA_SEND_METADATA_KEY] = True
+        result = await self.send(
+            chat_id=chat_id,
+            content=caption or "",
+            reply_to=reply_to,
+            metadata=merged_metadata,
+        )
+        if result is None or result.success:
+            return result
+        if file_name:
+            notice = f"⚠️ Couldn't deliver the file attachment ({file_name})."
+        else:
+            notice = "⚠️ Couldn't deliver the file attachment."
+        if caption:
+            notice = f"{caption}\n{notice}"
+        return await self.send(
+            chat_id=chat_id,
+            content=notice,
+            reply_to=reply_to,
+            metadata=metadata,
+        )
+
     def _exec_approval_fragment(
         self,
         command: str,
