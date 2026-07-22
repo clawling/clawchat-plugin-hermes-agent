@@ -287,6 +287,7 @@ class ClawChatStore:
             if self._initialized or self._disabled:
                 return
             try:
+                self._relocate_legacy_db()
                 self.db_path.parent.mkdir(parents=True, exist_ok=True)
                 conn = sqlite3.connect(self.db_path)
                 try:
@@ -1271,6 +1272,38 @@ class ClawChatStore:
         if row is None:
             return set()
         return {int(version) for (version,) in conn.execute("SELECT version FROM schema_migrations")}
+
+    def _relocate_legacy_db(self) -> None:
+        """One-time move of the pre-``clawchat/``-dir default DB into the data dir.
+
+        Older installs stored the default profile's DB at
+        ``$HERMES_HOME/clawchat.sqlite``; new installs use
+        ``$HERMES_HOME/clawchat/clawchat.sqlite``. Only the default profile has a
+        legacy location — named profiles are always fresh. Idempotent and
+        fail-safe: on any move error we open the legacy file in place rather than
+        creating an empty database.
+        """
+        target = self.db_path
+        if target.name != DB_FILENAME or target.parent.name != CLAWCHAT_DIRNAME:
+            return
+        if target.exists():
+            return
+        legacy = target.parent.parent / DB_FILENAME
+        if legacy == target or not legacy.exists():
+            return
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            for suffix in ("", "-wal", "-shm"):
+                src = legacy.with_name(legacy.name + suffix)
+                if src.exists():
+                    src.replace(target.with_name(target.name + suffix))
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "clawchat db relocation failed; opening legacy path in place",
+                exc_info=True,
+            )
+            if legacy.exists():
+                self.db_path = legacy
 
     def _chmod_private(self) -> None:
         try:
