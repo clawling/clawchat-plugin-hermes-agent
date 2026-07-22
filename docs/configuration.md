@@ -308,6 +308,14 @@ by `agents-connect` and `CLAWCHAT_HOME_CHANNEL_NAME` to `ClawChat`.
 | `CLAWCHAT_MEDIA_LOCAL_ROOTS`           | `media_local_roots`   | `()`                     | OS-pathsep-separated list (env) or array (extra). Roots from which local file paths may be uploaded. |
 | —                                      | `media_download_dir`  | `/tmp/clawchat-media`    | Where inbound media gets staged. |
 
+## Database location
+
+Plugin SQLite lives under `$HERMES_HOME/clawchat/`:
+`clawchat.sqlite` for the default profile, `clawchat-<profile>.sqlite` for named
+profiles. Upgrading from a version that stored `clawchat.sqlite` directly in
+`$HERMES_HOME` relocates it into `clawchat/` automatically on first start (with
+its WAL sidecars); no re-pairing is needed.
+
 ## Memory
 
 `memory_root` is derived from `HERMES_HOME` (or

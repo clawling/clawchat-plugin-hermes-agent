@@ -174,3 +174,22 @@ For protocol-level checks (WebSocket handshake, ack flow), see
   loops, confirm the plugin was registered (look for
   `ClawChat registered Hermes platform via plugin registry` in the
   Hermes log).
+
+## Multiple agents on one host (Hermes profiles)
+
+Each Hermes profile is an independent `HERMES_HOME` and runs its own gateway
+process, so each profile is a separate ClawChat agent with its own account and
+its own database file under `$HERMES_HOME/clawchat/`:
+
+```bash
+hermes profile create coder
+# install + activate + run, scoped to the profile:
+npx -y @clawling/clawchat-plugin-install-cli@latest install \
+  --target hermes --profile coder --activate <CONNECT_CODE>
+hermes -p coder gateway install && hermes -p coder gateway start
+```
+
+Repeat with a different profile name for each agent. The default profile keeps
+its database at `$HERMES_HOME/clawchat/clawchat.sqlite`; named profiles use
+`clawchat-<profile>.sqlite`. Single-gateway multiplexing
+(`multiplex_profiles=true`) is not supported — run one gateway per profile.
