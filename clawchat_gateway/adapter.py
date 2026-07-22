@@ -101,7 +101,11 @@ from clawchat_gateway.greeting import load_activation_bootstrap_prompt
 from clawchat_gateway.permission_result import handle_permission_result
 from clawchat_gateway.permissions import PermissionCache
 from clawchat_gateway import skill_update
-from clawchat_gateway.storage import get_clawchat_store, make_owner_profile_persister
+from clawchat_gateway.storage import (
+    get_clawchat_store,
+    is_default_profile,
+    make_owner_profile_persister,
+)
 from clawchat_gateway.terminal_send import (
     clear_clawchat_mention_sender,
     consume_terminal_clawchat_send,
@@ -1666,6 +1670,12 @@ class ClawChatAdapter(BasePlatformAdapter):
         reused across reconnects (its own ``start()`` re-checks stored state)
         rather than replaced.
         """
+        # Liveware owns host-global singletons (a fixed TCP port and the shared
+        # ``$HOME/.clawling`` CLI login) that co-located profiles cannot share,
+        # so only the primary/"main" agent — the Hermes default profile — boots
+        # it. Named profiles skip liveware entirely to avoid port/login clashes.
+        if not is_default_profile():
+            return
         if self._store is None:
             return
         if self._liveware_sample_supervisor is not None:

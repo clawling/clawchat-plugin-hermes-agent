@@ -15,8 +15,14 @@ Source: `clawchat_gateway/liveware_sample.py` (`LivewareSampleSupervisor` /
 ## Trigger conditions
 
 The supervisor is created and `start()`ed once per adapter instance, the
-first time the platform reaches `ConnectionState.READY`. `start()` itself
-decides whether to actually bootstrap:
+first time the platform reaches `ConnectionState.READY` — **but only for the
+Hermes default profile.** Liveware owns *host-global* singletons (a fixed TCP
+port and the shared `$HOME/.clawling` CLI login, keyed off `$HOME` rather than
+`HERMES_HOME`) that co-located profiles cannot share, so
+`_schedule_liveware_sample` gates on `storage.is_default_profile()` and returns
+immediately for any named profile (`hermes -p <name>`); only the primary/"main"
+agent boots liveware. Past that gate, `start()` itself decides whether to
+actually bootstrap:
 
 - `platforms.clawchat.extra.liveware_sample` must not be `false` (default
   `true`, see [Configuration](#configuration) below); otherwise `start()`
