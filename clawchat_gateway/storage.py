@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sqlite3
 import stat
 import threading
@@ -14,6 +15,8 @@ from typing import Any, Callable, TypeVar
 logger = logging.getLogger(__name__)
 
 DB_FILENAME = "clawchat.sqlite"
+CLAWCHAT_DIRNAME = "clawchat"
+_PROFILE_SAFE = re.compile(r"[^A-Za-z0-9_-]+")
 BOOTSTRAP_CLAIM_STALE_AFTER_MS = 10 * 60 * 1000
 
 _T = TypeVar("_T")
@@ -175,8 +178,50 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _hermes_home() -> Path:
+    return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+
+
+def _active_profile_name() -> str:
+    """Resolve the active Hermes profile name.
+
+    Prefers the host's own resolver (importable at runtime inside the Hermes
+    process); falls back to deriving it from the HERMES_HOME layout when
+    hermes_cli is not importable (unit tests, standalone CLI use).
+    """
+    try:
+        from hermes_cli.profiles import get_active_profile_name  # type: ignore
+
+        name = get_active_profile_name()
+        if name:
+            return name
+    except Exception:  # noqa: BLE001
+        pass
+    home = _hermes_home()
+    if home.parent.name == "profiles":
+        return home.name
+    return "default"
+
+
+def _sanitize_profile(name: str) -> str:
+    cleaned = _PROFILE_SAFE.sub("-", name).strip("-")
+    return cleaned or "default"
+
+
+def _db_filename(profile: str) -> str:
+    safe = _sanitize_profile(profile)
+    if safe == "default":
+        return DB_FILENAME
+    return f"clawchat-{safe}.sqlite"
+
+
+def clawchat_data_dir() -> Path:
+    """Dedicated ClawChat data directory: ``$HERMES_HOME/clawchat``."""
+    return _hermes_home() / CLAWCHAT_DIRNAME
+
+
 def default_db_path() -> Path:
-    return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes") / DB_FILENAME
+    return clawchat_data_dir() / _db_filename(_active_profile_name())
 
 
 def json_dumps(value: Any) -> str | None:
@@ -242,6 +287,7 @@ class ClawChatStore:
             if self._initialized or self._disabled:
                 return
             try:
+                self._relocate_legacy_db()
                 self.db_path.parent.mkdir(parents=True, exist_ok=True)
                 conn = sqlite3.connect(self.db_path)
                 try:
@@ -1226,6 +1272,38 @@ class ClawChatStore:
         if row is None:
             return set()
         return {int(version) for (version,) in conn.execute("SELECT version FROM schema_migrations")}
+
+    def _relocate_legacy_db(self) -> None:
+        """One-time move of the pre-``clawchat/``-dir default DB into the data dir.
+
+        Older installs stored the default profile's DB at
+        ``$HERMES_HOME/clawchat.sqlite``; new installs use
+        ``$HERMES_HOME/clawchat/clawchat.sqlite``. Only the default profile has a
+        legacy location — named profiles are always fresh. Idempotent and
+        fail-safe: on any move error we open the legacy file in place rather than
+        creating an empty database.
+        """
+        target = self.db_path
+        if target.name != DB_FILENAME or target.parent.name != CLAWCHAT_DIRNAME:
+            return
+        if target.exists():
+            return
+        legacy = target.parent.parent / DB_FILENAME
+        if legacy == target or not legacy.exists():
+            return
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            for suffix in ("", "-wal", "-shm"):
+                src = legacy.with_name(legacy.name + suffix)
+                if src.exists():
+                    src.replace(target.with_name(target.name + suffix))
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "clawchat db relocation failed; opening legacy path in place",
+                exc_info=True,
+            )
+            if legacy.exists():
+                self.db_path = legacy
 
     def _chmod_private(self) -> None:
         try:
