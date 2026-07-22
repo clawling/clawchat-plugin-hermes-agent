@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sqlite3
 import stat
 import threading
@@ -14,6 +15,8 @@ from typing import Any, Callable, TypeVar
 logger = logging.getLogger(__name__)
 
 DB_FILENAME = "clawchat.sqlite"
+CLAWCHAT_DIRNAME = "clawchat"
+_PROFILE_SAFE = re.compile(r"[^A-Za-z0-9_-]+")
 BOOTSTRAP_CLAIM_STALE_AFTER_MS = 10 * 60 * 1000
 
 _T = TypeVar("_T")
@@ -175,8 +178,50 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _hermes_home() -> Path:
+    return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+
+
+def _active_profile_name() -> str:
+    """Resolve the active Hermes profile name.
+
+    Prefers the host's own resolver (importable at runtime inside the Hermes
+    process); falls back to deriving it from the HERMES_HOME layout when
+    hermes_cli is not importable (unit tests, standalone CLI use).
+    """
+    try:
+        from hermes_cli.profiles import get_active_profile_name  # type: ignore
+
+        name = get_active_profile_name()
+        if name:
+            return name
+    except Exception:  # noqa: BLE001
+        pass
+    home = _hermes_home()
+    if home.parent.name == "profiles":
+        return home.name
+    return "default"
+
+
+def _sanitize_profile(name: str) -> str:
+    cleaned = _PROFILE_SAFE.sub("-", name).strip("-")
+    return cleaned or "default"
+
+
+def _db_filename(profile: str) -> str:
+    safe = _sanitize_profile(profile)
+    if safe == "default":
+        return DB_FILENAME
+    return f"clawchat-{safe}.sqlite"
+
+
+def clawchat_data_dir() -> Path:
+    """Dedicated ClawChat data directory: ``$HERMES_HOME/clawchat``."""
+    return _hermes_home() / CLAWCHAT_DIRNAME
+
+
 def default_db_path() -> Path:
-    return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes") / DB_FILENAME
+    return clawchat_data_dir() / _db_filename(_active_profile_name())
 
 
 def json_dumps(value: Any) -> str | None:
