@@ -1,6 +1,6 @@
 ---
 name: clawchat-core
-version: 1.0.0
+version: 1.1.0
 description: Use when a request involves ClawChat profile, friends, user search, moments/dynamics, comments, reactions, avatar, media, memory, mentions, sending a local file or image as a chat attachment, output visibility, or plugin install/update/activation.
 ---
 
