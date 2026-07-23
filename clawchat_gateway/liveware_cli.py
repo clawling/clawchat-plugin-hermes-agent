@@ -37,13 +37,27 @@ def liveware_dir() -> Path:
     return _hermes_home() / "clawchat" / "liveware"
 
 
+def liveware_binary_name(system: str | None = None) -> str:
+    """Local filename for the downloaded binary; Windows needs a .exe suffix."""
+    sys_name = (system or platform.system()).lower()
+    return "liveware.exe" if sys_name == "windows" else "liveware"
+
+
 def platform_assets(
     system: str | None = None, machine: str | None = None
 ) -> str | None:
     """Map host platform/arch to the liveware asset filename, or None."""
     sys_name = (system or platform.system()).lower()
     mach = (machine or platform.machine()).lower()
-    os_name = "darwin" if sys_name == "darwin" else "linux" if sys_name == "linux" else None
+    os_name = (
+        "darwin"
+        if sys_name == "darwin"
+        else "linux"
+        if sys_name == "linux"
+        else "windows"
+        if sys_name == "windows"
+        else None
+    )
     arch = (
         "amd64"
         if mach in ("x86_64", "amd64")
@@ -53,6 +67,11 @@ def platform_assets(
     )
     if not os_name or not arch:
         return None
+    # Windows only ships an amd64 build, published with a .exe suffix.
+    if os_name == "windows":
+        if arch != "amd64":
+            return None
+        return "liveware-windows-amd64.exe"
     return f"liveware-{os_name}-{arch}"
 
 
@@ -60,7 +79,7 @@ def resolve_liveware_path() -> str | None:
     """Resolve the liveware executable: PATH first, then the downloaded copy."""
     if shutil.which("liveware") is not None:
         return "liveware"
-    local = liveware_dir() / "liveware"
+    local = liveware_dir() / liveware_binary_name()
     if local.exists() and os.access(local, os.X_OK):
         return str(local)
     return None
@@ -91,7 +110,8 @@ def ensure_liveware_cli() -> None:
         if shutil.which("liveware") is not None:
             return  # PATH wins
         d = liveware_dir()
-        if (d / "liveware").exists():
+        binary_name = liveware_binary_name()
+        if (d / binary_name).exists():
             return
         liveware_asset = platform_assets()
         if liveware_asset is None:
@@ -102,7 +122,7 @@ def ensure_liveware_cli() -> None:
             )
             return
         d.mkdir(parents=True, exist_ok=True)
-        _download(LIVEWARE_BASE_URL + liveware_asset, d / "liveware")
+        _download(LIVEWARE_BASE_URL + liveware_asset, d / binary_name)
         logger.info("ClawChat: liveware CLI downloaded to %s", d)
     except Exception as exc:  # noqa: BLE001
         logger.warning("ClawChat: liveware CLI download skipped: %s", exc)
