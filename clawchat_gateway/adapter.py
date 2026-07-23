@@ -142,6 +142,14 @@ CLAWCHAT_PLUGIN_PLATFORM = "hermes"
 # Number of prior group messages to prepend as context when the agent is @-mentioned.
 # Internal constant; not user-facing.
 MENTION_CONTEXT_N = 10
+# Stable pseudo user_id for shared (non-per-user) group sessions. Returned by
+# ``_session_user_id_for_inbound`` so every sender in a shared group maps to ONE
+# session key (unified context). It MUST be non-None: the Hermes host drops a
+# ``user_id=None`` message at ``_is_user_authorized`` (the ``if not user_id:
+# return False`` guard runs before ``GATEWAY_ALLOW_ALL_USERS`` is consulted),
+# which silently discards every shared-group message. ``chat_id`` is already in
+# the session key, so a constant keeps different groups in distinct sessions.
+GROUP_SHARED_SESSION_USER_ID = "__group_shared__"
 TYPING_REFRESH_SECONDS = 10.0
 INBOUND_RATE_WINDOW_SECONDS = 30.0
 INBOUND_RATE_WARN_THRESHOLD = 5
@@ -2280,12 +2288,16 @@ class ClawChatAdapter(BasePlatformAdapter):
             inbound.sender_id,
         )
 
-    def _session_user_id_for_inbound(self, inbound: InboundMessage) -> str | None:
+    def _session_user_id_for_inbound(self, inbound: InboundMessage) -> str:
         if inbound.chat_type == "group" and not effective_group_sessions_per_user(
             self._clawchat_config,
             inbound.chat_id,
         ):
-            return None
+            # Shared group: a stable non-None sentinel so all senders share one
+            # session key while still passing host auth (a None user_id would be
+            # dropped before GATEWAY_ALLOW_ALL_USERS is checked). See the
+            # GROUP_SHARED_SESSION_USER_ID definition for the full rationale.
+            return GROUP_SHARED_SESSION_USER_ID
         return inbound.sender_id
 
     async def _ensure_group_participants_metadata(self, group_id: str) -> None:
