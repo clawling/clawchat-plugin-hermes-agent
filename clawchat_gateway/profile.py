@@ -12,6 +12,7 @@ from typing import Any
 import yaml
 
 from clawchat_gateway.api_client import DEFAULT_BASE_URL
+from clawchat_gateway.config import _get_env
 
 
 class ProfileConfigError(ValueError):
@@ -28,27 +29,6 @@ class ProfileConfig:
 
 def _hermes_home() -> Path:
     return Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
-
-
-def _load_env(path: Path) -> dict[str, str]:
-    if not path.exists():
-        return {}
-    values: dict[str, str] = {}
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        if line.startswith("export "):
-            line = line[len("export "):].lstrip()
-        key, value = line.split("=", 1)
-        key = key.strip()
-        if not key:
-            continue
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-            value = value[1:-1]
-        values[key] = value
-    return values
 
 
 def _first_non_empty(*values: Any) -> str:
@@ -75,7 +55,6 @@ def load_profile_config() -> ProfileConfig:
     hermes_home = _hermes_home()
     config_path = hermes_home / "config.yaml"
     config = _load_yaml(config_path)
-    env = _load_env(hermes_home / ".env")
     extra = (
         config.get("platforms", {})
         .get("clawchat", {})
@@ -84,19 +63,22 @@ def load_profile_config() -> ProfileConfig:
     if not isinstance(extra, dict):
         extra = {}
 
+    # Resolve CLAWCHAT_* via config._get_env so the profile client reads the
+    # SAME sources as the WS/other-tools client: os.environ -> Hermes-managed
+    # env store (hermes_cli.config.get_env_value) -> $HERMES_HOME/.env. Reading
+    # only os.environ + .env here used to miss a base_url stored in the Hermes
+    # env store, so profile calls silently fell back to DEFAULT_BASE_URL and
+    # GET /v1/users/me hit the wrong host (404) while WS-side tools worked.
     base_url = _first_non_empty(
-        os.environ.get("CLAWCHAT_BASE_URL"),
-        env.get("CLAWCHAT_BASE_URL"),
+        _get_env("CLAWCHAT_BASE_URL"),
         extra.get("base_url"),
         DEFAULT_BASE_URL,
     ).rstrip("/")
     token = _first_non_empty(
-        os.environ.get("CLAWCHAT_TOKEN"),
-        env.get("CLAWCHAT_TOKEN"),
+        _get_env("CLAWCHAT_TOKEN"),
     )
     user_id = _first_non_empty(
-        os.environ.get("CLAWCHAT_USER_ID"),
-        env.get("CLAWCHAT_USER_ID"),
+        _get_env("CLAWCHAT_USER_ID"),
         extra.get("user_id"),
     )
     if not token:
