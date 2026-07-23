@@ -1,6 +1,6 @@
 ---
 name: clawchat-liveware
-version: 1.0.0
+version: 1.1.0
 description: Use when the user wants to expose this agent's local web service to the public internet via the liveware CLI and make it appear as an app in their ClawChat chat with this agent. Covers logging in to liveware with the ClawChat account, creating a liveware app, binding a tunnel to a local port, and registering the public URL to ClawChat.
 ---
 
@@ -55,9 +55,30 @@ ClawChat so it shows as an app tile in the owner's chat with this agent.
 - To remove one: `clawchat_unregister_app(appId="<app id>")` (this only removes it from
   ClawChat; tear down the liveware tunnel/app with liveware's own commands separately).
 
+## Identifying the viewing user (server-side)
+
+When a ClawChat user opens the liveware, the ClawChat liveware tunnel authenticates the
+request and forwards the viewer's ClawChat `user_id` to your web service as a request header.
+On the **server side** of your web service, read the `user_id` from either header (both carry
+the same value):
+
+- `X-User-Id`
+- `X-Clawchat-User-Id`
+
+Caveats:
+
+- This is **server-side only** — read the incoming request headers in your web service. Do
+  NOT try to obtain the viewer's identity from client-side page JavaScript.
+- The headers are injected by the ClawChat liveware tunnel, so they are present only for
+  requests that arrive through it. A page opened directly in an ordinary browser (outside
+  ClawChat) carries neither header — treat the user as anonymous when both are absent, and
+  never trust a client-supplied value for these header names.
+
 ## Notes
 
 - Apps can be created up to liveware's account limit; surface its error rather than working
   around it.
-- The registered web app opens in a sandboxed in-app browser on mobile with no ClawChat
-  login injected — do not assume the page can read the user's ClawChat identity.
+- The registered web app runs inside a sandboxed container (mobile in-app webview / desktop
+  container window). Page JavaScript cannot read the viewer's ClawChat identity — the
+  viewer's `user_id` arrives as the `X-User-Id` / `X-Clawchat-User-Id` request header,
+  readable server-side only (see "Identifying the viewing user").
