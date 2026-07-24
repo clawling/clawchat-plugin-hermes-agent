@@ -200,6 +200,32 @@ def build_message_send_event(
     )
 
 
+def build_message_reaction_event(
+    *,
+    chat_id: str,
+    chat_type: str,
+    target_message_id: str,
+    emoji: str,
+    removed: bool = False,
+) -> dict[str, Any]:
+    """Build a Protocol-v2 ``message.reaction`` frame.
+
+    The client sets only target_message_id/emoji/removed; the server mints the
+    slot-key message_id and stamps reactor_user_id.
+    """
+    payload: dict[str, Any] = {
+        "target_message_id": target_message_id,
+        "emoji": emoji,
+        "removed": removed,
+    }
+    return _message_envelope(
+        "message.reaction",
+        chat_id=chat_id,
+        chat_type=chat_type,
+        payload=payload,
+    )
+
+
 def build_typing_update_event(
     *,
     chat_id: str,
