@@ -90,6 +90,7 @@ from clawchat_gateway.mention_message import (
 from clawchat_gateway.profile import load_profile_config
 from clawchat_gateway.profile_sync import relation_for_sender
 from clawchat_gateway.protocol import (
+    build_message_reaction_event,
     build_message_reply_event,
     build_message_send_event,
     build_typing_update_event,
@@ -472,6 +473,11 @@ class ClawChatAdapter(BasePlatformAdapter):
         # ({id, nick_name, fragments}) without a round-trip. Bounded FIFO.
         self._reply_preview_by_message_id: dict[str, dict[str, Any]] = {}
         self._reply_preview_order: deque[str] = deque()
+        # §7.x message.reaction: last inbound message_id seen per chat, so a
+        # same-turn reaction with no explicit target defaults to "react to
+        # what the user just sent" without a round-trip. Unbounded per-chat
+        # (one entry per active chat, replaced on every inbound).
+        self._last_inbound_message_id_by_chat: dict[str, str] = {}
         self._auth_failed = False
         # In-memory mirror of a pending owner-consent skill update (also persisted
         # to a small file under the managed skills dir for crash-restart recovery).
@@ -2007,6 +2013,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._remember_reply_preview(
                 message_id=protocol_message_id, inbound=inbound
             )
+            if protocol_message_id:
+                self._last_inbound_message_id_by_chat[inbound.chat_id] = protocol_message_id
         if inbound.chat_type == "group":
             # Gate ONLY group dispatch on the first per-(re)connect settings refresh
             # so a muted / mention-only group is not answered from a stale/empty
@@ -2946,6 +2954,48 @@ class ClawChatAdapter(BasePlatformAdapter):
             "instruction": TERMINAL_REPLY_INSTRUCTION,
             "messageId": message_id,
             "mentions": mentioned_ids,
+        }
+
+    async def send_reaction_message(
+        self,
+        *,
+        chat_id: str,
+        target_message_id: str | None = None,
+        emoji: str,
+        removed: bool = False,
+    ) -> dict[str, Any]:
+        """Emit a fire-and-forget message.reaction. Non-terminal: does not
+        suppress the same-turn text reply. Defaults the target to the last
+        inbound message in this chat when target_message_id is omitted."""
+        resolved_target = target_message_id or self._last_inbound_message_id_by_chat.get(chat_id)
+        if not resolved_target:
+            return {
+                "error": "validation",
+                "message": "no target message to react to (pass targetMessageId)",
+            }
+        frame = build_message_reaction_event(
+            chat_id=chat_id,
+            chat_type="group",
+            target_message_id=resolved_target,
+            emoji=emoji,
+            removed=removed,
+        )
+        sent = await self._connection.send_frame(frame, wait_for_ack=False)
+        if not sent:
+            logger.warning(
+                "clawchat reaction dropped chat_id=%s target=%s emoji=%s removed=%s",
+                chat_id, resolved_target, emoji, removed,
+            )
+            return {"error": "transport", "message": "clawchat reaction dropped"}
+        logger.info(
+            "clawchat reaction sent chat_id=%s target=%s emoji=%s removed=%s",
+            chat_id, resolved_target, emoji, removed,
+        )
+        return {
+            "reacted": True,
+            "targetMessageId": resolved_target,
+            "emoji": emoji,
+            "removed": removed,
         }
 
     async def _send_owner_attention(

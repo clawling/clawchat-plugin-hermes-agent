@@ -28,6 +28,16 @@ class ClawChatMentionSender(Protocol):
     ) -> dict[str, Any]:
         ...
 
+    async def send_reaction_message(
+        self,
+        *,
+        chat_id: str,
+        target_message_id: str | None = None,
+        emoji: str,
+        removed: bool = False,
+    ) -> dict[str, Any]:
+        ...
+
 
 _active_sender: ClawChatMentionSender | None = None
 _terminal_send_scope: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -72,6 +82,23 @@ async def send_clawchat_mention_message(
         text=text,
         mentions=mentions,
         reply_to_message_id=reply_to_message_id,
+    )
+
+
+async def send_clawchat_reaction_message(
+    *,
+    chat_id: str,
+    target_message_id: str | None = None,
+    emoji: str,
+    removed: bool = False,
+) -> dict[str, Any]:
+    if _active_sender is None:
+        raise RuntimeError("ClawChat websocket sender is not ready")
+    return await _active_sender.send_reaction_message(
+        chat_id=chat_id,
+        target_message_id=target_message_id,
+        emoji=emoji,
+        removed=removed,
     )
 
 
