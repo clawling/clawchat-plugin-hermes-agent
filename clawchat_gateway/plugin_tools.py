@@ -332,7 +332,7 @@ async def handle_clawchat_mention_message(args, **kw):
 
 async def handle_clawchat_react_message(args, **kw):
     task_id = kw.get("task_id") or "default"
-    logger.warning(
+    logger.info(
         "clawchat_react_message start task_id=%s chat_id=%s target=%s emoji=%s remove=%s",
         task_id,
         args.get("chatId") or "",
@@ -353,7 +353,7 @@ async def handle_clawchat_react_message(args, **kw):
             removed=bool(args.get("remove")),
         ),
     )
-    logger.warning("clawchat_react_message done task_id=%s result=%s", task_id, result)
+    logger.info("clawchat_react_message done task_id=%s result=%s", task_id, result)
     return _tool_result(result)
 
 
