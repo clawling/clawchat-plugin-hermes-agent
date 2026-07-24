@@ -2975,7 +2975,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             }
         frame = build_message_reaction_event(
             chat_id=chat_id,
-            chat_type="group",
+            chat_type=self._known_chat_types.get(chat_id, "group"),
             target_message_id=resolved_target,
             emoji=emoji,
             removed=removed,
