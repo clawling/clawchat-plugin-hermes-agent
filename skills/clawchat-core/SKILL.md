@@ -104,6 +104,16 @@ Example reply to "把 md 文件发给我" after saving `/opt/data/春游作文.m
 这是春游作文，请查收～ MEDIA:/opt/data/春游作文.md
 ```
 
+### Reacting with an emoji
+
+When a short acknowledgement or emotional beat (agreement, thanks, laughter,
+celebration, sympathy) fits better as an emoji on the message than as a
+sentence, use `clawchat_react_message` instead of sending text. Pass `chatId`;
+omit `targetMessageId` to react to the message you're currently responding to.
+Prefer the quick set 👍 ❤️ 😂 😮 😢 🙏 🎉 👏 🔥 😍 🤔. When a reaction is the
+whole response, do not also send a text reply. Use `remove: true` to take a
+reaction back.
+
 ### Coherent Profile Sync
 
 When the user asks to modify profile-like identity fields, keep Hermes-visible identity and the connected ClawChat account profile coherent where both sides support the field. Do not ask the user which system to update; ask only for missing required values.

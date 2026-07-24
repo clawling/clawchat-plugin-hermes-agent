@@ -330,6 +330,33 @@ async def handle_clawchat_mention_message(args, **kw):
     return _tool_result(result)
 
 
+async def handle_clawchat_react_message(args, **kw):
+    task_id = kw.get("task_id") or "default"
+    logger.warning(
+        "clawchat_react_message start task_id=%s chat_id=%s target=%s emoji=%s remove=%s",
+        task_id,
+        args.get("chatId") or "",
+        args.get("targetMessageId") or "",
+        args.get("emoji") or "",
+        bool(args.get("remove")),
+    )
+    from clawchat_gateway import tools
+
+    result = await _recorded_tool_call(
+        "clawchat_react_message",
+        args,
+        _account_id_from_kwargs(kw),
+        lambda: tools.react_message(
+            str(args.get("chatId") or ""),
+            emoji=str(args.get("emoji") or ""),
+            target_message_id=args.get("targetMessageId"),
+            removed=bool(args.get("remove")),
+        ),
+    )
+    logger.warning("clawchat_react_message done task_id=%s result=%s", task_id, result)
+    return _tool_result(result)
+
+
 async def handle_clawchat_create_moment(args, **kw):
     task_id = kw.get("task_id") or "default"
     logger.info("clawchat_create_moment start task_id=%s", task_id)
@@ -1225,6 +1252,36 @@ def register_tools(ctx) -> None:
         is_async=True,
         description="Send ClawChat Mention Message",
         emoji="@",
+    )
+
+    ctx.register_tool(
+        "clawchat_react_message",
+        "clawchat",
+        {
+            "name": "clawchat_react_message",
+            "description": _direct_tool_description(
+                "React to a ClawChat message with a single quick emoji (the bubble long-press reaction), instead of sending a text message. "
+                "TRIGGER - invoke when a short acknowledgement or emotional beat (agreement, thanks, laughter, celebration, sympathy) reads more naturally as an emoji on the message than as a sentence, e.g. a simple 👍 to \"done\" or ❤️ to good news. "
+                "Pass chatId for the current conversation. Omit targetMessageId to react to the message that triggered the current turn; pass it to react to an earlier message. "
+                "Set remove:true to take back your reaction. "
+                "Prefer the quick set 👍 ❤️ 😂 😮 😢 🙏 🎉 👏 🔥 😍 🤔. "
+                "When a reaction is all you want to send, do not also send a normal text reply."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "chatId": {"type": "string", "minLength": 1, "description": "ClawChat conversation id where the target message lives."},
+                    "emoji": {"type": "string", "minLength": 1, "description": "Single emoji to react with. Prefer the ClawChat quick set."},
+                    "targetMessageId": {"type": "string", "description": "Message id to react to. Omit to react to the message that triggered the current turn."},
+                    "remove": {"type": "boolean", "description": "Set true to remove your reaction; omit/false to add or overwrite."},
+                },
+                "required": ["chatId", "emoji"],
+            },
+        },
+        handle_clawchat_react_message,
+        is_async=True,
+        description="React to ClawChat Message",
+        emoji="👍",
     )
 
     ctx.register_tool(

@@ -34,7 +34,10 @@ from clawchat_gateway.config import ClawChatConfig
 from clawchat_gateway.storage import get_clawchat_store, make_owner_profile_persister
 from clawchat_gateway.mention_message import normalize_mention_targets
 from clawchat_gateway.profile import ProfileConfigError, load_profile_config
-from clawchat_gateway.terminal_send import send_clawchat_mention_message
+from clawchat_gateway.terminal_send import (
+    send_clawchat_mention_message,
+    send_clawchat_reaction_message,
+)
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
@@ -716,6 +719,36 @@ async def mention_message(
                 if isinstance(reply_to_message_id, str) and reply_to_message_id.strip()
                 else None
             ),
+        )
+    except RuntimeError as exc:
+        return _config_error(str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return _unknown_error(exc)
+
+
+async def react_message(
+    chat_id: Any,
+    *,
+    emoji: Any,
+    target_message_id: Any = None,
+    removed: Any = False,
+) -> dict[str, Any]:
+    if not isinstance(chat_id, str) or not chat_id.strip():
+        return _validation_error("chatId is required")
+    if not isinstance(emoji, str) or not emoji.strip():
+        return _validation_error("emoji is required")
+    if target_message_id is not None and not isinstance(target_message_id, str):
+        return _validation_error("targetMessageId must be a string when provided")
+    try:
+        return await send_clawchat_reaction_message(
+            chat_id=chat_id.strip(),
+            target_message_id=(
+                target_message_id.strip()
+                if isinstance(target_message_id, str) and target_message_id.strip()
+                else None
+            ),
+            emoji=emoji.strip(),
+            removed=bool(removed),
         )
     except RuntimeError as exc:
         return _config_error(str(exc))
