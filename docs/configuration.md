@@ -305,7 +305,7 @@ by `agents-connect` and `CLAWCHAT_HOME_CHANNEL_NAME` to `ClawChat`.
 
 | `extra.*` key                          | Default        |
 |----------------------------------------|----------------|
-| `typing_max_continuous_seconds`        | `300.0`        |
+| `typing_max_continuous_seconds`        | `900.0`        |
 
 `typing_max_continuous_seconds` stops emitting the typing indicator after this
 many seconds of continuous typing on one conversation — a safety net against a
@@ -314,8 +314,13 @@ the limit only suppresses the typing indicator; it never interrupts an
 in-flight reply. The window resets on `stop_typing` and restarts on the next
 `send_typing` call for that conversation.
 
+The default is deliberately well above the longest expected single reply: if it
+trips during a legitimate long agent run, the user's "typing…" indicator
+disappears while the reply is still being generated. Lower it only if your
+agents always reply quickly and you want a tighter bound on a leaked keepalive.
+
 A value that fails to parse as a number (missing/blank, `"abc"`, etc.) falls
-back to the `300.0` default rather than raising — it never takes down platform
+back to the `900.0` default rather than raising — it never takes down platform
 validation. `0` or a negative value also falls back to the default: there is
 no "disable the TTL" sentinel.
 
