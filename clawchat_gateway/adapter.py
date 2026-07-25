@@ -2047,6 +2047,12 @@ class ClawChatAdapter(BasePlatformAdapter):
                 frame.get("chat_id"),
             )
             return
+        if self._is_chat_dead(inbound.chat_id):
+            logger.debug(
+                "clawchat inbound dropped chat_id=%s reason=conversation_dissolved",
+                inbound.chat_id,
+            )
+            return
         logger.info(
             "clawchat inbound parsed chat_id=%s chat_type=%s sender_id=%s text_len=%d media=%d",
             inbound.chat_id,
