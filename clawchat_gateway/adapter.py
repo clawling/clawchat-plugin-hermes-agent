@@ -464,6 +464,12 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._typing_state: dict[str, tuple[bool, float]] = {}
         # Conversations confirmed dissolved via notify.signal{conversation.dissolved}.
         # OrderedDict used as a bounded FIFO set (value is always None).
+        # In-memory only: a process restart clears it and every dead chat looks
+        # live again until it is (re)dissolved. That is fine for the dissolve
+        # signal itself (the server can always re-deliver it), but it means this
+        # set is NOT the durable backstop against a leaked keepalive — the
+        # `typing_max_continuous_seconds` TTL below is, since it re-derives its
+        # state from wall-clock elapsed time rather than a remembered fact.
         self._dead_chats: OrderedDict[str, None] = OrderedDict()
         # Continuous-typing TTL: guards against a leaked upstream keepalive that
         # arrives with no dissolve signal at all.
@@ -678,13 +684,17 @@ class ClawChatAdapter(BasePlatformAdapter):
         while len(self._dead_chats) > DEAD_CHATS_MAX:
             self._dead_chats.popitem(last=False)
         self._evict_chat_state(chat_id)
-        logger.info("clawchat conversation dissolved; evicting chat_id=%s", chat_id)
+        logger.info("clawchat conversation dissolved; dropping chat_id=%s", chat_id)
 
     def _evict_chat_state(self, chat_id: str) -> None:
-        """Drop every per-chat entry for a conversation that is gone.
+        """Drop every per-chat entry tracked for a dissolved conversation.
 
-        These dicts otherwise have no removal path, so without this a long-lived
-        agent leaks one entry per conversation it ever saw.
+        Note this only bounds the state covered here (typing, inbound window,
+        active runs, etc. — see the pops below). `_typing_state`,
+        `_known_chat_types`, `_last_inbound_message_id_by_chat`, and
+        `_conversation_metadata_versions` remain unbounded for any conversation
+        that is never dissolved; this method does not by itself cap a
+        long-lived agent's total memory use.
         """
         self._typing_state.pop(chat_id, None)
         self._typing_started_at.pop(chat_id, None)
@@ -700,7 +710,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         for run_id in [
             rid
             for rid, run in self._active_runs_by_id.items()
-            if getattr(run, "chat_id", None) == chat_id
+            if run.chat_id == chat_id
         ]:
             self._active_runs_by_id.pop(run_id, None)
 
@@ -2071,6 +2081,14 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
             return
         if self._is_chat_dead(inbound.chat_id):
+            # _trace_inbound_frame() (called unconditionally above, before this
+            # chat is known to be dead) recreates an _inbound_window entry via
+            # setdefault() on every frame. Without this pop, a replayed frame
+            # for an already-evicted chat would silently resurrect the entry
+            # _evict_chat_state() just dropped, and could even trip the
+            # inbound-rate-spike warning for a conversation that no longer
+            # exists.
+            self._inbound_window.pop(inbound.chat_id, None)
             logger.debug(
                 "clawchat inbound dropped chat_id=%s reason=conversation_dissolved",
                 inbound.chat_id,
