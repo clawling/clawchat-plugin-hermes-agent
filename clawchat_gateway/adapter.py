@@ -598,6 +598,12 @@ class ClawChatAdapter(BasePlatformAdapter):
         return {"name": chat_id, "type": "direct", "chat_id": chat_id}
 
     async def send_typing(self, chat_id: str, metadata: Any = None) -> None:
+        if self._is_chat_dead(chat_id):
+            logger.debug(
+                "clawchat typing active skipped chat_id=%s reason=conversation_dissolved",
+                chat_id,
+            )
+            return
         chat_type = self._resolve_chat_type(chat_id, metadata, {})
         if self._should_skip_typing(chat_id, active=True):
             logger.debug("clawchat typing active skipped chat_id=%s reason=already_active", chat_id)
@@ -613,6 +619,12 @@ class ClawChatAdapter(BasePlatformAdapter):
         logger.info("clawchat typing active sent chat_id=%s chat_type=%s", chat_id, chat_type)
 
     async def stop_typing(self, chat_id: str, metadata: Any = None) -> None:
+        if self._is_chat_dead(chat_id):
+            logger.debug(
+                "clawchat typing inactive skipped chat_id=%s reason=conversation_dissolved",
+                chat_id,
+            )
+            return
         chat_type = self._resolve_chat_type(chat_id, metadata, {})
         if self._should_skip_typing(chat_id, active=False):
             logger.debug("clawchat typing inactive skipped chat_id=%s reason=already_inactive", chat_id)
