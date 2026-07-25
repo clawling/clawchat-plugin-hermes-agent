@@ -152,6 +152,9 @@ MENTION_CONTEXT_N = 10
 # the session key, so a constant keeps different groups in distinct sessions.
 GROUP_SHARED_SESSION_USER_ID = "__group_shared__"
 TYPING_REFRESH_SECONDS = 10.0
+# Bounded FIFO of conversations known to be dissolved. Uplinks for these are
+# suppressed so a leaked upstream typing keepalive cannot hammer a dead chat.
+DEAD_CHATS_MAX = 512
 INBOUND_RATE_WINDOW_SECONDS = 30.0
 INBOUND_RATE_WARN_THRESHOLD = 5
 # Max time a group message waits for the first per-group settings refresh to land
@@ -459,6 +462,9 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._active_runs_by_id: dict[str, _ActiveRun] = {}
         self._active_chat_runs: dict[str, str] = {}
         self._typing_state: dict[str, tuple[bool, float]] = {}
+        # Conversations confirmed dissolved via notify.signal{conversation.dissolved}.
+        # OrderedDict used as a bounded FIFO set (value is always None).
+        self._dead_chats: OrderedDict[str, None] = OrderedDict()
         self._known_chat_types: dict[str, str] = {}
         self._owner_approval_routes: dict[str, str] = {}
         self._run_counter = 0
@@ -620,6 +626,25 @@ class ClawChatAdapter(BasePlatformAdapter):
             queue_when_unready=False,
         )
         logger.info("clawchat typing inactive sent chat_id=%s chat_type=%s", chat_id, chat_type)
+
+    def _is_chat_dead(self, chat_id: str) -> bool:
+        return bool(chat_id) and chat_id in self._dead_chats
+
+    def _mark_chat_dead(self, chat_id: str) -> None:
+        """Record a conversation as dissolved and suppress further uplinks on it.
+
+        Only `cnv_`-prefixed ids are accepted: a bad entity_id must never be able
+        to mute a live conversation until process restart.
+        """
+        if not isinstance(chat_id, str) or not chat_id.startswith("cnv_"):
+            return
+        if chat_id in self._dead_chats:
+            self._dead_chats.move_to_end(chat_id)
+            return
+        self._dead_chats[chat_id] = None
+        while len(self._dead_chats) > DEAD_CHATS_MAX:
+            self._dead_chats.popitem(last=False)
+        logger.info("clawchat conversation dissolved; evicting chat_id=%s", chat_id)
 
     def _should_skip_typing(self, chat_id: str, *, active: bool) -> bool:
         now = time.monotonic()
