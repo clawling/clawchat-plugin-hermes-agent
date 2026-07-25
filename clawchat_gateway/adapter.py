@@ -152,6 +152,9 @@ MENTION_CONTEXT_N = 10
 # the session key, so a constant keeps different groups in distinct sessions.
 GROUP_SHARED_SESSION_USER_ID = "__group_shared__"
 TYPING_REFRESH_SECONDS = 10.0
+# Bounded FIFO of conversations known to be dissolved. Uplinks for these are
+# suppressed so a leaked upstream typing keepalive cannot hammer a dead chat.
+DEAD_CHATS_MAX = 512
 INBOUND_RATE_WINDOW_SECONDS = 30.0
 INBOUND_RATE_WARN_THRESHOLD = 5
 # Max time a group message waits for the first per-group settings refresh to land
@@ -459,6 +462,19 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._active_runs_by_id: dict[str, _ActiveRun] = {}
         self._active_chat_runs: dict[str, str] = {}
         self._typing_state: dict[str, tuple[bool, float]] = {}
+        # Conversations confirmed dissolved via notify.signal{conversation.dissolved}.
+        # OrderedDict used as a bounded FIFO set (value is always None).
+        # In-memory only: a process restart clears it and every dead chat looks
+        # live again until it is (re)dissolved. That is fine for the dissolve
+        # signal itself (the server can always re-deliver it), but it means this
+        # set is NOT the durable backstop against a leaked keepalive — the
+        # `typing_max_continuous_seconds` TTL below is, since it re-derives its
+        # state from wall-clock elapsed time rather than a remembered fact.
+        self._dead_chats: OrderedDict[str, None] = OrderedDict()
+        # Continuous-typing TTL: guards against a leaked upstream keepalive that
+        # arrives with no dissolve signal at all.
+        self._typing_started_at: dict[str, float] = {}
+        self._typing_ttl_warned: set[str] = set()
         self._known_chat_types: dict[str, str] = {}
         self._owner_approval_routes: dict[str, str] = {}
         self._run_counter = 0
@@ -592,6 +608,27 @@ class ClawChatAdapter(BasePlatformAdapter):
         return {"name": chat_id, "type": "direct", "chat_id": chat_id}
 
     async def send_typing(self, chat_id: str, metadata: Any = None) -> None:
+        if self._is_chat_dead(chat_id):
+            logger.debug(
+                "clawchat typing active skipped chat_id=%s reason=conversation_dissolved",
+                chat_id,
+            )
+            return
+        now = time.monotonic()
+        started = self._typing_started_at.get(chat_id)
+        if started is None:
+            self._typing_started_at[chat_id] = now
+        elif now - started > self._clawchat_config.typing_max_continuous_seconds:
+            if chat_id not in self._typing_ttl_warned:
+                self._typing_ttl_warned.add(chat_id)
+                logger.warning(
+                    "clawchat typing exceeded max continuous duration; "
+                    "suppressing chat_id=%s elapsed=%.1fs limit=%.1fs",
+                    chat_id,
+                    now - started,
+                    self._clawchat_config.typing_max_continuous_seconds,
+                )
+            return
         chat_type = self._resolve_chat_type(chat_id, metadata, {})
         if self._should_skip_typing(chat_id, active=True):
             logger.debug("clawchat typing active skipped chat_id=%s reason=already_active", chat_id)
@@ -607,6 +644,14 @@ class ClawChatAdapter(BasePlatformAdapter):
         logger.info("clawchat typing active sent chat_id=%s chat_type=%s", chat_id, chat_type)
 
     async def stop_typing(self, chat_id: str, metadata: Any = None) -> None:
+        if self._is_chat_dead(chat_id):
+            logger.debug(
+                "clawchat typing inactive skipped chat_id=%s reason=conversation_dissolved",
+                chat_id,
+            )
+            return
+        self._typing_started_at.pop(chat_id, None)
+        self._typing_ttl_warned.discard(chat_id)
         chat_type = self._resolve_chat_type(chat_id, metadata, {})
         if self._should_skip_typing(chat_id, active=False):
             logger.debug("clawchat typing inactive skipped chat_id=%s reason=already_inactive", chat_id)
@@ -620,6 +665,54 @@ class ClawChatAdapter(BasePlatformAdapter):
             queue_when_unready=False,
         )
         logger.info("clawchat typing inactive sent chat_id=%s chat_type=%s", chat_id, chat_type)
+
+    def _is_chat_dead(self, chat_id: str) -> bool:
+        return bool(chat_id) and chat_id in self._dead_chats
+
+    def _mark_chat_dead(self, chat_id: str) -> None:
+        """Record a conversation as dissolved and suppress further uplinks on it.
+
+        Only `cnv_`-prefixed ids are accepted: a bad entity_id must never be able
+        to mute a live conversation until process restart.
+        """
+        if not isinstance(chat_id, str) or not chat_id.startswith("cnv_"):
+            return
+        if chat_id in self._dead_chats:
+            self._dead_chats.move_to_end(chat_id)
+            return
+        self._dead_chats[chat_id] = None
+        while len(self._dead_chats) > DEAD_CHATS_MAX:
+            self._dead_chats.popitem(last=False)
+        self._evict_chat_state(chat_id)
+        logger.info("clawchat conversation dissolved; dropping chat_id=%s", chat_id)
+
+    def _evict_chat_state(self, chat_id: str) -> None:
+        """Drop every per-chat entry tracked for a dissolved conversation.
+
+        Note this only bounds the state covered here (typing, inbound window,
+        active runs, etc. — see the pops below). `_typing_state`,
+        `_known_chat_types`, `_last_inbound_message_id_by_chat`, and
+        `_conversation_metadata_versions` remain unbounded for any conversation
+        that is never dissolved; this method does not by itself cap a
+        long-lived agent's total memory use.
+        """
+        self._typing_state.pop(chat_id, None)
+        self._typing_started_at.pop(chat_id, None)
+        self._typing_ttl_warned.discard(chat_id)
+        self._known_chat_types.pop(chat_id, None)
+        self._owner_approval_routes.pop(chat_id, None)
+        self._inbound_window.pop(chat_id, None)
+        self._last_inbound_message_id_by_chat.pop(chat_id, None)
+        self._conversation_metadata_versions.pop(chat_id, None)
+        # Run bookkeeping: _ActiveRun is a plain dataclass with no task handle,
+        # so there is nothing to cancel — only records to drop.
+        self._active_chat_runs.pop(chat_id, None)
+        for run_id in [
+            rid
+            for rid, run in self._active_runs_by_id.items()
+            if run.chat_id == chat_id
+        ]:
+            self._active_runs_by_id.pop(run_id, None)
 
     def _should_skip_typing(self, chat_id: str, *, active: bool) -> bool:
         now = time.monotonic()
@@ -675,6 +768,9 @@ class ClawChatAdapter(BasePlatformAdapter):
         * ``agent.config.changed`` — re-pulls the per-group settings cache.
         * ``agent.permission.changed`` — re-pulls the permission policy cache.
         * ``clawchat.skill.update.check`` — checks for a newer skill version.
+        * ``conversation.dissolved`` — evicts all per-chat state for the dead
+          conversation so it stops being addressed (e.g. leaked typing
+          keepalives); does not suppress the awareness note below.
         * ``friend.added``, ``friend.removed``, ``friend.profile_updated``,
           ``conversation.*`` — lightweight awareness events; may emit one
           consolidated note to the owner when ``awareness_note`` is enabled.
@@ -685,6 +781,13 @@ class ClawChatAdapter(BasePlatformAdapter):
         payload = frame.get("payload")
         if not isinstance(payload, dict):
             return
+        if payload.get("type") == "conversation.dissolved":
+            # The conversation is gone. Evict it so a leaked upstream typing
+            # keepalive cannot keep hammering a dead chat until process restart.
+            # This is a standalone `if` (not part of the chain below) so the
+            # generic conversation.* awareness branch still runs independently
+            # and the owner still gets told.
+            self._mark_chat_dead(str(payload.get("entity_id") or ""))
         if payload.get("type") == "agent.config.changed":
             # Clear the gate BEFORE spawning the signal-triggered refresh (item 3),
             # mirroring the reconnect-path protection: a group message arriving
@@ -1975,6 +2078,20 @@ class ClawChatAdapter(BasePlatformAdapter):
                 "clawchat inbound dropped event=%s chat_id=%s reason=parse_or_filter_failed",
                 event_name,
                 frame.get("chat_id"),
+            )
+            return
+        if self._is_chat_dead(inbound.chat_id):
+            # _trace_inbound_frame() (called unconditionally above, before this
+            # chat is known to be dead) recreates an _inbound_window entry via
+            # setdefault() on every frame. Without this pop, a replayed frame
+            # for an already-evicted chat would silently resurrect the entry
+            # _evict_chat_state() just dropped, and could even trip the
+            # inbound-rate-spike warning for a conversation that no longer
+            # exists.
+            self._inbound_window.pop(inbound.chat_id, None)
+            logger.debug(
+                "clawchat inbound dropped chat_id=%s reason=conversation_dissolved",
+                inbound.chat_id,
             )
             return
         logger.info(

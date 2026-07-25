@@ -246,6 +246,26 @@ def _read_group_sessions_per_user(value: Any) -> bool:
     return True if parsed is None else parsed
 
 
+def _read_positive_float(value: Any, default: float) -> float:
+    """Coerce a user-supplied duration, never raising.
+
+    Unlike most `extra.*` values, this one previously went through a bare
+    ``float()`` call with no try/except, so an empty YAML value (``None``) or
+    a typo (``"abc"``, ``""``) raised and took down the whole
+    `from_platform_config` call — not just this one tuning knob. Fall back to
+    ``default`` on any coercion failure, and also on `0`/negative input: there
+    is no documented "disable the TTL" sentinel, and silently accepting a
+    non-positive value would suppress typing after the very first frame.
+    """
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed <= 0:
+        return default
+    return parsed
+
+
 def _read_groups(value: Any) -> dict[str, dict[str, Any]]:
     if not isinstance(value, dict):
         return {}
@@ -297,6 +317,7 @@ class ClawChatConfig:
     enable_rich_interactions: bool = False
     runtime_status_messages: bool = False
     awareness_note: bool = False
+    typing_max_continuous_seconds: float = 900.0
     liveware_sample: bool = True
 
     @classmethod
@@ -387,6 +408,14 @@ class ClawChatConfig:
                     "awareness_note",
                     False,
                 )
+            ),
+            typing_max_continuous_seconds=_read_positive_float(
+                _get_config_value(
+                    extra,
+                    "typing_max_continuous_seconds",
+                    900.0,
+                ),
+                900.0,
             ),
             liveware_sample=bool(
                 _get_config_value(

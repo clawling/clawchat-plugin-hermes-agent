@@ -301,6 +301,48 @@ by `agents-connect` and `CLAWCHAT_HOME_CHANNEL_NAME` to `ClawChat`.
 | `ack_timeout_ms`                       | `15000`        |
 | `ack_auto_resend_on_timeout`           | `false`        |
 
+## Typing
+
+| `extra.*` key                          | Default        |
+|----------------------------------------|----------------|
+| `typing_max_continuous_seconds`        | `900.0`        |
+
+`typing_max_continuous_seconds` stops emitting the typing indicator after this
+many seconds of continuous typing on one conversation — a safety net against a
+leaked upstream keepalive that never sends a matching `stop_typing`. Tripping
+the limit only suppresses the typing indicator; it never interrupts an
+in-flight reply. The window resets on `stop_typing` and restarts on the next
+`send_typing` call for that conversation.
+
+The default is deliberately well above the longest expected single reply: if it
+trips during a legitimate long agent run, the user's "typing…" indicator
+disappears while the reply is still being generated. Lower it only if your
+agents always reply quickly and you want a tighter bound on a leaked keepalive.
+
+A value that fails to parse as a number (missing/blank, `"abc"`, etc.) falls
+back to the `900.0` default rather than raising — it never takes down platform
+validation. `0` or a negative value also falls back to the default: there is
+no "disable the TTL" sentinel.
+
+## Dissolved-conversation eviction
+
+When the server sends `notify.signal{type: "conversation.dissolved"}` for a
+conversation, the plugin marks that `chat_id` dead in an in-memory, bounded
+(512-entry, FIFO) set and immediately drops all per-chat state it was
+tracking for it (typing state, inbound rate-limit window, known chat type,
+active runs, etc.). While a chat is marked dead:
+
+- inbound messages for it are dropped before reaching the LLM/business
+  pipeline;
+- `send_typing`/`stop_typing` uplinks for it are suppressed.
+
+The dead-chat set is **not durable** — a process restart clears it, so a
+dissolved conversation looks live again until the server re-delivers the
+dissolve signal (or another message on it is naturally rejected server-side).
+It is not a substitute for `typing_max_continuous_seconds`, which is the
+actual backstop against a leaked keepalive that never sends a
+`conversation.dissolved` signal at all.
+
 ## Media
 
 | Env var                                | `extra.*` key         | Default                  | Notes |
