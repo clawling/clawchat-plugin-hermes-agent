@@ -644,7 +644,30 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._dead_chats[chat_id] = None
         while len(self._dead_chats) > DEAD_CHATS_MAX:
             self._dead_chats.popitem(last=False)
+        self._evict_chat_state(chat_id)
         logger.info("clawchat conversation dissolved; evicting chat_id=%s", chat_id)
+
+    def _evict_chat_state(self, chat_id: str) -> None:
+        """Drop every per-chat entry for a conversation that is gone.
+
+        These dicts otherwise have no removal path, so without this a long-lived
+        agent leaks one entry per conversation it ever saw.
+        """
+        self._typing_state.pop(chat_id, None)
+        self._known_chat_types.pop(chat_id, None)
+        self._owner_approval_routes.pop(chat_id, None)
+        self._inbound_window.pop(chat_id, None)
+        self._last_inbound_message_id_by_chat.pop(chat_id, None)
+        self._conversation_metadata_versions.pop(chat_id, None)
+        # Run bookkeeping: _ActiveRun is a plain dataclass with no task handle,
+        # so there is nothing to cancel — only records to drop.
+        self._active_chat_runs.pop(chat_id, None)
+        for run_id in [
+            rid
+            for rid, run in self._active_runs_by_id.items()
+            if getattr(run, "chat_id", None) == chat_id
+        ]:
+            self._active_runs_by_id.pop(run_id, None)
 
     def _should_skip_typing(self, chat_id: str, *, active: bool) -> bool:
         now = time.monotonic()
