@@ -21,6 +21,7 @@ provides_tools:
   - clawchat_get_conversation
   - clawchat_leave_group
   - clawchat_mention_message
+  - clawchat_react_message
   - clawchat_create_moment
   - clawchat_delete_moment
   - clawchat_toggle_moment_reaction
