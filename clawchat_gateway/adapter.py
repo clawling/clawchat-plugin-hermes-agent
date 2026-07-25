@@ -723,6 +723,9 @@ class ClawChatAdapter(BasePlatformAdapter):
         * ``agent.config.changed`` — re-pulls the per-group settings cache.
         * ``agent.permission.changed`` — re-pulls the permission policy cache.
         * ``clawchat.skill.update.check`` — checks for a newer skill version.
+        * ``conversation.dissolved`` — evicts all per-chat state for the dead
+          conversation so it stops being addressed (e.g. leaked typing
+          keepalives); does not suppress the awareness note below.
         * ``friend.added``, ``friend.removed``, ``friend.profile_updated``,
           ``conversation.*`` — lightweight awareness events; may emit one
           consolidated note to the owner when ``awareness_note`` is enabled.
@@ -733,6 +736,13 @@ class ClawChatAdapter(BasePlatformAdapter):
         payload = frame.get("payload")
         if not isinstance(payload, dict):
             return
+        if payload.get("type") == "conversation.dissolved":
+            # The conversation is gone. Evict it so a leaked upstream typing
+            # keepalive cannot keep hammering a dead chat until process restart.
+            # This is a standalone `if` (not part of the chain below) so the
+            # generic conversation.* awareness branch still runs independently
+            # and the owner still gets told.
+            self._mark_chat_dead(str(payload.get("entity_id") or ""))
         if payload.get("type") == "agent.config.changed":
             # Clear the gate BEFORE spawning the signal-triggered refresh (item 3),
             # mirroring the reconnect-path protection: a group message arriving
