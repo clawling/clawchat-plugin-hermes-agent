@@ -465,6 +465,10 @@ class ClawChatAdapter(BasePlatformAdapter):
         # Conversations confirmed dissolved via notify.signal{conversation.dissolved}.
         # OrderedDict used as a bounded FIFO set (value is always None).
         self._dead_chats: OrderedDict[str, None] = OrderedDict()
+        # Continuous-typing TTL: guards against a leaked upstream keepalive that
+        # arrives with no dissolve signal at all.
+        self._typing_started_at: dict[str, float] = {}
+        self._typing_ttl_warned: set[str] = set()
         self._known_chat_types: dict[str, str] = {}
         self._owner_approval_routes: dict[str, str] = {}
         self._run_counter = 0
@@ -604,6 +608,21 @@ class ClawChatAdapter(BasePlatformAdapter):
                 chat_id,
             )
             return
+        now = time.monotonic()
+        started = self._typing_started_at.get(chat_id)
+        if started is None:
+            self._typing_started_at[chat_id] = now
+        elif now - started > self._clawchat_config.typing_max_continuous_seconds:
+            if chat_id not in self._typing_ttl_warned:
+                self._typing_ttl_warned.add(chat_id)
+                logger.warning(
+                    "clawchat typing exceeded max continuous duration; "
+                    "suppressing chat_id=%s elapsed=%.1fs limit=%.1fs",
+                    chat_id,
+                    now - started,
+                    self._clawchat_config.typing_max_continuous_seconds,
+                )
+            return
         chat_type = self._resolve_chat_type(chat_id, metadata, {})
         if self._should_skip_typing(chat_id, active=True):
             logger.debug("clawchat typing active skipped chat_id=%s reason=already_active", chat_id)
@@ -625,6 +644,8 @@ class ClawChatAdapter(BasePlatformAdapter):
                 chat_id,
             )
             return
+        self._typing_started_at.pop(chat_id, None)
+        self._typing_ttl_warned.discard(chat_id)
         chat_type = self._resolve_chat_type(chat_id, metadata, {})
         if self._should_skip_typing(chat_id, active=False):
             logger.debug("clawchat typing inactive skipped chat_id=%s reason=already_inactive", chat_id)
@@ -666,6 +687,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         agent leaks one entry per conversation it ever saw.
         """
         self._typing_state.pop(chat_id, None)
+        self._typing_started_at.pop(chat_id, None)
+        self._typing_ttl_warned.discard(chat_id)
         self._known_chat_types.pop(chat_id, None)
         self._owner_approval_routes.pop(chat_id, None)
         self._inbound_window.pop(chat_id, None)

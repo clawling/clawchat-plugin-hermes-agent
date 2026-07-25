@@ -301,6 +301,19 @@ by `agents-connect` and `CLAWCHAT_HOME_CHANNEL_NAME` to `ClawChat`.
 | `ack_timeout_ms`                       | `15000`        |
 | `ack_auto_resend_on_timeout`           | `false`        |
 
+## Typing
+
+| `extra.*` key                          | Default        |
+|----------------------------------------|----------------|
+| `typing_max_continuous_seconds`        | `300.0`        |
+
+`typing_max_continuous_seconds` stops emitting the typing indicator after this
+many seconds of continuous typing on one conversation — a safety net against a
+leaked upstream keepalive that never sends a matching `stop_typing`. Tripping
+the limit only suppresses the typing indicator; it never interrupts an
+in-flight reply. The window resets on `stop_typing` and restarts on the next
+`send_typing` call for that conversation.
+
 ## Media
 
 | Env var                                | `extra.*` key         | Default                  | Notes |

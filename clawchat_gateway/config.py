@@ -297,6 +297,7 @@ class ClawChatConfig:
     enable_rich_interactions: bool = False
     runtime_status_messages: bool = False
     awareness_note: bool = False
+    typing_max_continuous_seconds: float = 300.0
     liveware_sample: bool = True
 
     @classmethod
@@ -386,6 +387,13 @@ class ClawChatConfig:
                     extra,
                     "awareness_note",
                     False,
+                )
+            ),
+            typing_max_continuous_seconds=float(
+                _get_config_value(
+                    extra,
+                    "typing_max_continuous_seconds",
+                    300.0,
                 )
             ),
             liveware_sample=bool(
