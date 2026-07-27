@@ -47,6 +47,11 @@ REFRESH_CODE_INVALID_REFRESH = 10003  # not found / revoked / expired / device m
 REFRESH_CODE_BAD_REQUEST = 400  # bad body / missing or oversized device id
 REFRESH_CODE_INTERNAL = 1  # server internal error (no rotation committed)
 
+# POST /v1/agents/connect envelope code for "the supplied user_id matches no
+# agent". Servers that predate the stale-user_id fallback return this instead of
+# degrading to a fresh pairing; the client sheds the id and retries once.
+AGENT_NOT_FOUND_CODE = 16001
+
 # Transient-refresh backoff (spec §B): min(30s, 1s * 2^(n-1)) ± jitter, cap 30s.
 REFRESH_RETRY_BACKOFF_CAP_SECONDS = 30.0
 REFRESH_RETRY_BASE_SECONDS = 1.0

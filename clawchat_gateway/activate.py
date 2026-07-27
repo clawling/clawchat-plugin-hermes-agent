@@ -22,9 +22,11 @@ except Exception as exc:
 
 from clawchat_gateway.api_client import (
     ACTIVATION_TIMEOUT_SECONDS,
+    AGENT_NOT_FOUND_CODE,
     DEFAULT_BASE_URL,
     DEFAULT_WEBSOCKET_URL,
     ClawChatApiClient,
+    ClawChatApiError,
     agents_connect_with_retry,
 )
 from clawchat_gateway.config import _get_env
@@ -79,7 +81,14 @@ def _write_env_values(values: dict[str, str | None]) -> Path:
     return Path(get_env_path())
 
 
-def _read_existing_user_id(config: dict[str, Any]) -> str:
+def _read_existing_user_id(config: dict[str, Any], *, base_url: str = "") -> str:
+    """Return the stored shadow ``user_id`` to replay as a re-pair hint.
+
+    Returns "" when the stored identity was minted by a *different* backend
+    (``extra.base_url`` differs from the one being activated against). Agent ids
+    are per-deployment, so replaying one across environments can only produce
+    ``16001 agent not found`` — the server has no such row and never will.
+    """
     platforms = config.get("platforms")
     if not isinstance(platforms, dict):
         return ""
@@ -90,7 +99,19 @@ def _read_existing_user_id(config: dict[str, Any]) -> str:
     if not isinstance(extra, dict):
         return ""
     user_id = extra.get("user_id")
-    return user_id.strip() if isinstance(user_id, str) else ""
+    if not isinstance(user_id, str) or not user_id.strip():
+        return ""
+    stored_base_url = extra.get("base_url")
+    if base_url and isinstance(stored_base_url, str) and stored_base_url.strip():
+        if stored_base_url.strip().rstrip("/") != base_url.strip().rstrip("/"):
+            logger.info(
+                "clawchat activation ignoring stored user_id from a different backend "
+                "(stored=%s current=%s)",
+                stored_base_url,
+                base_url,
+            )
+            return ""
+    return user_id.strip()
 
 
 def _derive_websocket_url(base_url: str) -> str:
@@ -405,10 +426,28 @@ async def activate(code: str, *, base_url: str) -> dict[str, Any]:
         timeout=ACTIVATION_TIMEOUT_SECONDS,
     )
     _config_path, config = _load_config()
-    existing_user_id = _read_existing_user_id(config)
-    result = await agents_connect_with_retry(
-        client, code=code, user_id=existing_user_id or None
-    )
+    existing_user_id = _read_existing_user_id(config, base_url=base_url)
+    try:
+        result = await agents_connect_with_retry(
+            client, code=code, user_id=existing_user_id or None
+        )
+    except ClawChatApiError as exc:
+        # AGENT_NOT_FOUND means the replayed user_id has no agent row on this
+        # backend — stale local state (the owner deleted their account, or the
+        # config outlived its deployment). The connect code itself is untouched
+        # and still pending in that case, so shed the id and pair fresh. Any
+        # other failure (including a genuine owner mismatch) propagates: only a
+        # provably meaningless user_id is worth a second attempt at a
+        # single-use code.
+        if not existing_user_id or exc.code != AGENT_NOT_FOUND_CODE:
+            raise
+        logger.warning(
+            "clawchat activation: stored user_id %s no longer exists on %s; "
+            "retrying as a fresh pairing",
+            existing_user_id,
+            base_url,
+        )
+        result = await agents_connect_with_retry(client, code=code, user_id=None)
     agent = result["agent"]
     agent_id = str(agent.get("id") or "")
     user_id = str(agent["user_id"])

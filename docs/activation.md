@@ -81,6 +81,31 @@ The Hermes request body is:
 the direct activation commands use `https://app.clawling.com`. When
 `platforms.clawchat.extra.user_id` already contains a non-empty value,
 activation sends it as optional `user_id`; otherwise the field is omitted.
+
+### Stale `user_id` recovery
+
+The stored `user_id` is a *re-pair hint*, not a credential — the invite code
+alone decides which account the agent lands in. It can outlive the agent row it
+names (the owner deleted their ClawChat account; the config was copied to
+another machine or pointed at a different deployment), and a replayed dead id
+makes the server answer `16001 agent not found` for **every** invite code — the
+pre-check `POST /v1/agents/connect/check` never inspects `user_id`, so it keeps
+reporting `pairable: true` right up to the failure. Two defences:
+
+- **Environment guard.** The stored id is only replayed when `extra.base_url`
+  matches the `base_url` being activated against (trailing slashes ignored).
+  Agent ids are per-deployment, so an id from another backend is dropped
+  without ever being sent.
+- **16001 retry.** If the server still answers `16001` for a replayed id, the
+  client logs a warning, drops the id, and retries the same code once as a
+  fresh pairing. A `16001` failure leaves the invite code `pending`
+  server-side, so the retry cannot double-spend it. No other envelope code is
+  retried — an owner mismatch (`16014`) is a genuine rejection, and a code that
+  was never replayed has no stale state to shed.
+
+Recent backends fold this fallback into `POST /v1/agents/connect` itself (an
+unresolvable `user_id` degrades to a new pairing server-side), so the retry is
+only exercised against older deployments.
 `plugin_version` carries the package `__version__` so the backend can record
 which plugin build paired at connect time (optional, backward-compatible — the
 backend stores it when present and ignores its absence).
