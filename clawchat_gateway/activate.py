@@ -114,6 +114,61 @@ def _read_existing_user_id(config: dict[str, Any], *, base_url: str = "") -> str
     return user_id.strip()
 
 
+def _clawchat_extra(config: dict[str, Any]) -> dict[str, Any]:
+    platforms = config.get("platforms")
+    if not isinstance(platforms, dict):
+        return {}
+    clawchat = platforms.get("clawchat")
+    if not isinstance(clawchat, dict):
+        return {}
+    extra = clawchat.get("extra")
+    return extra if isinstance(extra, dict) else {}
+
+
+def _has_live_token(config: dict[str, Any]) -> bool:
+    """True when this profile still holds usable ClawChat credentials.
+
+    Mirrors how ``config.py`` resolves the token at runtime (env first, then
+    ``extra.token``). Auto-logout blanks both, which is exactly what makes a
+    logged-out profile safe to re-pair without a flag.
+    """
+    if _get_env("CLAWCHAT_TOKEN"):
+        return True
+    stored = _clawchat_extra(config).get("token")
+    return isinstance(stored, str) and bool(stored.strip())
+
+
+class ExistingActivationError(RuntimeError):
+    """Raised when activating would silently replace a live activation.
+
+    A Hermes profile holds exactly one ClawChat identity (the plugin's
+    ``account_id`` is the constant ``"default"`` in config, .env and the
+    activations table alike). Replaying the stored ``user_id`` against a *new*
+    connect code therefore does not add a second agent — the server treats it
+    as a re-pair of the existing one, consumes the code, creates no second
+    agent and no second contact entry, and the local credentials are
+    overwritten in place. Refuse instead, and name the two real intents.
+    """
+
+    def __init__(self, user_id: str, agent_id: str = "") -> None:
+        self.user_id = user_id
+        self.agent_id = agent_id
+        who = f"agent {agent_id} (shadow user {user_id})" if agent_id else f"agent {user_id}"
+        super().__init__(
+            f"this Hermes profile is already paired to ClawChat {who}. "
+            "Redeeming another connect code here would re-bind that code to the SAME "
+            "agent — no second agent is created, and this profile's credentials are "
+            "overwritten.\n"
+            "  - To run a SECOND agent alongside this one, give it its own profile:\n"
+            "      hermes profile create <name>\n"
+            "      hermes -p <name> plugins install clawling/clawchat-plugin-hermes-agent --enable\n"
+            "      hermes -p <name> clawchat activate <CODE>\n"
+            "  - To REPLACE this profile's agent with a brand-new identity: "
+            "re-run with --new-account\n"
+            "  - To re-pair THIS agent (e.g. after losing its token): re-run with --repair"
+        )
+
+
 def _derive_websocket_url(base_url: str) -> str:
     parsed = urlparse(base_url)
     if parsed.netloc == "app.clawling.com":
@@ -418,7 +473,13 @@ def clear_persisted_credentials(*, account_id: str = "default") -> None:
         logger.warning("clawchat logout database clear failed", exc_info=True)
 
 
-async def activate(code: str, *, base_url: str) -> dict[str, Any]:
+async def activate(
+    code: str,
+    *,
+    base_url: str,
+    new_account: bool = False,
+    repair: bool = False,
+) -> dict[str, Any]:
     client = ClawChatApiClient(
         base_url=base_url.rstrip("/"),
         token="",
@@ -427,6 +488,17 @@ async def activate(code: str, *, base_url: str) -> dict[str, Any]:
     )
     _config_path, config = _load_config()
     existing_user_id = _read_existing_user_id(config, base_url=base_url)
+    if existing_user_id and not new_account and not repair and _has_live_token(config):
+        extra = _clawchat_extra(config)
+        agent_id = extra.get("agent_id")
+        raise ExistingActivationError(
+            existing_user_id,
+            agent_id.strip() if isinstance(agent_id, str) else "",
+        )
+    if new_account:
+        # A brand-new identity is precisely "do not replay" — the replay is the
+        # only thing that would bind this code to the incumbent agent.
+        existing_user_id = ""
     try:
         result = await agents_connect_with_retry(
             client, code=code, user_id=existing_user_id or None
@@ -488,8 +560,12 @@ async def activate_and_maybe_restart(
     base_url: str,
     restart: bool,
     restart_delay_seconds: int = 2,
+    new_account: bool = False,
+    repair: bool = False,
 ) -> dict[str, Any]:
-    payload = await activate(code.strip(), base_url=base_url)
+    payload = await activate(
+        code.strip(), base_url=base_url, new_account=new_account, repair=repair
+    )
     payload["ok"] = True
     if restart:
         payload["restart_scheduled"] = True

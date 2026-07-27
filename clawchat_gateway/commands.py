@@ -5,7 +5,7 @@ import io
 import shlex
 from contextlib import redirect_stderr
 
-from clawchat_gateway.activate import activate_and_maybe_restart
+from clawchat_gateway.activate import ExistingActivationError, activate_and_maybe_restart
 from clawchat_gateway.api_client import DEFAULT_BASE_URL
 from clawchat_gateway.output_visibility import apply_output_visibility
 
@@ -27,11 +27,24 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip the detached Hermes gateway restart after activation.",
     )
+    parser.add_argument(
+        "--new-account",
+        action="store_true",
+        help="Replace this profile's ClawChat identity with a brand-new agent.",
+    )
+    parser.add_argument(
+        "--repair",
+        action="store_true",
+        help="Re-pair the agent this profile already holds (keeps its identity).",
+    )
     return parser
 
 
 def _usage(message: str | None = None) -> str:
-    lines = ["usage: /clawchat-activate CODE [--restart] [--no-restart]"]
+    lines = [
+        "usage: /clawchat-activate CODE [--restart] [--no-restart] "
+        "[--new-account] [--repair]"
+    ]
     if message:
         lines.append(message)
     return "\n".join(lines)
@@ -67,11 +80,18 @@ async def handle_clawchat_activate_command(raw_args: str) -> str:
     if isinstance(args, str):
         return args
 
-    payload = await activate_and_maybe_restart(
-        args.code,
-        base_url=DEFAULT_BASE_URL,
-        restart=not args.no_restart,
-    )
+    try:
+        payload = await activate_and_maybe_restart(
+            args.code,
+            base_url=DEFAULT_BASE_URL,
+            restart=not args.no_restart,
+            new_account=args.new_account,
+            repair=args.repair,
+        )
+    except ExistingActivationError as exc:
+        # The connect code was never spent — surface the guidance in-chat so the
+        # owner can redeem it into a fresh profile instead.
+        return f"clawchat: activation refused — {exc}"
     lines = [f"clawchat: activation complete for {payload['user_id']}"]
     if payload.get("restart_scheduled"):
         lines.append(

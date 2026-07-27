@@ -27,6 +27,19 @@ def setup_clawchat_cli(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Skip the detached Hermes gateway restart after activation.",
     )
+    activate_parser.add_argument(
+        "--new-account",
+        action="store_true",
+        help=(
+            "Replace this profile's ClawChat identity with a brand-new agent "
+            "instead of re-pairing the existing one."
+        ),
+    )
+    activate_parser.add_argument(
+        "--repair",
+        action="store_true",
+        help="Re-pair the agent this profile already holds (keeps its identity).",
+    )
     activate_parser.set_defaults(func=handle_clawchat_cli, _parser=parser)
     parser.set_defaults(_parser=parser)
 
@@ -44,14 +57,23 @@ def handle_clawchat_cli(args: argparse.Namespace) -> int:
     if runner is None:
         from clawchat_gateway.activate import activate_and_maybe_restart as runner
 
+    from clawchat_gateway.activate import ExistingActivationError
+
     try:
         payload = asyncio.run(
             runner(
                 args.code,
                 base_url=resolve_activation_base_url(),
                 restart=not args.no_restart,
+                new_account=args.new_account,
+                repair=args.repair,
             )
         )
+    except ExistingActivationError as exc:
+        # A precondition failure, not a server rejection: the connect code was
+        # never spent, so the operator can still redeem it the right way.
+        print(f"clawchat: activation refused — {exc}", file=sys.stderr)
+        return 1
     except ClawChatApiError as exc:
         details = f"{exc.kind}"
         if exc.path:

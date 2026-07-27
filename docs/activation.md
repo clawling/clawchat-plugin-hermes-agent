@@ -56,6 +56,38 @@ docker exec hermes sh -lc \
 |---|---|
 | `--restart` | Compatibility flag; activation schedules a detached Hermes gateway restart by default. |
 | `--no-restart` | Skip the detached Hermes gateway restart after activation. |
+| `--new-account` | Replace this profile's ClawChat identity with a brand-new agent — drops the stored `user_id` so the server mints a fresh one. |
+| `--repair` | Re-pair the agent this profile already holds, keeping its identity. |
+
+### One profile, one agent
+
+A Hermes profile holds exactly **one** ClawChat identity: `config.yaml`
+(`platforms.clawchat.extra`), `.env` (`CLAWCHAT_TOKEN`) and the `activations`
+row (primary key `("hermes", "default")`) are all single-slot.
+
+Activating a **new** connect code in a profile that already holds a **live**
+activation therefore cannot produce a second agent. The stored `user_id` is
+replayed as a re-pair hint, so the server binds the new code to the *existing*
+agent — the code is spent, no second agent and no second contact entry appear,
+and the local credentials are overwritten in place, losing the first agent.
+
+Activation refuses that case (`ExistingActivationError`, exit 1) **without
+sending the code**, so it stays redeemable. "Live" means the profile still has
+a usable token; a logged-out profile (see auto-logout below) keeps re-pairing
+with no flag, since that is the flow the replay exists for.
+
+To run a **second agent on the same host**, give it its own Hermes profile:
+
+```bash
+hermes profile create <name>
+hermes -p <name> plugins install clawling/clawchat-plugin-hermes-agent --enable
+hermes -p <name> clawchat activate <CODE>
+hermes -p <name> gateway install && hermes -p <name> gateway start
+```
+
+The ClawChat backend and msghub already key sessions on the composite
+`(user_id, device_id)`, so both agents coexist, stay online together, and can
+join the same group — a shared host `device_id` is not a conflict.
 
 Successful activation prints `clawchat: activation complete for <user_id>` and
 exits 0. Treat any non-zero exit as a hard failure. Activation codes are
@@ -125,7 +157,9 @@ Activation writes:
 | `$HERMES_HOME/clawchat.sqlite` | Latest activation row, including access token, optional refresh token, user ids, activation conversation id, and the connect-time `device_id` (`activations.device_id`); plus the `owner_profile` cache row (last-known owner nickname/avatar/bio/locale, refreshed on every owner-metadata pull, advisory only). |
 
 Returned `.env` tokens and `config.yaml` user ids overwrite any previously
-configured ClawChat activation credentials.
+configured ClawChat activation credentials — which is why activation refuses to
+run against a live activation unless `--new-account` or `--repair` says which
+overwrite was intended (see [One profile, one agent](#one-profile-one-agent)).
 
 Credential tokens are stored in plugin SQLite as the authoritative runtime
 credential record and in `.env` as the bootstrap copy written by activation.
