@@ -62,8 +62,21 @@ class GroupMessageCoalescer:
         batch.append(message)
         self._reset_idle_task(message.chat_id, idle_seconds_override=idle_seconds_override)
         if message.chat_id not in self._max_wait_tasks:
+            # max_wait bounds how long a chat that keeps talking can defer its
+            # batch; it is NOT a second, shorter deadline competing with the
+            # owner's chosen delay. Sleeping self._max_wait_seconds
+            # unconditionally silently truncated any longer override — a group
+            # set to batch_delay_seconds=300 still got a reply at 30s. Take
+            # whichever is larger so the ceiling can never undercut the delay,
+            # while the default shape (idle 10s / max_wait 30s) is unchanged.
+            idle_seconds = (
+                idle_seconds_override if idle_seconds_override is not None else self._idle_seconds
+            )
             self._max_wait_tasks[message.chat_id] = asyncio.create_task(
-                self._flush_after_max_wait(message.chat_id),
+                self._flush_after_max_wait(
+                    message.chat_id,
+                    max_wait_seconds=max(self._max_wait_seconds, idle_seconds),
+                ),
                 name=f"clawchat-group-coalesce-max-{message.chat_id}",
             )
 
@@ -121,10 +134,12 @@ class GroupMessageCoalescer:
             if self._tasks.get(chat_id) is task:
                 self._tasks.pop(chat_id, None)
 
-    async def _flush_after_max_wait(self, chat_id: str) -> None:
+    async def _flush_after_max_wait(self, chat_id: str, *, max_wait_seconds: float | None = None) -> None:
         task = asyncio.current_task()
         try:
-            await self._sleep(self._max_wait_seconds)
+            await self._sleep(
+                self._max_wait_seconds if max_wait_seconds is None else max_wait_seconds
+            )
             await self.flush(chat_id)
         except asyncio.CancelledError:
             raise
