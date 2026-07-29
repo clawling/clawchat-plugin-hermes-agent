@@ -9,7 +9,11 @@ import os
 import re
 import time
 
-from clawchat_gateway.no_reply import is_no_reply_token, is_no_reply_token_prefix
+from clawchat_gateway.no_reply import (
+    contains_no_reply_token,
+    is_no_reply_token_prefix,
+    strip_no_reply_tokens,
+)
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -3293,6 +3297,10 @@ class ClawChatAdapter(BasePlatformAdapter):
         if not has_media and self._is_pure_silent_response(fragments):
             logger.info("clawchat silent response suppressed chat_id=%s chat_type=%s", chat_id, chat_type)
             return SendResult(success=True)
+        if has_media:
+            before = len(fragments)
+            fragments = self._strip_no_reply_from_fragments(fragments)
+            fragment_count -= before - len(fragments)
         message_id = new_message_id()
         mode = "complete" if is_immediate_media_send else "complete-buffered"
         logger.info(
@@ -3521,6 +3529,10 @@ class ClawChatAdapter(BasePlatformAdapter):
             logger.info("clawchat silent response final suppressed chat_id=%s message_id=%s", chat_id, run.message_id)
             return SendResult(success=True, message_id=run.message_id)
         final_content = visible_final_text if visible_final_text else run.last_text
+        if self._has_outbound_media(run.metadata, run.kwargs) and contains_no_reply_token(
+            final_content
+        ):
+            final_content = strip_no_reply_tokens(final_content)
         if not self._has_outbound_media(run.metadata, run.kwargs) and self._should_suppress_runtime_status_message(
             final_content
         ):
@@ -4155,21 +4167,48 @@ class ClawChatAdapter(BasePlatformAdapter):
             return self._clawchat_config.runtime_status_messages
 
     def _is_noop_response_text(self, content: str) -> bool:
-        return is_no_reply_token(content) or content.strip() == LEGACY_EMPTY_RESPONSE_TOKEN
+        # The host runtime already detects its own bare silence markers
+        # (NO_REPLY / [SILENT] / …) and clears the response — or retracts an
+        # already-streamed preview of one — before the platform adapter is
+        # asked to deliver anything. The bare-marker branch here is a
+        # fallback net for whatever slips past that host-side filter, not
+        # the primary detection path.
+        return (
+            contains_no_reply_token(content)
+            or content.strip() == LEGACY_EMPTY_RESPONSE_TOKEN
+        )
 
     def _is_no_reply_token_prefix(self, content: str) -> bool:
-        # Recognize prefixes of *every* accepted no-reply / silent variant
-        # (bracket / case / spacing), not just the canonical NO_REPLY_TOKEN, so a
-        # streamed first chunk like ``[clawchat`` or ``<CLAWCHAT:NO`` is held back
-        # instead of leaking into chat.
+        # Holds a streamed first chunk that is still on its way to becoming a
+        # token, so the final-detection guard is the one that decides.
         return is_no_reply_token_prefix(content)
 
     def _is_pure_silent_response(self, fragments: list[dict[str, Any]]) -> bool:
-        return (
-            len(fragments) == 1
-            and fragments[0].get("kind") == "text"
-            and self._is_noop_response_text(str(fragments[0].get("text") or ""))
-        )
+        if not fragments:
+            return False
+        if any(fragment.get("kind") != "text" for fragment in fragments):
+            return False
+        joined = "".join(str(fragment.get("text") or "") for fragment in fragments)
+        return self._is_noop_response_text(joined)
+
+    def _strip_no_reply_from_fragments(
+        self, fragments: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Drop no-reply tokens from text fragments, leaving media untouched.
+
+        A text fragment that becomes empty is removed entirely rather than sent
+        as a blank bubble.
+        """
+        result: list[dict[str, Any]] = []
+        for fragment in fragments:
+            if fragment.get("kind") != "text":
+                result.append(fragment)
+                continue
+            stripped = strip_no_reply_tokens(str(fragment.get("text") or ""))
+            if not stripped:
+                continue
+            result.append({**fragment, "text": stripped})
+        return result
 
     def _is_empty_text_response(self, fragments: list[dict[str, Any]]) -> bool:
         return (
