@@ -8,11 +8,12 @@ pattern is NOT anchored, wrapping decorations (``<>``, ``[]``, ``{}``, ``/``,
 backticks, ``*``) are tolerated for free and must not be written into the
 pattern itself.
 
-RULE B — the host's bare markers (``NO_REPLY`` / ``[SILENT]`` / ``SILENT`` /
-``NO REPLY``), matched as a WHOLE STRING ONLY.  The canonicalization below is a
-line-for-line port of the host runtime's own silence filter so the two never
-drift.  These are ordinary English words; substring-matching them would swallow
-prose such as "there is no reply from the server".
+RULE B — bare runtime silence markers (``NO_REPLY`` / ``[SILENT]`` /
+``SILENT`` / ``NO REPLY``), matched as a WHOLE STRING ONLY.  The host runtime
+defines these itself, and the canonicalization below is a line-for-line port of
+its own silence filter so the two never drift.  They are ordinary English words
+— substring-matching them would swallow prose such as "there is no reply from
+the server".
 
 This module MUST stay a literal mirror of the OpenClaw plugin's equivalent
 module.  When one side changes, change the other in the same breath.
