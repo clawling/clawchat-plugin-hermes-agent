@@ -4,8 +4,6 @@ Port of clawchat-plugin-openclaw/src/liveware-sample.ts. Downloads a
 zero-dependency node demo web app from the install-cli repo (GitHub raw +
 per-file sha256), runs it locally, binds a liveware tunnel, registers it as a
 ClawChat app, and supervises it — deterministically, without the LLM.
-
-Spec: clawchat-plugin-openclaw/docs/superpowers/specs/2026-07-06-liveware-sample-autoboot-design.md
 """
 from __future__ import annotations
 

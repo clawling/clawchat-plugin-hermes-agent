@@ -1,7 +1,6 @@
 # Liveware Sample auto-boot
 
 Port of `clawchat-plugin-openclaw`'s liveware-sample auto-boot feature
-(design: `clawchat-plugin-openclaw/docs/superpowers/specs/2026-07-06-liveware-sample-autoboot-design.md`)
 to the Hermes gateway platform. On first activation the plugin deterministically
 (no LLM involved) downloads a tiny demo web app, runs it locally, exposes it via
 a `liveware` tunnel, and registers it as an app tile in the owner's ClawChat
