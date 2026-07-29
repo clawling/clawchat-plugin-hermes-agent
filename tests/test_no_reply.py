@@ -112,6 +112,7 @@ PREFIX_ACCEPT = [
 PREFIX_REJECT = [
     "",
     "<clawchat:no-reply/>",   # 完整 token 归 contains_no_reply_token 管
+    "clawchat:no-reply",       # 裸 token 也要被 contains_no_reply_token 和其 guard 守护
     "NO",                      # 宿主 marker 不参与前缀守卫
     "hello there",
 ]
