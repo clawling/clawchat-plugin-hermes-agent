@@ -27,7 +27,12 @@ import unicodedata
 # Rule A — clawchat: family, loose substring
 # ---------------------------------------------------------------------------
 
-_CORE = r"clawchat\s*:\s*(?:no[-_ ]?reply|silent)\b"
+# The trailing guard is an explicit ASCII negative lookahead, NOT ``\b``: ``\b``
+# is Unicode-aware on Python ``str`` patterns but ASCII-only in JavaScript, so
+# the two mirrors would disagree on ``clawchat:no-reply好的`` (Python would let
+# it through, JS would suppress). ``(?![A-Za-z0-9_])`` means exactly the same
+# thing in both engines and keeps recognition rate first.
+_CORE = r"clawchat\s*:\s*(?:no[-_ ]?reply|silent)(?![A-Za-z0-9_])"
 
 _CONTAINS_RE = re.compile(_CORE, re.IGNORECASE)
 

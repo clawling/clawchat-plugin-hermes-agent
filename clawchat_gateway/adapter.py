@@ -3297,7 +3297,11 @@ class ClawChatAdapter(BasePlatformAdapter):
         if not has_media and self._is_pure_silent_response(fragments):
             logger.info("clawchat silent response suppressed chat_id=%s chat_type=%s", chat_id, chat_type)
             return SendResult(success=True)
-        if has_media:
+        if has_media and self._is_noop_response_text(visible_content):
+            # Only strip when the token is actually there. Stripping trims the
+            # ends unconditionally, so an untouched caption with deliberate
+            # leading/trailing whitespace must not be run through it (mirrors
+            # outbound.ts, which strips only inside the noop branch).
             before = len(fragments)
             fragments = self._strip_no_reply_from_fragments(fragments)
             fragment_count -= before - len(fragments)
@@ -3529,9 +3533,22 @@ class ClawChatAdapter(BasePlatformAdapter):
             logger.info("clawchat silent response final suppressed chat_id=%s message_id=%s", chat_id, run.message_id)
             return SendResult(success=True, message_id=run.message_id)
         final_content = visible_final_text if visible_final_text else run.last_text
-        if self._has_outbound_media(run.metadata, run.kwargs) and contains_no_reply_token(
-            final_content
-        ):
+        # Single throat for the final text (mirrors outbound.ts's
+        # sendOpenclawClawlingText): the token suppresses the whole reply unless
+        # media is riding along, in which case only the token is cut out. The
+        # `not run.last_text` guard above cannot cover this — the streaming flow
+        # seeds run.last_text with the intermediate draft, so a token that first
+        # appears in the final text would otherwise reach the user verbatim.
+        if self._is_noop_response_text(final_content):
+            if not self._has_outbound_media(run.metadata, run.kwargs):
+                self._discard_run(run)
+                self._remember_completed_run(run.message_id)
+                logger.info(
+                    "clawchat silent response final suppressed chat_id=%s message_id=%s",
+                    chat_id,
+                    run.message_id,
+                )
+                return SendResult(success=True, message_id=run.message_id)
             final_content = strip_no_reply_tokens(final_content)
         if not self._has_outbound_media(run.metadata, run.kwargs) and self._should_suppress_runtime_status_message(
             final_content
