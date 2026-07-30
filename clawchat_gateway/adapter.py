@@ -1840,7 +1840,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         ``LivewareSampleSupervisor.start()`` catches its own errors and never
         raises. Idempotent per adapter instance — a supervisor already held is
         reused across reconnects (its own ``start()`` re-checks stored state)
-        rather than replaced.
+        rather than replaced; a later ``READY`` only asks it to
+        ``start_if_idle()``.
         """
         # Liveware owns host-global singletons (a fixed TCP port and the shared
         # ``$HOME/.clawling`` CLI login) that co-located profiles cannot share,
@@ -1851,6 +1852,20 @@ class ClawChatAdapter(BasePlatformAdapter):
         if self._store is None:
             return
         if self._liveware_sample_supervisor is not None:
+            # Keep the ONE supervisor per adapter instance — constructing a
+            # second would race the bootstrap "owner has zero apps" gate and
+            # register a duplicate liveware app that no (single-row) sqlite row
+            # tracks. But do NOT just return: the supervisor's
+            # _START_RETRY_DELAYS_S ladder is bounded, so a plain return made
+            # every later READY a permanent no-op and, once the ladder was
+            # exhausted, nothing ever re-entered the flow again. start_if_idle()
+            # kicks a fresh attempt only when nothing is in flight. Unlike
+            # openclaw (adoptDeps) there are no deps to re-point: every dep is
+            # read lazily off `self`, so a reconnect needs no new closure.
+            self._spawn_liveware_sample_task(
+                self._liveware_sample_supervisor.start_if_idle(),
+                name="clawchat-liveware-sample-start-if-idle",
+            )
             return
         cfg = self._clawchat_config
         hermes_home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
@@ -1893,10 +1908,13 @@ class ClawChatAdapter(BasePlatformAdapter):
             log=logger,
         )
         self._liveware_sample_supervisor = LivewareSampleSupervisor(deps)
-        task = asyncio.create_task(
+        self._spawn_liveware_sample_task(
             self._liveware_sample_supervisor.start(),
             name="clawchat-liveware-sample-start",
         )
+
+    def _spawn_liveware_sample_task(self, coro, *, name: str) -> None:
+        task = asyncio.create_task(coro, name=name)
         self._liveware_sample_tasks.add(task)
         task.add_done_callback(self._liveware_sample_task_done)
 
