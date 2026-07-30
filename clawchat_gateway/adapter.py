@@ -1033,7 +1033,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
         message = build_skill_update_prompt(pending)
         try:
-            await self._connection.send_frame(
+            sent = await self._connection.send_frame(
                 build_message_send_event(
                     chat_id=owner_chat_id,
                     chat_type="direct",
@@ -1046,6 +1046,13 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
         except Exception:  # noqa: BLE001
             logger.warning("clawchat skill-update prompt send failed", exc_info=True)
+            return
+        if not sent:
+            # The owner never saw the prompt, so we must not record a pending
+            # consent that makes the agent wait for a reply to it.
+            logger.warning(
+                "clawchat skill-update prompt dropped owner_chat_id=%s", owner_chat_id
+            )
             return
 
         self._pending_skill_update = pending
@@ -3338,7 +3345,6 @@ class ClawChatAdapter(BasePlatformAdapter):
                     error="clawchat owner direct chat unavailable",
                 )
             target_chat_id = owner_chat_id
-            self._remember_owner_approval_route(owner_chat_id, session_key)
             fallback_text = _owner_attention_text(chat_id, fallback_text)
 
         fragments = [{"kind": "text", "text": fallback_text}]
@@ -3357,6 +3363,11 @@ class ClawChatAdapter(BasePlatformAdapter):
                 error="clawchat exec approval dropped",
                 message_id=message_id,
             )
+        if target_chat_id != chat_id:
+            # Group approvals are forwarded to the owner's direct chat; remember
+            # the route only once the card is actually on its way, otherwise a
+            # later owner reply gets matched to an approval that never arrived.
+            self._remember_owner_approval_route(target_chat_id, session_key)
         return SendResult(success=True, message_id=message_id)
 
     async def send_or_update_status(
