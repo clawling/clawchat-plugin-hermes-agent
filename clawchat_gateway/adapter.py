@@ -159,6 +159,35 @@ TYPING_REFRESH_SECONDS = 10.0
 # Bounded FIFO of conversations known to be dissolved. Uplinks for these are
 # suppressed so a leaked upstream typing keepalive cannot hammer a dead chat.
 DEAD_CHATS_MAX = 512
+# Terminal message.error codes: the server has told us this uplink can never
+# succeed as addressed. See docs/client-integration.md §14.3.
+TERMINAL_CHAT_CODES: frozenset[str] = frozenset({"chat_not_found", "not_member"})
+# How long a server rejection gates outbound frames for one chat_id.
+#
+# A rejection is NOT a one-way fact: the server revives a soft-deleted direct
+# conversation IN PLACE under the same cnv_ id (that is exactly what re-pairing
+# does), and the protocol only says "do not retry without a corrected chat_id /
+# before re-resolving membership" — never that the id is permanently void. So
+# the gate must expire on its own.
+#
+# 10 minutes. The whole point of the expiry is to BOUND the damage when a LIVE
+# conversation gets wrongly silenced, so on that axis shorter is strictly safer
+# and we take the smaller of two workable magnitudes. It still collapses the
+# incident shape (~24 replies / 20 min) to ~6 wasted uplinks an hour, versus
+# ~1272/hour before the server-side mitigation — three orders of magnitude, and
+# indistinguishable from the ~4/hour a 15-minute window would give. It also
+# stays an order of magnitude above the server's own 30s not-found negative
+# cache, so the retry after expiry does not just land on a stale negative entry.
+# The two immediate clears below (any inbound frame, any non-dissolved
+# conversation.* signal) cover every revival that produces any traffic at all,
+# so this TTL only has to catch a chat that revived and then stayed completely
+# silent.
+#
+# CROSS-REPO CONTRACT: must stay identical to the openclaw plugin's
+# SERVER_REJECTION_TTL_MS (600_000) and to the ttl_ms pinned by the shared,
+# byte-identical parity fixture. Changing it means changing both repos and the
+# fixture together.
+DEAD_CHAT_REJECTION_TTL_SECONDS: float = 600.0
 INBOUND_RATE_WINDOW_SECONDS = 30.0
 INBOUND_RATE_WARN_THRESHOLD = 5
 # Max time a group message waits for the first per-group settings refresh to land
@@ -462,6 +491,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             on_signal=self._on_signal,
             on_auth_logout=self._on_auth_logout,
             on_notify_signal=self._on_notify_signal,
+            on_message_error=self._on_message_error,
         )
         self._active_runs_by_id: dict[str, _ActiveRun] = {}
         self._active_chat_runs: dict[str, str] = {}
@@ -475,6 +505,15 @@ class ClawChatAdapter(BasePlatformAdapter):
         # `typing_max_continuous_seconds` TTL below is, since it re-derives its
         # state from wall-clock elapsed time rather than a remembered fact.
         self._dead_chats: OrderedDict[str, None] = OrderedDict()
+        # Conversations the SERVER rejected with a terminal message.error code.
+        # DISJOINT from _dead_chats in effect: this tier gates OUTBOUND frames
+        # only. It never gates typing (that is _dead_chats' job), never gates
+        # inbound (rows persisted for this chat before it died are still
+        # replayed and are still real messages), and never calls
+        # _evict_chat_state (a revocable send rejection must not kill an active
+        # run or a pending approval route).
+        # chat_id -> monotonic deadline; see DEAD_CHAT_REJECTION_TTL_SECONDS.
+        self._server_rejected_chats: OrderedDict[str, float] = OrderedDict()
         # Continuous-typing TTL: guards against a leaked upstream keepalive that
         # arrives with no dissolve signal at all.
         self._typing_started_at: dict[str, float] = {}
@@ -673,6 +712,72 @@ class ClawChatAdapter(BasePlatformAdapter):
     def _is_chat_dead(self, chat_id: str) -> bool:
         return bool(chat_id) and chat_id in self._dead_chats
 
+    def _server_rejected(self) -> "OrderedDict[str, float]":
+        """Lazily-initialised accessor for the server-rejection tier.
+
+        Mirrors ``_remember_owner_approval_route``'s convention: several test
+        harnesses build the adapter via ``__new__`` and fill fields by hand, so
+        a new field must not become a mandatory harness edit.
+        """
+        rejected = getattr(self, "_server_rejected_chats", None)
+        if rejected is None:
+            rejected = OrderedDict()
+            self._server_rejected_chats = rejected
+        return rejected
+
+    def _mark_chat_server_rejected(self, chat_id: str) -> None:
+        """Record a terminal server rejection; gates OUTBOUND frames only.
+
+        Deliberately does NOT write ``_dead_chats`` and does NOT call
+        ``_evict_chat_state`` — see the field comment in ``__init__``.
+        """
+        if not isinstance(chat_id, str) or not chat_id.startswith("cnv_"):
+            return
+        rejected = self._server_rejected()
+        # Re-insert so the FIFO bound evicts by last-rejection, and so a repeat
+        # rejection extends the window rather than letting it lapse mid-storm.
+        rejected.pop(chat_id, None)
+        rejected[chat_id] = time.monotonic() + DEAD_CHAT_REJECTION_TTL_SECONDS
+        while len(rejected) > DEAD_CHATS_MAX:
+            rejected.popitem(last=False)
+        logger.info(
+            "clawchat conversation rejected by server; gating outbound "
+            "chat_id=%s ttl=%.0fs",
+            chat_id,
+            DEAD_CHAT_REJECTION_TTL_SECONDS,
+        )
+
+    def _clear_chat_server_rejection(self, chat_id: str) -> None:
+        """Lift the outbound gate on any proof the conversation is alive."""
+        if not isinstance(chat_id, str) or not chat_id:
+            return
+        if self._server_rejected().pop(chat_id, None) is not None:
+            logger.info("clawchat conversation rejection cleared chat_id=%s", chat_id)
+
+    def _is_chat_server_rejected(self, chat_id: str) -> bool:
+        """Outbound gate predicate, injected into the connection layer."""
+        if not isinstance(chat_id, str) or not chat_id:
+            return False
+        rejected = self._server_rejected()
+        deadline = rejected.get(chat_id)
+        if deadline is None:
+            # Fast path for every live chat: no store read, no clock skew.
+            return False
+        if time.monotonic() >= deadline:
+            rejected.pop(chat_id, None)
+            logger.info("clawchat conversation rejection expired chat_id=%s", chat_id)
+            return False
+        if chat_id == self._owner_direct_chat_id():
+            # The owner direct chat is the agent's only out-of-band channel —
+            # notably the auth-logout "please re-pair me" notice — and
+            # re-pairing is exactly what revives a soft-deleted direct
+            # conversation under this same id. Gating it would turn a
+            # recoverable failure into a silent permanent one. The store read
+            # here is behind the `deadline is None` early return, so it only
+            # happens for a chat that is actually under rejection.
+            return False
+        return True
+
     def _mark_chat_dead(self, chat_id: str) -> None:
         """Record a conversation as dissolved and suppress further uplinks on it.
 
@@ -764,6 +869,23 @@ class ClawChatAdapter(BasePlatformAdapter):
             return
         await self._handle_metadata_invalidated(frame)
 
+    async def _on_message_error(self, frame: dict[str, Any]) -> None:
+        """Consume the wire-level negative ack on the send path.
+
+        Reads ``payload.code`` inline rather than through the connection's
+        ``_message_error_code``: this handler must work with ``_connection``
+        unset (the test harnesses build the adapter via ``__new__``), and
+        duplicating four lines is cheaper than coupling the two layers.
+        """
+        payload = frame.get("payload")
+        if not isinstance(payload, dict):
+            return
+        value = payload.get("code")
+        code = value if isinstance(value, str) else ""
+        if code not in TERMINAL_CHAT_CODES:
+            return
+        self._mark_chat_server_rejected(str(frame.get("chat_id") or ""))
+
     async def _on_notify_signal(self, frame: dict[str, Any]) -> None:
         """Handle inbound ``notify.signal`` frames dispatched by the connection.
 
@@ -775,6 +897,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         * ``conversation.dissolved`` — evicts all per-chat state for the dead
           conversation so it stops being addressed (e.g. leaked typing
           keepalives); does not suppress the awareness note below.
+        * ``conversation.*`` (except ``conversation.dissolved``) — also clears
+          any outbound gate held against that conversation.
         * ``friend.added``, ``friend.removed``, ``friend.profile_updated``,
           ``conversation.*`` — lightweight awareness events; may emit one
           consolidated note to the owner when ``awareness_note`` is enabled.
@@ -792,6 +916,17 @@ class ClawChatAdapter(BasePlatformAdapter):
             # generic conversation.* awareness branch still runs independently
             # and the owner still gets told.
             self._mark_chat_dead(str(payload.get("entity_id") or ""))
+        signal_type = payload.get("type")
+        if (
+            isinstance(signal_type, str)
+            and signal_type.startswith("conversation.")
+            and signal_type != "conversation.dissolved"
+        ):
+            # The server emitted a change notification for this conversation, so
+            # it exists in the conversation table right now — authoritative
+            # proof that any earlier chat_not_found is stale. `dissolved` is
+            # excluded: it is the opposite signal, not evidence of life.
+            self._clear_chat_server_rejection(str(payload.get("entity_id") or ""))
         if payload.get("type") == "agent.config.changed":
             # Clear the gate BEFORE spawning the signal-triggered refresh (item 3),
             # mirroring the reconnect-path protection: a group message arriving
@@ -2043,6 +2178,11 @@ class ClawChatAdapter(BasePlatformAdapter):
         return is_self_echo
 
     async def _on_message(self, frame: dict[str, Any]) -> None:
+        # ANY inbound frame naming this chat is authoritative proof the server
+        # can still route into it — stronger evidence than the error frame that
+        # put it under gate. Cleared BEFORE the self-echo drop below on purpose:
+        # our own echo means the server accepted and fanned out our frame.
+        self._clear_chat_server_rejection(str(frame.get("chat_id") or ""))
         if self._trace_inbound_frame(frame):
             # Self-echo (sender.id == own user id): drop before it ever reaches
             # the LLM/business pipeline. Aligns with openclaw inbound.ts guard
