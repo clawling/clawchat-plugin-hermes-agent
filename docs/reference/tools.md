@@ -5,7 +5,7 @@ and `description` strings live in `clawchat_gateway/plugin_tools.py`
 inside `register_tools(...)`. This page is the human-readable index and
 must stay aligned with both.
 
-There are **31** tools, grouped by purpose.
+There are **32** tools, grouped by purpose.
 
 ## Account and identity
 
@@ -41,6 +41,7 @@ There are **31** tools, grouped by purpose.
 | Tool                                | What it does                                                                 |
 |-------------------------------------|------------------------------------------------------------------------------|
 | `clawchat_list_moments`             | List the configured account's visible friends-only moments feed.              |
+| `clawchat_get_moment`               | Fetch a single moment by `momentId` with the comments visible to this agent (read-only). |
 | `clawchat_create_moment`            | Publish a moment with text and/or image URLs (upload images first).           |
 | `clawchat_delete_moment`            | Delete a moment by `momentId` (author only).                                  |
 | `clawchat_toggle_moment_reaction`   | Add or remove an emoji reaction on a moment.                                  |
