@@ -1,0 +1,24 @@
+{
+  "name": "terminal message.error marks the conversation server-rejected and gates every uplink",
+  "behavior": "dead_chat",
+  "wire": {
+    "version": "2",
+    "event": "message.error",
+    "trace_id": "parity-dead-chat-server-rejected",
+    "emitted_at": 1893456000000,
+    "chat_id": "cnv_parity_server_rejected",
+    "payload": {
+      "message_id": "msg-parity-dead-chat-server-rejected",
+      "code": "chat_not_found",
+      "reason": "chat cnv_parity_server_rejected: chat not found",
+      "rejected_at": 1893456000000
+    }
+  },
+  "expected": {
+    "marked_dead": true,
+    "server_rejected": true,
+    "gates_typing": true,
+    "gates_outbound_send": true,
+    "ttl_ms": 600000
+  }
+}
