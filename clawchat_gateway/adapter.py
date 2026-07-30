@@ -492,6 +492,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             on_auth_logout=self._on_auth_logout,
             on_notify_signal=self._on_notify_signal,
             on_message_error=self._on_message_error,
+            is_chat_rejected=self._is_chat_server_rejected,
         )
         self._active_runs_by_id: dict[str, _ActiveRun] = {}
         self._active_chat_runs: dict[str, str] = {}

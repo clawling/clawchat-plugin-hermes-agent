@@ -55,6 +55,18 @@ _WS_CLOSE_TIMEOUT_SECONDS = 5.0
 SEND_QUEUE_MAX = 128
 BACKOFF_RESET_AFTER_SECONDS = 5.0
 ACKABLE_EVENTS = {"message.send", "message.reply"}
+
+
+class _ChatRejectedError(RuntimeError):
+    """Internal sentinel: a queued frame was dropped by the dead-chat gate.
+
+    Raised only into a queued frame's ack future by ``_flush_send_queue``, and
+    caught only by ``send_frame``, which turns it back into ``False``. It never
+    escapes the connection layer, so callers keep seeing the plain
+    "not delivered" bool they already handle.
+    """
+
+
 ACTIVATION_CREDENTIAL_POLL_INTERVAL_SECONDS = 2.0
 
 # Protocol v2 §14.1: a `hello-fail` whose reason signals that the upstream auth
@@ -183,6 +195,9 @@ OnNotifySignal = Callable[[dict[str, Any]], Awaitable[None]]
 # lookup — an unmatched frame still carries an authoritative ``chat_id`` +
 # ``payload.code`` and must participate in dead-chat decisions.
 OnMessageError = Callable[[dict[str, Any]], Awaitable[None]]
+# Injected by the adapter. True when the server has rejected this chat_id with
+# a terminal message.error code and no outbound frame may be sent for it.
+IsChatRejected = Callable[[str], bool]
 
 
 class ClawChatConnection:
@@ -205,6 +220,7 @@ class ClawChatConnection:
         on_auth_logout: OnAuthLogout | None = None,
         on_notify_signal: OnNotifySignal | None = None,
         on_message_error: OnMessageError | None = None,
+        is_chat_rejected: IsChatRejected | None = None,
         account_id: str = "default",
         connect_device_id: str | None = None,
     ) -> None:
@@ -222,6 +238,7 @@ class ClawChatConnection:
         self._on_auth_logout = on_auth_logout
         self._on_notify_signal = on_notify_signal
         self._on_message_error = on_message_error
+        self._is_chat_rejected = is_chat_rejected
         self._account_id = account_id
         self._state = ConnectionState.DISCONNECTED
         self._ws: Any = None
@@ -499,6 +516,12 @@ class ClawChatConnection:
     ) -> bool:
         text = encode_frame(frame)
         queued = self._queued_frame(frame, text, wait_for_ack=wait_for_ack)
+        if self._chat_is_rejected(queued.chat_id):
+            # Rule is "any frame carrying a rejected chat_id", not an event-name
+            # allowlist: a conversation the server refuses must receive nothing,
+            # and handshake / ping / presence frames carry no chat_id anyway.
+            self._log_send_dropped(queued, reason="chat_rejected")
+            return False
         if self._stopping or self._state == ConnectionState.CLOSED:
             self._log_send_dropped(queued, reason="stopped")
             return False
@@ -535,14 +558,22 @@ class ClawChatConnection:
                 self._log_send_failed(queued)
                 raise
             if queued.ack_future is not None:
-                await queued.ack_future
+                try:
+                    await queued.ack_future
+                except _ChatRejectedError:
+                    # _flush_send_queue dropped this frame after we queued it.
+                    return False
             return True
         if not queue_when_unready:
             self._log_send_dropped(queued, reason="not_ready")
             return False
         self._enqueue_frame(queued)
         if queued.ack_future is not None:
-            await queued.ack_future
+            try:
+                await queued.ack_future
+            except _ChatRejectedError:
+                # _flush_send_queue dropped this frame after we queued it.
+                return False
         return True
 
     @property
@@ -1123,6 +1154,23 @@ class ClawChatConnection:
         self._flushing_send_queue = True
         try:
             while self._send_queue:
+                queued = self._send_queue[0]
+                if self._chat_is_rejected(queued.chat_id):
+                    # The reconnect flush is the incident's actual shape: frames
+                    # queued while offline for a conversation that died in the
+                    # meantime. This path never goes through send_frame, so the
+                    # gate has to be repeated here.
+                    self._log_send_dropped(queued, reason="chat_rejected")
+                    self._send_queue.popleft()
+                    if queued.ack_timeout_task is not None:
+                        queued.ack_timeout_task.cancel()
+                    if queued.ack_future is not None and not queued.ack_future.done():
+                        # Wake the send_frame coroutine still parked on this
+                        # future so it returns False instead of hanging forever.
+                        queued.ack_future.set_exception(
+                            _ChatRejectedError(f"chat rejected: {queued.chat_id}")
+                        )
+                    continue
                 logger.info(
                     format_ws_log(
                         event="send_flush",
@@ -1132,14 +1180,13 @@ class ClawChatConnection:
                         state=ConnectionState.READY.value,
                         action="send",
                         fields=[
-                            ("event_name", self._send_queue[0].event_name),
-                            ("trace_id", self._send_queue[0].trace_id),
-                            ("chat_id", self._send_queue[0].chat_id),
+                            ("event_name", queued.event_name),
+                            ("trace_id", queued.trace_id),
+                            ("chat_id", queued.chat_id),
                             ("remaining", len(self._send_queue) - 1),
                         ],
                     )
                 )
-                queued = self._send_queue[0]
                 try:
                     await ws.send(queued.text)
                     self._start_ack_timer_if_needed(queued)
@@ -1801,6 +1848,13 @@ class ClawChatConnection:
                     ("queue_size", len(self._send_queue)),
                 ],
             )
+        )
+
+    def _chat_is_rejected(self, chat_id: str) -> bool:
+        return (
+            self._is_chat_rejected is not None
+            and bool(chat_id)
+            and self._is_chat_rejected(chat_id)
         )
 
     def _log_send_dropped(self, queued: _QueuedFrame, *, reason: str) -> None:
