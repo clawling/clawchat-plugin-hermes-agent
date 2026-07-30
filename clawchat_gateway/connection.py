@@ -179,6 +179,10 @@ OnAuthLogout = Callable[[str], Awaitable[None]]
 # Receives the full raw frame dict.  Use to react to specific ``payload.type``
 # values (e.g. ``"agent.config.changed"``).
 OnNotifySignal = Callable[[dict[str, Any]], Awaitable[None]]
+# Called for every inbound ``message.error`` frame, BEFORE the pending-ack
+# lookup — an unmatched frame still carries an authoritative ``chat_id`` +
+# ``payload.code`` and must participate in dead-chat decisions.
+OnMessageError = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 class ClawChatConnection:
@@ -200,6 +204,7 @@ class ClawChatConnection:
         on_signal: OnSignal | None = None,
         on_auth_logout: OnAuthLogout | None = None,
         on_notify_signal: OnNotifySignal | None = None,
+        on_message_error: OnMessageError | None = None,
         account_id: str = "default",
         connect_device_id: str | None = None,
     ) -> None:
@@ -216,6 +221,7 @@ class ClawChatConnection:
         self._on_signal = on_signal
         self._on_auth_logout = on_auth_logout
         self._on_notify_signal = on_notify_signal
+        self._on_message_error = on_message_error
         self._account_id = account_id
         self._state = ConnectionState.DISCONNECTED
         self._ws: Any = None
@@ -1915,6 +1921,8 @@ class ClawChatConnection:
         chat_id = str(frame.get("chat_id") or "")
         payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
         message_id = payload.get("message_id") if isinstance(payload.get("message_id"), str) else None
+        if self._on_message_error is not None:
+            asyncio.create_task(self._notify_message_error(frame))
         pending = self._pending_acks.pop(trace_id, None)
         if pending is None:
             logger.info(
@@ -1954,6 +1962,24 @@ class ClawChatConnection:
         )
         if not pending.future.done():
             pending.future.set_exception(RuntimeError(f"message.error: {reason}"))
+
+    async def _notify_message_error(self, frame: dict[str, Any]) -> None:
+        assert self._on_message_error is not None
+        try:
+            await self._on_message_error(frame)
+        except Exception:  # noqa: BLE001 — a callback must never break ack handling
+            logger.exception("clawchat on_message_error callback failed")
+
+    def _message_error_code(self, payload: dict[str, Any]) -> str:
+        """Return ``payload.code`` verbatim.
+
+        Deliberately NOT routed through ``_message_error_reason``: that helper
+        ranks ``code`` last, so a non-empty ``reason`` (which the server always
+        sends) shadows it. It also sanitizes secrets — irrelevant for a fixed
+        protocol token and capable of mangling it.
+        """
+        value = payload.get("code")
+        return value if isinstance(value, str) else ""
 
     def _message_error_reason(self, payload: dict[str, Any]) -> str:
         for key in ("reason", "error", "message", "code"):
