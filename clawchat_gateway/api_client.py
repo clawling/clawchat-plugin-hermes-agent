@@ -298,6 +298,9 @@ class ClawChatApiClient:
         path = f"/v1/moments?{query}" if query else "/v1/moments"
         return await self._call_json("GET", path)
 
+    async def get_moment(self, moment_id: int) -> dict:
+        return await self._call_json("GET", f"/v1/moments/{moment_id}")
+
     async def get_conversation(self, conversation_id: str) -> dict:
         if not conversation_id.strip():
             raise ClawChatApiError("validation", "conversation_id is required")
