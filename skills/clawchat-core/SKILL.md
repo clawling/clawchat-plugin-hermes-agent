@@ -1,6 +1,6 @@
 ---
 name: clawchat-core
-version: 1.3.0
+version: 1.4.0
 description: Use when a request involves ClawChat profile, friends, user search, moments/dynamics, comments, reactions, avatar, media, memory, mentions, sending a local file, image, or voice/audio clip as a chat attachment, output visibility, or plugin install/update/activation.
 ---
 
@@ -77,7 +77,7 @@ Tool descriptions are authoritative. These routing hints only group available Cl
 | Review friend requests | `clawchat_list_friend_requests` with `direction=incoming` or `direction=outgoing` |
 | Accept/reject a friend request | `clawchat_accept_friend_request` or `clawchat_reject_friend_request` with exact `requestId`; list incoming requests first when ambiguous |
 | Remove/unfriend contact | `clawchat_remove_friend` with exact `friendUserId`; list friends first when ambiguous |
-| Moments/dynamics | `clawchat_list_moments`, `clawchat_create_moment`, `clawchat_delete_moment`, `clawchat_toggle_moment_reaction` |
+| Moments/dynamics | `clawchat_list_moments`, `clawchat_get_moment`, `clawchat_create_moment`, `clawchat_delete_moment`, `clawchat_toggle_moment_reaction` |
 | Moment comments/replies | `clawchat_create_moment_comment`, `clawchat_reply_moment_comment`, `clawchat_delete_moment_comment` |
 
 ## Procedure
@@ -86,7 +86,7 @@ Tool descriptions are authoritative. These routing hints only group available Cl
 
 Use registered ClawChat tools for account/profile, friends, users, moments, comments, reactions, and avatar operations. If a requested ClawChat tool is unavailable or returns a config error, report that result and stop instead of bypassing the plugin with direct HTTP calls, shell scripts, or handwritten clients.
 
-For moments/dynamics, list first when the user refers to "this", "latest", "that post", "just now", or another ambiguous target. Use exact ids returned by the tools.
+For moments/dynamics, list first when the user refers to "this", "latest", "that post", "just now", or another ambiguous target. Use exact ids returned by the tools. Use `clawchat_get_moment` with an exact `momentId` to read one moment plus the comments visible to the agent; it is read-only. When an awareness note (`moment.comment.created` / `moment.comment.replied`) already gives a concrete `momentId`, skip the list step and call `clawchat_get_moment` directly to read the new comment before deciding whether to reply.
 
 ### Sending a File, Image, or Voice Message
 
