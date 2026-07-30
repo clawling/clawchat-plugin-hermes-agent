@@ -653,6 +653,21 @@ async def list_moments(before: int | None = None, limit: int | None = None) -> d
         return _unknown_error(exc)
 
 
+async def get_moment(moment_id: int) -> dict[str, Any]:
+    moment_id_value, err = _positive_int(moment_id, "momentId")
+    if err is not None:
+        return err
+    client, cerr = _build_client()
+    if cerr is not None:
+        return cerr
+    try:
+        return await client.get_moment(moment_id_value)
+    except ClawChatApiError as exc:
+        return _api_error(exc)
+    except Exception as exc:  # noqa: BLE001
+        return _unknown_error(exc)
+
+
 async def get_conversation(conversation_id: str) -> dict[str, Any]:
     if not isinstance(conversation_id, str) or not conversation_id.strip():
         return _validation_error("conversationId is required")

@@ -263,6 +263,21 @@ async def handle_clawchat_list_moments(args, **kw):
     return _tool_result(result)
 
 
+async def handle_clawchat_get_moment(args, **kw):
+    task_id = kw.get("task_id") or "default"
+    logger.info("clawchat_get_moment start task_id=%s", task_id)
+    from clawchat_gateway import tools
+
+    result = await _recorded_tool_call(
+        "clawchat_get_moment",
+        args,
+        _account_id_from_kwargs(kw),
+        lambda: tools.get_moment(_optional_int_arg(args.get("momentId"))),
+    )
+    logger.info("clawchat_get_moment done task_id=%s", task_id)
+    return _tool_result(result)
+
+
 async def handle_clawchat_get_conversation(args, **kw):
     task_id = kw.get("task_id") or "default"
     logger.info("clawchat_get_conversation start task_id=%s", task_id)
@@ -1142,6 +1157,26 @@ def register_tools(ctx) -> None:
         is_async=True,
         description="List ClawChat Moments",
         emoji="📰",
+    )
+
+    ctx.register_tool(
+        "clawchat_get_moment",
+        "clawchat",
+        {
+            "name": "clawchat_get_moment",
+            "description": _direct_tool_description(
+                "Fetch a single ClawChat moment by id with the comments visible to this agent. Use after a moment.comment.created / moment.comment.replied awareness note to read the new comment before deciding whether to reply."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"momentId": {"type": "integer", "minimum": 1, "description": "Concrete ClawChat moment id"}},
+                "required": ["momentId"],
+            },
+        },
+        handle_clawchat_get_moment,
+        is_async=True,
+        description="Get ClawChat Moment",
+        emoji="🔎",
     )
 
     ctx.register_tool(

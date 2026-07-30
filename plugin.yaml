@@ -18,6 +18,7 @@ provides_tools:
   - clawchat_remove_friend
   - clawchat_search_users
   - clawchat_list_moments
+  - clawchat_get_moment
   - clawchat_get_conversation
   - clawchat_leave_group
   - clawchat_mention_message
