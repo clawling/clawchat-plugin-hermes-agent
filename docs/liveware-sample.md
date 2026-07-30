@@ -191,7 +191,26 @@ entry carries a `sha256` that is verified byte-for-byte before it is written;
 a mismatch aborts the whole download without touching the previous install.
 The git `ref` used is the same one skill hot-updates use
 (`DEFAULT_SKILLS_REF`, normally `main`). User-owned files (`state.json`,
-`events.jsonl`) are preserved across a sample-version upgrade.
+`events.jsonl`) are preserved across a sample-version upgrade. The per-file
+fetches run concurrently (a small thread pool inside the already-off-loop
+`download_liveware_sample`), since they are independent round-trips to the same
+host.
+
+**Re-install short-circuit.** The manifest is fetched on every attempt — that is
+what says which hashes to compare against — but if `<sample_root>/app` already
+matches it (`_local_install_matches`), nothing is fetched or rewritten and the
+existing install is reused as-is. A match requires every listed file present,
+every *program* file byte-identical to its manifest `sha256`, and **nothing else**
+in the directory, so a file dropped by a newer manifest still forces a clean
+reinstall. `state.json` / `events.jsonl` are checked for **presence only, never
+content**: `state.json` ships in the manifest *and* becomes agent-owned right
+afterwards, so hashing it would defeat the short-circuit on precisely the samples
+that are in use. Any read/OS error answers "not installed" and falls through to a
+full reinstall. Before this, every boot re-downloaded the whole ~20 KB bundle
+even when the identical bytes were already on disk, and an unreachable GitHub raw
+host hard-failed a sample that was already fully installed. Matches
+`clawchat-plugin-openclaw`'s `localInstallMatches`. There is deliberately no
+ETag/`If-None-Match` handling — it would save bandwidth but not the round-trip.
 
 ## SQLite state / status semantics
 

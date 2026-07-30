@@ -14,6 +14,7 @@ import logging
 import re
 import shutil
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -25,6 +26,9 @@ LIVEWARES_TARGET = "hermes"
 LIVEWARE_SAMPLE_ID = "liveware-sample"
 LIVEWARE_SAMPLE_APP_NAME = "Liveware Sample"
 MAX_SAMPLE_FILE_BYTES = 512 * 1024
+# Bundle files are fetched concurrently; the bundle is tiny, so a handful of
+# sockets against one host is plenty.
+_MAX_DOWNLOAD_WORKERS = 5
 
 # Files the agent owns at runtime; preserved across sample upgrades.
 _USER_DATA_FILES = ("state.json", "events.jsonl")
@@ -118,6 +122,66 @@ def _fetch_verified(fetch: Fetcher, url: str) -> bytes:
     return bytes(raw)
 
 
+def _local_install_matches(app_dir: Path, manifest: LivewareSampleManifest) -> bool:
+    """True when app_dir already holds exactly what the manifest pins.
+
+    Every listed file must be present, program files must be byte-identical to
+    their manifest sha256, and nothing else may live in the directory (so a file
+    dropped by a newer manifest still forces a clean reinstall).
+    _USER_DATA_FILES are checked for presence only, never for content —
+    `state.json` ships in the manifest *and* is owned by the agent afterwards, so
+    hashing it would make the short-circuit miss on exactly the installs that are
+    actually in use. Cheap (~20 KB of local reads) next to the per-file GETs it
+    saves, and fail-safe: any read/OS error answers "no".
+
+    Mirrors openclaw's `localInstallMatches` in src/liveware-sample.ts.
+    """
+    try:
+        expected = {Path(f.path).name for f in manifest.files}
+        for child in app_dir.iterdir():
+            if child.name not in expected and child.name not in _USER_DATA_FILES:
+                return False
+        for f in manifest.files:
+            name = Path(f.path).name
+            target = app_dir / name
+            if name in _USER_DATA_FILES:
+                if not target.is_file():  # agent-owned: presence is the whole check
+                    return False
+                continue
+            if hashlib.sha256(target.read_bytes()).hexdigest() != f.sha256:
+                return False
+        return True
+    except OSError:
+        return False  # missing / unreadable — treat as "not installed"
+
+
+def _fetch_sample_files(
+    fetch: Fetcher, manifest: LivewareSampleManifest, ref: str
+) -> list[tuple[str, bytes]]:
+    """Fetch + sha256-verify every manifest file concurrently.
+
+    The files are independent round-trips to the same host, so serializing them
+    only added latency. This function is called from a worker thread already
+    (see LivewareSampleSupervisor._download), hence a small thread pool rather
+    than asyncio. Returns (basename, bytes) pairs; raises on the first failure.
+    """
+    def _one(f: LivewareSampleFile) -> tuple[str, bytes]:
+        raw = _fetch_verified(fetch, liveware_file_url(f.path, ref))
+        actual = hashlib.sha256(raw).hexdigest()
+        if actual != f.sha256:
+            raise LivewareSampleError(
+                f"sha256 mismatch for {f.path}: expected {f.sha256} got {actual}"
+            )
+        # Flatten to basename (the sample is a flat dir; matches openclaw).
+        return Path(f.path).name, raw
+
+    if not manifest.files:
+        return []
+    workers = min(len(manifest.files), _MAX_DOWNLOAD_WORKERS)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(_one, manifest.files))
+
+
 def download_liveware_sample(
     *, fetch: Fetcher, sample_root: Path, ref: str = DEFAULT_SKILLS_REF
 ) -> tuple[str, Path]:
@@ -125,26 +189,29 @@ def download_liveware_sample(
 
     Preserves _USER_DATA_FILES from an existing install. Raises on any failure;
     never leaves a partially-written app/ dir behind.
+
+    Re-install short-circuit: when the installed bytes already match every hash
+    the manifest pins, nothing is fetched or rewritten. Every boot used to
+    re-fetch the whole bundle from GitHub raw even when the identical files were
+    already on disk — a handful of serial round-trips on the critical path, and
+    an unreachable raw host then failed a sample that was already fully
+    installed. Only the manifest itself is still fetched every time, because that
+    is what tells us which hashes to compare against.
     """
     sample_root = Path(sample_root)
     manifest = parse_livewares_manifest(
         _fetch_verified(fetch, livewares_manifest_url(ref))
     )
     app_dir = sample_root / "app"
+    if _local_install_matches(app_dir, manifest):
+        return manifest.version, app_dir
     tmp_dir = sample_root / ".app.tmp"
     if tmp_dir.exists():
         shutil.rmtree(tmp_dir, ignore_errors=True)
     tmp_dir.mkdir(parents=True, exist_ok=True)
     try:
-        for f in manifest.files:
-            raw = _fetch_verified(fetch, liveware_file_url(f.path, ref))
-            actual = hashlib.sha256(raw).hexdigest()
-            if actual != f.sha256:
-                raise LivewareSampleError(
-                    f"sha256 mismatch for {f.path}: expected {f.sha256} got {actual}"
-                )
-            # Flatten to basename (the sample is a flat dir; matches openclaw).
-            (tmp_dir / Path(f.path).name).write_bytes(raw)
+        for name, raw in _fetch_sample_files(fetch, manifest, ref):
+            (tmp_dir / name).write_bytes(raw)
         # Preserve agent/user-owned data files from a previous install.
         for name in _USER_DATA_FILES:
             prev = app_dir / name
