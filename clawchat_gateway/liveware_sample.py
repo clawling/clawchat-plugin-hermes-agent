@@ -183,6 +183,10 @@ _APP_ID_RE = re.compile(
 )
 _ID_KV_RE = re.compile(r"\bid\s*[:=]\s*\"?([A-Za-z0-9][A-Za-z0-9_-]*)\"?", re.IGNORECASE)
 _LONE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{5,}$")
+# An id-looking token must carry at least one of these, so a bare status word
+# ("active"/"running", which _LONE_ID_RE alone happily accepts) can never be
+# mistaken for an app id in `app list`'s text table. See _is_app_id_token.
+_ID_CHAR_RE = re.compile(r"[0-9_-]")
 
 SpawnFn = Callable[..., "Awaitable"]
 ExecFn = Callable[..., "Awaitable"]
@@ -211,6 +215,14 @@ def parse_tunnel_public_url(output: str) -> str | None:
 
 
 def _find_id_deep(value) -> str | None:
+    if isinstance(value, list):
+        # Parity with openclaw's findIdDeep, where `typeof [] === "object"` makes
+        # Object.values() walk array elements too.
+        for item in value:
+            found = _find_id_deep(item)
+            if found:
+                return found
+        return None
     if not isinstance(value, dict):
         return None
     for key in ("app_id", "appId", "id"):
@@ -246,6 +258,68 @@ def parse_app_create_output(stdout: str) -> str | None:
         t = line.strip()
         if _LONE_ID_RE.match(t):
             return t
+    return None
+
+
+def _is_app_id_token(token: str) -> bool:
+    return bool(_LONE_ID_RE.match(token)) and bool(_ID_CHAR_RE.search(token))
+
+
+def _find_named_id_deep(value, name: str) -> str | None:
+    if isinstance(value, list):
+        for item in value:
+            found = _find_named_id_deep(item, name)
+            if found:
+                return found
+        return None
+    if not isinstance(value, dict):
+        return None
+    named = any(
+        isinstance(value.get(key), str) and value[key].strip() == name
+        for key in ("name", "app_name", "appName", "title")
+    )
+    if named:
+        found = _find_id_deep(value)
+        if found:
+            return found
+    for nested in value.values():
+        found = _find_named_id_deep(nested, name)
+        if found:
+            return found
+    return None
+
+
+def find_app_id_by_name(stdout: str, name: str) -> str | None:
+    """Find the id of an existing liveware app named `name` in `liveware app
+    list` output.
+
+    Deliberately conservative: a shape this cannot read must degrade to "not
+    found" — the caller then creates an app, i.e. the previous behaviour — and
+    must never return a WRONG id, so the text branch only accepts a line that
+    contains the exact app name plus one id-looking token OUTSIDE it, and an
+    id-looking token must carry a digit/`-`/`_` so a status word ("active",
+    "running") cannot pass for an id. JSON output (any wrapper key) is the
+    reliable path; the aligned-table branch is calibrated on `app create`'s
+    table, the only text shape verified against the real CLI.
+    """
+    text = (stdout or "").strip()
+    wanted = (name or "").strip()
+    if not text or not wanted:
+        return None
+    try:
+        found = _find_named_id_deep(json.loads(text), wanted)
+        if found:
+            return found
+    except (ValueError, TypeError):
+        pass  # not JSON
+    for line in text.split("\n"):
+        at = line.find(wanted)
+        if at < 0:
+            continue
+        outside_name = f"{line[:at]} {line[at + len(wanted):]}"
+        for token in outside_name.split():
+            if _is_app_id_token(token):
+                return token
     return None
 
 
@@ -460,6 +534,42 @@ async def liveware_login(*, liveware_path, token: str, exec: ExecFn | None = Non
         raise LivewareSampleError(f"liveware login failed: {detail}")
 
 
+async def liveware_app_find_by_name(
+    *, liveware_path, name: str, exec: ExecFn | None = None,
+    log: "logging.Logger | None" = None, timeout: float = _CLI_TIMEOUT,
+) -> str | None:
+    """`liveware app list` -> the id of an existing app with this name, or None.
+
+    Best-effort by contract: an exec failure, a non-zero exit or unreadable
+    output all resolve to None with a debug log, so the caller falls back to
+    `app create` instead of failing the whole flow. Never raises.
+
+    Only ``Exception`` is caught, never ``BaseException``: a CancelledError from
+    stop() must keep propagating (``_communicate`` already killed the child) so
+    a one-shot CLI process is not orphaned.
+    """
+    exec = exec or asyncio.create_subprocess_exec
+    logger = log or logging.getLogger("clawchat.liveware_sample")
+    try:
+        proc = await _maybe_await(exec(
+            liveware_path, "app", "list",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        ))
+        out, err = await _communicate(proc, timeout, "liveware app list")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "liveware-sample app list failed; falling back to app create: %s", exc)
+        return None
+    stdout = (out or b"").decode(errors="replace")
+    if proc.returncode:
+        stderr = (err or b"").decode(errors="replace")
+        logger.debug(
+            "liveware-sample app list failed; falling back to app create: %s",
+            (stderr or stdout).strip())
+        return None
+    return find_app_id_by_name(stdout, name)
+
+
 async def liveware_app_create(*, liveware_path, name: str, exec: ExecFn | None = None,
                               timeout: float = _CLI_TIMEOUT) -> str:
     exec = exec or asyncio.create_subprocess_exec
@@ -543,6 +653,9 @@ class LivewareSampleSupervisor:
         self._server = None
         self._tunnel = None
         self._stopped = False
+        # True while a _start_attempt chain (bootstrap/relaunch) is running; read
+        # by _is_idle() so start_if_idle never begins a second concurrent flow.
+        self._launch_in_flight = False
         self._restart_times: list[float] = []
         self._tasks: set[asyncio.Task] = set()
         # Bumped every time children are killed (stop, restart, cap-out) so a
@@ -582,8 +695,48 @@ class LivewareSampleSupervisor:
         dormant until the next platform restart)."""
         await self._start_attempt(0)
 
+    async def start_if_idle(self) -> None:
+        """Kick a fresh start attempt, but only when nothing is in flight.
+
+        The adapter re-enters ``_schedule_liveware_sample`` on every ``READY``
+        (reconnect / token refresh). It keeps exactly ONE supervisor per adapter
+        instance - a second one would race the bootstrap "owner has zero apps"
+        gate and register a duplicate liveware app - but a plain ``return``
+        there made every later READY a permanent no-op, so once the bounded
+        ``_START_RETRY_DELAYS_S`` ladder was exhausted nothing ever retried and
+        the sample stayed dormant for the whole process lifetime.
+
+        Unlike openclaw's ``adoptDeps`` there is nothing to re-point: hermes
+        reads every dep lazily off the live adapter instance (token, REST
+        client, owner-notify path), so a reconnect needs no new closure.
+        """
+        if not self._is_idle():
+            return
+        await self._start_attempt(0)
+
+    def _is_idle(self) -> bool:
+        """Nothing running and nothing scheduled: safe to (re)start a flow.
+
+        Deliberately conservative - a false "not idle" only costs a kick we
+        could have made, whereas a false "idle" would run two launch flows
+        concurrently, which is exactly the duplicate `app create` /
+        double-registration bug the one-supervisor-per-adapter rule exists to
+        prevent. ``self._tasks`` is hermes's equivalent of openclaw's ``timers``
+        set: it holds any pending retry / crash-restart / intro-retry task (plus
+        the pipe drains, which only outlive a launch while its children do).
+        """
+        return (
+            not self._stopped
+            and not self._launch_in_flight
+            and not self._launch_lock.locked()
+            and not self._tasks
+            and self._server is None
+            and self._tunnel is None
+        )
+
     async def _start_attempt(self, attempt: int) -> None:
         d = self._d
+        self._launch_in_flight = True
         try:
             if not d.enabled:
                 return
@@ -614,6 +767,8 @@ class LivewareSampleSupervisor:
                 "liveware-sample start failed (attempt %d, retrying in %.0fs): %s",
                 attempt + 1, delay, exc)
             self._spawn_task(self._retry_start(attempt + 1, delay))
+        finally:
+            self._launch_in_flight = False
 
     async def _retry_start(self, attempt: int, delay: float) -> None:
         await asyncio.sleep(delay)
@@ -691,19 +846,19 @@ class LivewareSampleSupervisor:
 
     async def _bootstrap(self) -> None:
         d = self._d
+        # Retryable-vs-opt-out: a missing CLI, an absent token and a flaky
+        # list_apps are all transient, but they used to `return`, which left the
+        # sample dormant for the whole process lifetime (nothing re-enters
+        # _bootstrap on its own). Raise instead so _start_attempt's
+        # _START_RETRY_DELAYS_S ladder gets its turn; only a genuine opt-out
+        # (disabled row, owner already has apps) returns.
         path = d.resolve_liveware_path()
         if not path:
-            self._log.warning("liveware-sample liveware CLI not ready; skip bootstrap")
-            return
+            raise LivewareSampleError("liveware CLI not ready")
         token = d.resolve_token()
         if not token:
-            self._log.debug("liveware-sample no token; skip bootstrap")
-            return
-        try:
-            apps = await d.list_apps()
-        except Exception as exc:  # noqa: BLE001
-            self._log.debug("liveware-sample list_apps failed; skip bootstrap: %s", exc)
-            return
+            raise LivewareSampleError("no ClawChat token available yet")
+        apps = await d.list_apps()
         if apps.get("apps"):
             self._log.debug("liveware-sample user already has liveware apps; skip bootstrap")
             return
@@ -727,8 +882,33 @@ class LivewareSampleSupervisor:
             await liveware_login(liveware_path=path, token=token, exec=d.exec)
             if self._bail_if_stale(gen):
                 return
-            app_id = await liveware_app_create(
-                liveware_path=path, name=LIVEWARE_SAMPLE_APP_NAME, exec=d.exec)
+            # Reuse an app we already own before minting another one. `app
+            # create` is not idempotent and nothing here ever reconciled against
+            # the liveware side, so every bootstrap that died past this point (no
+            # row was written until the very end, see below) left one more orphan
+            # app behind and ate into the owner's app quota. Best-effort: an
+            # unreadable list falls through to `app create`.
+            app_id = await liveware_app_find_by_name(
+                liveware_path=path, name=LIVEWARE_SAMPLE_APP_NAME, exec=d.exec,
+                log=self._log)
+            if self._bail_if_stale(gen):
+                return
+            if app_id:
+                self._log.debug(
+                    "liveware-sample reusing existing liveware app %s", app_id)
+            else:
+                app_id = await liveware_app_create(
+                    liveware_path=path, name=LIVEWARE_SAMPLE_APP_NAME, exec=d.exec)
+            # Persist the app id BEFORE the steps that can still fail - and with
+            # NO bail point between `app create` and this write, which is the
+            # whole point. Without this row a failure anywhere below left no row
+            # at all, so the next boot ran _bootstrap again and created yet
+            # another app; a "pending" row makes the next attempt resume through
+            # _relaunch() with the same app id instead.
+            d.store.upsert_liveware_sample(
+                platform=d.platform, account_id=d.account_id, app_id=app_id,
+                app_name=LIVEWARE_SAMPLE_APP_NAME, port=port, public_url=None,
+                sample_version=version, status="pending")
             if self._bail_if_stale(gen):
                 return
             public_url = await tunnel_bind(
@@ -759,19 +939,24 @@ class LivewareSampleSupervisor:
 
     async def _relaunch(self, row) -> None:
         d = self._d
+        # Both of these used to `return` and strand the sample until the next
+        # process start; they are transient, so raise and let _start_attempt's
+        # retry ladder run (see _bootstrap). Only a SUCCESSFUL list that no
+        # longer contains the app is an opt-out.
         path = d.resolve_liveware_path()
         if not path:
-            self._log.warning("liveware-sample liveware CLI not ready; skip relaunch")
-            return
-        try:
-            apps = await d.list_apps()
-            if not any(a.get("app_id") == row.app_id for a in apps.get("apps", [])):
-                d.store.update_liveware_sample_status(
-                    platform=d.platform, account_id=d.account_id,
-                    status="disabled", last_error="app removed by user")
-                return
-        except Exception as exc:  # noqa: BLE001
-            self._log.debug("liveware-sample list_apps failed; skip relaunch: %s", exc)
+            raise LivewareSampleError("liveware CLI not ready")
+        apps = await d.list_apps()
+        # The user deleting the app tile is an explicit opt-out - never reinstall.
+        # Exception: a "pending" row was persisted mid-bootstrap, before the app
+        # was ever registered with ClawChat, so its absence from this list means
+        # "not registered yet", not "deleted" - disabling it here would strand
+        # the app id forever.
+        if row.status != "pending" and not any(
+                a.get("app_id") == row.app_id for a in apps.get("apps", [])):
+            d.store.update_liveware_sample_status(
+                platform=d.platform, account_id=d.account_id,
+                status="disabled", last_error="app removed by user")
             return
 
         # See _bootstrap for why this section is lock-serialized and intro
@@ -787,8 +972,49 @@ class LivewareSampleSupervisor:
             self._spawn_task(server_drain)
             if self._bail_if_stale(gen):
                 return
+            # Re-login before touching the CLI (same server -> login -> CLI-app
+            # ordering as _bootstrap). The CLI keeps its credentials in
+            # $HOME/.clawling, which is NOT under HERMES_HOME - a different
+            # volume from the sqlite state holding the row that sent us down
+            # this path. A container that persists HERMES_HOME but not $HOME
+            # therefore comes back with a row AND a logged-out CLI, so every
+            # tunnel_bind/start_tunnel_agent below fails auth until the
+            # _START_RETRY_DELAYS_S ladder gives up - and the sample then never
+            # returns for the whole process lifetime. `login` is idempotent;
+            # best-effort, so a stale token still falls through to whatever
+            # credentials the CLI already has.
+            token = d.resolve_token()
+            if token:
+                try:
+                    await liveware_login(liveware_path=path, token=token, exec=d.exec)
+                except Exception as exc:  # noqa: BLE001
+                    # Catch Exception, never BaseException: a CancelledError from
+                    # stop() must keep propagating so children aren't orphaned.
+                    self._log.warning(
+                        "liveware-sample relaunch re-login failed; continuing with "
+                        "cached CLI credentials: %s", exc)
+                if self._bail_if_stale(gen):
+                    return
+            else:
+                self._log.debug("liveware-sample no token; relaunch without re-login")
+            # Kept AFTER the re-login above so the lookup runs against a CLI that
+            # is actually authenticated: a pending row's app id came straight out
+            # of `app create`'s parser and was never confirmed by the liveware
+            # side, so prefer a by-name lookup - a mis-parsed id then self-heals
+            # instead of failing every tunnel bind for the rest of this row's life.
+            app_id = row.app_id
+            if row.status == "pending":
+                found = await liveware_app_find_by_name(
+                    liveware_path=path, name=row.app_name, exec=d.exec, log=self._log)
+                if found and found != app_id:
+                    self._log.warning(
+                        "liveware-sample pending app id %s not listed; adopting %s",
+                        app_id, found)
+                    app_id = found
+                if self._bail_if_stale(gen):
+                    return
             public_url = await tunnel_bind(
-                liveware_path=path, app_id=row.app_id, port=port, exec=d.exec)
+                liveware_path=path, app_id=app_id, port=port, exec=d.exec)
             if self._bail_if_stale(gen):
                 return
             self._tunnel, agent_drain = await start_tunnel_agent(
@@ -798,11 +1024,13 @@ class LivewareSampleSupervisor:
                 return
             # See _bootstrap: no bail between register/upsert (H8 fix) so a
             # crash of either child in this window can't orphan the row.
-            if public_url != row.public_url:
+            # A pending row has never been registered with ClawChat (public_url is
+            # None), so this condition also covers "register it for the first time".
+            if public_url != row.public_url or app_id != row.app_id:
                 await d.register_app(
-                    name=row.app_name, app_id=row.app_id, url=public_url)
+                    name=row.app_name, app_id=app_id, url=public_url)
             d.store.upsert_liveware_sample(
-                platform=d.platform, account_id=d.account_id, app_id=row.app_id,
+                platform=d.platform, account_id=d.account_id, app_id=app_id,
                 app_name=row.app_name, port=port, public_url=public_url,
                 sample_version=version, status="active")
             self._watch_child(self._server)

@@ -1223,6 +1223,15 @@ class ClawChatStore:
         port: int, public_url: str | None, sample_version: str, status: str,
         last_error: str | None = None,
     ) -> None:
+        """Upsert the single liveware-sample row for (platform, account_id).
+
+        ``status`` is one of ``pending`` | ``active`` | ``failed`` | ``disabled``
+        (see docs/liveware-sample.md). ``pending`` means ``liveware app create``
+        succeeded but the app is not registered with ClawChat yet; it is written
+        mid-bootstrap so a failure after create resumes with the same app id
+        instead of minting (and leaking) another one. The column is a plain TEXT
+        with no CHECK constraint, so adding the value needs no migration.
+        """
         now = _now_ms()
 
         def _op(conn: sqlite3.Connection) -> None:
