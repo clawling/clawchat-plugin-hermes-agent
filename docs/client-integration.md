@@ -1780,6 +1780,55 @@ failures (e.g. permission denied) may still manifest as silent drops;
 out-of-band channels (REST error replies, push) remain the fallback for
 those.
 
+#### Terminal codes and the outbound gate (client-side handling)
+
+`chat_not_found` and `not_member` are **terminal for the conversation as
+addressed**: the server will reject every further uplink the same way until
+whatever made the chat unresolvable is corrected. On either code this client
+records the `chat_id` in a **server-rejection** set and drops every subsequent
+**outbound** frame carrying it, at both transport convergence points (the
+immediate send path and the reconnect flush of the offline queue). Callers see
+the ordinary "not delivered" result they already handle.
+
+**The rejection is revocable, not permanent.** A soft-deleted direct
+conversation is revived *in place*, under the *same* `chat_id` — re-pairing an
+agent does exactly that — so a client that treats one `chat_not_found` as a
+permanent fact will silently mute a conversation that has since come back. The
+gate therefore lifts on any of three conditions, whichever happens first:
+
+* a **10-minute TTL** expires (the backstop for a chat that revived and then
+  stayed completely silent);
+* **any inbound frame** arrives naming that `chat_id` — the server routing a
+  frame into the chat is stronger proof of existence than the error frame was,
+  and even a self-echo counts, since it means the server accepted and fanned
+  out our own uplink;
+* **any `conversation.*` signal** for that `entity_id` other than
+  `conversation.dissolved` — a change notification means the conversation is
+  live in the server's table right now. `dissolved` is excluded because it is
+  the opposite signal, not evidence of life.
+
+**The owner's direct chat is exempt from the gate.** It is the agent's only
+out-of-band channel — in particular the "credentials permanently expired,
+please re-pair me" notice — and re-pairing is precisely the action that revives
+a soft-deleted direct conversation. Gating it would convert a recoverable
+failure into a silent permanent one.
+
+**A dissolve signal MUST NOT gate `message.send`, and MUST NOT gate inbound.**
+`conversation.dissolved` drives per-chat state eviction and stops
+`typing.update`, and that is all. It is a separate, orthogonal tier from the
+server-rejection set above: the two never write to each other. Dropping inbound
+on a dissolve is a message-loss bug — the relay does not itself track
+conversation dissolution, so inbox rows persisted for that `chat_id` *before*
+the signal are still replayed on the next reconnect and are still real
+messages.
+
+**Out of scope: typing-only dead chats.** `message.error` covers
+`message.send` / `message.reply` and the streaming lifecycle events only
+(§14.3 scope above). A failed conversation resolve on a `typing.update` uplink
+is consumed silently and produces **no** error frame, so a conversation that
+only ever emits typing and never a reply can never learn it is dead through
+this mechanism. Bound that case with a local continuous-typing ceiling instead.
+
 ### 14.4 `message.delivered` — device-level delivery receipt
 
 **Who emits it and when.** A receiving client that advertised

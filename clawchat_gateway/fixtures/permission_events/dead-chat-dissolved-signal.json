@@ -1,0 +1,23 @@
+{
+  "name": "conversation.dissolved gates typing only; message.send MUST NOT be gated on it",
+  "behavior": "dead_chat",
+  "wire": {
+    "version": "2",
+    "event": "notify.signal",
+    "trace_id": "parity-dead-chat-dissolved-signal",
+    "emitted_at": 1893456000000,
+    "payload": {
+      "type": "conversation.dissolved",
+      "entity_id": "cnv_parity_dissolved",
+      "event_id": "parity-evt-dead-chat-dissolved-signal",
+      "version": 1,
+      "message_id": "notify:conversation.dissolved:cnv_parity_dissolved"
+    }
+  },
+  "expected": {
+    "marked_dead": true,
+    "server_rejected": false,
+    "gates_typing": true,
+    "gates_outbound_send": false
+  }
+}
