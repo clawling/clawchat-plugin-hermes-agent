@@ -772,6 +772,9 @@ class ClawChatAdapter(BasePlatformAdapter):
         * ``agent.config.changed`` — re-pulls the per-group settings cache.
         * ``agent.permission.changed`` — re-pulls the permission policy cache.
         * ``clawchat.skill.update.check`` — checks for a newer skill version.
+        * ``moment.comment.created``, ``moment.comment.replied`` — emits one
+          content-free owner note per event pointing the agent at the
+          ``get_moment`` tool; the handler never hydrates the comment itself.
         * ``conversation.dissolved`` — evicts all per-chat state for the dead
           conversation so it stops being addressed (e.g. leaked typing
           keepalives); does not suppress the awareness note below.
@@ -809,6 +812,15 @@ class ClawChatAdapter(BasePlatformAdapter):
             # version and, if any, ask the owner for consent in chat. All network
             # work runs off the read loop on a tracked task.
             self._spawn_skill_update_check()
+        elif payload.get("type") in {"moment.comment.created", "moment.comment.replied"}:
+            moment_id = str(payload.get("entity_id") or "")
+            replied = payload.get("type") == "moment.comment.replied"
+            logger.info(
+                "clawchat moment comment signal received: type=%s moment=%s",
+                payload.get("type"),
+                moment_id,
+            )
+            asyncio.ensure_future(self._emit_moment_comment_note(moment_id, replied))
         elif (
             payload.get("type") in {"friend.added", "friend.removed", "friend.profile_updated"}
             or (
@@ -821,6 +833,45 @@ class ClawChatAdapter(BasePlatformAdapter):
             if self._clawchat_config.awareness_note and not self._pending_awareness_note:
                 self._pending_awareness_note = True
                 asyncio.ensure_future(self._emit_awareness_note())
+
+    async def _emit_moment_comment_note(self, moment_id: str, replied: bool) -> None:
+        """Emit one content-free owner note pointing the agent at get_moment.
+
+        Scheduled via ``asyncio.ensure_future`` for every
+        ``moment.comment.created`` / ``moment.comment.replied`` signal — unlike
+        ``_emit_awareness_note`` this is per-event, not debounced, since each
+        comment is its own distinct, actionable event. The note carries only
+        the scenario and the moment id; it never hydrates the comment itself
+        (that is left to the agent calling ``get_moment``). Delivery failure is
+        best-effort: swallowed and logged at debug, never raised into the
+        connection loop.
+        """
+        owner_user_id = self._owner_user_id()
+        owner_chat_id = self._owner_direct_chat_id()
+        if not owner_user_id or not owner_chat_id:
+            return
+        if replied:
+            text = (
+                f"ClawChat: someone replied to your comment on a moment (id {moment_id}). "
+                "Use the get_moment tool to view it and reply if appropriate."
+            )
+        else:
+            text = (
+                f"ClawChat: someone commented on your moment (id {moment_id}). "
+                "Use the get_moment tool to view it and reply if appropriate."
+            )
+        inbound = InboundMessage(
+            chat_id=owner_chat_id,
+            chat_type="direct",
+            sender_id="clawchat-awareness",
+            sender_name="ClawChat",
+            text=text,
+            raw_message={"synthetic": True, "moment_comment": True, "moment_id": moment_id, "replied": replied},
+        )
+        try:
+            await self._handle_inbound(inbound)
+        except Exception:  # noqa: BLE001 — best-effort note
+            logger.debug("clawchat moment comment note delivery failed", exc_info=True)
 
     async def _emit_awareness_note(self) -> None:
         """Emit one consolidated low-priority awareness note to the owner's direct chat.

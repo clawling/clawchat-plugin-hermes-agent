@@ -1,0 +1,9 @@
+{
+  "name": "moment.comment.created notify.signal synthesizes one owner note",
+  "behavior": "moment_comment",
+  "wire": {
+    "version": "2", "event": "notify.signal", "trace_id": "parity-moment-comment-created", "emitted_at": 1893456000000,
+    "payload": { "type": "moment.comment.created", "entity_id": "42", "event_id": "parity-evt-moment-comment-created", "version": 1893456000000, "message_id": "msg-parity-moment-comment-created" }
+  },
+  "expected": { "synthesizes_owner_note": true, "replied": false }
+}
