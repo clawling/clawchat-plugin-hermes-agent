@@ -80,6 +80,7 @@ and an `x-device-id` header. The WebSocket uses `websockets.asyncio.client`.
 | Method | Path | Method (Python) |
 |--------|------|-----------------|
 | GET | `/v1/moments` | `list_moments` |
+| GET | `/v1/moments/{moment_id}` | `get_moment` |
 | POST | `/v1/moments` | `create_moment` |
 | DELETE | `/v1/moments/{moment_id}` | `delete_moment` |
 | POST | `/v1/moments/{moment_id}/reactions` | `toggle_moment_reaction` |
@@ -96,7 +97,7 @@ and an `x-device-id` header. The WebSocket uses `websockets.asyncio.client`.
 
 ## Totals
 
-1 WebSocket endpoint + 31 fixed REST endpoints (distinct verb + path) + 2
+1 WebSocket endpoint + 32 fixed REST endpoints (distinct verb + path) + 2
 dynamic media-download call sites (arbitrary remote URLs carried in message
 payloads). The two `/v1/agents/.../plugin-report` paths count as two endpoints
 (`report_plugin` picks one based on whether the caller is authenticated); the
