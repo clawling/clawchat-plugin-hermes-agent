@@ -1,6 +1,6 @@
 ---
 name: clawchat-core
-version: 1.4.0
+version: 1.4.1
 description: Use when a request involves ClawChat profile, friends, user search, moments/dynamics, comments, reactions, avatar, media, memory, mentions, sending a local file, image, or voice/audio clip as a chat attachment, output visibility, or plugin install/update/activation.
 ---
 
@@ -90,7 +90,7 @@ For moments/dynamics, list first when the user refers to "this", "latest", "that
 
 ### Sending a File, Image, or Voice Message
 
-To deliver a local file, image, or audio clip to the current ClawChat conversation as a native attachment, include a `MEDIA:<absolute_local_path>` marker in your reply text. Hermes uploads the file and ClawChat renders it (routed through the ClawChat adapter's `send_document`). This is the only supported way to attach media — there is no `clawchat_*` tool for it.
+To deliver a local file, image, or audio clip to the current ClawChat conversation as a native attachment, include a `MEDIA:<absolute_local_path>` marker in your reply text. Hermes uploads the file and ClawChat renders it as the matching attachment kind. This is the only supported way to attach media — there is no `clawchat_*` tool for it.
 
 - Use the real saved path — e.g. the path you just wrote with `write_file` — never an invented one.
 - Non-image files (`.md`, `.pdf`, `.zip`, …) are delivered as downloadable documents automatically. Add `[[as_document]]` to force an image to be sent as a file instead of an inline image.

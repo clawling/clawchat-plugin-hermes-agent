@@ -4034,17 +4034,100 @@ class ClawChatAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Deliver a non-image file attachment natively.
 
-        Hermes' run.py routes non-image ``MEDIA:`` attachments here with no
-        hasattr guard; without this override the base fallback only posts a
-        "couldn't deliver" notice and the file never reaches ClawChat. Upload
-        the file through the immediate media-send path (parity with
-        ``send_image_file``). If the upload is dropped, ``send`` withholds the
-        misleading media frame, so preserve the base-class contract and post
-        the notice instead of going silent — never echoing ``file_path``, which
-        is a host filesystem path.
+        Hermes' run.py routes every ``MEDIA:`` attachment that is not an image,
+        audio clip, or video here, with no hasattr guard; without this override
+        the base fallback only posts a "couldn't deliver" notice and the file
+        never reaches ClawChat. Upload the file through the immediate
+        media-send path (parity with ``send_image_file``). Audio and video are
+        handled by ``send_voice`` / ``send_video``, which run.py prefers.
+        """
+        if file_name:
+            failure_notice = f"⚠️ Couldn't deliver the file attachment ({file_name})."
+        else:
+            failure_notice = "⚠️ Couldn't deliver the file attachment."
+        return await self._deliver_media_attachment(
+            chat_id=chat_id,
+            media_path=file_path,
+            caption=caption,
+            reply_to=reply_to,
+            metadata=metadata,
+            failure_notice=failure_notice,
+        )
+
+    async def send_voice(
+        self,
+        chat_id: str,
+        audio_path: str,
+        caption: str | None = None,
+        reply_to: str | None = None,
+        metadata: Any = None,
+        **kwargs: Any,
+    ) -> SendResult:
+        """Deliver an audio clip as a native ClawChat voice message.
+
+        ``should_send_media_as_audio`` routes *every* recognized audio
+        extension to this method on non-Telegram platforms, so a ClawChat
+        ``MEDIA:`` audio attachment never reaches ``send_document``. Without
+        this override the base fallback only posted "Couldn't deliver the audio
+        attachment" and the clip was never uploaded. ClawChat infers the
+        ``audio`` fragment kind from the uploaded file's mime, so the same
+        immediate media-send path as ``send_document`` produces a voice bubble
+        — there is no separate voice kind or duration to set.
+        """
+        return await self._deliver_media_attachment(
+            chat_id=chat_id,
+            media_path=audio_path,
+            caption=caption,
+            reply_to=reply_to,
+            metadata=metadata,
+            failure_notice="⚠️ Couldn't deliver the audio attachment.",
+        )
+
+    async def send_video(
+        self,
+        chat_id: str,
+        video_path: str,
+        caption: str | None = None,
+        reply_to: str | None = None,
+        metadata: Any = None,
+        **kwargs: Any,
+    ) -> SendResult:
+        """Deliver a video clip natively.
+
+        run.py routes ``.mp4``/``.mov``/… ``MEDIA:`` attachments here before
+        ever considering ``send_document``, so the base "couldn't deliver"
+        fallback applied to video too. Same immediate media-send path; ClawChat
+        infers the ``video`` fragment kind from the uploaded file's mime.
+        """
+        return await self._deliver_media_attachment(
+            chat_id=chat_id,
+            media_path=video_path,
+            caption=caption,
+            reply_to=reply_to,
+            metadata=metadata,
+            failure_notice="⚠️ Couldn't deliver the video attachment.",
+        )
+
+    async def _deliver_media_attachment(
+        self,
+        *,
+        chat_id: str,
+        media_path: str,
+        caption: str | None,
+        reply_to: str | None,
+        metadata: Any,
+        failure_notice: str,
+    ) -> SendResult:
+        """Upload one local media file and send it as an attachment.
+
+        Shared by ``send_voice`` / ``send_video``. If the upload is dropped,
+        ``send`` withholds the misleading media frame, so preserve the
+        base-class contract and post ``failure_notice`` instead of going
+        silent — never echoing ``media_path``, which is a host filesystem path
+        that would leak the Hermes home layout.
         """
         merged_metadata = dict(metadata or {})
-        merged_metadata["media_urls"] = [normalize_outbound_media_reference(file_path)]
+        merged_metadata["media_urls"] = [normalize_outbound_media_reference(media_path)]
         merged_metadata[IMMEDIATE_MEDIA_SEND_METADATA_KEY] = True
         result = await self.send(
             chat_id=chat_id,
@@ -4054,12 +4137,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
         if result is None or result.success:
             return result
-        if file_name:
-            notice = f"⚠️ Couldn't deliver the file attachment ({file_name})."
-        else:
-            notice = "⚠️ Couldn't deliver the file attachment."
-        if caption:
-            notice = f"{caption}\n{notice}"
+        notice = f"{caption}\n{failure_notice}" if caption else failure_notice
         return await self.send(
             chat_id=chat_id,
             content=notice,
