@@ -63,6 +63,58 @@ explicit ClawChat conversation ids without changing Hermes source. The
 patch is narrowly scoped and idempotent (it tags itself with
 `_clawchat_target_patch=True`).
 
+Every other target is delegated to Hermes' original parser, which for an
+unknown platform returns `(None, None, False)` — "not explicit". The host then
+resolves the reference through `gateway.channel_directory.resolve_channel_name`,
+i.e. the friendly-name → id lookup, and re-parses the result. That is a
+legitimate path (it is how "send to <agent nickname>" works) and must not be
+short-circuited: the directory is what turns a nickname into the `cnv_…` the
+patch then accepts.
+
+## Outbound chat_id validity gate
+
+`ClawChatConnection.send_frame` drops any frame whose `chat_id` is present but
+does not start with `cnv_` (`connection.is_valid_chat_id`), logging at WARNING
+with the offending value and `reason=invalid_chat_id`.
+
+The check reads the **raw frame**, not `queued.chat_id`: `_queued_frame`
+coerces a missing key to `""`, which would make an explicitly-empty `chat_id`
+indistinguishable from an absent one. The rule is *a frame that carries a
+`chat_id` must carry a valid one* — an absent `chat_id` is fine, an empty one
+is not.
+
+`CHAT_ID_PREFIX` and the rejected/accepted sample set are **cross-plugin
+contract**, pinned by `clawchat_gateway/fixtures/permission_events/invalid-chat-id-outbound.json`
+— a byte-identical copy of the openclaw plugin's fixture, asserted from both
+suites (`tests/test_parity.py`). The openclaw side enforces the same rule at
+its own structured boundaries (`sendRawEnvelope`, `sendAlignedAckableEnvelope`,
+`sendOpenclawClawlingReaction`).
+
+Every ClawChat conversation id is minted by member-backend with the `cnv_`
+prefix and msghub resolves a chat_id only through member-backend, so anything
+else is refused upstream with `code=400: invalid conversation id` — a wasted
+round trip and an ERROR line in msghub for a frame that never had a recipient.
+Production (2026-07-30) saw agents address peers by their `usr_…` idcode and by
+a host-composed `direct:{self}:{peer}` key.
+
+The gate lives at the connection boundary rather than at any single caller
+because the plugin forwards a chat_id chosen upstream — by the host's target
+parser, its channel directory (whose entry ids are `{chat_id}` or
+`{chat_id}:{thread_id}`, so it *can* compose values that are not ClawChat
+conversation ids), a cron target, or a tool argument. Guarding the one point
+every frame passes through does not depend on enumerating those paths.
+
+Unlike the dead-chat gate, this one is **not** re-checked when the reconnect
+queue replays: a dead chat is a revocable server state a queued frame can fall
+into, whereas a malformed chat_id is wrong at construction time and can never
+become valid — rejecting it at the entry point keeps it out of the queue
+entirely.
+
+The drop surfaces to the caller as `send_frame` → `False`, which
+`ClawChatAdapter.send` turns into `SendResult(success=False)` and
+`standalone_send` into `{"error": …}`, so the agent is told the send failed
+rather than reading it as delivered.
+
 ## Standalone sender (out-of-process `hermes send` / cron)
 
 `register_platform` also passes `standalone_sender_fn=_clawchat_standalone_send`

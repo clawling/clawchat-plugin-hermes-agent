@@ -1,0 +1,34 @@
+{
+  "name": "a chat_id that cannot name a conversation is refused locally, before the wire",
+  "behavior": "invalid_chat_id",
+  "wire": {
+    "version": "2",
+    "event": "message.send",
+    "trace_id": "parity-invalid-chat-id",
+    "emitted_at": 1893456000000,
+    "chat_id": "usr_01KXY9CACEFP4VMS37VYBW3B07",
+    "payload": {
+      "message_id": "msg-parity-invalid-chat-id",
+      "fragments": [{ "kind": "text", "text": "must never leave" }]
+    }
+  },
+  "context": {
+    "note": "Every conversation id is minted by member-backend with the cnv_ prefix and msghub resolves a chat_id only through member-backend, so anything else is answered with code=400 invalid conversation id. Both plugins forward a chat_id chosen upstream (host target parser, channel directory, cron target, tool argument), so each guards its own outbound boundary. The rejected samples below are the shapes observed in msghub production logs on 2026-07-30.",
+    "rejected": [
+      "usr_01KXY9CACEFP4VMS37VYBW3B07",
+      "direct:usr_01KYR1TBJY:usr_01KXY9CAC",
+      "agt_01KYRWA3H9F6H8VPR53P2G24ST",
+      "clawchat-plugin-openclaw",
+      "default",
+      "0",
+      ""
+    ],
+    "accepted": ["cnv_01KYT0ZGPRE4KVBKNKS109FFCG"]
+  },
+  "expected": {
+    "chat_id_prefix": "cnv_",
+    "valid_chat_id": false,
+    "sent_on_wire": false,
+    "gated_when_chat_id_absent": false
+  }
+}

@@ -56,6 +56,25 @@ SEND_QUEUE_MAX = 128
 BACKOFF_RESET_AFTER_SECONDS = 5.0
 ACKABLE_EVENTS = {"message.send", "message.reply"}
 
+# Every ClawChat conversation id is minted by member-backend with the `cnv_`
+# prefix, and msghub resolves a chat_id only through member-backend. Anything
+# else — a `usr_…` user idcode, a host-composed `direct:{self}:{peer}` key, an
+# adapter name, a placeholder — is rejected upstream with
+# `code=400: invalid conversation id`, which costs a round trip and leaves an
+# ERROR line in msghub for a frame that never had a recipient.
+CHAT_ID_PREFIX = "cnv_"
+
+
+def is_valid_chat_id(chat_id: Any) -> bool:
+    """Whether `chat_id` can name a ClawChat conversation at all.
+
+    A purely *static* check — it says nothing about whether the conversation
+    exists, is alive, or admits this sender. Those are server-side questions
+    answered by `message.error`; this one is answerable locally and is always
+    wrong to send.
+    """
+    return isinstance(chat_id, str) and chat_id.startswith(CHAT_ID_PREFIX)
+
 
 class _ChatRejectedError(RuntimeError):
     """Internal sentinel: a queued frame was dropped by the dead-chat gate.
@@ -516,6 +535,21 @@ class ClawChatConnection:
     ) -> bool:
         text = encode_frame(frame)
         queued = self._queued_frame(frame, text, wait_for_ack=wait_for_ack)
+        # Read the RAW frame, not `queued.chat_id`: `_queued_frame` coerces a
+        # missing key to "" and would make an explicitly-empty chat_id
+        # indistinguishable from an absent one. The rule is "a frame that
+        # CARRIES a chat_id must carry a valid one" — byte-identical to the
+        # openclaw plugin's, pinned by the shared parity fixture.
+        raw_chat_id = frame.get("chat_id")
+        if raw_chat_id is not None and not is_valid_chat_id(raw_chat_id):
+            # A malformed chat_id is wrong at construction time and can never
+            # become valid, so — unlike the dead-chat gate below, which guards a
+            # revocable server state and therefore must be re-checked when the
+            # reconnect queue replays — rejecting here at the entry point is
+            # sufficient: the frame never enters the send queue at all.
+            self._log_invalid_chat_id(queued)
+            self._log_send_dropped(queued, reason="invalid_chat_id")
+            return False
         if self._chat_is_rejected(queued.chat_id):
             # Rule is "any frame carrying a rejected chat_id", not an event-name
             # allowlist: a conversation the server refuses must receive nothing,
@@ -1855,6 +1889,22 @@ class ClawChatConnection:
             self._is_chat_rejected is not None
             and bool(chat_id)
             and self._is_chat_rejected(chat_id)
+        )
+
+    def _log_invalid_chat_id(self, queued: _QueuedFrame) -> None:
+        """Surface a locally-detectable addressing bug at WARNING.
+
+        `_log_send_dropped` alone is INFO and shaped for routine drops; this one
+        names the offending value so the caller that composed it can be found
+        without correlating against msghub's logs.
+        """
+        logger.warning(
+            "clawchat outbound frame dropped: chat_id is not a ClawChat "
+            "conversation id event=%s chat_id=%r trace_id=%s expected_prefix=%s",
+            queued.event_name,
+            queued.chat_id,
+            queued.trace_id,
+            CHAT_ID_PREFIX,
         )
 
     def _log_send_dropped(self, queued: _QueuedFrame, *, reason: str) -> None:
