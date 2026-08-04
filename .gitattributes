@@ -1,0 +1,17 @@
+# `hermes plugins install clawling/clawchat-plugin-hermes-agent` installs this
+# repo by cloning it, so a Windows host with the default core.autocrlf=true
+# would rewrite every checked-out text file to CRLF. Pin LF so the bytes the
+# plugin reads at runtime — skills/*/SKILL.md, prompts/*.md, plugin.yaml — are
+# the bytes that were committed, and stay comparable with the copies served
+# over HTTP by the skill-update flow.
+* text=auto eol=lf
+
+# Binary-ish assets that must never be line-ending normalised.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.whl binary

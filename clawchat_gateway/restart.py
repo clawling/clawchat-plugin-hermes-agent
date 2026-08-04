@@ -20,12 +20,28 @@ def _hermes_dir() -> Path:
     return _hermes_home() / "hermes-agent"
 
 
+def _venv_hermes(venv: Path) -> list[Path]:
+    """Console-script locations inside a venv, in probe order.
+
+    Windows venvs put console scripts in ``Scripts\\`` with an ``.exe`` shim, not
+    ``bin/``. Probing only the POSIX layout meant every Windows lookup missed and
+    fell through to the bare ``Path("hermes")``, so a restart worked only when
+    hermes happened to be on PATH already.
+    """
+    if sys.platform == "win32":
+        return [venv / "Scripts" / "hermes.exe", venv / "Scripts" / "hermes"]
+    return [venv / "bin" / "hermes"]
+
+
 def _hermes_binary(hermes_dir: Path) -> Path:
-    candidates = [
-        hermes_dir / ".venv" / "bin" / "hermes",
-        Path.home() / ".hermes" / "hermes-agent" / ".venv" / "bin" / "hermes",
-        Path("/opt/hermes/.venv/bin/hermes"),
-    ]
+    roots = [hermes_dir, Path.home() / ".hermes" / "hermes-agent"]
+    if sys.platform != "win32":
+        # Container image layout; there is no Windows equivalent to probe.
+        roots.append(Path("/opt/hermes"))
+    candidates = [exe for root in roots for exe in _venv_hermes(root / ".venv")]
+    # Bare "hermes" is the last resort: os.execvpe resolves it through PATH
+    # (and through PATHEXT on Windows), which is correct whenever the venv is
+    # already active.
     return next((path for path in candidates if path.exists()), Path("hermes"))
 
 

@@ -4,6 +4,8 @@ import asyncio
 import json
 import logging
 import mimetypes
+import os
+import sys
 import uuid
 from pathlib import Path
 from collections.abc import Sequence
@@ -40,6 +42,7 @@ _DENIED_ABS_PREFIXES: tuple[str, ...] = (
 )
 
 # Denied relative to the user's HOME (e.g. ~/.ssh/id_rsa, ~/.hermes/.env).
+# These carry over to Windows unchanged: Path.home() resolves to %USERPROFILE%.
 _DENIED_HOME_SUBPATHS: tuple[str, ...] = (
     ".ssh",
     ".aws",
@@ -49,9 +52,33 @@ _DENIED_HOME_SUBPATHS: tuple[str, ...] = (
     ".hermes/.env",
 )
 
+# Windows equivalents of the absolute prefixes above, as (env var, subpath).
+# They must be resolved from the environment rather than hardcoded: the drive
+# letter and profile root are not fixed. Without these the whole absolute-prefix
+# layer was inert on Windows — "/etc" resolves to a drive-relative "C:\etc" that
+# never exists, so nothing on that list could ever match.
+#   %SystemRoot%  - the /etc + /proc + /sys analogue, and where the SAM and
+#                   SYSTEM registry hives live (System32\config).
+#   Credentials   - Credential Manager blobs.
+#   Protect       - DPAPI master keys that decrypt the above.
+_DENIED_WINDOWS_ENV_SUBPATHS: tuple[tuple[str, str], ...] = (
+    ("SystemRoot", ""),
+    ("WINDIR", ""),
+    ("APPDATA", "Microsoft/Credentials"),
+    ("LOCALAPPDATA", "Microsoft/Credentials"),
+    ("APPDATA", "Microsoft/Protect"),
+    ("LOCALAPPDATA", "Microsoft/Vault"),
+)
+
 
 def _denied_delivery_paths() -> list[Path]:
     denied = [Path(p) for p in _DENIED_ABS_PREFIXES]
+    if sys.platform == "win32":
+        for var, sub in _DENIED_WINDOWS_ENV_SUBPATHS:
+            root = os.environ.get(var)
+            if not root:
+                continue
+            denied.append(Path(root) / sub if sub else Path(root))
     try:
         home = Path.home()
     except (RuntimeError, OSError):
