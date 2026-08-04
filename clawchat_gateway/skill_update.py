@@ -1,8 +1,8 @@
 """Conversational, adapter-driven hot-update of ClawChat skill markdown.
 
 This module is the Python (Hermes) re-implementation of the cross-language
-skill-update contract documented in
-``ops/agent-plugin/skill-dynamic-update-plan.md`` (§6, "H1 variant").
+skill-update contract; this repo's end of the flow is documented in
+``docs/skill-updates.md``.
 It re-implements the semantics of the install-cli TypeScript reference
 (``packages/core/src/skills/check-update.ts`` + ``installers/metadata.ts``)
 WITHOUT taking any dependency on it.

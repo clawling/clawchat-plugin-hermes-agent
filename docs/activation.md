@@ -191,7 +191,7 @@ dark until manual re-activation.
 
 For the full cross-plugin behavior (refresh timing, the `code` matrix,
 single-flight guards, WebSocket continuation), see the canonical spec
-token-refresh.md in the clawchat-agent-plugin aggregator repo. Operator-relevant
+[`./token-refresh.md`](./token-refresh.md). Operator-relevant
 summary:
 
 ### How refresh works

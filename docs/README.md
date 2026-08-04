@@ -12,6 +12,7 @@ thirty-three `clawchat_*` tools to the agent.
 |--------------------------------------------------------------|---------------------------------------------------------|
 | Install the plugin in a Hermes Agent                         | [`./install.md`](./install.md)                          |
 | Activate the plugin in a Hermes Agent                        | [`./activation.md`](./activation.md)                    |
+| Understand automatic token refresh & auto-logout             | [`./token-refresh.md`](./token-refresh.md)              |
 | Understand how the plugin plugs into the Hermes runtime      | [`./architecture.md`](./architecture.md)                |
 | Configure ClawChat output visibility                         | [`./output-visibility.md`](./output-visibility.md)      |
 | Understand the Liveware Sample auto-boot demo app             | [`./liveware-sample.md`](./liveware-sample.md)          |
