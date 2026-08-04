@@ -58,6 +58,7 @@ from clawchat_gateway.connection import (
     HANDSHAKE_TIMEOUT_SECONDS,
     ClawChatConnection,
     ConnectionState,
+    is_valid_chat_id,
 )
 from clawchat_gateway.group_message_coalescer import (
     GroupMessageCoalescer,
@@ -4218,6 +4219,41 @@ class ClawChatAdapter(BasePlatformAdapter):
             if value == session_key:
                 routes.pop(key, None)
 
+    def _owner_approval_route_chat_id(self, session_key: str) -> str:
+        """The conversation an approval card was delivered to, by session key.
+
+        `_owner_approval_routes` is keyed by chat_id, so this is the reverse
+        lookup; only group-forwarded approvals record a route.
+        """
+        routes = getattr(self, "_owner_approval_routes", {})
+        for chat_id, value in routes.items():
+            if value == session_key:
+                return str(chat_id or "")
+        return ""
+
+    def _approval_reply_chat_id(self, frame: dict[str, Any], session_key: str) -> str:
+        """Where the resolution of `session_key` must be delivered.
+
+        A user idcode is NOT an answer here: `sender_id` names the owner, not a
+        conversation, and member-backend answers a `usr_…` chat_id with
+        `code=400: invalid conversation id` (the outbound gate now drops it
+        locally instead, which would lose the resolution silently). Every
+        candidate below is a real conversation id, checked before use:
+
+        1. the frame the owner interacted with — the card's own conversation;
+        2. the group-forward route remembered when the card was sent;
+        3. the owner's direct conversation from the activation cache.
+        """
+        candidates = (
+            frame.get("chat_id"),
+            self._owner_approval_route_chat_id(session_key),
+            self._owner_direct_chat_id(),
+        )
+        for candidate in candidates:
+            if is_valid_chat_id(candidate):
+                return str(candidate)
+        return ""
+
     async def _handle_owner_forwarded_approval(self, inbound: InboundMessage) -> bool:
         if inbound.chat_type != "direct" or inbound.sender_id != self._owner_user_id():
             return False
@@ -4261,8 +4297,22 @@ class ClawChatAdapter(BasePlatformAdapter):
         resolved = self._resolve_gateway_approval(session_key, decision, resolve_all=False)
         if not resolved:
             return True
+        # Resolve the reply's conversation BEFORE forgetting the route — the
+        # route is one of the places that knows it.
+        chat_id = self._approval_reply_chat_id(frame, session_key)
         self._forget_owner_approval_route(session_key)
-        chat_id = str(frame.get("chat_id") or sender_id)
+        if not chat_id:
+            logger.error(
+                "clawchat approval resolution not delivered "
+                "reason=no_conversation_id session_key=%s decision=%s resolved=%d "
+                "frame_chat_id=%r owner_user_id=%s",
+                session_key,
+                decision,
+                resolved,
+                frame.get("chat_id"),
+                self._owner_user_id(),
+            )
+            return True
         await self.send(
             chat_id,
             self._approval_resolution_text(decision, resolved),

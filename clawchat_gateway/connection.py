@@ -64,6 +64,20 @@ ACKABLE_EVENTS = {"message.send", "message.reply"}
 # ERROR line in msghub for a frame that never had a recipient.
 CHAT_ID_PREFIX = "cnv_"
 
+# The prefix alone is not the rule. member-backend mints every
+# externally-visible id as `<3 lowercase ascii>_<26 Crockford base32 chars>`
+# and validates that shape server-side: exactly 30 chars, `_` at index 3, and a
+# body decodable as Crockford base32 — an alphabet that drops I, L, O and U to
+# stay unambiguous, decoded case-insensitively so a lowercase body is equally
+# valid. Checking only the prefix still lets `cnv_`,
+# `cnv_<id>:thr_1` and `cnv_<display name>` onto the wire, where member-backend
+# answers `code=400: invalid conversation id` all the same. These constants are
+# pinned by the shared parity fixture (`invalid-chat-id-outbound.json`).
+IDCODE_LENGTH = 30
+IDCODE_BODY_LENGTH = 26
+CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+_CROCKFORD_CHARS = frozenset(CROCKFORD_ALPHABET + CROCKFORD_ALPHABET.lower())
+
 
 def is_valid_chat_id(chat_id: Any) -> bool:
     """Whether `chat_id` can name a ClawChat conversation at all.
@@ -73,7 +87,14 @@ def is_valid_chat_id(chat_id: Any) -> bool:
     answered by `message.error`; this one is answerable locally and is always
     wrong to send.
     """
-    return isinstance(chat_id, str) and chat_id.startswith(CHAT_ID_PREFIX)
+    if not isinstance(chat_id, str):
+        return False
+    if len(chat_id) != IDCODE_LENGTH:
+        return False
+    if not chat_id.startswith(CHAT_ID_PREFIX):
+        return False
+    body = chat_id[len(CHAT_ID_PREFIX) :]
+    return all(char in _CROCKFORD_CHARS for char in body)
 
 
 class _ChatRejectedError(RuntimeError):
@@ -535,19 +556,22 @@ class ClawChatConnection:
     ) -> bool:
         text = encode_frame(frame)
         queued = self._queued_frame(frame, text, wait_for_ack=wait_for_ack)
-        # Read the RAW frame, not `queued.chat_id`: `_queued_frame` coerces a
-        # missing key to "" and would make an explicitly-empty chat_id
-        # indistinguishable from an absent one. The rule is "a frame that
-        # CARRIES a chat_id must carry a valid one" — byte-identical to the
-        # openclaw plugin's, pinned by the shared parity fixture.
-        raw_chat_id = frame.get("chat_id")
-        if raw_chat_id is not None and not is_valid_chat_id(raw_chat_id):
+        # Test KEY PRESENCE, not `frame.get(...) is not None`: `_queued_frame`
+        # coerces a missing key to "" and would make an explicitly-empty chat_id
+        # indistinguishable from an absent one, while a `None` default would let
+        # `{"chat_id": null}` skip the gate entirely. msghub decodes an explicit
+        # null into the same empty string as a missing key and rejects every
+        # business event carrying one (`reason=missing_chat_id`), so null is an
+        # unusable value, not an absent field. The rule is "a frame that CARRIES
+        # a chat_id must carry a valid one" — byte-identical to the openclaw
+        # plugin's, pinned by the shared parity fixture.
+        if "chat_id" in frame and not is_valid_chat_id(frame["chat_id"]):
             # A malformed chat_id is wrong at construction time and can never
             # become valid, so — unlike the dead-chat gate below, which guards a
             # revocable server state and therefore must be re-checked when the
             # reconnect queue replays — rejecting here at the entry point is
             # sufficient: the frame never enters the send queue at all.
-            self._log_invalid_chat_id(queued)
+            self._log_invalid_chat_id(queued, frame["chat_id"])
             self._log_send_dropped(queued, reason="invalid_chat_id")
             return False
         if self._chat_is_rejected(queued.chat_id):
@@ -1891,20 +1915,24 @@ class ClawChatConnection:
             and self._is_chat_rejected(chat_id)
         )
 
-    def _log_invalid_chat_id(self, queued: _QueuedFrame) -> None:
+    def _log_invalid_chat_id(self, queued: _QueuedFrame, raw_chat_id: Any) -> None:
         """Surface a locally-detectable addressing bug at WARNING.
 
         `_log_send_dropped` alone is INFO and shaped for routine drops; this one
         names the offending value so the caller that composed it can be found
-        without correlating against msghub's logs.
+        without correlating against msghub's logs. It logs the RAW value rather
+        than `queued.chat_id`, which coerces `None` to "" and would hide an
+        explicit null behind an empty string.
         """
         logger.warning(
             "clawchat outbound frame dropped: chat_id is not a ClawChat "
-            "conversation id event=%s chat_id=%r trace_id=%s expected_prefix=%s",
+            "conversation id event=%s chat_id=%r trace_id=%s "
+            "expected=%s+%d Crockford base32 chars",
             queued.event_name,
-            queued.chat_id,
+            raw_chat_id,
             queued.trace_id,
             CHAT_ID_PREFIX,
+            IDCODE_BODY_LENGTH,
         )
 
     def _log_send_dropped(self, queued: _QueuedFrame, *, reason: str) -> None:

@@ -31,6 +31,7 @@ from clawchat_gateway.clawchat_metadata import (
     update_metadata as update_clawchat_metadata,
 )
 from clawchat_gateway.config import ClawChatConfig
+from clawchat_gateway.connection import CHAT_ID_PREFIX, is_valid_chat_id
 from clawchat_gateway.storage import get_clawchat_store, make_owner_profile_persister
 from clawchat_gateway.mention_message import normalize_mention_targets
 from clawchat_gateway.profile import ProfileConfigError, load_profile_config
@@ -59,6 +60,22 @@ def _validation_error(message: str, *, code: str | None = None) -> dict[str, Any
     if code:
         result["code"] = code
     return result
+
+
+def _invalid_chat_id_error(chat_id: Any) -> dict[str, Any]:
+    """A model-actionable rejection for a chat_id that cannot name a chat.
+
+    The value here comes straight from the LLM, so a hallucinated `usr_…`, a
+    nickname, or a leftover placeholder is routine. Left unchecked it reaches
+    the wire and comes back as a generic transport error the model cannot act
+    on; naming the expected shape lets it correct itself on the next turn.
+    """
+    return _validation_error(
+        "chatId must be a ClawChat conversation id "
+        f"({CHAT_ID_PREFIX} + 26 Crockford base32 chars), got {chat_id!r} — "
+        "use the chatId of the conversation you are in, not a user id or a name",
+        code="invalid_chat_id",
+    )
 
 
 def _validation_error_from_exception(exc: ValueError) -> dict[str, Any]:
@@ -713,6 +730,8 @@ async def mention_message(
 ) -> dict[str, Any]:
     if not isinstance(chat_id, str) or not chat_id.strip():
         return _validation_error("chatId is required")
+    if not is_valid_chat_id(chat_id.strip()):
+        return _invalid_chat_id_error(chat_id)
     if chat_type not in {"direct", "group"}:
         return _validation_error("chatType must be direct or group")
     if text is not None and not isinstance(text, str):
@@ -750,6 +769,8 @@ async def react_message(
 ) -> dict[str, Any]:
     if not isinstance(chat_id, str) or not chat_id.strip():
         return _validation_error("chatId is required")
+    if not is_valid_chat_id(chat_id.strip()):
+        return _invalid_chat_id_error(chat_id)
     if not isinstance(emoji, str) or not emoji.strip():
         return _validation_error("emoji is required")
     if target_message_id is not None and not isinstance(target_message_id, str):
