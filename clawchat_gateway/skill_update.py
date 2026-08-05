@@ -45,10 +45,17 @@ logger = logging.getLogger(__name__)
 OFFICIAL_SKILLS_BASE = (
     "https://raw.githubusercontent.com/clawling/clawchat-plugin-install-cli"
 )
-# Default git ref for the skills tree. Production SHOULD pin an immutable
-# ``skills-vX.Y.Z`` tag (see ``ref_for_target_version``); ``main`` is the
-# fallback when no target version is supplied.
-DEFAULT_SKILLS_REF = "main"
+# Default git ref for the skills tree — an immutable ``skills-vX.Y.Z`` tag, not
+# ``main``. Nothing currently supplies a target version (the trigger signal is
+# content-free and ``ref_for_target_version`` has no caller), so this constant
+# is the only ref every fetch uses: on ``main`` a released agent would silently
+# follow whatever landed in the skills tree since, including work in progress.
+#
+# Moving the pin is therefore a deliberate plugin release: publish the new
+# ``skills-vX.Y.Z`` tag in the install-cli repo, bump this constant, ship it.
+# ``liveware_sample`` imports this same ref, so the pin covers the ``livewares``
+# tree at that tag too.
+DEFAULT_SKILLS_REF = "skills-v1.6.0"
 # Defence in depth: refuse an absurdly large response before hashing/writing.
 MAX_SKILL_BYTES = 256 * 1024
 # Which host's skill set this plugin consumes from ``skills.<target>``.
