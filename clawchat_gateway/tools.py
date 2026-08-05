@@ -703,6 +703,26 @@ async def leave_group(conversation_id: str) -> dict[str, Any]:
         return _unknown_error(exc)
 
 
+async def add_group_member(conversation_id: str, user_id: str) -> dict[str, Any]:
+    if not isinstance(conversation_id, str) or not conversation_id.strip():
+        return _validation_error("conversationId is required")
+    if not isinstance(user_id, str) or not user_id.strip():
+        return _validation_error("userId is required")
+
+    client, err = _build_client()
+    if err is not None:
+        return err
+    try:
+        return await client.add_conversation_member(
+            conversation_id=conversation_id.strip(),
+            user_id=user_id.strip(),
+        )
+    except ClawChatApiError as exc:
+        return _api_error(exc)
+    except Exception as exc:  # noqa: BLE001
+        return _unknown_error(exc)
+
+
 async def mention_message(
     chat_id: Any,
     *,
