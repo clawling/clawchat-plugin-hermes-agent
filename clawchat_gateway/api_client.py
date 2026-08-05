@@ -311,6 +311,18 @@ class ClawChatApiClient:
             raise ClawChatApiError("validation", "conversation_id is required")
         return await self._call_json("POST", f"/v1/conversations/{conversation_id}/leave")
 
+    async def add_conversation_member(self, *, conversation_id: str, user_id: str) -> dict:
+        if not conversation_id.strip():
+            raise ClawChatApiError("validation", "conversation_id is required")
+        if not user_id.strip():
+            raise ClawChatApiError("validation", "user_id is required")
+        return await self._call_json(
+            "POST",
+            f"/v1/conversations/{conversation_id}/members",
+            body=json.dumps({"user_id": user_id}).encode("utf-8"),
+            extra_headers={"content-type": "application/json"},
+        )
+
     async def get_agent_detail(self, agent_id: str) -> dict:
         if not agent_id.strip():
             raise ClawChatApiError("validation", "agent_id is required")
