@@ -57,7 +57,34 @@ docker exec hermes sh -lc \
 | `--restart` | Compatibility flag; activation schedules a detached Hermes gateway restart by default. |
 | `--no-restart` | Skip the detached Hermes gateway restart after activation. |
 | `--new-account` | Replace this profile's ClawChat identity with a brand-new agent — drops the stored `user_id` so the server mints a fresh one. |
-| `--repair` | Re-pair the agent this profile already holds, keeping its identity. |
+| `--repair` | Re-pair the agent this profile already holds, keeping its identity. Refused when that identity has no local provenance (below). |
+
+#### Choosing between `--new-account` and `--repair`
+
+The two flags are not interchangeable, and the wrong one is not recoverable —
+it spends the code:
+
+| Intent | Flag |
+|---|---|
+| This profile should end up with **its own new agent** — including when `config.yaml` already names an agent it inherited from a clone | `--new-account` |
+| This profile **already paired its own agent** and merely lost the token (auto-logout, wiped `.env`) and the owner wants that same agent back | `--repair` |
+
+`--repair` keeps the stored `user_id` in the replay, so the server re-pairs
+*that* agent and consumes the code on it — it never creates an agent. Pointing
+it at an inherited identity therefore re-pairs the **source** profile's agent
+and leaves this profile with nothing of its own, which is exactly what a fresh
+install on a cloned profile looks like from the flag's point of view: no token,
+an identity already in `config.yaml`.
+
+Activation therefore refuses `--repair` (`UnprovenRepairError`, a subclass of
+`ExistingActivationError`, exit 1, **code not sent**) unless the identity is
+provably this profile's own — either `extra.profile` names the active profile,
+or this profile's own SQLite `activations` row records the same `user_id`. The
+database is the one piece of per-profile state `--clone` does not copy. The
+check fails **open** if the local store cannot answer, so an unreadable
+database never strands a legitimate repair. To repair an identity the check
+cannot vouch for, record the ownership first by setting
+`platforms.clawchat.extra.profile` to the active profile, then re-run.
 
 ### One profile, one agent
 

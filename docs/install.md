@@ -179,13 +179,24 @@ For protocol-level checks (WebSocket handshake, ack flow), see
   `CLAWCHAT_TOKEN` exists in `$HERMES_HOME/.env` and that
   `platforms.clawchat.extra.websocket_url` is set in `config.yaml`. The
   default is `wss://app.clawling.com/ws`.
+- **Activation refuses with "this Hermes profile is already paired"** — decide
+  what you actually want before re-running, because the wrong flag spends the
+  code. If this profile should get **its own new agent** — the normal case when
+  a freshly created profile already shows an identity, which it inherited from
+  a cloned `config.yaml` — use `--new-account`. Use `--repair` **only** when the
+  owner confirms this profile itself paired that agent and merely lost its
+  token: `--repair` keeps the stored `user_id`, so the server re-pairs *that*
+  agent and creates none here. Activation now refuses `--repair` outright
+  (`UnprovenRepairError`, code not sent) when the identity has no local
+  provenance; see [`./activation.md`](./activation.md#choosing-between---new-account-and---repair).
 - **A new profile's agent turns out to be an existing agent** (same ClawChat
-  account, or activation fails with "this Hermes profile is already paired") —
-  the command resolved to the wrong `HERMES_HOME`, almost always the default
-  profile. Do **not** request a new code yet: run the Step 0 checks in
+  account) — either the command resolved to the wrong `HERMES_HOME`, or
+  `--repair` replayed an inherited identity. Do **not** request a new code yet:
+  run the Step 0 checks in
   [Confirm the target profile](#confirm-the-target-profile-before-every-install--activate),
-  re-issue the command with `-p <profile>` **and** `HERMES_HOME` set, then use a
-  fresh code.
+  compare `extra.user_id` against the other profile's, then re-issue with
+  `-p <profile>` **and** `HERMES_HOME` set, plus `--new-account` if this profile
+  still needs its own agent.
 - **`[HERMES_HOME fallback] HERMES_HOME is unset but active profile is '<name>'`
   on stderr or in the Hermes log** — the process is writing into the *default*
   profile while `hermes profile use` says otherwise. Export `HERMES_HOME`
