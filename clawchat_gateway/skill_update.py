@@ -46,10 +46,12 @@ OFFICIAL_SKILLS_BASE = (
     "https://raw.githubusercontent.com/clawling/clawchat-plugin-install-cli"
 )
 # Default git ref for the skills tree — an immutable ``skills-vX.Y.Z`` tag, not
-# ``main``. Nothing currently supplies a target version (the trigger signal is
-# content-free and ``ref_for_target_version`` has no caller), so this constant
-# is the only ref every fetch uses: on ``main`` a released agent would silently
-# follow whatever landed in the skills tree since, including work in progress.
+# ``main``. The trigger signal is content-free, so nothing supplies a ref at
+# runtime and this constant is the only one every fetch uses: on ``main`` a
+# released agent would silently follow whatever landed in the skills tree
+# since, including work in progress. (A ``ref_for_target_version`` helper once
+# mapped a signalled version to a tag; no signal ever carried one, so it was
+# removed rather than left as an unused second source of truth.)
 #
 # Moving the pin is therefore a deliberate plugin release: publish the new
 # ``skills-vX.Y.Z`` tag in the install-cli repo, bump this constant, ship it.
@@ -368,14 +370,6 @@ def seed_managed_skill(skill_id: str, bundled_path: Path) -> Path:
 
 
 # --- Remote source ----------------------------------------------------------
-
-
-def ref_for_target_version(target_version: str | None) -> str:
-    """Map a target version to the immutable git tag, or fall back to ``main``."""
-    version = (target_version or "").strip()
-    if not version:
-        return DEFAULT_SKILLS_REF
-    return f"skills-v{version}"
 
 
 def _skills_base(ref: str) -> str:

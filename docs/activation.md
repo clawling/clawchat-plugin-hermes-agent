@@ -119,6 +119,32 @@ A config written before `extra.profile` existed carries no stamp and is
 indistinguishable from a clone, which is why the refusal above is unconditional
 rather than token-gated.
 
+#### Collision detection at load
+
+The guards prevent a *new* collision; they cannot undo one already written. If
+a mis-targeted activation stored another agent's `user_id` **and** stamped
+`extra.profile` with the profile it ran in, the identity is locally
+indistinguishable from one this profile earned, and every later guard — the
+clone check, the `--repair` provenance check — reads it as legitimate.
+
+So the plugin checks at load (`clawchat_gateway/profile_collision.py`, called
+from `_register_platform`): it compares this profile's `extra.user_id` against
+every sibling `config.yaml` under the Hermes root (`<root>/config.yaml` plus
+`<root>/profiles/*/config.yaml`) and logs a warning naming both profiles when
+two hold the same identity on the same `base_url`:
+
+```text
+ClawChat: Hermes profiles 'g' and 'default' are configured with the same
+ClawChat identity (usr_…). Both gateways authenticate as that one agent …
+To give this profile its own agent, activate a fresh connect code with
+--new-account …
+```
+
+Read-only and best-effort: only `extra.user_id` / `extra.base_url` are read
+(never a token), unreadable siblings are skipped, and a failure never blocks
+registration. Identical ids under different `base_url`s are not reported —
+separate deployments mint ids independently.
+
 To run a **second agent on the same host**, give it its own Hermes profile:
 
 ```bash

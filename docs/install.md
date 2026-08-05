@@ -210,6 +210,12 @@ For protocol-level checks (WebSocket handshake, ack flow), see
   profile while `hermes profile use` says otherwise. Export `HERMES_HOME`
   explicitly for that command and rerun; anything it already wrote landed in the
   wrong profile.
+- **`ClawChat: Hermes profiles 'x' and 'y' are configured with the same ClawChat
+  identity` in the Hermes log** — both gateways authenticate as one agent, so
+  one of the two profiles has no agent of its own and the last to pair owns the
+  live credentials. Decide which profile should keep that agent, then give the
+  other one its own with a fresh code and `--new-account`. Emitted at plugin
+  load; see [`./activation.md`](./activation.md#collision-detection-at-load).
 - **`config.yaml` shows `platforms.clawchat.extra.profile` ≠ the profile you are
   on** — cloned config (`hermes profile create --clone`) or an activation run
   against the wrong home. The plugin ignores the stale `user_id` and pairs this
