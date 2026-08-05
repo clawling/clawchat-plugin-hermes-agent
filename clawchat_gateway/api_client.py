@@ -11,7 +11,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 from clawchat_gateway import __version__
@@ -318,7 +318,7 @@ class ClawChatApiClient:
             raise ClawChatApiError("validation", "user_id is required")
         return await self._call_json(
             "POST",
-            f"/v1/conversations/{conversation_id}/members",
+            f"/v1/conversations/{quote(conversation_id, safe='')}/members",
             body=json.dumps({"user_id": user_id}).encode("utf-8"),
             extra_headers={"content-type": "application/json"},
         )

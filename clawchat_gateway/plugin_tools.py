@@ -1258,8 +1258,8 @@ def register_tools(ctx) -> None:
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "conversationId": {"type": "string", "description": "Concrete ClawChat group conversation id to add the user to"},
-                    "userId": {"type": "string", "description": "Concrete ClawChat user id (usr_...) to add to the group"},
+                    "conversationId": {"type": "string", "minLength": 1, "description": "Concrete ClawChat group conversation id to add the user to"},
+                    "userId": {"type": "string", "minLength": 1, "description": "Concrete ClawChat user id (usr_...) to add to the group"},
                 },
                 "required": ["conversationId", "userId"],
             },
