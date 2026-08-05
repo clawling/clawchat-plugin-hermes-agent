@@ -13,6 +13,7 @@ import yaml
 
 from clawchat_gateway.api_client import DEFAULT_BASE_URL
 from clawchat_gateway.config import _get_env
+from clawchat_gateway.hermes_home import hermes_home
 
 
 class ProfileConfigError(ValueError):
@@ -28,7 +29,7 @@ class ProfileConfig:
 
 
 def _hermes_home() -> Path:
-    return Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+    return hermes_home()
 
 
 def _first_non_empty(*values: Any) -> str:
@@ -52,8 +53,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 
 def load_profile_config() -> ProfileConfig:
-    hermes_home = _hermes_home()
-    config_path = hermes_home / "config.yaml"
+    config_path = _hermes_home() / "config.yaml"
     config = _load_yaml(config_path)
     extra = (
         config.get("platforms", {})

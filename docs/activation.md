@@ -65,16 +65,32 @@ A Hermes profile holds exactly **one** ClawChat identity: `config.yaml`
 (`platforms.clawchat.extra`), `.env` (`CLAWCHAT_TOKEN`) and the `activations`
 row (primary key `("hermes", "default")`) are all single-slot.
 
-Activating a **new** connect code in a profile that already holds a **live**
-activation therefore cannot produce a second agent. The stored `user_id` is
-replayed as a re-pair hint, so the server binds the new code to the *existing*
-agent — the code is spent, no second agent and no second contact entry appear,
-and the local credentials are overwritten in place, losing the first agent.
+Activating a **new** connect code in a profile that already holds an identity
+therefore cannot produce a second agent. The stored `user_id` is replayed as a
+re-pair hint, so the server binds the new code to the *existing* agent — the
+code is spent, no second agent and no second contact entry appear, and the
+local credentials are overwritten in place, losing the first agent.
 
 Activation refuses that case (`ExistingActivationError`, exit 1) **without
-sending the code**, so it stays redeemable. "Live" means the profile still has
-a usable token; a logged-out profile (see auto-logout below) keeps re-pairing
-with no flag, since that is the flow the replay exists for.
+sending the code**, so it stays redeemable. The refusal is not conditional on
+the profile still having a usable token: a logged-out profile (see auto-logout
+below) must now ask for its re-pair with `--repair`. Identity-present-but-
+token-absent is exactly the shape a cloned profile has (below), and the
+unflagged replay used to spend the code on the *source* profile's agent.
+
+#### Cloned profiles
+
+`hermes profile create <name> --clone` (and the dashboard's "clone from
+default") copies `config.yaml` and `.env` wholesale, so a brand-new profile can
+arrive carrying the source profile's `extra.user_id` / `extra.agent_id` without
+ever having paired. Activation stamps `extra.profile` with the profile that
+minted the identity and drops a stored `user_id` whose stamp does not match the
+active profile — the same way it already drops one minted against a different
+`extra.base_url`. Such a profile pairs fresh, with no flag needed.
+
+A config written before `extra.profile` existed carries no stamp and is
+indistinguishable from a clone, which is why the refusal above is unconditional
+rather than token-gated.
 
 To run a **second agent on the same host**, give it its own Hermes profile:
 
@@ -84,6 +100,9 @@ hermes -p <name> plugins install clawling/clawchat-plugin-hermes-agent --enable
 hermes -p <name> clawchat activate <CODE>
 hermes -p <name> gateway install && hermes -p <name> gateway start
 ```
+
+Prefer a bare `hermes profile create` over `--clone` for a second ClawChat
+agent: cloning copies credentials that the new profile must not reuse.
 
 The ClawChat backend and msghub already key sessions on the composite
 `(user_id, device_id)`, so both agents coexist, stay online together, and can
@@ -109,8 +128,13 @@ The Hermes request body is:
 { "code": "<invite>", "platform": "hermes", "type": "clawbot", "plugin_version": "<clawchat_gateway.__version__>", "user_id": "<optional-existing-user_id>" }
 ```
 
-`base_url` comes from the interactive setup answer for `hermes gateway setup`;
-the direct activation commands use `https://app.clawling.com`. When
+`base_url` comes from the interactive setup answer for `hermes gateway setup`.
+The direct activation commands — both `clawchat activate` and the in-chat
+`/clawchat-activate` — resolve it via `config.resolve_activation_base_url()`
+(env → Hermes env store → `$HERMES_HOME/.env`), falling back to
+`https://app.clawling.com`. The installer writes the deployment's
+`CLAWCHAT_BASE_URL` into that `.env`, so a code minted on a custom backend is
+sent there rather than to the public default. When
 `platforms.clawchat.extra.user_id` already contains a non-empty value,
 activation sends it as optional `user_id`; otherwise the field is omitted.
 

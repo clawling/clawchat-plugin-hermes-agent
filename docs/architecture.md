@@ -184,11 +184,18 @@ When the wire shape changes:
 `clawchat_gateway.config.ClawChatConfig.from_platform_config` resolves
 configuration in this priority order:
 
-1. Process environment (`CLAWCHAT_*` vars).
-2. `hermes_cli.config.get_env_value(...)` (if the helper is importable).
-3. `$HERMES_HOME/.env` file lookup.
+1. `hermes_cli.config.get_env_value_prefer_dotenv(...)` (if importable) — the
+   profile's `.env`, then a scope-checked process-env fallback.
+2. `$HERMES_HOME/.env` parsed directly (standalone CLI, no `hermes_cli`).
+3. Process environment (`CLAWCHAT_*` vars) — last, so a value inherited from
+   another profile's gateway process cannot win. See
+   [`./configuration.md`](./configuration.md).
 4. `platforms.clawchat.extra` from `config.yaml`.
 5. Hard-coded defaults from the dataclass.
+
+`$HERMES_HOME` resolution itself lives in `clawchat_gateway.hermes_home` —
+exported value, else the platform-native default (`~/.hermes` on POSIX,
+`%LOCALAPPDATA%\hermes` on Windows). Never re-derive it inline.
 
 `__init__._clawchat_platform_config_with_home_extra` merges the on-disk
 `config.yaml` extra block into sparse runtime `PlatformConfig` values so

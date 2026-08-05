@@ -3,8 +3,23 @@
 All settings are resolved by
 `clawchat_gateway.config.ClawChatConfig.from_platform_config`. The
 priority order is documented in [`./architecture.md`](./architecture.md):
-process env → `hermes_cli.config.get_env_value` → `$HERMES_HOME/.env`
-→ `platforms.clawchat.extra` → dataclass default.
+`hermes_cli.config.get_env_value_prefer_dotenv` → `$HERMES_HOME/.env`
+→ process env → `platforms.clawchat.extra` → dataclass default.
+
+Process env is deliberately **last**. Hermes launches a named profile's gateway
+as a child of a default-profile process with only an env *overlay*
+(`HERMES_HOME`, `VIRTUAL_ENV`, `PYTHONPATH`), and its inherited-key scrub covers
+a hardcoded first-party allow-list that `CLAWCHAT_*` can never join — so reading
+the process env first made a second profile authenticate as the *first* profile's
+agent and post into its home channel. Hermes states the contract in
+`env_loader._clear_known_keys_missing_from_dotenv`: cross-profile credential
+isolation happens at read time. Process env stays in the chain because env-only
+deployments (a pod with credentials injected and no `.env`) have nowhere else to
+put them.
+
+`$HERMES_HOME` itself resolves through `clawchat_gateway.hermes_home`: the
+exported value when set, else the platform-native default — `~/.hermes` on
+POSIX, `%LOCALAPPDATA%\hermes` on Windows.
 
 Credential tokens are the exception: at startup the runtime connection first
 adopts the latest complete activation row in plugin SQLite
@@ -73,6 +88,12 @@ env:
   - name: CLAWCHAT_DEVICE_ID
     value: "hermes-agt-<stable-agent-id>"
 ```
+
+`CLAWCHAT_DEVICE_ID` is read profile-first (`$HERMES_HOME/.env` before the
+process env), because a named profile's gateway inherits the default profile's
+exported value. The id itself stays **host**-scoped, not profile-scoped — see
+[`./activation.md`](./activation.md) (One profile, one agent) for why co-located
+profiles sharing one device id is not a conflict.
 
 The server-assigned `resolved_device_id` from the `hello-ok` handshake is
 recorded in plugin SQLite (`connections.resolved_device_id`) for diagnostics.

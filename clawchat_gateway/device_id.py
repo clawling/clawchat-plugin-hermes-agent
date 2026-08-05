@@ -3,7 +3,6 @@ from __future__ import annotations
 import functools
 import hashlib
 import logging
-import os
 import platform
 import re
 import socket
@@ -12,6 +11,18 @@ import uuid
 from pathlib import Path
 
 logger = logging.getLogger("clawchat_gateway.device_id")
+
+
+def _env(name: str) -> str:
+    """Profile-scoped env read, imported lazily to break a cycle.
+
+    ``config`` pulls ``api_client`` for the default URLs, and ``api_client``
+    imports this module for the connect-time ``X-Device-Id`` — so the import
+    has to happen at call time, not at module load.
+    """
+    from clawchat_gateway.config import _get_env
+
+    return _get_env(name)
 
 
 def _safe_id(prefix: str, value: str) -> str:
@@ -63,27 +74,35 @@ def get_device_id() -> str:
 
     Resolution order:
 
-    1. ``CLAWCHAT_DEVICE_ID`` env var — used **verbatim** when already a
-       well-formed ``hermes-`` id, otherwise sanitized to the transport-safe
-       charset and ``hermes-`` prefixed. This is the durable, deployment-pinned
-       path: the same env value always yields the same device id across pod
+    1. ``CLAWCHAT_DEVICE_ID`` — used **verbatim** when already a well-formed
+       ``hermes-`` id, otherwise sanitized to the transport-safe charset and
+       ``hermes-`` prefixed. This is the durable, deployment-pinned path: the
+       same value always yields the same device id across pod
        restarts/reschedules. **Deployments MUST set this** (see
        ``docs/configuration.md`` — Device id durability) so the server-side
-       per-device cursor stays stable.
+       per-device cursor stays stable. Read through ``_get_env`` (not raw
+       ``os.getenv``) so a named profile's own ``.env`` beats a value it
+       inherited from the default profile's gateway process.
     2. Host fingerprint fallback (macOS ``IOPlatformUUID`` → Linux
        ``machine-id`` → hostname+MAC hash) — only when the env var is unset.
        In a container this fingerprint changes on every reschedule, which the
        server treats as a brand-new device (full replay + orphan cursor).
+
+    The id is deliberately **host**-scoped, not profile-scoped: co-located
+    Hermes profiles sharing one id is not a conflict, because every backend
+    structure that consumes it is keyed on the composite ``(user_id,
+    device_id)`` and the two agents have different ``user_id``s. See
+    ``docs/activation.md`` — One profile, one agent.
     """
-    override = os.getenv("CLAWCHAT_DEVICE_ID", "").strip()
+    override = _env("CLAWCHAT_DEVICE_ID")
     if override:
-        return _safe_id("hermes", override) if not override.startswith("hermes-") else override
+        return override if override.startswith("hermes-") else _safe_id("hermes", override)
     return _mac_platform_uuid() or _machine_id() or _host_fingerprint()
 
 
 def device_id_is_pinned() -> bool:
     """True iff ``CLAWCHAT_DEVICE_ID`` is set (the durable, deployment-pinned path)."""
-    return bool(os.getenv("CLAWCHAT_DEVICE_ID", "").strip())
+    return bool(_env("CLAWCHAT_DEVICE_ID"))
 
 
 def warn_if_device_id_unpinned() -> None:

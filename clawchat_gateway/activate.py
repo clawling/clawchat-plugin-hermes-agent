@@ -36,7 +36,7 @@ from clawchat_gateway.output_visibility import (
     runtime_status_messages_for_visibility,
 )
 from clawchat_gateway.restart import schedule_gateway_restart
-from clawchat_gateway.storage import get_clawchat_store
+from clawchat_gateway.storage import _active_profile_name, get_clawchat_store
 
 logger = logging.getLogger(__name__)
 
@@ -84,10 +84,16 @@ def _write_env_values(values: dict[str, str | None]) -> Path:
 def _read_existing_user_id(config: dict[str, Any], *, base_url: str = "") -> str:
     """Return the stored shadow ``user_id`` to replay as a re-pair hint.
 
-    Returns "" when the stored identity was minted by a *different* backend
-    (``extra.base_url`` differs from the one being activated against). Agent ids
-    are per-deployment, so replaying one across environments can only produce
-    ``16001 agent not found`` — the server has no such row and never will.
+    Returns "" when the stored identity did not originate here:
+
+    * a *different backend* (``extra.base_url`` differs from the one being
+      activated against) — agent ids are per-deployment, so replaying one
+      across environments can only produce ``16001 agent not found``;
+    * a *different profile* (``extra.profile`` differs from the active Hermes
+      profile) — ``hermes profile create --clone`` copies ``config.yaml``
+      wholesale, so a brand-new profile can carry the source profile's identity
+      without ever having paired. Replaying it spends the connect code
+      re-pairing the SOURCE agent instead of creating this profile's own.
     """
     platforms = config.get("platforms")
     if not isinstance(platforms, dict):
@@ -111,6 +117,17 @@ def _read_existing_user_id(config: dict[str, Any], *, base_url: str = "") -> str
                 base_url,
             )
             return ""
+    stored_profile = extra.get("profile")
+    if isinstance(stored_profile, str) and stored_profile.strip():
+        current_profile = _active_profile_name()
+        if stored_profile.strip() != current_profile:
+            logger.info(
+                "clawchat activation ignoring stored user_id minted by another Hermes "
+                "profile (stored=%s current=%s); pairing this profile fresh",
+                stored_profile,
+                current_profile,
+            )
+            return ""
     return user_id.strip()
 
 
@@ -125,21 +142,8 @@ def _clawchat_extra(config: dict[str, Any]) -> dict[str, Any]:
     return extra if isinstance(extra, dict) else {}
 
 
-def _has_live_token(config: dict[str, Any]) -> bool:
-    """True when this profile still holds usable ClawChat credentials.
-
-    Mirrors how ``config.py`` resolves the token at runtime (env first, then
-    ``extra.token``). Auto-logout blanks both, which is exactly what makes a
-    logged-out profile safe to re-pair without a flag.
-    """
-    if _get_env("CLAWCHAT_TOKEN"):
-        return True
-    stored = _clawchat_extra(config).get("token")
-    return isinstance(stored, str) and bool(stored.strip())
-
-
 class ExistingActivationError(RuntimeError):
-    """Raised when activating would silently replace a live activation.
+    """Raised when activating would silently replace this profile's identity.
 
     A Hermes profile holds exactly one ClawChat identity (the plugin's
     ``account_id`` is the constant ``"default"`` in config, .env and the
@@ -258,6 +262,10 @@ def persist_activation(
     else:
         extra.pop("agent_id", None)
     extra["owner_user_id"] = owner_user_id
+    # Stamp the minting profile so a later `hermes profile create --clone` of
+    # this config is recognisable as someone else's identity rather than
+    # replayed as this profile's own.
+    extra["profile"] = _active_profile_name()
     _ensure_output_visibility_defaults(extra)
     _ensure_clawchat_agent_defaults(config)
     _ensure_clawchat_display_defaults(config)
@@ -488,7 +496,13 @@ async def activate(
     )
     _config_path, config = _load_config()
     existing_user_id = _read_existing_user_id(config, base_url=base_url)
-    if existing_user_id and not new_account and not repair and _has_live_token(config):
+    # Deliberately NOT gated on "does a live token exist". A config written
+    # before `extra.profile` existed is indistinguishable from a clone, and a
+    # clone's inherited token is routinely stale — so "identity present, token
+    # absent" cannot be read as "this profile auto-logged out". Anything that
+    # survives _read_existing_user_id is this profile's own identity, and
+    # spending a single-use code on it must be an explicit choice.
+    if existing_user_id and not new_account and not repair:
         extra = _clawchat_extra(config)
         agent_id = extra.get("agent_id")
         raise ExistingActivationError(
