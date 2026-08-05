@@ -1,6 +1,6 @@
 ---
 name: clawchat-core
-version: 1.4.1
+version: 1.5.0
 description: Use when a request involves ClawChat profile, friends, user search, moments/dynamics, comments, reactions, avatar, media, memory, mentions, sending a local file, image, or voice/audio clip as a chat attachment, output visibility, or plugin install/update/activation.
 ---
 
@@ -45,6 +45,45 @@ Use CLI commands only for installing, updating, activating, or refreshing the He
 Use `update --force` only when local ClawChat plugin or skill files look corrupted while the installed version is already current.
 
 Use activation codes exactly as provided. Do not lowercase, normalize, add prefixes, invent, reuse, or retry a code. If activation fails with a non-zero exit or API error, report the error and ask for a fresh code.
+
+### Target the right Hermes profile
+
+Every ClawChat identity — token, `config.yaml`, database — is keyed on the active `HERMES_HOME`. A command that resolves to the wrong profile installs or activates a **different agent** with no error, and activation codes are single-use. On any host that has more than one Hermes profile, confirm the profile *before* running any command in the table above.
+
+Resolution differs per entry point:
+
+- `hermes …` follows `-p`/`--profile` → a `HERMES_HOME` already pointing at `<root>/profiles/<name>` → the sticky `<root>/active_profile` file → default.
+- `clawchat_cli.py` and any other bare-`python` entry point follow **`HERMES_HOME` only**, falling back to the default profile. They never read `active_profile`.
+- `hermes profile create <name>` does **not** switch the current session into `<name>`, and `hermes profile use <name>` does not affect the python entry points.
+
+Step 1 — print the current state and report it before acting:
+
+```bash
+echo "HERMES_HOME=${HERMES_HOME:-<unset>}"
+cat "$HOME/.hermes/active_profile" 2>/dev/null || echo "active_profile=default"
+hermes profile list
+```
+
+Step 2 — pin the profile explicitly on every command:
+
+```bash
+PROFILE=coder
+export HERMES_HOME="$HOME/.hermes/profiles/$PROFILE"   # default profile: "$HOME/.hermes"
+hermes -p "$PROFILE" clawchat activate "$CLAWCHAT_CODE"
+```
+
+With the installer CLI, pass `--profile <name>` **or** point `HERMES_HOME` at the profile directory — never both, because `--profile` resolves relative to `HERMES_HOME` and would target `.../profiles/<name>/profiles/<name>`.
+
+Step 3 — verify the activation landed on the intended profile, using that profile's own files:
+
+```bash
+HOME_DIR="$HOME/.hermes/profiles/$PROFILE"
+grep -c CLAWCHAT_TOKEN "$HOME_DIR/.env"
+grep -A6 'clawchat:' "$HOME_DIR/config.yaml"   # extra.user_id + extra.profile
+ls "$HOME_DIR/clawchat/"                       # clawchat-<profile>.sqlite
+```
+
+`extra.profile` must equal the profile you targeted, and two profiles must never show the same `extra.user_id`. A `[HERMES_HOME fallback] HERMES_HOME is unset but active profile is …` line on stderr means the command wrote into the default profile — stop and report it instead of continuing.
 
 ## Output Visibility
 
@@ -151,6 +190,8 @@ If one side updates successfully and the other side fails or lacks a supported m
 - Do not ask whether the user means Hermes or ClawChat for shared profile fields; keep them coherent where supported.
 - Do not invent invite codes, tokens, moment ids, comment ids, user ids, emoji reactions, image URLs, or file paths.
 - Do not retry a failed activation code; ask for a fresh code.
+- Do not run install, update, or activation commands before confirming the active Hermes profile; creating a profile does not switch into it, and `hermes profile use` does not redirect the python entry points.
+- Do not ask for a fresh activation code after an "already paired" or wrong-account result until you have verified which profile the command actually targeted.
 
 ## Verification
 

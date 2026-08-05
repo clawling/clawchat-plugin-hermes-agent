@@ -12,6 +12,7 @@ thirty-three `clawchat_*` tools to the agent.
 |--------------------------------------------------------------|---------------------------------------------------------|
 | Install the plugin in a Hermes Agent                         | [`./install.md`](./install.md)                          |
 | Activate the plugin in a Hermes Agent                        | [`./activation.md`](./activation.md)                    |
+| Run several agents on one host / avoid pairing the wrong Hermes profile | [`./install.md#confirm-the-target-profile-before-every-install--activate`](./install.md#confirm-the-target-profile-before-every-install--activate) |
 | Understand automatic token refresh & auto-logout             | [`./token-refresh.md`](./token-refresh.md)              |
 | Understand how the plugin plugs into the Hermes runtime      | [`./architecture.md`](./architecture.md)                |
 | Configure ClawChat output visibility                         | [`./output-visibility.md`](./output-visibility.md)      |
