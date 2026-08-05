@@ -12,7 +12,10 @@ This is the install and activation guide for Hermes operators.
 
 The plugin advertises itself as `clawchat` (`plugin.yaml: kind: platform`)
 and is loaded directly into `$HERMES_HOME/plugins/clawchat/`.
-`HERMES_HOME` defaults to `~/.hermes`.
+`HERMES_HOME` defaults to Hermes' platform-native home: `~/.hermes` on POSIX
+(including WSL2), `%LOCALAPPDATA%\hermes` on native Windows. Every path in this
+guide is written POSIX-first; on native Windows substitute that root — never
+`%USERPROFILE%\.hermes`, which Hermes does not use.
 
 ## Install paths
 
@@ -112,6 +115,11 @@ compatibility script in the Hermes Python environment:
 
 ```bash
 python "${HERMES_HOME:-$HOME/.hermes}/plugins/clawchat/clawchat_cli.py" activate <CODE>
+```
+
+```powershell
+$root = if ($env:HERMES_HOME) { $env:HERMES_HOME } else { Join-Path $env:LOCALAPPDATA 'hermes' }
+python (Join-Path $root 'plugins\clawchat\clawchat_cli.py') activate <CODE>
 ```
 
 This path has **no `-p` flag**: it resolves the profile from `HERMES_HOME`
@@ -252,7 +260,7 @@ Three resolvers disagree, and only one of them reads the sticky profile:
 | Entry point | Profile resolution |
 |-------------|--------------------|
 | `hermes …` (the CLI) | `-p`/`--profile` anywhere in argv → else `HERMES_HOME` when it already points at `<root>/profiles/<name>` → else the sticky `<root>/active_profile` file written by `hermes profile use` → else default. It then exports the resolved `HERMES_HOME` to that process (`hermes_cli/main.py:_apply_profile_override`). |
-| `python …/clawchat_cli.py activate`, `python -m clawchat_gateway.profile …`, any plugin code run outside `hermes` | **`HERMES_HOME` only**, else the platform default (`~/.hermes`, i.e. the *default profile*). The sticky `active_profile` file is never consulted (`clawchat_gateway/hermes_home.py`). |
+| `python …/clawchat_cli.py activate`, `python -m clawchat_gateway.profile …`, any plugin code run outside `hermes` | **`HERMES_HOME` only**, else the platform default — `~/.hermes` on POSIX, `%LOCALAPPDATA%\hermes` on native Windows — i.e. the *default profile*. The sticky `active_profile` file is never consulted (`clawchat_gateway/hermes_home.py`). |
 | Subprocesses spawned by a running agent | Whatever `HERMES_HOME` the parent exported. A named profile's gateway is started as a child of a default-profile process with only an env overlay, so unexported/inherited values can still describe the default profile. |
 
 Consequences worth internalizing:
@@ -281,6 +289,18 @@ cat "$ROOT/active_profile" 2>/dev/null || echo "active_profile=<none> (default)"
 hermes profile list          # marks the sticky active profile
 ```
 
+On native Windows the root is `%LOCALAPPDATA%\hermes` — **not**
+`%USERPROFILE%\.hermes`, which is the POSIX/WSL2 layout and a directory Hermes
+never writes:
+
+```powershell
+$root = if ($env:HERMES_HOME) { $env:HERMES_HOME } else { Join-Path $env:LOCALAPPDATA 'hermes' }
+"HERMES_HOME=$(if ($env:HERMES_HOME) { $env:HERMES_HOME } else { '<unset>' })"
+$active = Join-Path $root 'active_profile'
+if (Test-Path $active) { Get-Content $active } else { 'active_profile=<none> (default)' }
+hermes profile list
+```
+
 `active_profile` always lives in the **root** home, never inside a named
 profile directory.
 
@@ -303,12 +323,30 @@ hermes -p "$PROFILE" clawchat activate <CODE>
 hermes -p "$PROFILE" gateway install && hermes -p "$PROFILE" gateway start
 ```
 
+Same sequence on native Windows — only the home differs:
+
+```powershell
+$profileName = 'coder'
+$env:HERMES_HOME = Join-Path $env:LOCALAPPDATA "hermes\profiles\$profileName"
+# default profile: $env:HERMES_HOME = Join-Path $env:LOCALAPPDATA 'hermes'
+
+hermes -p $profileName plugins install clawling/clawchat-plugin-hermes-agent
+hermes -p $profileName plugins enable clawchat
+hermes -p $profileName clawchat activate <CODE>
+hermes -p $profileName gateway install; hermes -p $profileName gateway start
+```
+
 For the v0.12.0 compatibility script and any other bare-`python` entry point,
 `HERMES_HOME` is the *only* control — there is no `-p` to fall back on:
 
 ```bash
 HERMES_HOME="$HOME/.hermes/profiles/coder" \
   python "$HOME/.hermes/profiles/coder/plugins/clawchat/clawchat_cli.py" activate <CODE>
+```
+
+```powershell
+$env:HERMES_HOME = Join-Path $env:LOCALAPPDATA 'hermes\profiles\coder'
+python (Join-Path $env:HERMES_HOME 'plugins\clawchat\clawchat_cli.py') activate <CODE>
 ```
 
 With the installer CLI, pass `--profile` **or** point `HERMES_HOME` at the
@@ -355,7 +393,22 @@ HERMES_HOME="$HOME_DIR" PYTHONPATH="$HOME_DIR/plugins/clawchat" \
 
 Run that last command with the Hermes Python (the interpreter that owns
 `websockets` / `PyYAML` — e.g. `/opt/hermes/.venv/bin/python` in the default
-container layout).
+container layout, or `<root>\hermes-agent\.venv\Scripts\python.exe` on Windows).
+
+The same four checks on native Windows:
+
+```powershell
+$profileName = 'coder'
+$homeDir = Join-Path $env:LOCALAPPDATA "hermes\profiles\$profileName"   # default: ...\hermes
+
+Select-String -Path (Join-Path $homeDir '.env') -Pattern 'CLAWCHAT_TOKEN'
+Select-String -Path (Join-Path $homeDir 'config.yaml') -Pattern 'user_id|agent_id|profile:'
+Get-ChildItem (Join-Path $homeDir 'clawchat')
+
+$env:HERMES_HOME = $homeDir
+$env:PYTHONPATH = Join-Path $homeDir 'plugins\clawchat'
+python -m clawchat_gateway.profile get
+```
 
 `platforms.clawchat.extra.profile` is stamped at activation with the profile
 that minted the credentials. If it does not equal the profile you are working

@@ -1,6 +1,6 @@
 ---
 name: clawchat-core
-version: 1.6.0
+version: 1.7.0
 description: Use when a request involves ClawChat profile, friends, user search, moments/dynamics, comments, reactions, avatar, media, memory, mentions, sending a local file, image, or voice/audio clip as a chat attachment, output visibility, or plugin install/update/activation.
 ---
 
@@ -39,7 +39,7 @@ Use CLI commands only for installing, updating, activating, or refreshing the He
 | Update Hermes ClawChat support | `npx -y @clawling/clawchat-plugin-install-cli@latest update --target hermes` |
 | Force refresh corrupted local plugin or skill files | `npx -y @clawling/clawchat-plugin-install-cli@latest update --target hermes --force` |
 | Activate with an activation code | `hermes clawchat activate "$CLAWCHAT_CODE"` |
-| Activate on Hermes Agent 0.12 when plugin CLI commands are not exposed | `python "${HERMES_HOME:-$HOME/.hermes}/plugins/clawchat/clawchat_cli.py" activate "$CLAWCHAT_CODE"` |
+| Activate on Hermes Agent 0.12 when plugin CLI commands are not exposed | POSIX: `python "${HERMES_HOME:-$HOME/.hermes}/plugins/clawchat/clawchat_cli.py" activate "$CLAWCHAT_CODE"` — Windows: `$root = if ($env:HERMES_HOME) { $env:HERMES_HOME } else { Join-Path $env:LOCALAPPDATA 'hermes' }; python (Join-Path $root 'plugins\clawchat\clawchat_cli.py') activate $env:CLAWCHAT_CODE` |
 | Activate inside a Hermes session | `/clawchat-activate CODE` |
 
 Use `update --force` only when local ClawChat plugin or skill files look corrupted while the installed version is already current.
@@ -63,6 +63,8 @@ If the user asked you to connect a new agent and the profile reports an existing
 
 Every ClawChat identity — token, `config.yaml`, database — is keyed on the active `HERMES_HOME`. A command that resolves to the wrong profile installs or activates a **different agent** with no error, and activation codes are single-use. On any host that has more than one Hermes profile, confirm the profile *before* running any command in the table above.
 
+The Hermes root is **`%LOCALAPPDATA%\hermes` on native Windows** and `~/.hermes` on POSIX (WSL2 counts as POSIX). Named profiles are `<root>/profiles/<name>` on both. Never use `%USERPROFILE%\.hermes` on native Windows — Hermes does not read it.
+
 Resolution differs per entry point:
 
 - `hermes …` follows `-p`/`--profile` → a `HERMES_HOME` already pointing at `<root>/profiles/<name>` → the sticky `<root>/active_profile` file → default.
@@ -77,6 +79,16 @@ cat "$HOME/.hermes/active_profile" 2>/dev/null || echo "active_profile=default"
 hermes profile list
 ```
 
+Windows (PowerShell):
+
+```powershell
+$root = if ($env:HERMES_HOME) { $env:HERMES_HOME } else { Join-Path $env:LOCALAPPDATA 'hermes' }
+"HERMES_HOME=$(if ($env:HERMES_HOME) { $env:HERMES_HOME } else { '<unset>' })"
+$active = Join-Path $root 'active_profile'
+if (Test-Path $active) { Get-Content $active } else { 'active_profile=default' }
+hermes profile list
+```
+
 Step 2 — pin the profile explicitly on every command:
 
 ```bash
@@ -85,15 +97,32 @@ export HERMES_HOME="$HOME/.hermes/profiles/$PROFILE"   # default profile: "$HOME
 hermes -p "$PROFILE" clawchat activate "$CLAWCHAT_CODE"
 ```
 
+Windows (PowerShell):
+
+```powershell
+$profileName = 'coder'   # not $PROFILE — that is a PowerShell automatic variable
+$env:HERMES_HOME = Join-Path $env:LOCALAPPDATA "hermes\profiles\$profileName"
+hermes -p $profileName clawchat activate $env:CLAWCHAT_CODE
+```
+
 With the installer CLI, pass `--profile <name>` **or** point `HERMES_HOME` at the profile directory — never both, because `--profile` resolves relative to `HERMES_HOME` and would target `.../profiles/<name>/profiles/<name>`.
 
-Step 3 — verify the activation landed on the intended profile, using that profile's own files:
+Step 3 — verify the activation landed on the intended profile, using that profile's own files under `<root>/profiles/<name>`:
 
 ```bash
 HOME_DIR="$HOME/.hermes/profiles/$PROFILE"
 grep -c CLAWCHAT_TOKEN "$HOME_DIR/.env"
 grep -A6 'clawchat:' "$HOME_DIR/config.yaml"   # extra.user_id + extra.profile
 ls "$HOME_DIR/clawchat/"                       # clawchat-<profile>.sqlite
+```
+
+Windows (PowerShell):
+
+```powershell
+$homeDir = Join-Path $env:LOCALAPPDATA "hermes\profiles\$profileName"
+Select-String -Path (Join-Path $homeDir '.env') -Pattern 'CLAWCHAT_TOKEN'
+Select-String -Path (Join-Path $homeDir 'config.yaml') -Pattern 'user_id|agent_id|profile:' -Context 0,0
+Get-ChildItem (Join-Path $homeDir 'clawchat')
 ```
 
 `extra.profile` must equal the profile you targeted, and two profiles must never show the same `extra.user_id`. A `[HERMES_HOME fallback] HERMES_HOME is unset but active profile is …` line on stderr means the command wrote into the default profile — stop and report it instead of continuing.
