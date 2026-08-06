@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from clawchat_gateway.config import ClawChatConfig
+from clawchat_gateway.protocol import MENTION_ALL_USER_ID
 
 
 @dataclass(frozen=True)
@@ -153,7 +154,6 @@ def parse_inbound_message(
         return None
 
     context_mentioned_users = _extract_mentioned_users(context.get("mentions"))
-    context_mentioned_user_ids = _mentioned_user_ids(context_mentioned_users)
     fragment_mentioned_users: list[dict[str, str]] = []
     for fragment in _coerce_fragments(message):
         if isinstance(fragment, dict) and _fragment_kind(fragment) == "mention":
@@ -166,7 +166,17 @@ def parse_inbound_message(
                 fragment_mentioned_users.append(item)
     mentioned_users = _merge_mentioned_users(fragment_mentioned_users, context_mentioned_users)
     mentioned_user_ids = _mentioned_user_ids(mentioned_users)
-    was_mentioned = config.user_id in context_mentioned_user_ids
+    # Match on the MERGED set, not on context alone: the `mention` fragment is
+    # the typed, ordered carrier and `context.mentions` only its untyped mirror
+    # (client-integration.md §7.1 / §10.2), so reading one half silently drops
+    # mentions the other half carries.
+    #
+    # MENTION_ALL_USER_ID ("all") is the @everyone sentinel — it addresses every
+    # member of the room, this agent included, so it counts as a mention even
+    # though it never equals our own user id.
+    was_mentioned = (
+        config.user_id in mentioned_user_ids or MENTION_ALL_USER_ID in mentioned_user_ids
+    )
 
     fragments = _coerce_fragments(message)
     text_parts: list[str] = []

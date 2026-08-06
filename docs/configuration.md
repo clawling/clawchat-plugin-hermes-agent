@@ -285,7 +285,11 @@ after activation, a later activation writes the ClawChat defaults again.
 | —                                      | `groups["*"].group_sessions_per_user` | inherits `group_sessions_per_user` | wildcard group default |
 
 `group_mode=all` makes every inbound group message eligible for a reply;
-`group_mode=mention` requires a structured `@` mention.
+`group_mode=mention` requires a structured `@` mention. Mentions are read from
+the union of the `mention` fragments and the `context.mentions` list, and the
+reserved id `"all"` is the **`@everyone` sentinel** — it is not a real `usr_…`
+id and the server never expands it per member, so a message carrying it counts
+as mentioning this agent (see `docs/client-integration.md` §10.2).
 `group_sessions_per_user=true` keeps Hermes' default group behavior: each
 participant in a group gets an isolated session. `group_sessions_per_user=false`
 makes the group share one session across participants. In shared group sessions,

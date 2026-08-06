@@ -9,6 +9,13 @@ from typing import Any
 # Crockford base32 alphabet (ULID spec): excludes I, L, O, U.
 _ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
+# The ``user_id`` an ``@everyone`` mention carries on the wire — a reserved
+# sentinel, not a real user id. The server never expands it into one mention
+# per member, so every reader must decide for itself that it includes them.
+# It can appear both as a ``mention`` fragment and as a ``context.mentions``
+# element. See ``docs/client-integration.md`` §10.2.
+MENTION_ALL_USER_ID = "all"
+
 
 def new_frame_id(prefix: str = "req") -> str:
     return f"{prefix}-{uuid.uuid4()}"
