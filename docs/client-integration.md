@@ -1,30 +1,36 @@
 # ClawlingChat Message Hub — Client Integration Guide
 
 **Audience.** Anyone implementing a client (mobile, desktop, web, or agent
-adapter) that talks to the ClawlingChat message hub.
+adapter) that talks to a ClawlingChat Message Hub server.
 
-**Scope.** This document is the complete, self-contained contract a client
-needs:
+**Scope.** This document is the complete contract for the WebSocket wire and the
+HTTP media upload. Three event families (`chat.metadata.invalidated`,
+`notify.signal`, `permission.request` / `permission.resolved`) are deliberately
+content-free: they tell a client *that* something changed, and the authoritative
+state is then read from the deployment's companion REST API, which is a separate
+specification. It covers:
 
-- WebSocket real-time API (the ClawChat WebSocket service, path `/ws`) — Protocol v2
-- HTTP media upload API (the ClawChat media service)
+- WebSocket real-time API (default path `/ws`) — Protocol v2
+- HTTP media upload API
 - Authentication, handshake, every event, every payload field, full wire examples
 
 **Out of scope.** Server architecture, internal message-broker topology,
-persistence internals, deployment. Clients never see those.
+persistence internals, deployment, and the deployment's companion REST API.
+Clients never see the first four.
 
 **Versioning.** This document describes Protocol **v2**. Every WebSocket
 frame carries `"version": "2"` at the top level. The wire is JSON in both
 directions.
 
 **Conformance.** When this document and the server's reference
-implementation disagree, the implementation is authoritative — file an
-issue against this document.
+implementation disagree, the implementation is authoritative — please file
+an issue against this document in the repository that ships it.
 
 ---
 
 ## Table of contents
 
+0. [Before you start](#0-before-you-start)
 1. [Endpoints](#1-endpoints)
 2. [Authentication](#2-authentication)
 3. [WebSocket handshake](#3-websocket-handshake)
@@ -33,7 +39,7 @@ issue against this document.
 6. [Event catalogue](#6-event-catalogue)
 7. [Materialized messages — `message.send` / `message.reply` / `message.ack`](#7-materialized-messages)
 8. [Streaming messages — `message.created` / `add` / `done` / `failed`](#8-streaming-messages)
-9. [Out-of-band signals — typing, presence, metadata, notifications, and permissions](#9-out-of-band-signals--typing-presence-and-metadata)
+9. [Out-of-band signals — typing, presence, metadata, notifications, and permissions](#9-out-of-band-signals--typing-presence-metadata-notifications-and-permissions)
 10. [Fragments — content schema](#10-fragments--content-schema)
 11. [Reconnection & device replay](#11-reconnection--device-replay)
 12. [Heartbeat — `ping` / `pong`](#12-heartbeat--ping--pong)
@@ -45,13 +51,28 @@ issue against this document.
 
 ---
 
+## 0. Before you start
+
+This specification describes the wire contract of a Message Hub **deployment**.
+The operator of that deployment supplies the WebSocket host, the media host, and
+the token issuer: the server delegates token verification to a pluggable
+authenticator (§2), so the token format is the operator's choice and there is no
+in-protocol discovery or issuance mechanism.
+
+Connecting to a hosted ClawChat service is not covered here — obtain the two host
+names and a token from whoever runs the deployment you are integrating with.
+
+---
+
 ## 1. Endpoints
 
 | Surface | URL | Notes |
 |---------|-----|-------|
-| WebSocket | `ws://<host>/ws` (or `wss://` in production) | No query string, no subprotocol |
-| Media upload | `https://<host>/media/upload` | `POST`, `multipart/form-data` |
-| Media health | `https://<host>/health` | `GET`, returns `200 ok` |
+| WebSocket | `wss://<ws-host>/<ws-path>` (default path `/ws`) | No query string, no subprotocol |
+| Media upload | `https://<media-host>/media/upload` | `POST`, `multipart/form-data` |
+| Media health | `https://<media-host>/health` | `GET`, returns `200 ok` |
+
+Host, port and path are deployment-configured (§0).
 
 The WebSocket and media services may run on different hosts in production —
 do not assume they share an origin. Both accept the **same** bearer token.
@@ -69,18 +90,24 @@ Authorization: Bearer <token>
 For the WebSocket the token travels inside the `connect` envelope (see §3),
 not in an HTTP header — the upgrade itself is unauthenticated.
 
-The server delegates verification to a pluggable `Authenticator`. Three
+The server delegates verification to a pluggable `Authenticator`. Two
 provider types may be configured server-side; clients do not need to know
 which is in use. They MUST treat the token as opaque:
 
 | Provider | What the server expects |
 |---------|-------------------------|
-| `mock` | Pre-seeded test tokens (dev / E2E only) |
 | `jwt` | HS256 or RS256 token; server enforces `exp`, optionally `iss` |
 | `http` | Forwarded to an upstream verifier; server accepts **any 2xx** with body `{"user_id": "...", "nick_name": "..."}` |
 
 Client implication: do not parse, decode, or rely on any structure inside
-the token. Acquire it from your identity provider and forward it verbatim.
+the token. Acquire it from your identity provider and forward it verbatim (§0).
+
+**You also need your own `user_id`, and the WebSocket wire does not carry it.**
+Self-echo filtering (§4, `origin_device_id`) and "is this message mine?" both
+require it, and `hello-ok` does not return it. Obtain it **out-of-band** from
+your identity provider at startup (in the ClawChat deployment, the companion REST
+API's "current user" endpoint) and cache it for the process lifetime — do **not**
+derive it by decoding the token.
 
 ---
 
@@ -135,6 +162,8 @@ literal string `"challenge"` — it is not correlated with the client's
     "token": "<bearer token>",
     "nonce": "Wn9hZ3lJZkN1QXBkUEpYbmNk",
     "device_id": "stable-device-id-optional",
+    "client_version": "3.8.2",
+    "protocol_version": 2,
     "capabilities": {
       "multi_device":         true,
       "device_replay":        true,
@@ -155,8 +184,18 @@ literal string `"challenge"` — it is not correlated with the client's
 |-------|----------|-------|
 | `token` | yes | Bearer token (see §2) |
 | `nonce` | yes | Echoed from `connect.challenge` |
-| `device_id` | optional | Stable identifier for this device. If omitted, the server uses the authenticated `user_id`. **Strongly recommended** for multi-device users — it is the key for replay state. |
+| `device_id` | optional | Stable identifier for this device. If omitted, the server uses the authenticated `user_id`. **Strongly recommended** for multi-device users — it is the key for replay state. Run exactly one process per `(user_id, device_id)`; see the operator warning in §3.6. |
+| `client_version` | optional | Your app's own version string (mobile sends its package version, e.g. `"3.8.2"`). Diagnostic only — see below. An empty string is acceptable. |
+| `protocol_version` | optional | The wire protocol revision you speak — send `2` for the v2 baseline. Diagnostic only; omission is recorded as `0`. Redundant with the mandatory envelope `version: "2"` (§4) that the hub enforces on every uplink. |
 | `capabilities` | optional | A map of feature flags. **A client SHOULD advertise every feature it supports and MAY omit any flag for a feature it does not** — omission disables that feature for this device, it never errors. Per-flag meaning in the table below. |
+
+**Version telemetry.** `client_version` and `protocol_version` are pure
+telemetry: the server records them on its `handshake accepted` log line and no
+code path gates behavior on either value. A new client SHOULD send both — they
+are what an operator greps when triaging a client-specific bug — but omission is
+free, and both current agent adapters (`openclaw-clawchat`, `hermes-clawchat`)
+omit them with no consequence; mobile has sent both since 2026-05-25. A future
+milestone MAY add minimum-version rejection.
 
 **Capability flags.** Every field is a boolean; omission is equivalent to `false`.
 
@@ -169,9 +208,9 @@ literal string `"challenge"` — it is not correlated with the client's
 | `notify_signals` | off | Opts the client in to **live** `notify.signal` system notifications (§9.4). A client that does not advertise it never receives the *live* frame. On **v1 / legacy** the reliable inbox path still replays the signal on the next reconnect regardless of this flag; on **v2** (`reliable_delivery_v2`) the replay path is **also** gated by this flag, so a v2 device that omits it is skipped on replay too. See §9.4. |
 | `permission_events` | off | Opts an owner client in to `permission.request` / `permission.resolved` agent-approval signals (§9.5). A client that does not advertise it never receives these ephemeral frames. |
 | `history_sync` | off | Declares support for `history.transit` sibling-device history transfer (§11.4). **Actively enforced on uplink** — a client that sends `history.transit` without having advertised `history_sync` gets a `message.error` with `code: "capability_missing"` (§14.3). |
-| `e2ee` | off | Declares support for per-device ciphertext-fragment peeling on E2EE envelopes. A capable target receives the matching `ciphertext_fragments[device_id]`; a client that omits it sees only the sender-supplied placeholder payload. E2EE crypto detail is out of this document's scope — see the msghub Protocol v2 reference (owned by msghub). |
+| `e2ee` | off | Declares support for per-device ciphertext-fragment peeling on E2EE envelopes. A capable target receives the matching `ciphertext_fragments[device_id]`; a client that omits it sees only the sender-supplied placeholder payload. E2EE crypto detail is out of this document's scope. |
 | `reliable_delivery` | off | **v1 reliable delivery.** Client emits `message.cursor_ack` after durably persisting received frames and understands `history.truncated`. The server then advances the replay cursor only on the ack (not on socket-write) and stamps the storage `seq` on downlinks. Absent → legacy advance-on-write. See §11 (reconnect/replay) and §6's `seq`/`dseq` field rows. ⚠️ If you advertise it you **MUST** implement `message.cursor_ack`. |
-| `reliable_delivery_v2` | off | **v2 reliable delivery (dseq).** Successor to `reliable_delivery`: client acks the per-connection dense `dseq` via `message.sync_ack{dseq,epoch}`, verifies dseq density at the socket read layer, echoes the hello-ok `ack_epoch`, and quarantines un-persistable frames instead of stalling. Granted only when the server returns `hello-ok.ack_mode="dseq"`; otherwise fall back to v1/legacy. SHOULD be advertised **together with** `reliable_delivery` so an older server falls back cleanly. See §11. ⚠️ If you advertise it you **MUST** implement `message.sync_ack`. |
+| `reliable_delivery_v2` | off | **v2 reliable delivery (dseq).** Successor to `reliable_delivery`: client acks the per-connection dense `dseq` via `message.sync_ack{dseq,epoch}`, verifies dseq density at the socket read layer, echoes the hello-ok `ack_epoch`, and quarantines un-persistable frames instead of stalling. Granted only when the server returns `hello-ok.ack_mode="dseq"`; otherwise fall back to v1/legacy. **MUST** be advertised **together with** `reliable_delivery`: v2 does not imply v1 on the server, and both `seq` stamping and the `history.truncated` prune boundary are gated on `reliable_delivery` alone — so a v2-only client gets no `seq` and, worse, **no truncation boundary at all** when the inbox is pruned past its cursor. See §11. ⚠️ If you advertise it you **MUST** implement `message.sync_ack`. |
 
 Note that `e2ee` is gated by client-side policy (advertised only when E2EE is enabled), whereas `history_sync` is advertised **unconditionally** by current clients because both the E2EE and plaintext history-transfer paths share the same `history.transit` wire (§11.4).
 
@@ -198,6 +237,10 @@ deadline causes the server to close the socket **without** a `hello-fail`.
 omitted). `delivery_mode` is `"device_replay"` for all currently accepted
 clients (treat any other value as forward-compatible).
 
+**`hello-ok` carries no user identity.** There is no field on this frame — or
+anywhere else on the WS wire — that tells you your own `user_id`. Obtain it
+out-of-band (§2) before you connect.
+
 **v2 reliable-delivery negotiation.** If you advertised `reliable_delivery_v2`
 and the server enabled it, `hello-ok.payload` additionally carries
 `ack_mode: "dseq"` and a per-connection `ack_epoch` (a random ULID). Their
@@ -209,6 +252,11 @@ and the server enabled it, `hello-ok.payload` additionally carries
   per-connection, starting from 1).
 - `ack_mode` absent → the server did not grant v2; fall back to v1
   (`message.cursor_ack` over storage `seq`) or legacy advance-on-write.
+
+Whether v2 is granted is a per-deployment operator decision as well as a client
+one, so treat both outcomes as normal: branch strictly on the presence of
+`ack_mode` in `hello-ok`, and keep the v1 path implemented and tested even if the
+deployment you develop against always grants v2.
 
 After `hello-ok`, the server immediately begins device replay (§11) before
 new live messages, then transitions to live delivery.
@@ -225,29 +273,99 @@ new live messages, then transitions to live delivery.
 }
 ```
 
-| `reason` | Meaning |
-|----------|---------|
-| `"nonce mismatch"` | The echoed nonce does not match the one issued in `connect.challenge`. |
-| `"authentication failed"` | The token was rejected. |
-| `"invalid connect event"` | First frame was not a parseable `connect`. |
-| `"invalid connect payload"` | `payload` could not be decoded. |
+| `reason` | Meaning | Reconnect strategy |
+|----------|---------|--------------------|
+| `"nonce mismatch"` | The echoed nonce does not match the one issued in `connect.challenge`. | New connection. |
+| `"authentication failed"` | The token was **rejected** by upstream auth (`4xx`). | **Terminal for this token** — acquire a fresh token (refresh / re-login) before retrying; do not hot-loop the same token. |
+| `"remote auth service unavailable"` | The auth backend (member-backend) was **down/slow** (`5xx` / timeout) — token state is **unknown**, the token may still be valid. | **Backoff-reconnect with the *same* token.** Do NOT refresh/re-login (a 5xx storm would otherwise become a mass-refresh storm). |
+| `"invalid connect event"` | First frame was not a parseable `connect`. | Fix the frame, new connection. |
+| `"invalid connect payload"` | `payload` could not be decoded. | Fix the payload, new connection. |
 
-After `hello-fail` the server closes the socket. Do not retry without a new
-token / new connection.
+These five are the complete set a conforming msghub emits today. The set MAY
+grow, and any string added to it will be transient by construction — so do not
+add speculative terminal matchers for strings such as `"invalid token"` or
+`"token expired"`; the server does not emit them, and matching them breaks the
+forward-compat guarantee below.
+
+After `hello-fail` the server closes the socket **at the transport layer — it
+sends no WebSocket CLOSE control frame**, so your library will surface close code
+**1006** (abnormal closure). Treat `hello-fail` + 1006 as the normal, expected
+handshake-rejection shape: the `payload.reason` from the frame you already
+received is the authoritative signal, never the close code. For
+`"authentication failed"`, do not retry without a new token; for
+`"remote auth service unavailable"`, backoff-reconnect with the same token.
+
+> **⚠️ Reason-string matching contract (don't break this in either direction):**
+> Clients distinguish the *terminal* auth failure from the *transient* backend
+> outage by the `reason` string, so the exact text is part of the wire contract:
+>
+> - **`"authentication failed"` is matched by exact equality.** Treat any other
+>   reason (including unknown future strings) as **transient → backoff-reconnect
+>   with the same token**, *not* as a terminal auth failure. This is what lets
+>   the server introduce new transient reasons without bricking old clients —
+>   never widen your terminal branch to a substring/prefix of this string.
+> - **Transient backend-outage reasons contain the substring
+>   `auth service unavailable`.** If your reconnect logic needs to special-case
+>   the 5xx class (e.g. to suppress a token refresh), match on that **substring**
+>   (case-insensitive), not on the full canonical string — the server may prefix
+>   it (`"remote auth service unavailable"`). The shipped agent plugins already
+>   do this (openclaw `/auth service unavailable/i`; hermes marker list).
+>
+> The simplest correct client (mobile's model): exact-match
+> `"authentication failed"` → terminal; **everything else → backoff-reconnect**.
+> That needs no per-reason table and is forward-compatible by construction.
 
 ### 3.6 Duplicate-session policy
 
 If the same `(user_id, device_id)` pair is already connected to the same
 server instance, the server uses **takeover** semantics: the **older**
-socket is closed without an envelope, and the **newer** socket proceeds
-to `hello-ok` as normal.
+socket is closed (no business envelope), and the **newer** socket proceeds
+to `hello-ok` as normal. The older socket receives a WebSocket **close
+control frame** with application close code **`4001`** ("connection replaced
+by a newer session for this device") — best-effort: an already-dead socket
+may just drop. This is distinct from `1011` (which is emitted *by the
+client's own* keepalive watchdog, never by msghub).
 
 Client implication: a `hello-ok` you receive may be racing an older
 session you previously held. If the older session is still running
-locally, it will see its connection drop without a `hello-fail`. Treat an
-unexplained socket close on a previously-good session as a likely
-takeover by another instance of yourself, and reconnect with backoff —
-do **not** assume the token has been revoked.
+locally, it will see its connection close (close code `4001` when the
+frame arrives). Treat a `4001` — or any unexplained close on a
+previously-good session — as a likely takeover by another instance of
+yourself, and reconnect with backoff; do **not** assume the token has
+been revoked. A well-behaved client SHOULD treat `4001` as a signal to
+back off rather than reconnect instantly, since an instant reconnect that
+races your own other session is what produces a takeover storm.
+
+To dampen such storms the server **throttles** repeated takeovers of the
+same `(user_id, device_id)`: more than 3 within a 10s window add a small
+bounded backoff (≤2s) before the new socket is installed. The server never
+*refuses* the new socket — throttling only slows a tight loop.
+
+**Operator warning — a stable `device_id` makes two instances evict each other
+forever.** §3.3 recommends a stable `device_id` so replay state survives a
+restart, and you should follow that. But the same stability means two
+*concurrently running* instances of the same identity present the same
+`(user_id, device_id)` pair and will take each other over indefinitely, each
+reconnecting into the other's eviction. **Run exactly one process per
+`(user_id, device_id)`.** If you genuinely need concurrent instances, give each a
+distinct `device_id` — and accept that each then maintains its own replay cursor
+and its own inbox backlog. To keep even the single-instance case out of the
+server's throttle band, apply a reconnect floor of at least **5 s** after an
+unexplained close on a previously-good session, rather than your normal
+first-attempt delay.
+
+### 3.7 Token lifetime on a live connection
+
+The token is verified **once**, during the handshake. The server never re-checks
+it on an established connection, so a token that expires mid-session does **not**
+close your socket — a live connection is not evidence that your token is still
+valid.
+
+There is also no in-band rotation: a refreshed token takes effect only on the
+next `connect`, which means closing the socket and re-handshaking. Refresh
+**proactively**, before you reconnect, rather than reacting to `hello-fail` — a
+reconnect attempted with an already-expired token yields the terminal
+`"authentication failed"` (§3.5).
 
 ---
 
@@ -274,12 +392,12 @@ Every WebSocket frame is a JSON object with this top level:
 | `version` | string | always | Currently `"2"` |
 | `event` | string | always | One of the constants in §6 |
 | `trace_id` | string | always | Client-chosen on uplink; the server echoes it on the matching ack/response |
-| `emitted_at` | int64 | always | Milliseconds since epoch. Treat the sender's `emitted_at` as advisory: the server restamps on every downlink it constructs (materialized `message.send` / `message.reply`, `message.ack`, `message.error`, and every streaming lifecycle event). The only paths that echo the client's value verbatim are the `ping` ↔ `pong` heartbeat. |
-| `chat_id` | string | every business event | Drives routing (§5). Empty / missing values are rejected on uplink. |
+| `emitted_at` | int64 | always | Milliseconds since epoch. Treat the sender's `emitted_at` as advisory: the server restamps on every downlink it **constructs** (materialized `message.send` / `message.reply`, `message.ack`, `message.error`, and every streaming lifecycle event). Three exceptions: `pong` echoes the `ping`'s value verbatim; **a replayed frame keeps the `emitted_at` it was originally sent with**, not the replay time; and the connect-time `message.read` watermark snapshot (§9.7) sets `emitted_at` equal to the watermark. Do not order or de-duplicate a timeline on this field. |
+| `chat_id` | string | every business event | Drives routing (§5). Empty / missing values cause the uplink to be **silently dropped** — no `message.ack` and no `message.error` (§14.5). |
 | `chat_type` | string | downlink business events only | `"direct"` or `"group"`. Server-stamped. **Clients MUST omit on uplink** — any client value is dropped. |
-| `to` | object | optional everywhere | UI context only (which conversation row to render under). Never used for routing. Echoed verbatim end-to-end. |
+| `to` | object | optional everywhere **except `message.delivered`** | UI context on chat events (which conversation row to render under), echoed verbatim end-to-end and never used for routing. **On `message.delivered` it is required and load-bearing:** `to.id` must be the original sender's `user_id` and the server uses it as the routing key — a receipt with no `to.id` is dropped silently (§14.4, §14.5). |
 | `sender` | object | downlink business events | Identifies the originating user. **Clients MUST omit on uplink** — the server stamps it from the authenticated identity. |
-| `origin_device_id` | string | downlink (multi-device) | Stamped on the `message.send` / `message.reply` and streaming (`message.created`/`add`/`done`/`failed`) downlinks (identifies the originating device) — **not** on `message.ack` or `message.error`. Self-echo **filtering** applies only when `sender.id` equals **your own** `user_id` — your sibling devices use it to suppress the echo to the originating device; from another user it is informational. **Clients MUST omit on uplink** — any client value is dropped. |
+| `origin_device_id` | string | downlink (multi-device) | Stamped on the `message.send` / `message.reply` and streaming (`message.created`/`add`/`done`/`failed`) downlinks (identifies the originating device) — **not** on `message.ack` or `message.error`. Self-echo **filtering** applies only when `sender.id` equals **your own** `user_id` — your sibling devices use it to suppress the echo to the originating device; from another user it is informational. Your own `user_id` is **not** carried on this wire; obtain it out-of-band (§2) before you rely on this filter. **Clients MUST omit on uplink** — any client value is dropped. |
 | `seq` | int64 | downlink, **v1** reliable only | OPAQUE, SPARSE, MUTABLE storage coordinate stamped only for clients that advertised `reliable_delivery`. Ack the highest you have durably persisted via `message.cursor_ack` as an opaque high-water mark; **never** wait for "missing" seqs (the space is ~75% holes). Absent on uplink, legacy, and v2-only downlinks. See §11. |
 | `dseq` | int64 | downlink, **v2** reliable only | Per-connection DENSE delivery seq (`1,2,3…`, reset per connection) stamped only when the server granted `reliable_delivery_v2`. Ack the highest contiguous `dseq` via `message.sync_ack{dseq,epoch}`; verify `dseq == lastReadDseq+1` at the read layer. Absent on uplink and v1/legacy downlinks. See §11. |
 | `target_device_id` | string | uplink, `history.transit` only | The sibling device this transfer is for (§11.4). |
@@ -300,7 +418,9 @@ Every WebSocket frame is a JSON object with this top level:
   identifies a single user, even on group downlinks. This is the **routing
   type** (the sender is a single user), NOT a human-vs-agent distinction;
   human/agent is not carried on the wire (it is server-side metrics only,
-  derived from the JWT `aid` claim).
+  derived from the JWT `aid` claim). The one exception is `history.transit`,
+  where the server does not stamp `sender` at all and the object is
+  whatever the sending sibling device wrote (§11.4).
 - `to.type` is **client-supplied UI metadata**. The canonical values are
   `"direct"` and `"group"`; the server does not validate it and echoes it
   through unchanged. Clients SHOULD send `"direct"` / `"group"` and SHOULD
@@ -316,6 +436,20 @@ delivers a copy of the envelope to every member **except the sender** —
 with one exception: when the sender advertised `multi_device` (§3.3), the
 sender's *own other devices* also receive an echo (filtered via
 `origin_device_id`, §4).
+
+**`chat_id` format.** msghub itself never parses `chat_id`: it hands the string
+to the deployment's configured chat resolver, and a resolver that rejects it as
+malformed produces `message.error` `code: "bad_request"` before any fanout
+(§14.3) — distinct from `chat_not_found`, which means the id was well-formed but
+names no live conversation. **The format is therefore a property of the
+deployment's source of truth.** In the ClawChat deployment a conversation id is a
+`cnv_`-prefixed idcode (`cnv_` + a Crockford base32 ULID); a user id (`usr_…`),
+an agent id (`agt_…`), a composite key such as `direct:usr_A:usr_B`, or a bare
+adapter name is rejected. Clients targeting that deployment SHOULD reject a
+non-`cnv_` `chat_id` locally before sending — both reference agent adapters do —
+because on paths where no ack is awaited the failure is otherwise a silently
+dropped turn. (Dev / E2E deployments using a mock resolver accept arbitrary ids;
+examples in this guide such as `chat-ab` are of that form.)
 
 This means:
 
@@ -339,7 +473,12 @@ wire. **Clients must use `"direct"` / `"group"` only.**
 
 ## 6. Event catalogue
 
-Full list of `event` values. C = client, S = server.
+Full list of `event` values — this catalogue is **exhaustive**: it is the
+complete set of event names a conforming msghub emits or accepts. Any other event
+name is a client-local extension or a future addition; in both cases the
+tolerance rule applies (do not error, do not close), and in the second case see
+§11.7 on acking a `dseq`-bearing frame whose name you do not recognise.
+C = client, S = server.
 
 | `event` | Direction | Carries `to` | Carries `sender` | Server emits ack? |
 |---------|-----------|--------------|------------------|-------------------|
@@ -351,6 +490,8 @@ Full list of `event` values. C = client, S = server.
 | `message.ack` | S → C | yes | no | n/a |
 | `message.error` | S → C | yes (UI) | no | **negative ack** for `message.send` / `message.reply` / streaming uplinks — see §14.3 |
 | `message.delivered` | C ↔ S | yes (`to` = original sender) | server-stamped (receiver) | n/a — is a receipt |
+| `message.reaction` | C → S → members | yes (UI) | server-stamped (reactor) | **yes** (`message.ack` to the reactor, keyed by the slot id `rxn:<target>:<reactor>`; clients MAY ignore — reactions self-heal via inbox replay). See §9.6. |
+| `message.read` | C ↔ S | no | server-stamped (reader) | **no** — the live echo carries no ack; delivery gated by `multi_device` (self-echo to the reader's other devices only). The watermark is durably persisted server-side, independent of the live echo. See §9.7. |
 | `history.transit` | C ↔ S | no | **yes — client-set on uplink** (§11.4) | **no** — E2EE sibling-device history transfer (§11.4). Gated by `capabilities.history_sync` (enforced on uplink). Unknown event values MUST be tolerated. |
 | `message.reply` | C ↔ S | yes (UI) | server-only on downlink | **yes** (`message.ack`) on uplink |
 | `message.created` | C ↔ S | yes (UI) | server-only on downlink | **no** |
@@ -375,8 +516,8 @@ Full list of `event` values. C = client, S = server.
 | `offline.batch` | S → C | no | no | **deprecated / legacy** — superseded by device replay + `replay.done` (§11.5); see §11.3 |
 | `offline.ack` | C → S | no | no | **deprecated / legacy** — superseded by device replay + `replay.done` (§11.5); see §11.3 |
 | `offline.done` | S → C | no | no | **deprecated / legacy** — superseded by device replay + `replay.done` (§11.5); see §11.3 |
-| `ping` | C ↔ S | no | no | yes (`pong`) |
-| `pong` | C ↔ S | no | no | n/a |
+| `ping` | C → S | no | no | yes (`pong`) |
+| `pong` | S → C | no | no | n/a |
 
 ### 6.1 Routing-type constants
 
@@ -390,7 +531,7 @@ Full list of `event` values. C = client, S = server.
 ## 7. Materialized messages
 
 **Two-tier delivery status.** Messages have two status tiers on the wire:
-`message.ack` = "sent" (the server accepted and durably enqueued the message);
+`message.ack` = "sent" (the server accepted the uplink and queued it for fanout);
 `message.delivered` = "delivered" (a recipient device actually received the
 message). A client that does not advertise `delivery_receipt` (or whose peer
 doesn't) simply stays at "sent".
@@ -412,8 +553,8 @@ Forbidden:
 - Top-level `sender` — server stamps it.
 - Top-level `chat_type` — server stamps it.
 - `payload.message.streaming` — server fills it on the downlink.
-- `payload.message_id` — usually omitted; server mints a `msg-<ULID>`.
-  See §7.4 for the **rare exception**.
+- `payload.message_id` — SHOULD be client-minted (§7.6); if omitted the server
+  mints a `msg-<ULID>`.
 
 ```json
 {
@@ -432,6 +573,50 @@ Forbidden:
   }
 }
 ```
+
+**`context.mentions` is untyped and relayed element-for-element.** The
+server carries it as an untyped, opaque JSON array and the uplink →
+downlink rewrite only re-marshals it — nothing validates or normalizes the
+elements, so whatever a producer sends reaches every recipient unchanged.
+Producer and receiver obligations differ:
+
+- **Producers SHOULD** emit mention objects —
+  `{"kind": "mention", "user_id": "usr_…", "display": "Anne"}`. Every
+  shipped producer (mobile, `openclaw-clawchat`, `hermes-clawchat`) does.
+- **Receivers MUST parse tolerantly and MUST NOT throw.** Accept mention
+  objects; accept **bare user-id strings** — a legacy/out-of-tree form that
+  is real on the wire and that all three shipped consumers tolerate; accept
+  `null`, because the field has no `omitempty`, so a producer that omits
+  `mentions` entirely yields `"mentions": null` on the downlink; and skip
+  any element you do not recognise.
+
+```jsonc
+"context": {
+  "mentions": [
+    { "kind": "mention", "user_id": "usr_anne", "display": "Anne" },
+    "usr_bob"                    // legacy / tolerated form, not canonical
+  ],
+  "reply": null
+}
+```
+
+A `mentions` parse failure MUST NOT abort the frame's durable persist or
+its ack. On a v2 (`dseq`) connection an exception thrown while mapping one
+message stalls the whole stream — see the poison-frame quarantine **MUST**
+in §11.7.
+
+**U+0000 is silently removed.** The server's JSON document store cannot hold
+U+0000, so the
+server deletes every genuine `\u0000` escape from the marshaled envelope before
+it is fanned out or persisted. The rule applies
+**anywhere in the envelope** — fragment `text` / `delta`, `metadata.*`,
+`context.*`, `chat_id`, `trace_id`, `to.*`, `sender.nick_name`,
+`payload.message_id`, `ciphertext_fragments[].ciphertext` — and for every chat
+event that fans out through the hub it is applied identically to the live
+downlink and to the stored copy, so replay and live delivery agree. It is the
+one exception to the "preserved verbatim" promises in §7.6 and §13: text
+containing U+0000 arrives one codepoint shorter than you sent it. Clients
+SHOULD NOT put U+0000 in any field.
 
 ### 7.2 `message.ack` (S → C, back to the sender)
 
@@ -536,23 +721,53 @@ SHOULD send `"normal"` for ordinary messages and may use other values
 specific modes differently and SHOULD treat empty string as equivalent
 to `"normal"`.
 
+**Consumer rule (normative).** A client MUST treat `""` and `"normal"` as
+identical. For any other value, a client that ingests messages as *conversational
+input* (an agent, a bot, an automation) SHOULD **skip** the frame: non-normal
+modes such as `"thinking"` carry producer-internal reasoning, not a turn
+addressed to the recipient. A *rendering* client (a human-facing UI) MAY instead
+display it with mode-specific styling. Whichever you choose, do not error on an
+unrecognised mode. A client that ingests non-normal modes as user turns will feed
+an agent its own scratchpad.
+
 ### 7.6 `payload.message_id` rules
 
-- **Uplink**: usually omit. The server mints `msg-<26-char ULID>`.
+- **Uplink**: optional, but any client that can retransmit an unacknowledged send
+  (reconnect replay, ack timeout, offline outbox) **MUST** mint the id itself and
+  reuse it byte-for-byte on every attempt. The server mints a *new* id each time
+  the field is omitted, and the recipient inbox de-duplicates on
+  `(recipient, message_id)` — so an omitted id turns one retry into two delivered
+  messages. Omit it only in a strictly fire-and-forget client. See also the
+  upsert-by-`message_id` rule in §11.7.
 - **Downlink**: always populated.
 - **Reuse exception**: a streaming producer that closes a stream with a
   trailing `message.reply` MAY (and usually SHOULD) reuse the same
   `message_id` it used for the stream — see §8.4.
 - **Format contract** (binding): a client-supplied `message_id` MUST match
-  `^msg-[0-9A-HJ-NP-Z]{26}$` (`"msg-"` + a 26-char Crockford base32 ULID) and
-  be **≤ 128 characters**. This is exactly what the server mints, and what
-  the official clients already produce. Do **not**
-  invent a different id scheme: the server preserves ids verbatim **today**,
-  but planned input-validation hardening on the backend will start
-  **rejecting** non-conforming ids.
+  `^msg-[0-9A-HJ-NP-Z]{26}$` (`"msg-"` + a 26-char Crockford base32 ULID) — 30
+  characters, well inside every server limit. This is exactly what the server
+  mints, and what mobile / `openclaw-clawchat` / `hermes-clawchat` already
+  produce. Do **not** invent a different id scheme.
 
-The server **preserves** any client-supplied `message_id` verbatim. Do not
-rely on this to forge a counterfeit identity for someone else's message —
+> **Length is enforced; shape is not.** The server rejects any client-supplied
+> `message_id` longer than **512 bytes** — bytes, not characters — on
+> `message.send`, `message.reply`, and all four streaming lifecycle uplinks.
+> The uplink is
+> consumed before any fanout, so no recipient sees it, and the sender gets a
+> `message.error` with `code: "message_id_too_long"` whose `reason` carries the
+> actual and maximum byte counts (§14.3). It is terminal — retrying the same id
+> fails identically. The **shape** half of the contract above is *not* validated
+> server-side: a short non-`msg-` id is still accepted verbatim today. A
+> conforming 30-char id can never reach the 512-byte cap, which is an anti-abuse
+> bound and not a budget to spend. Any `≤ 128 characters` figure you see quoted
+> for `message_id` is a style convention with nothing behind it — storage imposes
+> no length bound of its own, so the 512-byte ingest cap is the only `message_id`
+> length limit in the system.
+
+The server **preserves** any client-supplied `message_id` verbatim, except that
+an id over 512 bytes is rejected outright (above) and any U+0000 in it is
+stripped like anywhere else in the envelope (§7.1). Do not rely on this to
+forge a counterfeit identity for someone else's message —
 `sender` is always server-stamped from the authenticated identity, so
 recipients cannot be tricked into attributing the message to another user.
 
@@ -580,6 +795,25 @@ All four lifecycle events use a **flat** payload — fragments, streaming
 state, and timestamps live at `payload` top level, **not** inside
 `payload.message.body`.
 
+### 8.0 Streaming is optional — the minimum viable client
+
+Neither reference agent adapter produces streaming frames, and neither acts on
+the downlink lifecycle events; both chunk their replies as ordinary
+`message.send` / `message.reply` frames. Nothing in this section is required of a
+conforming client.
+
+A fully conformant client needs only: `connect` and `message.send` (uplink); and
+handling for `connect.challenge`, `hello-ok`, `hello-fail`, `message.ack`,
+`message.error`, `message.send` and `message.reply` (downlink). `replay.done`
+arrives on every reconnect and may simply be ignored. The heartbeat needs no
+application code at all — the server heartbeats with RFC 6455 Ping *control*
+frames that your WebSocket library auto-answers, and it never sends a JSON-level
+`ping` (§12); the JSON `ping`/`pong` pair is an optional client-initiated probe.
+
+Everything else in this guide — streaming, presence, delivery receipts, read
+cursors, reliable delivery, `history.transit` — is optional, and most of it is
+gated behind a capability you can choose not to advertise.
+
 ### 8.1 `message.created`
 
 Minimal payload — opens the stream for one `message_id`.
@@ -603,9 +837,14 @@ Minimal payload — opens the stream for one `message_id`.
 | `message_id` | yes | Client-chosen. **MUST stay identical across every event in this stream.** |
 | `message_mode` | optional | Server preserves it verbatim and does **not** default it — clients SHOULD treat empty as equivalent to `"normal"`. |
 
-The producer chooses the `message_id`; the server preserves it. Use a
-prefix that distinguishes producer-generated ids from server-minted ones
-(e.g. `"agent-stream-<ULID>"`) to make logs greppable.
+The producer chooses the `message_id`; the server preserves it verbatim.
+Note the §7.6 format contract still applies: a client-supplied id SHOULD
+conform to `^msg-[0-9A-HJ-NP-Z]{26}$`, so distinguish producer-generated ids
+by the ULID itself (which is greppable) rather than by a non-conforming
+literal prefix. The `agent-stream-…` ids shown in the examples of this
+section work only because the server does not yet validate id **shape** —
+length *is* validated (over 512 bytes ⇒ `message.error` with
+`code: "message_id_too_long"`, §7.6), and a shape check may follow.
 
 ### 8.2 `message.add`
 
@@ -703,15 +942,28 @@ message.reply (message_id = M1, body = [text: "Final answer: 42."])
        containing the final reply (not two rows: stream + reply)
 ```
 
-**Note this is a persistence-layer property, not a live-delivery one.**
-Online recipients still see every wire frame: the stream events as they
-arrive AND the trailing `message.reply`. The "collapse" only happens for
-recipients who are *offline during the stream* — the server stores at
-most one row keyed by `(recipient_user_id, message_id)`, and reusing the
-stream's id makes the polished reply overwrite the auto-merged stream
-record. If the producer instead used a fresh `message_id` for the
-trailing reply, offline recipients would see **both** the merged stream
-and the reply as separate messages on reconnect.
+**Note the id-reuse collapse is a persistence-layer property.** Online
+recipients still see every wire frame: the stream events as they arrive
+AND the trailing `message.reply`. The "collapse" is what keeps the stored
+row single — the server stores at most one row keyed by
+`(recipient_user_id, message_id)`, and reusing the stream's id makes the
+polished reply overwrite the auto-merged stream record. If the producer
+instead used a fresh `message_id` for the trailing reply, offline
+recipients would see **both** the merged stream and the reply as separate
+messages on reconnect.
+
+**But on a deployment configured to materialize merged replies, the merged
+reply itself is live-delivered.** There, the server
+materializes the merged reply on `message.done` and produces it back
+through the normal `message.reply` path, so an **online** recipient
+receives a *third* thing on the wire — the stream frames, the agent's own
+finalize `message.reply`, and the server-materialized merged reply,
+flagged by `payload.stream_merged: true`. That frame is **provisional**:
+it MUST NOT overwrite an already-persisted reply with the same
+`message_id` that lacks the flag (§11.7 "Persist is always upsert"), and
+absence of the flag does not imply "author-final" — the legacy `direct`
+mode marks nothing. Full field contract: the `payload.stream_merged` section of the msghub
+Protocol v2 reference (owned by msghub).
 
 ### 8.5 Streaming acks
 
@@ -737,6 +989,12 @@ When a recipient is offline during a stream, the server:
 
 The recipient receives this single envelope on reconnect via device replay
 (§11) — not as a stream.
+
+This section is not offline-only on a deployment configured to materialize
+merged replies: there the same materialized envelope is produced through the
+normal `message.reply` path, so an **online** recipient also receives it
+live, carrying `payload.stream_merged: true` (§8.4). Handle it as a
+provisional reply in both cases.
 
 ### 8.7 Streaming uplink rules
 
@@ -788,18 +1046,36 @@ load and have a much shorter retention than messages.
 The server fills `sender` on the downlink (server-injected, not echoed
 from the client).
 
+**Lifetime.** `typing.update` is a *level*, not an edge: the server relays it,
+holds no per-chat typing state, and applies no expiry of its own. A producer that
+sets `is_typing: true` **MUST** send a matching `is_typing: false` when it stops —
+including on error and on graceful shutdown — and **SHOULD** re-send `true`
+periodically while a turn is still running (the reference mobile client refreshes
+at most once per **3 s**; the hermes adapter throttles repeats to one per **10 s**).
+Receivers **MUST** apply their own local expiry so a crashed or disconnected
+producer cannot pin the indicator: the reference mobile client clears a peer's
+indicator **6 s** after the last `true`. Choose a receiver window that is at least
+twice your producer refresh interval.
+
 ### 9.2 Presence subscriptions
 
 Clients watch another user's online state by subscribing over the same
 WS connection. Subscriptions are scoped to that conn — they're cleaned
 up automatically on disconnect, and on reconnect you must re-subscribe.
 Hard cap: **16 active subscriptions per connection**, silently
-enforced. Over-cap subscribes still get a `presence.snapshot` reply,
-but the registry isn't grown.
+enforced (§13.2). Over-cap subscribes that pass the visibility gate still get a
+`presence.snapshot` reply, but the registry isn't grown.
 
 Invalid / malformed `user_id` is a **silent no-op** — there is no
-negative-ack envelope, matching Protocol v2's general style. Legal
+negative-ack envelope, matching Protocol v2's general style (§14.5). Legal
 `user_id` values start with `usr_` or `agt_`.
+
+**Visibility gate (deployment-dependent).** A deployment MAY require that you
+share at least one conversation with the target user. When the gate is enabled
+and denies, the subscribe is a silent no-op **with no snapshot at all** — a
+denial is deliberately indistinguishable from an offline user. Tolerate a
+`presence.subscribe` that never produces a snapshot, and do not retry it in a
+loop. Subscribing to yourself is always allowed.
 
 **Subscribe** (C → S):
 
@@ -872,22 +1148,28 @@ discriminator (snapshot = "initial state after subscribe", update =
 Idempotent — unsubscribing from a `user_id` the conn isn't subscribed
 to is a silent no-op.
 
-**Loss tolerance:** the cluster fans presence changes across instances,
-and individual update frames may be dropped under load.
+**Loss tolerance:** the cluster fans presence changes through Redis
+pub/sub, and individual update frames may be dropped under load.
 Clients re-sync state on reconnect by re-subscribing — a fresh snapshot
 is always the recovery primitive.
 
 ### 9.3 Chat metadata invalidation — `chat.metadata.invalidated`
 
+> This event is content-free: it names *what* changed, and the authoritative
+> state is read back from the deployment's companion REST API — a separate
+> specification (§0).
+
 A server-pushed signal that some out-of-band field of a chat (currently
-`title`, `description`, or `behavior` — see scope vocabulary below) has
-changed and local cached copies should be refreshed. The frame carries
-**no new data** — only an advisory `scope` of what changed — and the
-client must fetch the new state from the ClawChat backend REST API. The
-fetch endpoint depends on the scope (see vocabulary table below): group
-title / description changes are read back from
-`/v1/conversations/:cid`; `behavior` changes are read back from
-`/v1/agents/:id` against the agent paired in that direct conversation.
+`title`, `description`, `member_add_policy`, `avatar`, `announcement`, or
+`behavior` — see scope vocabulary below) has changed and local cached
+copies should be refreshed. The frame carries **no new data** — only an
+advisory `scope` of what changed — and the client must fetch the new
+state from `clawchat-member-backend`. The fetch endpoint depends on the
+scope (see vocabulary table below): the five group scopes are read back
+from `/v1/conversations/:cid`, and `announcement` additionally needs
+`/v1/conversations/:id/announcements`; `behavior` changes are read back
+from `/v1/agents/:id` against the agent paired in that direct
+conversation.
 
 **Capability-gated.** A client only ever receives this event if its
 `connect` payload (see §3.3) advertised `capabilities.chat_meta_events:
@@ -928,32 +1210,54 @@ addressed to one recipient at a time via the WS routing layer.
 
 **Scope vocabulary.** Open-ended and additive — clients **must** treat
 unknown scope strings as a generic "refetch everything" hint, not error.
-Currently produced by the ClawChat backend:
+Currently produced by `clawchat-member-backend`:
 
 | Scope | Triggered by | Refetch from |
 |-------|--------------|--------------|
 | `["title"]` | Successful group rename (`PATCH /v1/conversations/:cid` with `title`). | `GET /v1/conversations/:cid`. |
 | `["description"]` | Successful group description / system-prompt change (`PATCH /v1/conversations/:cid` with `description`). | `GET /v1/conversations/:cid`. |
+| `["member_add_policy"]` | Successful change to who may add members (`PATCH /v1/conversations/:cid` with `member_add_policy`). Group-only. | `GET /v1/conversations/:cid`. |
+| `["avatar"]` | Successful group avatar change (`PATCH /v1/conversations/:cid` with `avatar_url`). Group-only. | `GET /v1/conversations/:cid` — the paired `group_avatar_changed` system message carries the actor only, never the new URL, so the GET is the only way to obtain it. |
+| `["announcement"]` | Any announcement add / edit / delete on a group (`POST /v1/conversations/:id/announcements`, `PATCH` / `DELETE /v1/conversations/:id/announcements/:annId`). Group-only. | **Two calls.** `GET /v1/conversations/:cid` for the bumped `announcement_revision`, **and** `GET /v1/conversations/:id/announcements` for the announcements themselves — the detail response carries the revision counter only. Refetching just the detail leaves the banner stale, and on a group's first-ever announcement the banner never appears at all. |
 | `["behavior"]` | Owner edits the per-agent behavior / system prompt (`PATCH /v1/agents/:id` with `behavior`). Fired only when the value actually changes. Fanned over the agent's direct conversation; recipients are the owner and the agent's shadow user. | `GET /v1/agents/:id` against the agent paired in this direct conversation (the agent client typically caches its own id; the owner can resolve it via the conversation's other participant — the agent's shadow `user_id` → `agt_…`). |
 
-A single mutation always emits a single-element scope today; future
-changes may emit multi-element scope (e.g. `["title", "description"]`)
-or new scope strings. Implementations that only recognize `title` must
-still refresh on `description` or any unknown value.
+**Multi-element scope is current behavior, not forward-compat
+scaffolding.** One `PATCH /v1/conversations/:cid` can change `title`,
+`description`, `member_add_policy`, and `avatar` atomically, and it then
+emits a **single** signal whose `scope` lists every field that actually
+changed — e.g. `["title", "avatar"]`. Clients MUST iterate every element
+and MUST NOT read only `scope[0]`. New scope strings may also appear at
+any time; implementations that only recognize `title` must still refresh
+on `description` or any unknown value.
 
-**No-op short-circuit.** The producer (the ClawChat backend) does
-**not** emit a signal when the new value equals the current value
-(server-side "same title" / "same description" / "same behavior"
-check). Clients will therefore never see a redundant
-`chat.metadata.invalidated` for an unchanged field.
+**Some scopes are the only change notice you get.** `title`, `avatar`, and
+announcement changes each also post a durable system message into the
+conversation, so an offline client learns of them on replay.
+`description`, `member_add_policy`, and `behavior` post **none** — this
+ephemeral signal (plus the recovery fetches at the end of this section) is
+their only notification channel.
 
-**Direct vs group.** The ClawChat WebSocket wire surface is type-agnostic and
-the ClawChat backend uses it for both kinds:
+**No-op short-circuit.** The producer (`clawchat-member-backend`) does
+**not** emit a signal when the new value equals the current value on the
+`PATCH`-driven scopes: `title`, `description`, `member_add_policy`,
+`avatar` and `behavior` are each gated on a per-field equality check, and
+a field whose value did not move is simply left out of `scope` — so a
+multi-field PATCH that only really changes one field emits a
+single-element scope, and an all-no-op PATCH emits nothing at all.
+`announcement` has **no** such gate: any add / edit / delete call fires
+the signal, including an edit that rewrites an announcement to identical
+text. Treat a redundant `announcement` signal as normal and make the
+refetch idempotent.
 
-- Group `title` / `description` edits flow through
-  `PATCH /v1/conversations/:cid`, which rejects direct conversations
-  with `ErrUnsupportedType` before the notifier fires — so the
-  `["title"]` and `["description"]` scopes only appear on group chats.
+**Direct vs group.** The msghub wire surface is type-agnostic and
+member-backend uses it for both kinds:
+
+- Group `title` / `description` / `member_add_policy` / `avatar` edits all
+  flow through the one `PATCH /v1/conversations/:cid` handler, which
+  rejects direct conversations with `ErrUnsupportedType` before the
+  notifier fires, and the announcement endpoints apply the same group-only
+  guard — so the `title`, `description`, `member_add_policy`, `avatar`, and
+  `announcement` scopes only appear on group chats.
 - `PATCH /v1/agents/:id` with `behavior` fires the signal over the
   **direct conversation** between the owner and the agent's shadow
   user — so the `["behavior"]` scope only appears on direct chats. The
@@ -966,9 +1270,11 @@ the ClawChat backend uses it for both kinds:
    for `chat_id`; drop the frame if `version <= last_seen` (idempotent
    refresh — safe to skip if you implement #3 unconditionally).
 3. Issue `GET /v1/conversations/:cid` against
-   the ClawChat backend to fetch the authoritative state. Do
-   **not** mutate local state from the signal frame alone — `scope` is
-   advisory, not authoritative payload.
+   `clawchat-member-backend` to fetch the authoritative state — plus
+   `GET /v1/conversations/:id/announcements` if you render an announcement
+   banner, since the detail response carries only
+   `announcement_revision`. Do **not** mutate local state from the signal
+   frame alone — `scope` is advisory, not authoritative payload.
 4. Update your conversation row / UI from the GET response.
 5. Persist the new `version` cursor for step #2 on subsequent frames.
 
@@ -998,10 +1304,14 @@ build correctness on receiving it.
 
 ### 9.4 Reliable system notifications — `notify.signal`
 
+> This event is content-free: it names *what* changed, and the authoritative
+> state is read back from the deployment's companion REST API — a separate
+> specification (§0).
+
 A server-pushed, **content-free** signal that some entity in the user's
 world has changed (a friend was added, a friend request arrived, a
 conversation's roster moved, etc.) and the client should refetch the
-authoritative state from the ClawChat backend over REST. The frame
+authoritative state from `clawchat-member-backend` over REST. The frame
 carries **no business data** — only enough identity to dedup and to
 decide *what* to refetch.
 
@@ -1023,8 +1333,8 @@ replay too** — on v2 this capability gates both the live push *and* the
 replayed signal. Advertise it if you want sub-second refetch while
 connected (and, on v2, the replayed signal at all).
 
-**Producer.** These are produced by the ClawChat backend; clients never
-produce `notify.signal`.
+**Producer.** Clients never produce `notify.signal`; it is published by the
+platform's own services.
 
 **Wire shape** (S → C):
 
@@ -1052,29 +1362,13 @@ the WS routing layer.
 
 | Field | Type | Required | Meaning |
 |-------|------|----------|---------|
-| `type` | `string` | yes | Logical event type — the discriminator the client routes on to decide which REST refetch to issue (e.g. `friend.added`, friend-request changes, conversation-roster changes, `moment.comment.created`/`moment.comment.replied`). Unknown types MUST be tolerated as a generic "refetch the relevant surface" hint, not errored. |
-| `entity_id` | `string` | yes | The id of the changed entity (e.g. the friend's `usr_…`). What it points at depends on `type`. For `moment.comment.created`/`moment.comment.replied` it is the **moment id** — a plain numeric string, e.g. `"42"`. |
+| `type` | `string` | yes | Logical event type — the discriminator the client routes on to decide which REST refetch to issue (e.g. `friend.added`, friend-request changes, conversation-roster changes). Unknown types MUST be tolerated as a generic "refetch the relevant surface" hint, not errored. |
+| `entity_id` | `string` | yes | The id of the changed entity (e.g. the friend's `usr_…`). What it points at depends on `type`. |
 | `version` | `int64` | yes | Monotonic cursor (ms since epoch at mutation time). Use for client-side duplicate detection if two signals for the same entity race. |
-| `event_id` | `string` | yes | Globally-unique id for this signal occurrence. Use it as a cross-channel dedup key — the same logical change may also arrive via an off-app push notification, and `event_id` lets the client collapse the two. |
+| `event_id` | `string` | yes | Globally-unique id for this signal occurrence. Use it as a cross-channel dedup key — the same logical change may also arrive via a Pushy push, and `event_id` lets the client collapse the two. |
 | `message_id` | `string` | yes | The inbox **coalesce key**, formatted `notify:{type}:{entity_id}`. This is the server-side dedup key, **not** a chat message id — see loss tolerance below. |
 
-**Moment comment signals.** `moment.comment.created` and
-`moment.comment.replied` cover the two comment-related cases:
-
-- `moment.comment.created` — someone commented on one of this agent's
-  moments.
-- `moment.comment.replied` — someone replied to a comment this agent
-  wrote.
-
-Like every `notify.signal` payload, these are content-free — the frame
-carries no comment text, only `entity_id` (the moment id). On receipt
-the Hermes plugin synthesizes a lightweight owner-awareness note into
-the owner's direct chat; it does **not** hydrate the comment inside the
-signal handler. The agent is expected to call the `clawchat_get_moment`
-tool itself to read the moment and its visible comments, and may reply
-using the `clawchat_reply_moment_comment` tool.
-
-**Coalescing semantics.** The signal is upserted into the per-user offline
+**Coalescing semantics.** The signal is upserted into the per-recipient durable
 inbox keyed by `payload.message_id` (`notify:{type}:{entity_id}`). Re-firing
 the same `{type, entity_id}` **overwrites** the prior inbox row
 (last-write-wins, carrying the newest `version`) rather than queuing a
@@ -1083,9 +1377,9 @@ changes while a device is offline, the device gets **one** signal for it
 on reconnect, reflecting the latest state — which is correct because the
 signal is content-free and the client refetches anyway.
 
-**Relationship to off-app push.** A subset of these system changes is also
-delivered as an off-app push notification. The WS
-`notify.signal` and the push are independent transports for the
+**Relationship to Pushy.** A subset of these system changes is also
+delivered as a Pushy push for off-app notification. The WS
+`notify.signal` and the Pushy push are independent transports for the
 same logical event; use `event_id` to dedup if you process both.
 
 **Client handling recipe:**
@@ -1097,7 +1391,7 @@ same logical event; use `event_id` to dedup if you process both.
    friend-request list, a specific conversation, or the chat list). Do
    **not** mutate local state from the frame alone — it is a pure
    signal, not authoritative payload.
-4. Issue the synchronous REST refetch against the ClawChat backend
+4. Issue the synchronous REST refetch against `clawchat-member-backend`
    and update UI from the response.
 5. Persist the `version` cursor for step #2.
 
@@ -1105,7 +1399,7 @@ same logical event; use `event_id` to dedup if you process both.
 best-effort live, and capability-gated** (the live path always; the
 replay path too on v2 — see below):
 
-- **Reliable inbox path.** Persisted to the offline inbox under the
+- **Reliable inbox path.** Persisted to the per-recipient durable inbox under the
   coalesce key; reconnect / device replay (§11) **redelivers** it
   exactly once — on **v1 / legacy** regardless of the `notify_signals`
   capability. **v2 exception:** a `reliable_delivery_v2` device that did
@@ -1124,6 +1418,10 @@ received live — both mean "refetch now."
 
 ### 9.5 Agent permission approvals — `permission.request` / `permission.resolved`
 
+> These events are content-free: they name *what* changed, and the authoritative
+> state is read back from the deployment's companion REST API — a separate
+> specification (§0).
+
 A pair of server-originated, **owner-targeted** signals for the agent
 permission-approval flow. When an agent needs the owner's approval to
 perform a sensitive operation (read mail, access a resource, etc.), the
@@ -1132,7 +1430,7 @@ request is decided or expires, it emits a matching `permission.resolved`.
 Both are content-light signals — the **durable** record of the outcome
 flows separately as a `permission_result` system message inside the
 owner↔agent conversation, and the **decision itself flows back via
-the ClawChat backend REST API, not over this WebSocket** (there is no
+`clawchat-member-backend` REST, not over this WebSocket** (there is no
 permission uplink frame).
 
 **Single recipient, not member fanout.** Unlike business messages, these
@@ -1189,26 +1487,55 @@ routing layer.
   "chat_id": "cnv_01HXYZ...",
   "payload": {
     "request_id": "req_01JC...",
-    "decision": "approved",
-    "reason": "User granted"
+    "decision": "allow_once",
+    "reason": "owner_allowed"
   }
 }
 ```
 
 | Field | Type | Required | Meaning |
 |-------|------|----------|---------|
-| `request_id` | `string` | yes | Matches a prior `permission.request`. Use it to locate and collapse the approval card. |
-| `decision` | `string` | optional | Outcome — currently `approved`, `denied`, or `expired`. Unknown values MUST be tolerated. |
-| `reason` | `string` | optional | Human-readable hint suitable for a toast or log line. |
+| `request_id` | `string` | present, but **may be empty** | Normally matches a prior `permission.request` — use it to locate and collapse the approval card. The passive policy-deny path (below) ships `request_id: ""`, which correlates to no prior request; clients MUST ignore an empty value rather than treat it as a card id. |
+| `decision` | `string` | optional | The owner's decision, echoed verbatim from the `clawchat-member-backend` REST decision body: one of `allow_once`, `allow_always`, `deny_once`, `deny_always`. **Absent** on both server-initiated paths — the expiry sweep and the passive policy-deny — so a client MUST handle a `permission.resolved` with no `decision` and read `reason` instead. Unknown values MUST be tolerated. |
+| `reason` | `string` | optional | A machine-readable **code**, not prose: one of `owner_allowed`, `owner_denied`, `owner_timeout` (the request's `expires_at` passed and the server-side sweep settled it), `policy_forbidden` (a standing deny policy refused the operation; no card was ever shown). Map it to your own localized string — do **not** render it raw in a toast. Unknown values MUST be tolerated. |
+
+> **`decision` is not the system message's `outcome`.** The durable
+> `permission_result` system message carries a *different* field on the same
+> conceptual axis, `metadata.outcome`, whose vocabulary is
+> `approved` / `denied` / `expired` / `failed` / `auto_allowed` /
+> `auto_denied`. Those six values **never** appear as `decision` on this
+> frame, and the four `decision` values never appear as an `outcome`. Do not
+> share one enum between the two.
+
+**`decision` and `reason` are unvalidated pass-throughs.** msghub neither
+inspects nor normalizes either field — it relays verbatim whatever the
+deployment's permission service publishes. Two consequences for a client:
+
+- `allow_always` / `deny_always` also arrive when the owner edits a standing
+  **policy** in the agent permission panel and the backend cascades that
+  policy onto the agent's other pending requests for the same operation. Such
+  a frame is indistinguishable on the wire from a card the owner actually
+  answered, so do **not** render "you tapped *Always allow* on this request" —
+  say only that the request was allowed.
+- The passive policy-deny is the degenerate frame: it carries
+  `{"request_id": "", "reason": "policy_forbidden"}` and nothing else. The
+  `operation` the backend supplied is **dropped** — `PermissionResolvedPayload`
+  has no such field — so the only remaining context is the envelope's
+  `chat_id`. There is no card to collapse and no operation to name; treat it as
+  informational and take the real record from the durable `permission_result`
+  system message (step 5 below).
 
 **Client handling recipe:**
 
 1. On `permission.request`, render an approval card keyed by
    `request_id` (owner UI only).
-2. The owner approves/denies via a ClawChat backend REST call —
+2. The owner approves/denies via a `clawchat-member-backend` REST call —
    **never** by sending a WS frame. There is no permission uplink event.
-3. On `permission.resolved` with a matching `request_id`, collapse the
-   card and reflect `decision`.
+3. On `permission.resolved` with a **non-empty** `request_id`, collapse the
+   matching card and reflect the outcome: use `decision` when it is present,
+   and fall back to `reason` when it is not (`owner_timeout` and
+   `policy_forbidden` frames carry no `decision`). A frame with an empty
+   `request_id` matches no card — log it and stop.
 4. If `expires_at` passes with no `permission.resolved`, collapse the
    card locally as expired.
 5. The authoritative, persistent outcome appears as a `permission_result`
@@ -1219,8 +1546,8 @@ routing layer.
 best-effort, and capability-gated** — the same dispatch contract as
 `chat.metadata.invalidated` (§9.3) and `message.delivered` (§14.4):
 
-- Never written to the offline inbox or offline store;
-  reconnect / device replay will **not** redeliver them.
+- Never persisted server-side; reconnect / device replay will **not** redeliver
+  them.
 - The hub silently drops the frame if the owner's send buffer is full
   (no kick on backpressure for signal events).
 - No retry, no negative ack, no delivery confirmation; never pushed.
@@ -1229,6 +1556,69 @@ A client that misses the live pair recovers from the durable
 `permission_result` system message and from refetching the request's
 state over REST. Do not build correctness on receiving the ephemeral
 signals.
+
+### 9.6 Emoji reactions — `message.reaction`
+
+A reaction is a full fan-out event, not a side channel: it is delivered to every
+chat member and is **inbox-durable**, so reactions self-heal on replay.
+
+**Uplink (C → S).** Set only `payload.target_message_id`, `payload.emoji`, and
+optionally `payload.removed`. **MUST omit** `payload.message_id` and
+`payload.reactor_user_id` — the server discards and overwrites both.
+
+```json
+{
+  "version": "2",
+  "event": "message.reaction",
+  "trace_id": "trace-rxn-01",
+  "emitted_at": 1776162700000,
+  "chat_id": "cnv_abc",
+  "to": { "id": "cnv_abc", "type": "direct" },
+  "payload": {
+    "target_message_id": "msg-01JXYZ9KMNPQRSTVWXYZ0CD",
+    "emoji": "👍",
+    "removed": false
+  }
+}
+```
+
+- **Any** non-empty, valid-UTF-8 emoji string up to **64 bytes** is accepted,
+  including ZWJ sequences. There is **no curated allowlist**.
+- The server stamps `payload.message_id = "rxn:<target_message_id>:<reactor_user_id>"`
+  — a **last-write-wins slot** per `(message, reactor)`. A different emoji on the
+  same slot overwrites the previous one; `removed: true` is the tombstone.
+- The server stamps `payload.reactor_user_id` from the authenticated identity.
+  It can be an **agent** identity — do not assume a human reactor.
+- A slot-keyed `message.ack` comes back to the reactor (its `payload.message_id`
+  is the `rxn:` slot id). Clients MAY ignore it.
+- An invalid emoji or an empty `target_message_id` yields `message.error`
+  `code: "bad_request"` (§14.3) — terminal.
+- Reactions never generate a push notification, and a reactor that did not
+  advertise `multi_device` receives no self-copy.
+
+### 9.7 Read cursor — `message.read`
+
+**Uplink (C → S).** `payload = { "last_read_emitted_at": <ms> }` plus the
+envelope's `chat_id`, naming the message `emitted_at` up to which the chat is
+read. Malformed uplinks — bad payload, empty `chat_id`, or a non-positive
+watermark — are **silently dropped** (§14.5).
+
+**Downlink (S → C).** The echo goes only to the reader's **other** devices that
+advertised `multi_device`; the originating device is suppressed, and no other
+chat participant or agent ever sees it. It carries no ack and is best-effort.
+
+**Connect-time snapshot — expect a burst.** On **every** connection from a client
+that advertised `multi_device`, the server replays one `message.read` frame per
+chat for the last **30 days** of watermarks, capped at **500** conversations,
+**before** the inbox replay. Two traps:
+
+- these frames carry `trace_id: ""`;
+- their `emitted_at` equals `payload.last_read_emitted_at` (the watermark), **not**
+  the current clock — never sort your timeline by it.
+
+Apply each watermark with a MAX-guarded local cursor, so re-delivery is
+idempotent. The durable watermark, not the live echo, is what a reconnecting
+device relies on.
 
 ---
 
@@ -1260,11 +1650,19 @@ type Fragment =
 | `kind` | Fields |
 |--------|--------|
 | `text` | `text`; `delta` **only** on `message.add` |
-| `mention` | optional `user_id`, optional `display` |
+| `mention` | optional `user_id`, optional `display`. **`user_id: "all"` is a reserved sentinel meaning "@everyone in this conversation"** — it is not a real `usr_…` id, and the server never expands it into per-member fragments. Every reader MUST treat a mention with `user_id == "all"` as addressing itself. The same sentinel can appear as a `context.mentions` element (§7.1). |
 | `image` | `url`, optional `name`, `mime`, `size`, `width`, `height` |
 | `video` | `url`, optional `name`, `mime`, `size`, `width`, `height`, `duration` |
 | `audio` | `url`, optional `name`, `mime`, `size`, `duration` |
 | `file` | `url`, optional `name`, `mime`, `size` |
+
+> **A `mention` fragment is not a `context.mentions` element.** This table
+> describes `payload.message.body.fragments` — the inline, ordered,
+> typed content stream, where a mention is always the object above. The
+> separate `payload.message.context.mentions` array (§7.1) is **untyped**
+> `[]any`: its elements may be mention objects, bare user-id strings, or the
+> whole array may be `null`. Do not reuse one parser for both without the
+> tolerance rules in §7.1.
 
 ### 10.3 Units
 
@@ -1276,17 +1674,25 @@ type Fragment =
 
 ### 10.4 Forward compatibility
 
-Unknown `kind` values MUST be **preserved** by intermediaries (do not strip
-unknown fragments — they may render fine on a newer client) and rendered
-as "unsupported content" by clients that cannot display them.
+Unknown `kind` values reach recipients, but **not intact**: the hub deserializes
+every fragment into a typed struct on relay and re-serializes it. `kind` itself
+survives unchanged, and **every field in the documented union (§10.1) survives
+regardless of kind** — but any field outside that union is silently dropped. So
+an uplink `{"kind":"approval_request","text":"Approve?","options":["a","b"]}`
+arrives as `{"kind":"approval_request","text":"Approve?"}`. Unknown *fields*
+inside a known `kind` (e.g. a future `caption` on an `image`) are dropped the same
+way. Clients MUST render an unknown kind as "unsupported content" rather than
+erroring.
 
-**Caveat on unknown *fields* within a known fragment.** The server
-deserializes fragments into a typed struct
-on every relay, so unknown fields inside a known `kind` (e.g. a future
-`caption` on an `image` fragment) are silently dropped on the way out.
-Only the documented field set per kind survives a server-relay round
-trip. Producers introducing new fields should coordinate a code+doc
-update on the hub before depending on them.
+**Producer obligation.** A custom kind **may** carry the documented content
+fields — notably `text` — and those do reach the recipient; what will not survive
+is any bespoke field of your own. But a client that has not been taught your kind
+will typically render nothing for it, so a message whose only fragment is of an
+unknown kind is likely to appear **blank** to that client even though its `text`
+arrived. If you use a custom fragment kind for rich UI, always ship the
+human-readable content in an accompanying `text` fragment of a documented kind.
+Producers introducing new *fields* should coordinate a code+doc update on the hub
+before depending on them — an unmodelled field never survives the relay.
 
 ### 10.5 Media URLs
 
@@ -1323,8 +1729,8 @@ new live ones. Replay is keyed by **`(user_id, device_id)`**:
   on the next session.
 - Once replay catches up, the connection transitions seamlessly into live
   delivery. At the **seam** (the brief window where the server is catching
-  up to the inbox tail), live writes published to the user's delivery
-  stream can be delivered concurrently with the final replay frames.
+  up to the inbox tail), live writes routed to the user can be delivered
+  concurrently with the final replay frames.
   Net effect: the on-wire arrival order is monotonic by cursor but is
   **not** strictly ordered by sender `emitted_at`. Clients that sort by
   `payload.message_id` order (ULID-time-prefixed) on receive will get a
@@ -1332,6 +1738,9 @@ new live ones. Replay is keyed by **`(user_id, device_id)`**:
 - The server marks the end of replay with an explicit `replay.done`
   control frame (§11.5) — it always precedes the first live frame, and
   fires even when the backlog was empty.
+- **Connect ordering.** On a connection that advertised `multi_device`, the frames
+  arrive as: optional `history.truncated` → the `message.read` watermark snapshot
+  (§9.7 — up to 500 chats, ahead of the backlog) → the inbox rows → `replay.done`.
 
 ### 11.1 New devices
 
@@ -1352,12 +1761,15 @@ all chat history the server has kept.
 
 ### 11.3 Deprecated: `offline.batch` / `offline.ack` / `offline.done`
 
-These three events still exist in the protocol enum for backwards
-compatibility but are **no longer used by current clients or current
-servers**. Do not implement them on a new client. If a server in front of
-you ever sends `offline.batch`, the items inside are ordinary downlink
-envelopes — you can process them inline, then send a single `offline.ack`
-with the matching `batch_id`.
+These three event names survive in the protocol enum for backwards compatibility
+only. **The server has emitted none of them since device replay (§11) landed, and
+the canonical choice for any new client is to implement none of them.** Reconnect
+catch-up is entirely §11 device replay + `replay.done`. A client that ignores all
+three is fully conformant.
+
+Sending `offline.ack` is inert rather than an error: the event is explicitly
+whitelisted and discarded twice on the uplink path, so you get no `message.error`,
+no server-side error log, and no metric — just silence.
 
 ### 11.4 E2EE sibling-device history transfer — `history.transit`
 
@@ -1403,8 +1815,9 @@ target sibling):
   "emitted_at": 1776162700400,
   "target_device_id": "device-new",
   // Sender MUST set sender + origin_device_id on this event (see below).
+  // Only sender.id is load-bearing; `type` / `nick_name` are not validated.
   "sender": { "id": "user-alice", "type": "direct", "nick_name": "Alice" },
-  "origin_device_id": "device-old",
+  "origin_device_id": "device-old",   // stripped server-side today — see the gap note below
   "payload": { "kind": "history_sync_message" },
   "ciphertext_fragments": [
     { "device_id": "device-new", "type": "msg",
@@ -1417,8 +1830,8 @@ target sibling):
 | Field | Type | Required | Meaning |
 |-------|------|----------|---------|
 | `target_device_id` | `string` | yes (uplink) | The sibling `device_id` this transfer is for. The server delivers the frame only to that device. |
-| `sender` | object | yes (uplink) | **Divergence from §4 / §13:** for `history.transit` the server does **not** stamp `sender`. The sending client MUST populate `sender.id` with its own `user_id`. The receiving device keys its decryption session by `(sender.id, origin_device_id)`. |
-| `origin_device_id` | `string` | yes (uplink) | The sending (old) device's id. Likewise client-set, not server-stamped, for this event. |
+| `sender` | object | yes (uplink) | **Divergence from §4 / §13:** for `history.transit` the server does **not** stamp `sender` — the object reaches the target sibling exactly as the sending client wrote it. The sending client MUST populate `sender.id` with its own `user_id`; that is the only field with meaning here. `sender.type` carries **no meaning** on this event: receivers MUST NOT validate it and MUST NOT reject or fail to parse an unexpected value, and senders SHOULD send `"direct"` for consistency with every other event. `sender.nick_name` is equally unconstrained — treat it as optional and cosmetic. |
+| `origin_device_id` | `string` | yes (uplink) | The sending (old) device's id. Likewise client-set, not server-stamped, for this event — but see the gap note below: the server currently strips it, so it does not reach the target sibling. |
 | `payload.kind` | `string` | yes | One of `history_sync_request`, `history_sync_message`, `history_sync_progress`, `history_sync_done`, `history_sync_cancel` — the handshake/transfer phase. The server treats the whole payload as transparent; the client dispatches on `kind`. |
 | `ciphertext_fragments` | array | optional | Opaque per-device E2EE fragments (omitted on the plaintext path). Structure defined by the E2EE spec. |
 
@@ -1430,8 +1843,23 @@ target sibling):
 > `sender.id` and `origin_device_id` off the envelope to key decryption.
 > (Mobile implements exactly this.)
 
-**Inbox & replay behavior.** `history.transit` is written to
-the offline inbox on the same path as `message.send`, so an offline
+> ⚠️ **Known gap: `origin_device_id` does not survive the uplink.** The server
+> clears `origin_device_id` on **every** uplink envelope, with no
+> `history.transit` carve-out, and the transit path never restamps it — so
+> the frame the target sibling receives has an empty `origin_device_id`.
+> The `(sender.id, origin_device_id)` keying rule above is therefore the
+> **intended** contract, not current behavior: on the E2EE variant the
+> receiver cannot key its ratchet and mobile renders a decrypt-failed
+> placeholder. Do not build a new client that depends on the field until
+> this is fixed server-side; the plaintext variant is unaffected.
+
+Two harmless divergences worth knowing when you write a receiver: mobile
+sends `sender.type: "user"` on this event (not `"direct"`) and omits
+`nick_name` entirely. Nothing on either side reads either field here, which
+is exactly why a receiver must not hard-validate them.
+
+**Inbox & replay behavior.** `history.transit` is written to the per-recipient
+durable inbox on the same path as `message.send`, so an offline
 target device catches up via device replay (§11) on reconnect. **It is
 deleted from the inbox immediately after delivery to the target device**
 — so sync traffic does not accumulate and is never re-delivered after it
@@ -1496,8 +1924,8 @@ to seq 0.
 ```
 
 Empty payload; no `chat_id`, no `to`, no `sender`. The authenticated
-device sends it on an established connection. The server resets
-this `(user_id, device_id)` pair's replay cursor to 0,
+device sends it on an established connection. The server resets the per-device
+replay cursor to 0 for this `(user_id, device_id)` pair,
 then closes **this** connection only and returns **no ack** — the
 connection close *is* the acknowledgement. The client reconnects with the
 **same** `device_id`; on reconnect the cursor is found at 0 and device
@@ -1505,9 +1933,13 @@ replay (§11) re-streams the full retained inbox from the beginning,
 ending with `replay.done` (§11.5). On a server-side error the connection
 is left open for the client to retry.
 
-Not capability-gated — any authenticated client may send it. Mobile
-exposes this as a debug "migrate data" / full-resync action. Use
+Not capability-gated — any authenticated client may send it. Use
 sparingly: it re-streams the entire retained backlog.
+
+**Adoption.** No reference client emits this frame today; it was previously
+exposed by the mobile client as a "migrate data" / full-resync action and has
+since been withdrawn from its UI. The server continues to honour the frame, so a
+client that offers a full re-pull action may rely on it.
 
 > **v1/v2 interaction.** The reset is in storage-seq space (the durable
 > per-device replay cursor), shared by both v1 and v2 — v2's in-memory dseq
@@ -1531,10 +1963,10 @@ are two generations; advertise **both** so an older server cleanly falls back.
 
 - The server stamps the per-recipient inbox `seq` on each downlink (top-level
   `seq`); the cursor advances **only** when you send `message.cursor_ack`.
-- `seq` is an **opaque, sparse, mutable** storage coordinate. Ack the highest
+- `seq` is an **opaque, sparse, mutable** shard-level coordinate. Ack the highest
   `seq` you have **durably persisted** as an opaque high-water mark, and **never**
   wait for "missing" seqs — a recipient's seq space is ~75% holes (other users'
-  rows interleave; coalesce upserts re-bump rows to the storage tail). A client that
+  rows interleave; coalesce upserts re-bump rows to the shard tail). A client that
   acks only a strictly-contiguous prefix freezes at the first hole. This is the
   known v1 cursor-stall; v2 fixes it.
 
@@ -1555,6 +1987,17 @@ Granted only when `hello-ok` carried `ack_mode: "dseq"` (§3.4). Then:
   ackable downlink events (`message.send`, `message.reply`, `history.transit`,
   `notify.signal`, `sync.mark`, `replay.done`). You ack the highest **contiguous**
   `dseq` you have durably persisted, echoing the `ack_epoch`:
+
+  > **The ack rule is keyed on the `dseq` field, not on the event name (MUST).**
+  > Any downlink carrying a top-level `dseq` participates in the dense sequence
+  > and MUST be counted by your density check and acked — *including events whose
+  > `event` name you do not recognise*. The list above is the set the server
+  > stamps today; it MAY grow. Reconcile this with §6's "unknown events MUST be
+  > tolerated" as: **tolerate = do not error and do not close, but if the frame
+  > carries a `dseq`, still record and ack it.** Dropping an unrecognised
+  > `dseq`-bearing frame without acking creates a permanent hole in your ack
+  > high-water; the server then kicks you after 120 s of ack silence and replays
+  > the same frame, producing an unbreakable reconnect loop.
 
   ```json
   { "version": "2", "event": "message.sync_ack", "trace_id": "sync-ack-01",
@@ -1591,14 +2034,36 @@ Granted only when `hello-ok` carried `ack_mode: "dseq"` (§3.4). Then:
   resend the current high-water mark **every 30s** while connected (covers a
   zombie socket that swallowed an ack — the server's GREATEST/idempotent pop makes
   the resend free).
+- **MUST NOT rely on the server's kick as your ack liveness mechanism, and MUST
+  NOT drive the ack off a wall-clock timer alone.** An OS that suspends your
+  process while leaving the socket warm stops timers but keeps delivering frames.
+  Schedule the flush from the frame-processing path (microtask / immediate) as
+  well as from the debounce timer.
+- The server kicks an ack-silent v2 connection after roughly **120–150 s**, but
+  **rate-limits the kick per `(user, device)`**: after 3 consecutive kicks within
+  an hour it backs off exponentially to a **30-minute cap** and leaves you
+  connected while backed off. Nothing is lost, but the kick may be up to 30
+  minutes late — never use it as a health signal.
+- Independently of that timer, a **live** connection whose unacked window exceeds
+  **4096** frames is kicked immediately (device replay throttles itself at 3500).
+  Keep your unacked window well under 4096: a client that drains its socket but
+  acks slowly is killed by **depth**, not by silence.
 - **Persist is always upsert by `message_id`** — "conflict overwrites" counts as
   persisted, then record the `dseq`. Never "skip the write because the row exists,
   then ack": that silently drops coalesce re-writes (e.g. an agent's finalize
   `message.reply` overwriting an earlier row). Any retransmit MUST reuse a stable
-  `payload.message_id`.
+  `payload.message_id`. **One exception:** a `message.reply` whose
+  `payload.stream_merged` is `true` is provisional and MUST NOT overwrite an
+  already-persisted reply with the same `message_id` that lacks the flag — keep
+  the existing content, and still record and ack its `dseq` (§8.4).
 - **Poison-frame quarantine (MUST):** if a `dseq`-bearing frame cannot be
-  persisted (corrupt payload), record the failure out-of-band and **ack its
-  `dseq`** so the stream continues — do not stall the connection on one bad frame.
+  **parsed, processed, or persisted** — a corrupt payload, but equally a field
+  your mapper throws on (e.g. an unexpected `context.mentions` element, §7.1)
+  — record the failure out-of-band and **ack its `dseq`** so the stream
+  continues. Do not stall the connection on one bad frame: with unacked ledger
+  entries and no `message.sync_ack` for **120s** (swept every 30s) the server
+  kicks the socket and replays the same frame, so a swallowed mapper exception
+  becomes a reconnect loop rather than one degraded message.
 - **`history.transit` is delete-on-ack** on v2: the server deletes the inbox row
   when its `dseq` is acked, so ack only **after** durably persisting the transit
   payload.
@@ -1618,10 +2083,14 @@ frame — you do not need to handle these in application code. If the
 server does not receive a `Pong` within `ping_interval * max_miss_pong
 + pong_timeout` (default `30s * 2 + 10s = 70 s`), it closes the socket.
 
-**2. JSON-envelope `ping` / `pong` events.** Either side can emit a
-JSON-level ping; the peer **must** echo a `pong` with the same
-`trace_id` and an empty `payload`, and the responder echoes the
-sender's `emitted_at` verbatim (it is not restamped).
+**2. JSON-envelope `ping` / `pong` events.** The **client** may emit a JSON-level
+`ping`; the server replies with a `pong` carrying the same `trace_id`, an empty
+`payload`, and the **same `emitted_at`, echoed verbatim** (it is not restamped,
+so `pong.emitted_at` is not a server clock source).
+
+The server **never** emits a JSON-level `ping`, and an unsolicited client `pong`
+is an **unknown uplink event** — silently dropped and logged server-side. Do not
+ship a downlink-ping handler, and never send an unsolicited `pong`.
 
 ```jsonc
 // C → S — client probes liveness
@@ -1652,7 +2121,7 @@ client value is dropped:
 |-------|-----------|
 | `sender` | Stamped from the authenticated identity. Defends against impersonation. |
 | `chat_type` | Stamped from the resolved chat record on every downlink. |
-| `payload.message_id` | Minted (`msg-<ULID>`) when the client omits it on `message.send` / `message.reply`. **Preserved** when the client sets it. |
+| `payload.message_id` | Minted (`msg-<ULID>`) when the client omits it on `message.send` / `message.reply`. **Preserved** when the client sets it — unless it exceeds 512 bytes, in which case the whole uplink is rejected (§7.6). |
 | `emitted_at` | Restamped on every server-constructed downlink (materialized `message.send` / `message.reply`, `message.ack`, `message.error`, `message.delivered`, `typing.update`, all streaming lifecycle events, `presence.snapshot` / `presence.update`). Echoed verbatim only on `pong`. |
 | `payload.message.streaming` | Filled on materialized `message.send` / `message.reply` downlinks. MUST be omitted on uplink. |
 
@@ -1666,8 +2135,8 @@ client value is dropped:
 ### 13.1 The "must not violate" list
 
 - Client `message.send` / `message.reply` MUST omit top-level `sender` and
-  `payload.message.streaming`. SHOULD omit `payload.message_id` unless
-  reusing a stream id.
+  `payload.message.streaming`. `payload.message_id` SHOULD be client-minted and
+  MUST be reused byte-for-byte across any retransmit (§7.6, §11.7).
 - `message.send.payload.message` and `message.reply.payload.message` MUST
   NEVER nest `chat`, `sender`, `to`, or any timestamp fields.
 - `message.created` opens the stream for one `payload.message_id`. Minimal
@@ -1682,13 +2151,32 @@ client value is dropped:
 - All streaming lifecycle events for one stream reuse the same
   `payload.message_id`.
 - Routing is driven by top-level `chat_id` alone.
-- Top-level `to` is UI context only — never routing.
+- Top-level `to` is UI context only — never routing. **Exception —
+  `message.delivered` (§14.4):** there `to.id` is the receipt's routing key and
+  is required.
 - `chat_type` is server-stamped on every downlink; uplinks MUST omit it.
 - **Exception — `history.transit` (§11.4):** this is the one event where
   the client MUST set top-level `sender` (its own `user_id`) and
   `origin_device_id`, because the server does **not** stamp them for
   sibling-routed history transfer. Every other event keeps the
   omit-`sender` rule above.
+- The four streaming rules above bind only clients that **emit** streaming frames
+  (§8.0). A client that never streams violates none of them.
+
+### 13.2 Limits and fair use
+
+| Limit | Value | Enforcement |
+|---|---|---|
+| Presence subscriptions per connection | **16** | Silent. Over-cap subscribes **that pass the visibility gate** still get a `presence.snapshot`, but the registry is not grown; a gate-denied subscribe gets nothing at all (§9.2). |
+| Marshaled downlink envelope | **1,000,000 bytes** (server default) | `message.error` `code: "message_too_large"` — terminal (§14.3). |
+| Client-supplied `payload.message_id` | **512 bytes** | `message.error` `code: "message_id_too_long"` — terminal (§7.6). |
+| One inbound WebSocket frame | **8 MiB**; the pre-auth `connect` frame is held to **64 KiB** | Transport failure: WS close **1009**, no `message.error` (§14.1). |
+| Read deadline | ≈ **70 s** with no `Pong` control frame | Server closes the socket (§14.1). |
+| Unacked v2 window | **4096** frames | Immediate kick (§11.7). |
+
+A server MAY disconnect a client that accumulates undelivered backlog or stops
+acknowledging reliable downlinks. Clients MUST implement backoff on reconnect and
+MUST NOT hot-loop after any close.
 
 ---
 
@@ -1701,18 +2189,29 @@ The server may close the connection in several scenarios:
 | Trigger | What the client sees | Recommended response |
 |---------|----------------------|----------------------|
 | Handshake timeout | Close with no `hello-fail` | Reconnect; check token / clock |
-| `hello-fail` — token rejected (upstream auth `4xx`) | `hello-fail` envelope (auth-failure reason) + close | **Acquire a fresh token** (refresh / re-login) before retry. Do not hot-loop the same token. |
-| `hello-fail` — auth service unavailable (upstream `5xx` / timeout) | `hello-fail` with reason `"remote auth service unavailable"` + close | **Backoff-reconnect with the same token** — the token may be valid; the auth backend (the ClawChat backend) is down. Do **NOT** trigger token refresh/re-login here (a 5xx storm would otherwise become a mass-refresh storm). |
-| Duplicate session for `(user_id, device_id)` — you are the **older** session | Socket closes without an envelope, no `hello-fail` | A newer instance of you took over; reconnect with backoff. The token is still valid. |
+| `hello-fail` — token rejected (upstream auth `4xx`) | `hello-fail` with reason **exactly** `"authentication failed"` + close | **Acquire a fresh token** (refresh / re-login) before retry. Do not hot-loop the same token. |
+| `hello-fail` — auth service unavailable (upstream `5xx` / timeout) | `hello-fail` with a reason **containing** `auth service unavailable` (canonical `"remote auth service unavailable"`) + close | **Backoff-reconnect with the same token** — the token may be valid; the auth backend (member-backend) is down. Do **NOT** trigger token refresh/re-login here (a 5xx storm would otherwise become a mass-refresh storm). |
+| Duplicate session for `(user_id, device_id)` — you are the **older** session | No envelope and no `hello-fail`; a CLOSE control frame with application code **`4001`** (best-effort — an already-dead socket may just drop) | A newer instance of you took over; reconnect on a **raised** backoff floor (§3.6). The token is still valid. |
 | Missed pongs | Close when no `Pong` control frame arrives within `ping_interval * max_miss_pong + pong_timeout` (~70 s with defaults) | Reconnect with backoff |
 | Server backpressure | Close (the server kicks slow clients to protect itself) | Reconnect with backoff; messages will replay via §11 |
+| Any handshake rejection (`hello-fail`) | The `hello-fail` frame, then an abrupt close with **no CLOSE frame** (observed as 1006) | Act on `payload.reason` per §3.5; do not treat 1006 as a distinct failure class here |
 
-> **Enforcement status.** The `4xx → fresh token` behavior is current. The
-> **distinct `5xx` reason string + handshake auth deadline** are planned
-> backend hardening. Implement the 4xx/5xx branch **now** so the
-> client is ready before the server begins emitting the distinct 5xx reason —
-> until then a 5xx surfaces as a generic `hello-fail` and the safe default is
-> backoff-reconnect (not refresh).
+**Close codes.**
+
+| Code | When | Client action |
+|---|---|---|
+| `4001` | your `(user_id, device_id)` was taken over by a newer session | Back off before reconnecting (raise the floor — an instant reconnect causes a mutual-eviction storm). The token is still valid. |
+| `1009` | an inbound frame exceeded the server's frame cap (8 MiB post-auth, 64 KiB for the pre-auth `connect` frame) | Split the payload, or use media upload (§15). Never resend the frame. |
+| `1005` / close with no status | server-initiated kick: backpressure, ack-silence, unacked-ledger depth, `device.cursor.reset` | Reconnect with backoff; replay recovers the messages. |
+| `1006` (abnormal, no CLOSE frame) | handshake rejection, or a transport drop | **Read the last frame you received**: a `hello-fail` arrives immediately before the close and carries the real reason (§3.5). |
+
+`4001` is the only application (4000–4999) close code msghub emits. There is no
+close code for auth failure and none for protocol violation.
+
+> Match the two reasons by their **string contract**, not by equality on the full
+> text — exact `"authentication failed"` for terminal, substring
+> `auth service unavailable` for transient (see §3.5). Both strings are pinned by
+> server-side tests and are stable wire contract.
 
 **Reconnection strategy.** Implement exponential backoff with jitter,
 capped at e.g. 30 s. On reconnect, supply the same `device_id` as before
@@ -1727,15 +2226,18 @@ and offline recipients will not see the stream at all.
 
 ### 14.3 `message.error` — negative ack on the send path
 
-When an uplink `message.send`, `message.reply`, or streaming lifecycle
-event names a `chat_id` the server cannot resolve, the server emits a
-`message.error` envelope **back to the sender** instead of a
-`message.ack`. The envelope:
+When the server refuses an uplink, it emits a `message.error` envelope
+**back to the sender** instead of a `message.ack`. It fires on
+`message.send`, `message.reply`, the four streaming lifecycle events,
+`message.reaction`, and `history.transit` — an unresolvable `chat_id` is
+only one of the reasons (see the code table below). The envelope:
 
 - Echoes the uplink's `trace_id` so the sender can correlate it with the
   in-flight send.
 - Carries the offending `chat_id` (and optional `to`) for UI context.
-- Carries no `sender` and no `chat_type` (the chat could not be resolved).
+- Carries no `sender` and no `chat_type` — the error frame is built from the
+  uplink's `trace_id` / `chat_id` / `to` alone, even for codes where the chat
+  did resolve.
 
 The payload has four fields: `message_id` (mirrors the uplink's
 `payload.message_id`, omitted when the uplink left it blank), `code`,
@@ -1772,62 +2274,59 @@ The payload has four fields: `message_id` (mirrors the uplink's
 | `capability_missing` | A capability-gated uplink (currently `history.transit`) was sent without the required capability advertised at `connect` (here `history_sync`). The frame was dropped server-side; declare the capability and reconnect before retrying. See §11.4. |
 | `not_member` | The authenticated sender is not a member of the chat it tried to send to (e.g. an agent unpaired/removed from the conversation but still holding a valid JWT). The uplink was dropped (no fanout). Terminal — re-resolve membership before any retry. |
 | `unsupported_version` | The uplink envelope's `version` was not the string `"2"` (missing counts as not-`"2"`). Fires for **every** uplink event, including control frames, before any other handling. Terminal — the client must speak Protocol v2; the connection is **not** closed. |
+| `bad_request` | The uplink is structurally invalid or carries a semantically wrong value. Two cases: (a) `message.reaction` — the payload does not decode, `target_message_id` is empty, or — on a non-removal reaction — `emoji` is empty, is not valid UTF-8, or exceeds 64 bytes (there is **no** curated emoji allowlist; any valid emoji string within the cap is accepted); (b) `message.send` / `message.reply` / streaming carrying a **malformed `chat_id`** (not a well-formed conversation idcode — e.g. a `usr_`/`agt_` id or a truncated string), rejected before any fanout. Terminal — fix the frame, do not resend it unchanged. For (b) specifically: correct the `chat_id` (re-resolve the conversation); unlike `chat_not_found` this does **not** mean an existing conversation was deleted, so do not purge local state on it. See §5 for what a well-formed `chat_id` looks like in this deployment. |
+| `message_too_large` | The marshaled **downlink** envelope exceeded the server's per-message produce cap (default 1,000,000 bytes). The uplink was consumed before any fanout — no recipient saw it. Terminal — the same payload will never fit; split the content, or upload the media via §15 and send its URL. See the size-limit note below. |
+| `message_id_too_long` | A client-supplied `payload.message_id` exceeded **512 bytes**; `reason` carries the actual and maximum byte counts. Rejected before any fanout. Terminal — retrying the same id fails identically. See §7.6. |
 
-Clients MUST implement `message.error` — it is the **only** wire-level
-negative ack on the send path. Treating it as an unknown event will
-leave UI state stuck in "sending" forever. Other application-level
+Clients MUST implement `message.error` — it is the only wire-level negative ack
+on the send path, but it does **not** cover every rejection (see §14.5). Treating
+it as an unknown event will leave UI state stuck in "sending" forever. Other application-level
 failures (e.g. permission denied) may still manifest as silent drops;
 out-of-band channels (REST error replies, push) remain the fallback for
 those.
 
-#### Terminal codes and the outbound gate (client-side handling)
+**Unknown codes.** Every code above is **terminal for the affected uplink** —
+the frame was consumed server-side and nothing was fanned out. A client MUST
+treat any `code` it does not recognise the same way (mark the local row failed,
+surface it) and MUST NOT auto-retry the frame. Note this is the *opposite* of the
+forward-compat rule for `hello-fail` reasons in §3.5, where an unrecognised
+reason is treated as transient and retried with backoff — do not generalise that
+rule to this event.
 
-`chat_not_found` and `not_member` are **terminal for the conversation as
-addressed**: the server will reject every further uplink the same way until
-whatever made the chat unresolvable is corrected. On either code this client
-records the `chat_id` in a **server-rejection** set and drops every subsequent
-**outbound** frame carrying it, at both transport convergence points (the
-immediate send path and the reconnect flush of the offline queue). Callers see
-the ordinary "not delivered" result they already handle.
+> **Two size limits, and only one of them yields a `message.error`.** The
+> WebSocket read limit is **8 MiB** per frame (`websocket.max_message_size`,
+> the default prod runs; the pre-auth `connect` frame is held to a tighter fixed
+> 64 KiB). A frame over that limit is a transport failure, not a protocol one:
+> the server closes the socket with WS status **1009** (message too big) and you
+> never see a `message.error`. The produce cap is **1,000,000 bytes** (a server-side
+> per-message cap) and is measured on the *server's marshaled
+> downlink*, which is larger than the uplink you sent — the server stamps
+> `sender`, `chat_type`, `message_id`, and the storage `seq` / `dseq`. So a frame
+> between 1 MB and 8 MiB passes the socket read and is then refused with
+> `message_too_large`, and a client cannot derive its exact budget from its own
+> frame size: budget with margin and route anything sizeable through the media
+> upload in §15.
 
-**The rejection is revocable, not permanent.** A soft-deleted direct
-conversation is revived *in place*, under the *same* `chat_id` — re-pairing an
-agent does exactly that — so a client that treats one `chat_not_found` as a
-permanent fact will silently mute a conversation that has since come back. The
-gate therefore lifts on any of three conditions, whichever happens first:
+#### Recovering from a terminal chat error
 
-* a **10-minute TTL** expires (the backstop for a chat that revived and then
-  stayed completely silent);
-* **any inbound frame** arrives naming that `chat_id` — the server routing a
-  frame into the chat is stronger proof of existence than the error frame was,
-  and even a self-echo counts, since it means the server accepted and fanned
-  out our own uplink;
-* **any `conversation.*` signal** for that `entity_id` other than
-  `conversation.dissolved` — a change notification means the conversation is
-  live in the server's table right now. `dissolved` is excluded because it is
-  the opposite signal, not evidence of life.
+`chat_not_found` and `not_member` are terminal **for the uplink that produced
+them**, not forever for the conversation: a conversation id can become valid
+again (an agent is re-added, a membership sync lands). A client SHOULD gate
+further sends to that `chat_id` for a **bounded** window — the reference adapters
+use **600 s** — and SHOULD clear the gate early on:
 
-**The owner's direct chat is exempt from the gate.** It is the agent's only
-out-of-band channel — in particular the "credentials permanently expired,
-please re-pair me" notice — and re-pairing is precisely the action that revives
-a soft-deleted direct conversation. Gating it would convert a recoverable
-failure into a silent permanent one.
+- any inbound frame carrying that `chat_id` other than another `message.error`
+  (a `message.send`, `message.reply`, `typing.update`,
+  `chat.metadata.invalidated` or `message.reaction` all prove the conversation is
+  live again); or
+- a `notify.signal` whose `type` starts with `conversation.` and is **not**
+  `conversation.dissolved`.
 
-**A dissolve signal MUST NOT gate `message.send`, and MUST NOT gate inbound.**
-`conversation.dissolved` drives per-chat state eviction and stops
-`typing.update`, and that is all. It is a separate, orthogonal tier from the
-server-rejection set above: the two never write to each other. Dropping inbound
-on a dissolve is a message-loss bug — the relay does not itself track
-conversation dissolution, so inbox rows persisted for that `chat_id` *before*
-the signal are still replayed on the next reconnect and are still real
-messages.
-
-**Out of scope: typing-only dead chats.** `message.error` covers
-`message.send` / `message.reply` and the streaming lifecycle events only
-(§14.3 scope above). A failed conversation resolve on a `typing.update` uplink
-is consumed silently and produces **no** error frame, so a conversation that
-only ever emits typing and never a reply can never learn it is dead through
-this mechanism. Bound that case with a local continuous-typing ceiling instead.
+Do **not** purge local conversation state on these codes. An agent SHOULD exempt
+its owner's direct conversation from the gate so it can always report why it went
+dark. Note the distinct, weaker gate driven by
+`notify.signal{type:"conversation.dissolved"}`: that one gates `typing.update`
+only and MUST NOT gate `message.send`.
 
 ### 14.4 `message.delivered` — device-level delivery receipt
 
@@ -1847,15 +2346,14 @@ the incoming envelope). This tells the server where to route the receipt.
 
 **Server-side processing.** The server stamps `sender` = the receiving device's
 authenticated identity (client-supplied `sender` is always dropped). It then
-produces ONE delivery record keyed by the **original sender's `user_id`**
-(from `to.id`), routing the receipt to the sender on any instance in a
-multi-instance deployment. The relay gates delivery to only those of the original
-sender's connected devices that declared `delivery_receipt`.
+routes ONE record keyed by the **original sender's `user_id`** (from `to.id`),
+so the receipt reaches that sender on whichever instance they are connected to
+in a multi-instance deployment. Delivery is then gated to only those of the
+original sender's connected devices that declared `delivery_receipt`.
 
 **Ephemeral — best-effort only.**
 
-- Never written to the offline inbox store.
-- Never written to the offline message store.
+- Never persisted server-side (neither the durable inbox nor the offline mirror).
 - Never replayed on reconnect.
 - Never retransmitted on kick / backpressure.
 - Silently dropped if the original sender is offline at delivery time.
@@ -1863,16 +2361,47 @@ sender's connected devices that declared `delivery_receipt`.
 This is the same dispatch contract as `chat.metadata.invalidated` and the
 `permission.*` events — ephemeral, online-only, best-effort.
 
-**Capability-gated.** Both emission and reception require `delivery_receipt` to
-be advertised at connect. A sender whose peer has not declared the capability
-simply stays at "sent" — there is no error, no timeout, and the absence of a
-receipt is not a failure condition.
+**Reception is capability-gated; emission is a client-side obligation.** The
+server delivers `message.delivered` downlinks only to devices that advertised
+`delivery_receipt`. The uplink itself is neither capability-gated nor
+membership-checked — the server routes any well-formed receipt by `to.id` — but a
+conforming client MUST NOT emit receipts unless it advertised the capability. A
+sender whose peer never declared it simply stays at "sent": there is no error, no
+timeout, and the absence of a receipt is not a failure condition.
+
+### 14.5 Rejections that produce no frame at all
+
+Some uplinks are refused with **complete silence** — no `message.ack`, no
+`message.error`, no close. These are the ones a new client most often trips:
+
+- missing or empty `chat_id` on `message.send` / `message.reply` / streaming /
+  `typing.update` / `message.reaction`;
+- an `event` name the server does not recognise;
+- a frame that is not valid JSON;
+- `typing.update` into a deleted or malformed chat, or from a non-member;
+- `message.delivered` without `to.id`;
+- a malformed `message.read` (bad payload, no `chat_id`, or a non-positive
+  watermark);
+- a malformed `message.cursor_ack`, or one whose `seq` is not positive;
+- a `message.sync_ack` with a mismatched `epoch`, a `dseq` out of range, or a
+  `dseq` already acked (no-op);
+- `history.transit` without `target_device_id`;
+- a `presence.subscribe` / `presence.unsubscribe` with a malformed payload or a
+  `user_id` not prefixed `usr_` / `agt_`; and, for `presence.subscribe` only,
+  one denied by the shared-chat visibility gate (§9.2);
+- any `message.ack` / `message.error` / `pong` the server could not enqueue
+  because your send buffer was full — so even a **successful** `message.send` can
+  go un-acked under backpressure.
+
+**Client obligation.** Never rely on a negative ack for liveness. Always time out
+in-flight sends on your own clock, and reconcile by `payload.message_id` on the
+next replay.
 
 ---
 
 ## 15. HTTP media upload
 
-Use the ClawChat media service to upload binary content (images, video, audio, PDFs, etc.)
+Use the media upload service (§1) for binary content (images, video, audio, PDFs, etc.)
 **before** sending a `message.send` that references it. The upload returns
 a JSON object whose shape matches a single `Fragment` — drop it directly
 into your `fragments` array.
@@ -1880,7 +2409,7 @@ into your `fragments` array.
 ### 15.1 `POST /media/upload`
 
 ```
-POST https://<host>/media/upload
+POST https://<media-host>/media/upload
 Authorization: Bearer <token>
 Content-Type: multipart/form-data; boundary=...
 ```
@@ -1895,7 +2424,7 @@ key and the returned `name` are useful.)
 Example (curl):
 
 ```bash
-curl -s -X POST https://<host>/media/upload \
+curl -s -X POST https://<media-host>/media/upload \
   -H "Authorization: Bearer <token>" \
   -F "file=@./photo.png;type=image/png"
 ```
@@ -1952,7 +2481,7 @@ Inferred from the final stored MIME prefix:
 | Constraint | Default |
 |------------|---------|
 | Max single-file size | **100 MiB** (`media.max_size_bytes`; `413` if exceeded) |
-| Allowed MIME prefixes | **all types by default** — `media.allowed_mime_prefixes` is empty, so nothing is rejected by MIME. An operator may set a prefix allowlist (e.g. `image/`, `video/`) to make non-matching uploads return `415`. |
+| Allowed MIME prefixes | **all types accepted** — `media.allowed_mime_prefixes` ships empty in every environment, so nothing is rejected by MIME and `415` does not occur in practice. Stored XSS is prevented at the storage layer instead: each object is stored with a `Content-Disposition` chosen at upload time, `inline` only for images (`image/jpeg`, `image/png`, `image/gif`, `image/webp`, `image/heic`, `image/heif`, `image/avif`), `video/` and `audio/`, and `attachment` for everything else — so `text/html` and `image/svg+xml` download rather than execute. Clients should still handle `415`, since an operator may re-enable the allowlist as a product restriction. |
 | Object retention | 15 days (server-side bucket lifecycle deletion) |
 
 The MIME sniffer reads the first 512 bytes of the upload and **may**
@@ -1979,12 +2508,12 @@ them somewhere else and reference that URL. There is no re-signing endpoint.
 | `413` | `41301` | `upload too large: N bytes (limit M)` | Exceeds `max_size_bytes` |
 | `415` | `41501` | `mime type not allowed: ...` | MIME outside the allowed prefix list |
 | `500` | `50001` | `upload failed` | Storage backend error (logged server-side) |
-| `503` | `50301` | `storage not configured` | Server object-storage credentials missing — retry after operator fix |
+| `503` | `50301` | `storage not configured` | Object-storage backend not configured — retry after operator fix |
 
 ### 15.7 `GET /health`
 
 ```
-GET https://<host>/health   →   200 text/plain "ok"
+GET https://<media-host>/health   →   200 text/plain "ok"
 ```
 
 No auth, no body. Safe for liveness probes. Does **not** exercise the
@@ -1995,13 +2524,15 @@ storage backend — a successful `/health` does not imply uploads will work.
 ## 16. Canonical wire examples
 
 The canonical, test-asserted wire frames live in a single source of truth:
-the msghub Protocol v2 reference, §9 wire examples — the canonical set (owned by msghub).
+the msghub Protocol v2 reference, §9 wire examples — the canonical set
+(owned by msghub).
 That set covers every client path referenced in this guide — handshake
 (`connect.challenge` / `connect` / `hello-ok` / `hello-fail`),
 send → ack → downlink, `message.error`, the streaming sequence, device
 replay, typing, ping / pong, and the presence subscription lifecycle — and is
 kept in lockstep with the server test suite. There are no client-side wire
-deltas beyond it, so refer to §9 directly rather than a second copy here.
+deltas beyond it, so refer to that section of the reference directly rather than
+a second copy here.
 
 ---
 
@@ -2011,10 +2542,12 @@ Use this list as a final pass before integration testing.
 
 ### Connection
 
-- [ ] Open `ws://<host>/ws` (or `wss://`). No subprotocol.
+- [ ] Open `wss://<ws-host>/<ws-path>` (default path `/ws`). No subprotocol.
 - [ ] Receive `connect.challenge`; capture the `nonce`.
 - [ ] Send `connect` with `token`, the echoed `nonce`, a stable `device_id`,
-      and a `capabilities` map.
+      and a `capabilities` map. Add `client_version` and `protocol_version: 2`
+      — telemetry only, but they make your client greppable in server logs
+      (§3.3).
 - [ ] Advertise every feature you support in `capabilities`: at minimum
       `multi_device`, `device_replay`, `chat_meta_events`,
       `delivery_receipt`; add `notify_signals`, `permission_events`,
@@ -2022,7 +2555,14 @@ Use this list as a final pass before integration testing.
       do not support (omission disables that feature, never errors). See §3.3.
 - [ ] Treat any close before `hello-ok` / `hello-fail` as a duplicate-session
       collision OR a handshake timeout.
-- [ ] On `hello-fail`, do **not** retry without a fresh token / fresh socket.
+- [ ] `hello-fail` whose `reason` is **exactly** `"authentication failed"` →
+      terminal for that token: acquire a fresh token (refresh / re-login) before
+      retrying; do not hot-loop the same token (§3.5).
+- [ ] `hello-fail` with **any other** reason, including unknown future strings →
+      transient: backoff-reconnect with the **same** token; do NOT trigger a
+      token refresh (§3.5).
+- [ ] Expect no CLOSE frame after `hello-fail` — your library reports 1006.
+      Classify from `payload.reason`, never from the close code (§14.1).
 
 ### Sending messages
 
@@ -2030,7 +2570,9 @@ Use this list as a final pass before integration testing.
 - [ ] **Never** set top-level `sender`.
 - [ ] **Never** set top-level `chat_type`.
 - [ ] **Never** set `payload.message.streaming` on uplink.
-- [ ] Omit `payload.message_id` on regular sends; the server mints one.
+- [ ] Mint a stable `payload.message_id` (`msg-` + ULID) for any send you might
+      retransmit, and reuse it byte-for-byte on every retry; omit it only if you
+      never retransmit (§7.6).
 - [ ] Track local "sent" UI state by `trace_id`; reconcile to the server's
       `message_id` when `message.ack` arrives.
 - [ ] **Handle `message.error` on the send path** (correlated by `trace_id`)
@@ -2040,15 +2582,26 @@ Use this list as a final pass before integration testing.
 
 ### Receiving messages
 
-- [ ] Treat any envelope with `chat_type` set as a downlink.
+- [ ] Discriminate downlinks by `event` (and, on business messages, by the
+      presence of a server-stamped `sender`). Do **not** use `chat_type` as a
+      downlink marker — it is cleared on `message.delivered` and `message.read`
+      and is absent on `message.ack`, `message.error` and every signal/control
+      frame (`notify.signal`, `replay.done`, `sync.mark`, `history.truncated`,
+      `presence.*`).
 - [ ] Use `payload.message_id` to deduplicate against your local store.
 - [ ] Preserve unknown `fragment.kind` values; render as "unsupported".
+- [ ] Parse `payload.message.context.mentions` tolerantly (§7.1): mention
+      objects, bare user-id strings, `null`, and unknown elements must all be
+      survivable. A throw here stalls a v2 `dseq` stream (§11.7).
 - [ ] **Tolerate unknown `event` values** (forward-compat — future
       events must not error or close the socket).
 - [ ] If you opt in via `capabilities.chat_meta_events: true`, implement
       a handler for `chat.metadata.invalidated` — see §9.3 for the
       payload schema, scope vocabulary, and the GET-then-refresh recipe.
-      Tolerate unknown `scope` strings as "refetch everything".
+      Iterate **every** element of `scope` (a single PATCH can change
+      several fields at once) — never read only `scope[0]` — and tolerate
+      unknown `scope` strings as "refetch everything". On `announcement`,
+      refetch the announcements list as well as the conversation detail.
 - [ ] On streaming downlinks, apply the `delta` invariant
       (`text_prev + delta == text`) when reconstructing locally.
 - [ ] If you advertise `notify_signals`, implement a `notify.signal`
@@ -2058,8 +2611,11 @@ Use this list as a final pass before integration testing.
 - [ ] If you are an owner client and advertise `permission_events`,
       implement `permission.request` / `permission.resolved` (§9.5): render
       and collapse an approval card keyed by `request_id`, send the decision
-      via the ClawChat backend REST API (never a WS frame), and self-expire the card
-      at `expires_at`.
+      via member-backend REST (never a WS frame), and self-expire the card
+      at `expires_at`. Collapse only on a **non-empty** `request_id`; expect
+      `permission.resolved` frames with no `decision` at all, and treat
+      `reason` as a code set (`owner_allowed` / `owner_denied` /
+      `owner_timeout` / `policy_forbidden`), not display text.
 
 ### Streaming (producers only)
 
@@ -2095,8 +2651,16 @@ Use this list as a final pass before integration testing.
       `hello-ok` returns `ack_mode:"dseq"`, `message.sync_ack{dseq,epoch}` for v2
       — with socket-read-layer density check, per-connection baseline reset,
       200ms/replay.done/disconnect/30s ack rhythm, upsert-by-`message_id`
-      persistence, and poison-frame quarantine. Advertise both flags so an older
-      server falls back to v1.
+      persistence, and poison-frame quarantine.
+- [ ] Advertise **both** `reliable_delivery` and `reliable_delivery_v2`. v2 alone
+      loses `seq` **and** `history.truncated`, so you never learn your backlog was
+      pruned (§3.3).
+- [ ] On v2, ack **every** frame that carries a `dseq` — including an event whose
+      name you do not recognise. Dropping one wedges the connection in a
+      kick/replay loop (§11.7).
+- [ ] Keep your unacked v2 window well under **4096** frames, and drive the ack
+      flush from the frame-processing path, not from a wall-clock timer alone
+      (§11.7).
 - [ ] Implement exponential backoff with jitter for reconnect.
 
 ### E2EE / history sync (if supported)
@@ -2115,9 +2679,12 @@ Use this list as a final pass before integration testing.
 
 ### Heartbeat
 
-- [ ] Echo every `ping` with a `pong` (same `trace_id`, empty `payload`).
-- [ ] Optionally send your own `ping` if the server has been silent for
-      ~30 s — protects against half-open connections.
+- [ ] Do **not** implement a downlink `ping` handler and never send an
+      unsolicited `pong` — the server emits neither, and an uplink `pong` is an
+      unknown event (§12).
+- [ ] Optionally send your own JSON-level `ping` if the server has been silent for
+      ~30 s — protects against half-open connections. The RFC 6455 control-frame
+      heartbeat needs no application code.
 
 ### Media
 
@@ -2132,7 +2699,11 @@ Use this list as a final pass before integration testing.
 
 ### Token handling
 
-- [ ] Treat the token as opaque — do not parse it.
+- [ ] Treat the token as opaque — do not parse it. Fetch your own `user_id`
+      out-of-band at startup; the WS wire never carries it (§2, §3.4).
+- [ ] Refresh **proactively, before reconnecting**, not in reaction to a
+      `hello-fail`. The token is verified once at handshake and never re-checked
+      on a live connection (§3.7).
 - [ ] Use the same token for the WebSocket `connect` and the media
       `Authorization` header.
 - [ ] Refresh tokens out-of-band (not via this protocol). On refresh, close
