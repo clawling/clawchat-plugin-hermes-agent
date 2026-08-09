@@ -404,6 +404,10 @@ def _is_known_hermes_slash_command(text: str) -> bool:
     return bool(name and _known_hermes_slash_command_name(name))
 
 
+def _is_owner_only_approval_command(text: str) -> bool:
+    return _slash_command_name(text) in {"approve", "deny", "always", "cancel"}
+
+
 def _owner_attention_text(group_id: str, fallback_text: str) -> str:
     body = fallback_text.strip()
     if body:
@@ -411,18 +415,29 @@ def _owner_attention_text(group_id: str, fallback_text: str) -> str:
     return f"ClawChat group {group_id} {GROUP_OWNER_ATTENTION_TITLE}."
 
 
-def _exec_approval_fallback_text(command: str, description: str) -> str:
+def _exec_approval_fallback_text(
+    command: str,
+    description: str,
+    *,
+    allow_permanent: bool = True,
+    allow_session: bool = True,
+    smart_denied: bool = False,
+) -> str:
+    cmd_preview = command[:200] + "..." if len(command) > 200 else command
+    heading = "⚠️ Dangerous command requires approval:"
+    if smart_denied:
+        heading = "⚠️ Smart DENY — owner override for one operation:"
+
+    choices = ["Reply `/approve` to execute this one operation"]
+    if not smart_denied and allow_session:
+        choices.append("`/approve session` to approve this pattern for the session")
+        if allow_permanent:
+            choices.append("`/approve always` to approve permanently")
+    choices.append("`/deny` to cancel")
+    choice_text = ", ".join(choices[:-1]) + f", or {choices[-1]}."
     return (
-        "Command approval required:\n"
-        "```shell\n"
-        f"{command}\n"
-        "```\n\n"
-        f"Reason: {description}\n\n"
-        "Choose:\n"
-        "- Approve Once - reply /approve\n"
-        "- Approve Session - reply /approve session\n"
-        "- Always Approve - reply /approve always\n"
-        "- Deny - reply /deny"
+        f"{heading}\n```\n{cmd_preview}\n```\n"
+        f"Reason: {description}\n\n{choice_text}"
     )
 
 
@@ -520,7 +535,9 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._typing_started_at: dict[str, float] = {}
         self._typing_ttl_warned: set[str] = set()
         self._known_chat_types: dict[str, str] = {}
-        self._owner_approval_routes: dict[str, str] = {}
+        # One pending approval route per group. This intentionally does not model
+        # multiple concurrent approvals; a newer approval replaces the old slot.
+        self._group_approval_session_keys: dict[str, str] = {}
         self._run_counter = 0
         self._inbound_window: dict[str, deque[float]] = {}
         self._completed_run_ids: set[str] = set()
@@ -716,7 +733,7 @@ class ClawChatAdapter(BasePlatformAdapter):
     def _server_rejected(self) -> "OrderedDict[str, float]":
         """Lazily-initialised accessor for the server-rejection tier.
 
-        Mirrors ``_remember_owner_approval_route``'s convention: several test
+        Mirrors other lazily-initialised state accessors: several test
         harnesses build the adapter via ``__new__`` and fill fields by hand, so
         a new field must not become a mandatory harness edit.
         """
@@ -810,7 +827,6 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._typing_started_at.pop(chat_id, None)
         self._typing_ttl_warned.discard(chat_id)
         self._known_chat_types.pop(chat_id, None)
-        self._owner_approval_routes.pop(chat_id, None)
         self._inbound_window.pop(chat_id, None)
         self._last_inbound_message_id_by_chat.pop(chat_id, None)
         self._conversation_metadata_versions.pop(chat_id, None)
@@ -2382,14 +2398,20 @@ class ClawChatAdapter(BasePlatformAdapter):
                 return
         else:
             _eff = None
-        if await self._handle_owner_forwarded_approval(inbound):
-            return
         if inbound.chat_type == "group":
             if _is_known_hermes_slash_command(inbound.text):
                 command_mode = effective_group_command_mode(
                     self._clawchat_config,
                     inbound.chat_id,
                 )
+                approval_command = _is_owner_only_approval_command(inbound.text)
+                if approval_command and inbound.sender_relation != "owner":
+                    logger.info(
+                        "clawchat group approval command dropped chat_id=%s sender_id=%s reason=approval_owner_only",
+                        inbound.chat_id,
+                        inbound.sender_id,
+                    )
+                    return
                 command_allowed = command_mode == "all" or (
                     command_mode == "owner" and inbound.sender_relation == "owner"
                 )
@@ -2528,11 +2550,13 @@ class ClawChatAdapter(BasePlatformAdapter):
         reply_to_message_id, reply_to_text = self._extract_reply_fields(
             inbound.reply_preview
         )
+        source_user_id, source_user_id_alt = self._source_user_ids_for_inbound(inbound)
         source = self.build_source(
             chat_id=inbound.chat_id,
-            user_id=self._session_user_id_for_inbound(inbound),
+            user_id=source_user_id,
             chat_name=inbound.chat_id,
             chat_type=self._map_source_chat_type(inbound.chat_type),
+            user_id_alt=source_user_id_alt,
         )
         downloaded_media = await self._download_inbound_media(inbound)
         media_urls = [str(item.local_path) for item in downloaded_media]
@@ -2628,6 +2652,12 @@ class ClawChatAdapter(BasePlatformAdapter):
             reply_to_message_id,
         )
         await self.handle_message(event)
+        if (
+            inbound.chat_type == "group"
+            and inbound.sender_relation == "owner"
+            and _is_owner_only_approval_command(inbound.text)
+        ):
+            self._forget_group_approval_session(inbound.chat_id)
         logger.info(
             "clawchat dispatch accepted by hermes chat_id=%s user_id=%s",
             inbound.chat_id,
@@ -2635,16 +2665,62 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
 
     def _session_user_id_for_inbound(self, inbound: InboundMessage) -> str:
-        if inbound.chat_type == "group" and not effective_group_sessions_per_user(
-            self._clawchat_config,
-            inbound.chat_id,
-        ):
-            # Shared group: a stable non-None sentinel so all senders share one
-            # session key while still passing host auth (a None user_id would be
-            # dropped before GATEWAY_ALLOW_ALL_USERS is checked). See the
-            # GROUP_SHARED_SESSION_USER_ID definition for the full rationale.
-            return GROUP_SHARED_SESSION_USER_ID
+        if inbound.chat_type == "group":
+            if (
+                inbound.sender_relation == "owner"
+                and _is_owner_only_approval_command(inbound.text)
+            ):
+                routed_user_id = self._group_approval_session_user_id(inbound.chat_id)
+                if routed_user_id:
+                    return routed_user_id
+            if not effective_group_sessions_per_user(
+                self._clawchat_config,
+                inbound.chat_id,
+            ):
+                # Shared group: a stable non-None sentinel so all senders share one
+                # session key while still passing host auth (a None user_id would be
+                # dropped before GATEWAY_ALLOW_ALL_USERS is checked). See the
+                # GROUP_SHARED_SESSION_USER_ID definition for the full rationale.
+                return GROUP_SHARED_SESSION_USER_ID
         return inbound.sender_id
+
+    def _source_user_ids_for_inbound(
+        self,
+        inbound: InboundMessage,
+    ) -> tuple[str, str | None]:
+        routed_user_id = None
+        if (
+            inbound.chat_type == "group"
+            and inbound.sender_relation == "owner"
+            and _is_owner_only_approval_command(inbound.text)
+        ):
+            routed_user_id = self._group_approval_session_user_id(inbound.chat_id)
+        session_user_id = self._session_user_id_for_inbound(inbound)
+        if routed_user_id and session_user_id == routed_user_id:
+            # Keep the real sender in source.user_id for Gateway authz; use the
+            # pending participant only for build_session_key via user_id_alt.
+            return inbound.sender_id, routed_user_id
+        return session_user_id, None
+
+    def _group_approval_session_user_id(self, chat_id: str) -> str | None:
+        routes = getattr(self, "_group_approval_session_keys", {})
+        session_key = routes.get(chat_id)
+        if not session_key:
+            return None
+        marker = f":clawchat:group:{chat_id}:"
+        if marker not in session_key:
+            logger.warning(
+                "clawchat group approval route ignored chat_id=%s reason=session_key_shape",
+                chat_id,
+            )
+            return None
+        _prefix, participant_id = session_key.rsplit(":", 1)
+        return participant_id or None
+
+    def _forget_group_approval_session(self, chat_id: str) -> None:
+        routes = getattr(self, "_group_approval_session_keys", None)
+        if routes is not None:
+            routes.pop(chat_id, None)
 
     async def _ensure_group_participants_metadata(self, group_id: str) -> None:
         if not group_id:
@@ -3380,31 +3456,25 @@ class ClawChatAdapter(BasePlatformAdapter):
         session_key: str,
         description: str = "dangerous command",
         metadata: Any = None,
+        allow_permanent: bool = True,
+        allow_session: bool = True,
+        smart_denied: bool = False,
+        **kwargs: Any,
     ) -> SendResult:
-        chat_type = self._resolve_chat_type(chat_id, metadata, {})
-        target_chat_id = chat_id
-        fallback_text = _exec_approval_fallback_text(command, description)
-        if chat_type == "group":
-            owner_chat_id = self._owner_direct_chat_id()
-            if not owner_chat_id:
-                logger.error(
-                    "clawchat exec approval suppressed reason=missing_owner_direct_chat_id group=%s",
-                    chat_id,
-                )
-                return SendResult(
-                    success=False,
-                    error="clawchat owner direct chat unavailable",
-                )
-            target_chat_id = owner_chat_id
-            fallback_text = _owner_attention_text(chat_id, fallback_text)
-
-        fragments = [{"kind": "text", "text": fallback_text}]
+        chat_type = self._resolve_chat_type(chat_id, metadata, kwargs)
+        fallback_text = _exec_approval_fallback_text(
+            command,
+            description,
+            allow_permanent=allow_permanent,
+            allow_session=allow_session,
+            smart_denied=smart_denied,
+        )
         message_id = new_message_id()
         frame = build_message_reply_event(
-            chat_id=target_chat_id,
-            chat_type="direct",
+            chat_id=chat_id,
+            chat_type=chat_type,
             message_id=message_id,
-            fragments=fragments,
+            fragments=[{"kind": "text", "text": fallback_text}],
             include_message_id=True,
         )
         sent = await self._connection.send_frame(frame, wait_for_ack=True)
@@ -3414,11 +3484,12 @@ class ClawChatAdapter(BasePlatformAdapter):
                 error="clawchat exec approval dropped",
                 message_id=message_id,
             )
-        if target_chat_id != chat_id:
-            # Group approvals are forwarded to the owner's direct chat; remember
-            # the route only once the card is actually on its way, otherwise a
-            # later owner reply gets matched to an approval that never arrived.
-            self._remember_owner_approval_route(target_chat_id, session_key)
+        if chat_type == "group":
+            routes = getattr(self, "_group_approval_session_keys", None)
+            if routes is None:
+                self._group_approval_session_keys = {}
+                routes = self._group_approval_session_keys
+            routes[chat_id] = session_key
         return SendResult(success=True, message_id=message_id)
 
     async def send_or_update_status(
@@ -3460,7 +3531,10 @@ class ClawChatAdapter(BasePlatformAdapter):
                 kwargs,
                 force=True,
             )
-            if owner_fragment is not None:
+            if (
+                owner_fragment is not None
+                and owner_fragment.get("kind") != "approval_request"
+            ):
                 return await self._send_owner_attention(
                     group_id=chat_id,
                     fallback_text=str(owner_fragment.get("fallback_text") or content or ""),
@@ -4201,43 +4275,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             ],
         }
 
-    def _remember_owner_approval_route(self, owner_chat_id: str, session_key: str) -> None:
-        routes = getattr(self, "_owner_approval_routes", None)
-        if routes is None:
-            self._owner_approval_routes = {}
-            routes = self._owner_approval_routes
-        routes[owner_chat_id] = session_key
 
-    def _owner_approval_session_key(self, inbound: InboundMessage) -> str | None:
-        routes = getattr(self, "_owner_approval_routes", {})
-        return routes.get(inbound.chat_id)
-
-    def _forget_owner_approval_route(self, session_key: str) -> None:
-        routes = getattr(self, "_owner_approval_routes", {})
-        for key, value in list(routes.items()):
-            if value == session_key:
-                routes.pop(key, None)
-
-    async def _handle_owner_forwarded_approval(self, inbound: InboundMessage) -> bool:
-        if inbound.chat_type != "direct" or inbound.sender_id != self._owner_user_id():
-            return False
-        command_name = _slash_command_name(inbound.text)
-        if command_name not in {"approve", "deny", "always", "cancel"}:
-            return False
-        session_key = self._owner_approval_session_key(inbound)
-        if not session_key:
-            return False
-        choice, resolve_all = self._approval_choice_from_text(command_name, inbound.text)
-        resolved = self._resolve_gateway_approval(session_key, choice, resolve_all=resolve_all)
-        if not resolved:
-            return False
-        self._forget_owner_approval_route(session_key)
-        await self.send(
-            inbound.chat_id,
-            self._approval_resolution_text(choice, resolved),
-            metadata={"chat_type": "direct"},
-        )
-        return True
 
     async def _handle_interaction_submit(self, frame: dict[str, Any]) -> bool:
         payload = self._extract_exec_approval_payload(frame)
@@ -4261,12 +4299,12 @@ class ClawChatAdapter(BasePlatformAdapter):
         resolved = self._resolve_gateway_approval(session_key, decision, resolve_all=False)
         if not resolved:
             return True
-        self._forget_owner_approval_route(session_key)
         chat_id = str(frame.get("chat_id") or sender_id)
+        chat_type = self._resolve_chat_type(chat_id, None, {})
         await self.send(
             chat_id,
             self._approval_resolution_text(decision, resolved),
-            metadata={"chat_type": "direct"},
+            metadata={"chat_type": chat_type},
         )
         return True
 
@@ -4296,21 +4334,6 @@ class ClawChatAdapter(BasePlatformAdapter):
                 return candidate
         return None
 
-    def _approval_choice_from_text(self, command_name: str, text: str) -> tuple[str, bool]:
-        args = text.strip().split()[1:]
-        lowered = [arg.lower() for arg in args]
-        resolve_all = "all" in lowered
-        if command_name == "deny":
-            return "deny", resolve_all
-        if command_name == "cancel":
-            return "deny", resolve_all
-        if command_name == "always":
-            return "always", resolve_all
-        if any(arg in {"always", "permanent", "permanently"} for arg in lowered):
-            return "always", resolve_all
-        if any(arg in {"session", "ses"} for arg in lowered):
-            return "session", resolve_all
-        return "once", resolve_all
 
     def _resolve_gateway_approval(
         self,
