@@ -33,7 +33,7 @@ from clawchat_gateway.protocol import (
     is_hello_ok,
     new_frame_id,
 )
-from clawchat_gateway.config import _jwt_claim
+from clawchat_gateway.config import _get_env, _jwt_claim
 from clawchat_gateway.device_id import (
     device_id_is_pinned,
     get_device_id,
@@ -447,8 +447,10 @@ class ClawChatConnection:
                 stored = None
             if stored:
                 return stored
-        env_home = os.environ.get("CLAWCHAT_HOME_CHANNEL")
-        return env_home.strip() if isinstance(env_home, str) and env_home.strip() else None
+        # Via _get_env, not os.environ: a profile gateway inherits the default
+        # profile's exported CLAWCHAT_HOME_CHANNEL, and seeding this profile's
+        # row with it points the agent at the main agent's conversation.
+        return _get_env("CLAWCHAT_HOME_CHANNEL") or None
 
     async def _persist_rotated_tokens(self, access_token: str, refresh_token: str) -> bool:
         from clawchat_gateway.activate import persist_rotated_tokens

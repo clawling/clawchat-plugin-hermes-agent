@@ -11,7 +11,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 from clawchat_gateway import __version__
@@ -310,6 +310,18 @@ class ClawChatApiClient:
         if not conversation_id.strip():
             raise ClawChatApiError("validation", "conversation_id is required")
         return await self._call_json("POST", f"/v1/conversations/{conversation_id}/leave")
+
+    async def add_conversation_member(self, *, conversation_id: str, user_id: str) -> dict:
+        if not conversation_id.strip():
+            raise ClawChatApiError("validation", "conversation_id is required")
+        if not user_id.strip():
+            raise ClawChatApiError("validation", "user_id is required")
+        return await self._call_json(
+            "POST",
+            f"/v1/conversations/{quote(conversation_id, safe='')}/members",
+            body=json.dumps({"user_id": user_id}).encode("utf-8"),
+            extra_headers={"content-type": "application/json"},
+        )
 
     async def get_agent_detail(self, agent_id: str) -> dict:
         if not agent_id.strip():

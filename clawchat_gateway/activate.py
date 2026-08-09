@@ -36,7 +36,7 @@ from clawchat_gateway.output_visibility import (
     runtime_status_messages_for_visibility,
 )
 from clawchat_gateway.restart import schedule_gateway_restart
-from clawchat_gateway.storage import get_clawchat_store
+from clawchat_gateway.storage import _active_profile_name, get_clawchat_store
 
 logger = logging.getLogger(__name__)
 
@@ -84,10 +84,16 @@ def _write_env_values(values: dict[str, str | None]) -> Path:
 def _read_existing_user_id(config: dict[str, Any], *, base_url: str = "") -> str:
     """Return the stored shadow ``user_id`` to replay as a re-pair hint.
 
-    Returns "" when the stored identity was minted by a *different* backend
-    (``extra.base_url`` differs from the one being activated against). Agent ids
-    are per-deployment, so replaying one across environments can only produce
-    ``16001 agent not found`` — the server has no such row and never will.
+    Returns "" when the stored identity did not originate here:
+
+    * a *different backend* (``extra.base_url`` differs from the one being
+      activated against) — agent ids are per-deployment, so replaying one
+      across environments can only produce ``16001 agent not found``;
+    * a *different profile* (``extra.profile`` differs from the active Hermes
+      profile) — ``hermes profile create --clone`` copies ``config.yaml``
+      wholesale, so a brand-new profile can carry the source profile's identity
+      without ever having paired. Replaying it spends the connect code
+      re-pairing the SOURCE agent instead of creating this profile's own.
     """
     platforms = config.get("platforms")
     if not isinstance(platforms, dict):
@@ -111,6 +117,17 @@ def _read_existing_user_id(config: dict[str, Any], *, base_url: str = "") -> str
                 base_url,
             )
             return ""
+    stored_profile = extra.get("profile")
+    if isinstance(stored_profile, str) and stored_profile.strip():
+        current_profile = _active_profile_name()
+        if stored_profile.strip() != current_profile:
+            logger.info(
+                "clawchat activation ignoring stored user_id minted by another Hermes "
+                "profile (stored=%s current=%s); pairing this profile fresh",
+                stored_profile,
+                current_profile,
+            )
+            return ""
     return user_id.strip()
 
 
@@ -125,21 +142,8 @@ def _clawchat_extra(config: dict[str, Any]) -> dict[str, Any]:
     return extra if isinstance(extra, dict) else {}
 
 
-def _has_live_token(config: dict[str, Any]) -> bool:
-    """True when this profile still holds usable ClawChat credentials.
-
-    Mirrors how ``config.py`` resolves the token at runtime (env first, then
-    ``extra.token``). Auto-logout blanks both, which is exactly what makes a
-    logged-out profile safe to re-pair without a flag.
-    """
-    if _get_env("CLAWCHAT_TOKEN"):
-        return True
-    stored = _clawchat_extra(config).get("token")
-    return isinstance(stored, str) and bool(stored.strip())
-
-
 class ExistingActivationError(RuntimeError):
-    """Raised when activating would silently replace a live activation.
+    """Raised when activating would silently replace this profile's identity.
 
     A Hermes profile holds exactly one ClawChat identity (the plugin's
     ``account_id`` is the constant ``"default"`` in config, .env and the
@@ -159,14 +163,96 @@ class ExistingActivationError(RuntimeError):
             "Redeeming another connect code here would re-bind that code to the SAME "
             "agent — no second agent is created, and this profile's credentials are "
             "overwritten.\n"
-            "  - To run a SECOND agent alongside this one, give it its own profile:\n"
+            "  - Want a NEW agent for this profile — including when the identity above "
+            "was inherited from a cloned config: re-run with --new-account\n"
+            "  - Want a SECOND agent alongside this one: give it its own profile:\n"
             "      hermes profile create <name>\n"
             "      hermes -p <name> plugins install clawling/clawchat-plugin-hermes-agent --enable\n"
             "      hermes -p <name> clawchat activate <CODE>\n"
-            "  - To REPLACE this profile's agent with a brand-new identity: "
-            "re-run with --new-account\n"
-            "  - To re-pair THIS agent (e.g. after losing its token): re-run with --repair"
+            f"  - ONLY when the owner confirms this profile itself paired {who} and it "
+            "merely lost its token: re-run with --repair. --repair keeps that identity "
+            "and spends the code on it; it never produces a new agent."
         )
+
+
+class UnprovenRepairError(ExistingActivationError):
+    """Raised when ``--repair`` would replay an identity of unknown provenance.
+
+    ``--repair`` is for one situation: this profile paired its own agent and
+    later lost the token. It keeps ``extra.user_id`` in the replay, so the
+    server re-pairs *that* agent and spends the code on it.
+
+    An inherited identity (``hermes profile create <name> --clone``, the
+    dashboard's clone, a hand-copied ``config.yaml``) is indistinguishable at
+    the flag level, and a fresh install has no token by construction — so
+    "lost its token" reads as a match, and the code lands on the SOURCE
+    profile's agent while this profile creates none. Refuse instead, and name
+    the flag that does what the caller meant.
+    """
+
+    def __init__(
+        self,
+        user_id: str,
+        agent_id: str = "",
+        *,
+        profile: str = "",
+        config_path: str = "",
+    ) -> None:
+        RuntimeError.__init__(  # noqa: PLC2801 - bypass the base guard's text
+            self,
+            f"--repair would redeem this code onto ClawChat "
+            f"{f'agent {agent_id} (shadow user {user_id})' if agent_id else f'agent {user_id}'}"
+            f", an identity this Hermes profile ({profile or 'unknown'!r}) cannot prove it "
+            "owns: config.yaml carries no platforms.clawchat.extra.profile stamp for this "
+            "profile, and this profile's own database records no pairing for that agent. "
+            "That is what a cloned or copied config looks like, and re-pairing it binds "
+            "the code to the SOURCE profile's agent — this profile still ends up with no "
+            "agent of its own.\n"
+            "  - To give THIS profile its own new agent: re-run with --new-account\n"
+            "  - Only if the owner confirms this profile really owns that agent: record "
+            f"it first by setting platforms.clawchat.extra.profile: {profile} in "
+            f"{config_path or 'config.yaml'}, then re-run with --repair"
+        )
+        self.user_id = user_id
+        self.agent_id = agent_id
+        self.profile = profile
+
+
+def _identity_is_this_profiles_own(user_id: str) -> bool:
+    """True when ``user_id`` is provably an identity this profile itself paired.
+
+    Two proofs, in order:
+
+    * ``extra.profile`` names the active profile. Activation stamps it, so any
+      identity minted here since the multi-profile change carries it. (A stamp
+      naming a *different* profile never reaches this check — such an identity
+      is already dropped from the replay by ``_read_existing_user_id``.)
+    * this profile's own SQLite row records the same ``user_id``. Pre-stamp
+      installs have no stamp to check, and the database is the one piece of
+      per-profile state ``hermes profile create --clone`` does not copy.
+
+    Fails **open** when the local store cannot answer (older store object, or
+    an unreadable database): a broken database must not strand an operator
+    whose profile genuinely owns the agent.
+    """
+    _config_path, config = _load_config()
+    stamped = _clawchat_extra(config).get("profile")
+    if isinstance(stamped, str) and stamped.strip():
+        return stamped.strip() == _active_profile_name()
+    try:
+        reader = getattr(get_clawchat_store(), "get_activation_credentials", None)
+        if reader is None:
+            return True
+        credentials = reader(platform="hermes", account_id="default")
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "clawchat activation: repair provenance check could not read the local "
+            "activation row; allowing the re-pair",
+            exc_info=True,
+        )
+        return True
+    stored = str(getattr(credentials, "user_id", "") or "").strip()
+    return bool(stored) and stored == user_id
 
 
 def _derive_websocket_url(base_url: str) -> str:
@@ -258,6 +344,10 @@ def persist_activation(
     else:
         extra.pop("agent_id", None)
     extra["owner_user_id"] = owner_user_id
+    # Stamp the minting profile so a later `hermes profile create --clone` of
+    # this config is recognisable as someone else's identity rather than
+    # replayed as this profile's own.
+    extra["profile"] = _active_profile_name()
     _ensure_output_visibility_defaults(extra)
     _ensure_clawchat_agent_defaults(config)
     _ensure_clawchat_display_defaults(config)
@@ -486,14 +576,32 @@ async def activate(
         user_id="",
         timeout=ACTIVATION_TIMEOUT_SECONDS,
     )
-    _config_path, config = _load_config()
+    config_path, config = _load_config()
     existing_user_id = _read_existing_user_id(config, base_url=base_url)
-    if existing_user_id and not new_account and not repair and _has_live_token(config):
+    # Deliberately NOT gated on "does a live token exist". A config written
+    # before `extra.profile` existed is indistinguishable from a clone, and a
+    # clone's inherited token is routinely stale — so "identity present, token
+    # absent" cannot be read as "this profile auto-logged out". Anything that
+    # survives _read_existing_user_id is this profile's own identity, and
+    # spending a single-use code on it must be an explicit choice.
+    if existing_user_id and not new_account and not repair:
         extra = _clawchat_extra(config)
         agent_id = extra.get("agent_id")
         raise ExistingActivationError(
             existing_user_id,
             agent_id.strip() if isinstance(agent_id, str) else "",
+        )
+    # --repair keeps the replay, so it is only safe on an identity this profile
+    # can prove it paired. An inherited one re-pairs the SOURCE agent and
+    # leaves this profile with none — the failure the flag looks most like.
+    if existing_user_id and repair and not _identity_is_this_profiles_own(existing_user_id):
+        extra = _clawchat_extra(config)
+        agent_id = extra.get("agent_id")
+        raise UnprovenRepairError(
+            existing_user_id,
+            agent_id.strip() if isinstance(agent_id, str) else "",
+            profile=_active_profile_name(),
+            config_path=str(config_path or ""),
         )
     if new_account:
         # A brand-new identity is precisely "do not replay" — the replay is the

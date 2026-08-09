@@ -390,10 +390,26 @@ def _migrate_legacy_config_tokens() -> None:
         logger.warning("ClawChat legacy-token migration skipped: %s", exc)
 
 
+def _warn_on_shared_identity() -> None:
+    """Best-effort check that no sibling profile holds this profile's identity.
+
+    Diagnostics only — the activation guards prevent new collisions, but one
+    already written into config.yaml is indistinguishable from a legitimate
+    identity, so it is surfaced at load instead. Never breaks registration.
+    """
+    try:
+        from clawchat_gateway.profile_collision import warn_on_shared_identity
+
+        warn_on_shared_identity()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("ClawChat identity-collision check skipped: %s", exc)
+
+
 def _register_platform(ctx) -> bool:
     from clawchat_gateway.plugin_prompts import platform_prompt
 
     _migrate_legacy_config_tokens()
+    _warn_on_shared_identity()
 
     register_platform = getattr(ctx, "register_platform", None)
     if not callable(register_platform):

@@ -308,6 +308,21 @@ async def handle_clawchat_leave_group(args, **kw):
     return _tool_result(result)
 
 
+async def handle_clawchat_add_group_member(args, **kw):
+    task_id = kw.get("task_id") or "default"
+    logger.info("clawchat_add_group_member start task_id=%s", task_id)
+    from clawchat_gateway import tools
+
+    result = await _recorded_tool_call(
+        "clawchat_add_group_member",
+        args,
+        _account_id_from_kwargs(kw),
+        lambda: tools.add_group_member(args.get("conversationId"), args.get("userId")),
+    )
+    logger.info("clawchat_add_group_member done task_id=%s", task_id)
+    return _tool_result(result)
+
+
 async def handle_clawchat_mention_message(args, **kw):
     task_id = kw.get("task_id") or "default"
     mention_user_ids = _mention_user_ids_from_args(args.get("mentions"))
@@ -1226,6 +1241,33 @@ def register_tools(ctx) -> None:
         is_async=True,
         description="Leave ClawChat Group",
         emoji="🚪",
+    )
+
+    ctx.register_tool(
+        "clawchat_add_group_member",
+        "clawchat",
+        {
+            "name": "clawchat_add_group_member",
+            "description": _direct_tool_description(
+                "Add a specified ClawChat user to a group conversation the agent is a member of. "
+                "TRIGGER - invoke only when the user explicitly asks the agent to add, invite, or pull a specific person into a specific ClawChat group, and both a concrete conversationId and a concrete userId are available. "
+                "Never guess a userId from a name or nickname — use ids from ClawChat Group Message Metadata, clawchat_list_account_friends, or clawchat_search_users. "
+                "Groups only: direct conversations are rejected by the server. "
+                "The target must already be the agent's ClawChat friend, and the agent needs the group-management permission granted by its owner; if the call fails for either reason, explain that to the user and do not retry."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "conversationId": {"type": "string", "minLength": 1, "description": "Concrete ClawChat group conversation id to add the user to"},
+                    "userId": {"type": "string", "minLength": 1, "description": "Concrete ClawChat user id (usr_...) to add to the group"},
+                },
+                "required": ["conversationId", "userId"],
+            },
+        },
+        handle_clawchat_add_group_member,
+        is_async=True,
+        description="Add ClawChat Group Member",
+        emoji="➕",
     )
 
     ctx.register_tool(

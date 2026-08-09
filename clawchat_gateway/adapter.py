@@ -2130,26 +2130,63 @@ class ClawChatAdapter(BasePlatformAdapter):
                 "owner_user_id": owner_user_id,
             },
         )
+        # The greeting is emitted *inside* the turn below, so a failure after
+        # that point must not roll the claim back — releasing it lets the next
+        # READY (typically the process the activation restart just spawned)
+        # claim again and greet the owner a second time. Only a turn that put
+        # nothing on the wire is safe to retry.
+        delivered_before = self._visible_send_count(conversation_id)
         try:
             await self._handle_inbound(inbound)
-        except asyncio.CancelledError:
-            self._release_activation_bootstrap_claim(
-                conversation_id=conversation_id,
-                claimed_at=claimed_at,
-            )
+        except (asyncio.CancelledError, Exception):  # CancelledError is a BaseException
+            if self._visible_send_count(conversation_id) > delivered_before:
+                self._mark_activation_bootstrap_sent(
+                    conversation_id=conversation_id,
+                    claimed_at=claimed_at,
+                    reason="turn failed after delivery",
+                )
+            else:
+                self._release_activation_bootstrap_claim(
+                    conversation_id=conversation_id,
+                    claimed_at=claimed_at,
+                )
             raise
-        except Exception:
-            self._release_activation_bootstrap_claim(
-                conversation_id=conversation_id,
-                claimed_at=claimed_at,
-            )
-            raise
-        self._store.mark_activation_bootstrap_sent(
+        self._mark_activation_bootstrap_sent(
+            conversation_id=conversation_id,
+            claimed_at=claimed_at,
+        )
+
+    def _mark_activation_bootstrap_sent(
+        self,
+        *,
+        conversation_id: str,
+        claimed_at: Any,
+        reason: str = "",
+    ) -> None:
+        if self._store is None:
+            return
+        marked = self._store.mark_activation_bootstrap_sent(
             platform="hermes",
             account_id="default",
             conversation_id=conversation_id,
             claimed_at=claimed_at,
         )
+        if marked is False or marked is None:
+            # A silent no-op here leaves bootstrap_sent = 0 forever, so every
+            # later reconnect re-greets. Never swallow it.
+            logger.warning(
+                "clawchat activation bootstrap not marked sent conversation_id=%s "
+                "claimed_at=%s reason=%s — the greeting may repeat on reconnect",
+                conversation_id,
+                claimed_at,
+                reason or "post-turn",
+            )
+        elif reason:
+            logger.info(
+                "clawchat activation bootstrap marked sent conversation_id=%s reason=%s",
+                conversation_id,
+                reason,
+            )
 
     def _release_activation_bootstrap_claim(
         self,
@@ -3688,6 +3725,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 message_id,
             )
             return SendResult(success=False, error=error, message_id=message_id)
+        self._note_visible_send(chat_id)
         if not has_media:
             self._record_emit(chat_id, visible_content)
         logger.info(
@@ -3924,6 +3962,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             raw=frame,
         )
         run.last_text = final_content
+        self._note_visible_send(run.chat_id)
         if not self._has_outbound_media(run.metadata, run.kwargs):
             self._record_emit(run.chat_id, final_content)
         self._discard_run(run)
@@ -3965,6 +4004,38 @@ class ClawChatAdapter(BasePlatformAdapter):
         cache.move_to_end(key)
         while len(cache) > RECENT_EMIT_CACHE_MAX:
             cache.popitem(last=False)
+
+    def _visible_sends_cache(self) -> "OrderedDict[str, int]":
+        cache = getattr(self, "_visible_sends", None)
+        if cache is None:
+            cache = self._visible_sends = OrderedDict()
+        return cache
+
+    def _note_visible_send(self, chat_id: str) -> None:
+        """Count one message that actually reached the wire for ``chat_id``.
+
+        Unlike ``_record_emit`` this is not skipped for media sends and is not
+        keyed on the text: the only question it answers is "did the user see
+        anything in this conversation?". ``_dispatch_activation_bootstrap``
+        needs that to tell an activation greeting that was delivered from one
+        that never left the process.
+
+        LRU-bounded like ``_recent_emits``. Eviction only loses the count for a
+        chat that has been idle across 256 other chats, which cannot happen
+        inside the one bootstrap turn that reads it.
+        """
+        if not chat_id:
+            return
+        cache = self._visible_sends_cache()
+        cache[chat_id] = cache.get(chat_id, 0) + 1
+        cache.move_to_end(chat_id)
+        while len(cache) > RECENT_EMIT_CACHE_MAX:
+            cache.popitem(last=False)
+
+    def _visible_send_count(self, chat_id: str) -> int:
+        if not chat_id:
+            return 0
+        return self._visible_sends_cache().get(chat_id, 0)
 
     def _remember_completed_run(self, message_id: str) -> None:
         if message_id in self._completed_run_ids:

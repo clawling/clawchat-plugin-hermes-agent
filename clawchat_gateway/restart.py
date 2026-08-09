@@ -5,9 +5,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from clawchat_gateway.hermes_home import hermes_home
+
 
 def _hermes_home() -> Path:
-    return Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+    return hermes_home()
 
 
 def _hermes_dir() -> Path:

@@ -7,13 +7,13 @@ from pathlib import Path
 from typing import Any, Optional
 
 from clawchat_gateway.api_client import DEFAULT_BASE_URL, DEFAULT_WEBSOCKET_URL
+from clawchat_gateway.hermes_home import hermes_home
 
 logger = logging.getLogger("clawchat_gateway.config")
 
 
 def _read_env_file_value(name: str) -> str:
-    home = os.getenv("HERMES_HOME", "").strip()
-    env_path = Path(home).expanduser() / ".env" if home else Path.home() / ".hermes" / ".env"
+    env_path = hermes_home().expanduser() / ".env"
     try:
         lines = env_path.read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -32,28 +32,57 @@ def _read_env_file_value(name: str) -> str:
 
 
 def _read_hermes_env_value(name: str) -> str:
+    """Resolve through Hermes' own reader, preferring this profile's ``.env``.
+
+    ``get_env_value_prefer_dotenv`` is the API Hermes documents for its
+    *managed* credentials — ours are managed too (activation writes them with
+    ``save_env_value``). It puts ``$HERMES_HOME/.env`` ahead of ``os.environ``
+    and routes the fallback through ``agent.secret_scope``, which is exactly
+    the cross-profile isolation Hermes says must happen at read time. Older
+    hosts that only expose ``get_env_value`` degrade to that.
+    """
     try:
-        from hermes_cli.config import get_env_value
+        from hermes_cli import config as hermes_config
     except Exception:
         return ""
 
+    reader = getattr(hermes_config, "get_env_value_prefer_dotenv", None) or getattr(
+        hermes_config, "get_env_value", None
+    )
+    if reader is None:
+        return ""
     try:
-        return (get_env_value(name) or "").strip()
+        return (reader(name) or "").strip()
     except Exception:
         return ""
 
 
 def _get_env(*names: str) -> str:
-    for name in names:
-        value = os.getenv(name, "").strip()
-        if value:
-            return value
+    """Resolve a ``CLAWCHAT_*`` value, profile-scoped sources first.
+
+    Order: Hermes env store (profile ``.env`` -> scope-checked ``os.environ``)
+    -> ``$HERMES_HOME/.env`` parsed directly (standalone CLI, where
+    ``hermes_cli`` is not importable) -> raw ``os.environ``.
+
+    ``os.environ`` is LAST on purpose. Hermes launches a named profile's
+    gateway as a child of a default-profile process with only an env overlay,
+    and its inherited-key scrub covers a hardcoded first-party allow-list that
+    a plugin's keys can never join — so a raw ``os.getenv`` here returned the
+    DEFAULT profile's token/home-channel and the second agent silently became
+    the first one. It stays in the chain because env-only deployments (a pod
+    with credentials injected and no ``.env``) legitimately have nowhere else
+    to put them.
+    """
     for name in names:
         value = _read_hermes_env_value(name)
         if value:
             return value
     for name in names:
         value = _read_env_file_value(name).strip()
+        if value:
+            return value
+    for name in names:
+        value = os.getenv(name, "").strip()
         if value:
             return value
     return ""

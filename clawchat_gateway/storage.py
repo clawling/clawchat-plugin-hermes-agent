@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import sqlite3
 import stat
@@ -11,6 +10,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, TypeVar
+
+from clawchat_gateway.hermes_home import hermes_home
 
 logger = logging.getLogger(__name__)
 
@@ -179,7 +180,7 @@ def _now_ms() -> int:
 
 
 def _hermes_home() -> Path:
-    return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+    return hermes_home()
 
 
 def _active_profile_name() -> str:

@@ -6,7 +6,7 @@ import shlex
 from contextlib import redirect_stderr
 
 from clawchat_gateway.activate import ExistingActivationError, activate_and_maybe_restart
-from clawchat_gateway.api_client import DEFAULT_BASE_URL
+from clawchat_gateway.config import resolve_activation_base_url
 from clawchat_gateway.output_visibility import apply_output_visibility
 
 
@@ -83,7 +83,10 @@ async def handle_clawchat_activate_command(raw_args: str) -> str:
     try:
         payload = await activate_and_maybe_restart(
             args.code,
-            base_url=DEFAULT_BASE_URL,
+            # Same resolution as the CLI (cli.py): the installer writes the
+            # deployment's CLAWCHAT_BASE_URL into the Hermes .env, and a code
+            # minted on a custom backend is rejected if sent to the default.
+            base_url=resolve_activation_base_url(),
             restart=not args.no_restart,
             new_account=args.new_account,
             repair=args.repair,
