@@ -393,7 +393,7 @@ Every WebSocket frame is a JSON object with this top level:
 | `event` | string | always | One of the constants in §6 |
 | `trace_id` | string | always | Client-chosen on uplink; the server echoes it on the matching ack/response |
 | `emitted_at` | int64 | always | Milliseconds since epoch. Treat the sender's `emitted_at` as advisory: the server restamps on every downlink it **constructs** (materialized `message.send` / `message.reply`, `message.ack`, `message.error`, and every streaming lifecycle event). Three exceptions: `pong` echoes the `ping`'s value verbatim; **a replayed frame keeps the `emitted_at` it was originally sent with**, not the replay time; and the connect-time `message.read` watermark snapshot (§9.7) sets `emitted_at` equal to the watermark. Do not order or de-duplicate a timeline on this field. |
-| `chat_id` | string | every business event | Drives routing (§5). Empty / missing values cause the uplink to be **silently dropped** — no `message.ack` and no `message.error` (§14.5). |
+| `chat_id` | string | every business event | Drives routing (§5). Empty / missing values cause the uplink to be **silently dropped** — no `message.ack` and no `message.error` (§14.5); the server decodes an explicit `null` into the same empty string as an absent key. When present, must be a conversation idcode (§5.1) — the plugin refuses a malformed value locally, before the wire. |
 | `chat_type` | string | downlink business events only | `"direct"` or `"group"`. Server-stamped. **Clients MUST omit on uplink** — any client value is dropped. |
 | `to` | object | optional everywhere **except `message.delivered`** | UI context on chat events (which conversation row to render under), echoed verbatim end-to-end and never used for routing. **On `message.delivered` it is required and load-bearing:** `to.id` must be the original sender's `user_id` and the server uses it as the routing key — a receipt with no `to.id` is dropped silently (§14.4, §14.5). |
 | `sender` | object | downlink business events | Identifies the originating user. **Clients MUST omit on uplink** — the server stamps it from the authenticated identity. |
@@ -463,7 +463,30 @@ This means:
 - `sender` on uplink is **always** overwritten with the authenticated
   identity. Clients MUST NOT send a `sender` — any value is dropped.
 
-### 5.1 Legacy alias
+### 5.1 `chat_id` shape — refused locally, before the wire
+
+A `chat_id` is a member-backend **idcode**: `cnv_` followed by 26 Crockford
+base32 characters, 30 characters in total. Crockford's alphabet is
+`0123456789ABCDEFGHJKMNPQRSTVWXYZ` (no `I`, `L`, `O`, `U`) and decodes
+case-insensitively, so a lowercase body is equally valid. The authority is
+member-backend's server-side idcode validator; anything else is answered
+with `code=400: invalid conversation id`.
+
+The plugin therefore refuses such a frame at its own outbound boundary
+(`clawchat_gateway.connection.is_valid_chat_id`, enforced in `send_frame`):
+a frame that **carries** a `chat_id` key must carry a valid one, and the
+frame never enters the reconnect send queue. Frames that carry no `chat_id`
+at all (`connect`, `ping`/`pong`, presence) are untouched; an explicit
+`{"chat_id": null}` is a *present* key with an unusable value and is
+refused like any other. Rejected shapes seen in production: a `usr_…` /
+`agt_…` idcode, a host-composed `direct:{self}:{peer}` key, `cnv_` with no
+body, `cnv_<id>:thr_1`, a display name, an adapter name, a placeholder.
+
+`openclaw-clawchat` guards the same boundary with the same rules; the two
+are pinned by the byte-identical fixture
+`invalid-chat-id-outbound.json` shared by both repos.
+
+### 5.2 Legacy alias
 
 The server's chat resolver layer accepts the legacy string `"chat"` as an
 input alias and normalises it to `"direct"` before it ever appears on the

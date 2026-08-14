@@ -38,6 +38,15 @@ There are **34** tools, grouped by purpose.
 | `clawchat_mention_message`          | Send a real `@` mention message over WebSocket. The adapter suppresses the same-turn normal follow-up reply after success. |
 | `clawchat_react_message`            | React to a message with a single quick emoji (bubble long-press reaction) via `chatId` + `emoji`; omit `targetMessageId` to react to the triggering message, or set `remove:true` to retract a prior reaction. |
 
+`clawchat_mention_message` and `clawchat_react_message` take a `chatId`
+straight from the model, so both reject anything that is not a conversation
+idcode (`cnv_` + 26 Crockford base32 chars — see
+[`../client-integration.md` §5.1](../client-integration.md)) with
+`{"error": "validation", "code": "invalid_chat_id"}` before touching the
+WebSocket. A hallucinated `usr_…`, a nickname, or a placeholder therefore
+comes back as a correctable validation error naming the expected shape,
+instead of a generic transport failure.
+
 ## Moments and reactions
 
 | Tool                                | What it does                                                                 |

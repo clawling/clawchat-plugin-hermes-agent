@@ -130,6 +130,13 @@ def _message_envelope(
     payload: dict[str, Any],
     emitted_at: int | None = None,
 ) -> dict[str, Any]:
+    # `chat_id` is written UNCONDITIONALLY and deliberately, even when a caller
+    # violates the `str` annotation and passes None. Every event built here is a
+    # business event, where msghub requires a resolvable chat_id; dropping the
+    # key on None would only turn a locally-detectable bug into a server-side
+    # `reason=missing_chat_id` rejection. Keeping the key present lets
+    # `ClawChatConnection.send_frame`'s gate — which tests key PRESENCE — refuse
+    # the frame here, with a WARNING naming the offending value and its caller.
     return {
         "version": "2",
         "event": event,

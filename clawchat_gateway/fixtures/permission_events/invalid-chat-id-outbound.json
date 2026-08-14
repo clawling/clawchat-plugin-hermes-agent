@@ -14,6 +14,7 @@
   },
   "context": {
     "note": "Every conversation id is minted by member-backend with the cnv_ prefix and msghub resolves a chat_id only through member-backend, so anything else is answered with code=400 invalid conversation id. Both plugins forward a chat_id chosen upstream (host target parser, channel directory, cron target, tool argument), so each guards its own outbound boundary. The rejected samples below are the shapes observed in msghub production logs on 2026-07-30.",
+    "idcode_note": "The prefix alone is not enough: member-backend validates the full shape of every externally-visible id. The shape is <3 lowercase ascii letters>_<26 Crockford base32 chars>, exactly 30 chars, separator at index 3. Crockford's alphabet omits I, L, O and U; decoding is case-insensitive, so a lowercase body is accepted while the 3-char prefix must be lowercase. A prefix-only check still lets cnv_, cnv_<id>:thr_1 and cnv_<display name> reach the wire, where member-backend answers 400 and msghub logs an ERROR for a frame that never had a recipient.",
     "rejected": [
       "usr_01KXY9CACEFP4VMS37VYBW3B07",
       "direct:usr_01KYR1TBJY:usr_01KXY9CAC",
@@ -21,14 +22,44 @@
       "clawchat-plugin-openclaw",
       "default",
       "0",
-      ""
+      "",
+      "cnv_",
+      "cnv_01KYT0ZGPRE4KVBKNKS109FFCG:thr_1",
+      "cnv_01KYT0ZGPRE4KVBKNKS109FFC",
+      "cnv_01KYT0ZGPRE4KVBKNKS109FFCGG",
+      "cnv_01KYT0ZGPRE4KVBKNKS109FFCGX",
+      "cnv_01KYT0ZGPRE4KVBKNKS109FFCI",
+      "cnv_01KYT0ZGPRE4KVBKNKS109FFCL",
+      "cnv_01KYT0ZGPRE4KVBKNKS109FFCO",
+      "cnv_01KYT0ZGPRE4KVBKNKS109FFCU",
+      "cnv_01KYT0ZGPRE4KVBKNKS109FF-G",
+      "cnv-01KYT0ZGPRE4KVBKNKS109FFCG",
+      "CNV_01KYT0ZGPRE4KVBKNKS109FFCG",
+      "cnv_Team Standup",
+      "cnv_Weekly Standup",
+      "cnv_owner activation chat"
     ],
-    "accepted": ["cnv_01KYT0ZGPRE4KVBKNKS109FFCG"]
+    "accepted": [
+      "cnv_01KYT0ZGPRE4KVBKNKS109FFCG",
+      "cnv_01kyt0zgpre4kvbknks109ffcg"
+    ]
   },
   "expected": {
     "chat_id_prefix": "cnv_",
+    "idcode": {
+      "total_length": 30,
+      "separator": "_",
+      "separator_index": 3,
+      "prefix_length": 3,
+      "prefix_lowercase_only": true,
+      "body_length": 26,
+      "body_alphabet": "0123456789ABCDEFGHJKMNPQRSTVWXYZ",
+      "body_excluded_letters": ["I", "L", "O", "U"],
+      "body_case_insensitive": true
+    },
     "valid_chat_id": false,
     "sent_on_wire": false,
-    "gated_when_chat_id_absent": false
+    "gated_when_chat_id_absent": false,
+    "gated_when_chat_id_null": true
   }
 }
