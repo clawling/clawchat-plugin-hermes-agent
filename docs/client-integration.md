@@ -349,10 +349,28 @@ restart, and you should follow that. But the same stability means two
 reconnecting into the other's eviction. **Run exactly one process per
 `(user_id, device_id)`.** If you genuinely need concurrent instances, give each a
 distinct `device_id` — and accept that each then maintains its own replay cursor
-and its own inbox backlog. To keep even the single-instance case out of the
-server's throttle band, apply a reconnect floor of at least **5 s** after an
-unexplained close on a previously-good session, rather than your normal
-first-attempt delay.
+and its own inbox backlog.
+
+**A 5-second floor is not enough — measured.** Earlier revisions of this section
+suggested one. Prod on 2026-08-18 showed why it fails: six devices sat in a
+mutual-eviction loop for hours at **9–163 s per eviction**, i.e. every round
+kept the socket alive far longer than any few-second floor, and longer than the
+window most clients use to decide a connection was "stable" and reset their
+backoff. That reset is the actual engine of the loop — not the floor's size.
+
+This plugin therefore does two things on a `4001` close, and any other client
+should do the same:
+
+1. **Never take the backoff reset for a takeover close.** A connection that ends
+   in `4001` does not count as "stable", however long it lived.
+2. **Apply a floor that escalates per consecutive eviction** — 60 s, then
+   doubling to a 600 s ceiling — so whichever instance keeps losing withdraws
+   further each round and the other simply stays connected. The floor applies to
+   that one reconnect only; the ordinary exponential state is untouched, so a
+   device that stops being evicted returns to the fast path immediately.
+
+Constants: `TAKEOVER_BACKOFF_FLOOR_SECONDS` / `TAKEOVER_BACKOFF_MAX_SECONDS` in
+`clawchat_gateway/connection.py`.
 
 ### 3.7 Token lifetime on a live connection
 

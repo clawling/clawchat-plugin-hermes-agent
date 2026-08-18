@@ -326,6 +326,20 @@ by `agents-connect` and `CLAWCHAT_HOME_CHANNEL_NAME` to `ClawChat`.
 | `ack_timeout_ms`                       | `15000`        |
 | `ack_auto_resend_on_timeout`           | `false`        |
 
+Three reconnect values are **fixed constants, not `extra.*` keys**
+(`clawchat_gateway/connection.py`):
+
+| Constant                          | Value   | Purpose |
+|-----------------------------------|---------|---------|
+| `BACKOFF_RESET_AFTER_SECONDS`     | `5.0`   | READY time after which the exponential backoff resets to `reconnect_initial_delay_ms`. **Not applied when the connection ended in a takeover** — see below. |
+| `TAKEOVER_BACKOFF_FLOOR_SECONDS`  | `60.0`  | Minimum wait before reconnecting after msghub closed the socket with `4001` (a newer session for the same `(user_id, device_id)` took over). Doubles per consecutive eviction. |
+| `TAKEOVER_BACKOFF_MAX_SECONDS`    | `600.0` | Ceiling for that escalation. |
+
+The takeover floor exists because `reconnect_max_delay_ms` (15 s) is below the
+eviction periods measured in prod (9–163 s), so ordinary exponential backoff can
+never outrun a mutual-eviction loop between two instances sharing a device id.
+See `docs/client-integration.md` §3.6.
+
 ## Typing
 
 | `extra.*` key                          | Default        |
