@@ -54,6 +54,26 @@ HANDSHAKE_TIMEOUT_SECONDS = 10.0
 _WS_CLOSE_TIMEOUT_SECONDS = 5.0
 SEND_QUEUE_MAX = 128
 BACKOFF_RESET_AFTER_SECONDS = 5.0
+# msghub closes the OLDER socket with application code 4001 when a newer session
+# for the same (user_id, device_id) takes over (docs/client-integration.md §3.6).
+CLOSE_CODE_REPLACED = 4001
+# Reconnect floor after being evicted by a takeover, and its ceiling once the
+# eviction keeps repeating.
+#
+# The eviction loop is mutual: two supervisors sharing a device id each
+# reconnect when kicked and kick the other in turn. Ordinary exponential backoff
+# cannot break it, because every round reaches READY for longer than
+# BACKOFF_RESET_AFTER_SECONDS and resets the delay to
+# ``reconnect_initial_delay_ms``. Prod on 2026-08-18 held that pattern flat for
+# hours across six devices at 9-163s per eviction.
+#
+# So a takeover gets its own floor, doubling per consecutive loss: whichever
+# side keeps losing withdraws further each round until the other simply stays
+# connected. The floor is only ever applied to THIS reconnect's wait — the
+# ordinary exponential state is left untouched, so a device that stops being
+# evicted returns to the fast path immediately.
+TAKEOVER_BACKOFF_FLOOR_SECONDS = 60.0
+TAKEOVER_BACKOFF_MAX_SECONDS = 600.0
 ACKABLE_EVENTS = {"message.send", "message.reply"}
 
 # Every ClawChat conversation id is minted by member-backend with the `cnv_`
@@ -204,6 +224,17 @@ class _PendingAck:
     timeout_task: asyncio.Task[None]
 
 
+def takeover_backoff_floor(streak: int) -> float:
+    """Reconnect floor for ``streak`` consecutive takeover evictions.
+
+    0 losses -> no floor; then TAKEOVER_BACKOFF_FLOOR_SECONDS doubling per
+    additional loss, capped at TAKEOVER_BACKOFF_MAX_SECONDS.
+    """
+    if streak <= 0:
+        return 0.0
+    return min(TAKEOVER_BACKOFF_FLOOR_SECONDS * (2.0 ** (streak - 1)), TAKEOVER_BACKOFF_MAX_SECONDS)
+
+
 async def _ws_connect(url: str, **kwargs: Any) -> Any:
     if _ws_connect_impl is None:
         raise RuntimeError("websockets library not available")
@@ -294,6 +325,10 @@ class ClawChatConnection:
             self._store = None
             logger.warning("clawchat connection database unavailable")
         self._connection_row_id: int | None = None
+        # Close code of the most recent connection, and how many connections in
+        # a row ended in a takeover — the input to the takeover backoff floor.
+        self._last_close_code: int | None = None
+        self._takeover_streak = 0
         self._supervisor_task: asyncio.Task[None] | None = None
         self._read_task: asyncio.Task[None] | None = None
         self._credential_watch_task: asyncio.Task[None] | None = None
@@ -708,19 +743,31 @@ class ClawChatConnection:
                     self._refresh_pending_reconnect = False
             try:
                 await self._set_state(ConnectionState.CONNECTING)
+                self._last_close_code = None
                 await self._run_one_connection()
-                if self._stable_ready_reset_done or self._refresh_pending_reconnect:
-                    # §D: after a successful refresh closed the WS, reconnect
-                    # immediately with the new token (reset backoff) even if the
-                    # socket did not stay READY long enough for the stable-ready
-                    # reset — a refresh close is a planned swap, not a fault.
-                    delay_seconds = self._cfg.reconnect_initial_delay_ms / 1000.0
-                    retries = 0
+                if self._last_close_code == CLOSE_CODE_REPLACED:
+                    # Evicted by a newer session for this device. The
+                    # stable-ready reset is deliberately NOT taken here: the
+                    # eviction period always exceeds BACKOFF_RESET_AFTER_SECONDS,
+                    # so resetting is precisely what keeps two supervisors
+                    # kicking each other at the initial delay forever.
+                    self._takeover_streak += 1
+                    reconnect_reason = "replaced"
+                else:
+                    self._takeover_streak = 0
+                    if self._stable_ready_reset_done or self._refresh_pending_reconnect:
+                        # §D: after a successful refresh closed the WS, reconnect
+                        # immediately with the new token (reset backoff) even if the
+                        # socket did not stay READY long enough for the stable-ready
+                        # reset — a refresh close is a planned swap, not a fault.
+                        delay_seconds = self._cfg.reconnect_initial_delay_ms / 1000.0
+                        retries = 0
+                    reconnect_reason = "-"
                 self._refresh_pending_reconnect = False
-                reconnect_reason = "-"
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
+                self._takeover_streak = 0
                 reconnect_reason = self._safe_error_text(exc)
                 logger.warning(
                     format_ws_log(
@@ -742,8 +789,10 @@ class ClawChatConnection:
             if retries > max_retries:
                 break
             await self._set_state(ConnectionState.RECONNECTING)
-            jitter = random.uniform(0.0, delay_seconds * self._cfg.reconnect_jitter_ratio)
-            delay_with_jitter = delay_seconds + jitter
+            takeover_floor = self._takeover_backoff_floor()
+            effective_delay = max(delay_seconds, takeover_floor)
+            jitter = random.uniform(0.0, effective_delay * self._cfg.reconnect_jitter_ratio)
+            delay_with_jitter = effective_delay + jitter
             self._tracker.mark_reconnect_scheduled()
             next_reconnect_count = self._tracker.snapshot().reconnect_count + 1
             logger.info(
@@ -758,12 +807,22 @@ class ClawChatConnection:
                         ("delay_ms", int(delay_with_jitter * 1000)),
                         ("max_delay_ms", self._cfg.reconnect_max_delay_ms),
                         ("reason", reconnect_reason),
+                        ("takeover_streak", self._takeover_streak),
+                        ("takeover_floor_ms", int(takeover_floor * 1000)),
                     ],
                 )
             )
             await asyncio.sleep(delay_with_jitter)
             delay_seconds = min(delay_seconds * 2.0, max_delay_seconds)
         await self._set_state(ConnectionState.CLOSED)
+
+    def _takeover_backoff_floor(self) -> float:
+        """Minimum wait before reconnecting after consecutive takeover evictions.
+
+        Zero when the last connection did not end in a takeover, so this never
+        slows an ordinary reconnect.
+        """
+        return takeover_backoff_floor(self._takeover_streak)
 
     def _has_connect_credentials(self) -> bool:
         return bool(
@@ -1182,6 +1241,9 @@ class ClawChatConnection:
                 await ws.close()
             except Exception:  # noqa: BLE001
                 pass
+            # Read AFTER close() so the code is settled. This is what tells a
+            # takeover eviction apart from an ordinary drop.
+            self._last_close_code = getattr(ws, "close_code", None)
             self._ws = None
             self._read_task = None
             if not self._stopping and not self._auth_failed:
