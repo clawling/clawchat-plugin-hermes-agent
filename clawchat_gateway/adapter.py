@@ -4714,13 +4714,20 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
             return
         if self._store is None:
+            logger.warning(
+                "clawchat recall purge unavailable chat_id=%s message_id=%s reason=no_store",
+                frame.get("chat_id"),
+                target,
+            )
             return
         try:
             removed = self._store.delete_messages_by_message_id(
-                # The persist path writes rows under account_id="default"
-                # (_claim_message_once below); read and delete with the same
-                # value or a paired adapter, whose _account_id() is the
-                # ClawChat user_id, would purge nothing.
+                # The persist path (_record_message / _claim_message_once) writes
+                # rows under account_id="default"; delete with the same literal.
+                # A paired adapter's _account_id() returns the ClawChat user_id,
+                # not "default" — swapping in self._account_id() here would make
+                # the delete match zero rows and the recall would silently do
+                # nothing.
                 account_id="default",
                 message_id=target,
             )
@@ -4732,12 +4739,32 @@ class ClawChatAdapter(BasePlatformAdapter):
                 exc_info=True,
             )
             return
-        logger.info(
-            "clawchat recall purged chat_id=%s message_id=%s rows=%s",
-            frame.get("chat_id"),
-            target,
-            removed,
-        )
+        if removed is None:
+            # ClawChatStore._write returns None for two different reasons: the
+            # store is disabled, OR the write raised (SQLITE_BUSY, disk error,
+            # locked DB) and _write caught it — so the except block above never
+            # fires for a write failure; this is the branch that actually does.
+            # Never call this "purged": nothing was, and there is no tombstone
+            # or retry, so the recalled row stays in the ledger.
+            logger.warning(
+                "clawchat recall purge unavailable chat_id=%s message_id=%s",
+                frame.get("chat_id"),
+                target,
+            )
+            return
+        if removed:
+            logger.info(
+                "clawchat recall purged chat_id=%s message_id=%s rows=%s",
+                frame.get("chat_id"),
+                target,
+                removed,
+            )
+        else:
+            logger.info(
+                "clawchat recall no-op chat_id=%s message_id=%s reason=already_absent",
+                frame.get("chat_id"),
+                target,
+            )
 
     def _claim_message_once(
         self,
