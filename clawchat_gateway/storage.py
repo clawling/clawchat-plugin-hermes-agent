@@ -925,6 +925,48 @@ class ClawChatStore:
 
         self._write("update_message_by_identity", write)
 
+    def delete_messages_by_message_id(
+        self,
+        *,
+        account_id: str,
+        message_id: str,
+    ) -> int | None:
+        """Erase every ledger row for one ``message_id``.
+
+        The local half of a server-authorised recall (``message.recall``,
+        ``docs/client-integration.md`` §9.8).
+
+        **The only DELETE in this store, and deliberately so.** Nothing prunes
+        ``clawchat_messages`` and it has no retention policy, so without this a
+        message recalled ninety seconds after it was sent stays one @-mention
+        away from being read back aloud by
+        :meth:`list_recent_group_messages` for as long as the group is quiet.
+
+        Scoped to ``account_id`` so one account's recall cannot reach another's
+        rows, and matched on ``message_id`` — indexed by
+        ``idx_clawchat_messages_message_id``, so this is a lookup, not a scan.
+
+        Returns the number of rows removed. ``0`` is a normal outcome, not a
+        failure: the row may never have been stored. ``None`` means the store
+        is unavailable.
+        """
+        # An empty id would match every row whose message_id is '' — deleting
+        # everything the store never managed to key. Refuse rather than guess.
+        if not message_id:
+            return 0
+
+        def write(conn: sqlite3.Connection) -> int:
+            cursor = conn.execute(
+                """
+                DELETE FROM clawchat_messages
+                WHERE account_id = ? AND message_id = ?
+                """,
+                (account_id, message_id),
+            )
+            return int(cursor.rowcount)
+
+        return self._write("delete_messages_by_message_id", write)
+
     def start_connection(
         self,
         *,
