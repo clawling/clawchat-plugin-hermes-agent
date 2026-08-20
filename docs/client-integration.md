@@ -532,6 +532,7 @@ C = client, S = server.
 | `message.error` | S → C | yes (UI) | no | **negative ack** for `message.send` / `message.reply` / streaming uplinks — see §14.3 |
 | `message.delivered` | C ↔ S | yes (`to` = original sender) | server-stamped (receiver) | n/a — is a receipt |
 | `message.reaction` | C → S → members | yes (UI) | server-stamped (reactor) | **yes** (`message.ack` to the reactor, keyed by the slot id `rxn:<target>:<reactor>`; clients MAY ignore — reactions self-heal via inbox replay). See §9.6. |
+| `message.recall` | C → S → members | yes (UI) | server-stamped (the recalling human) | **yes** (`message.ack` to the recaller, keyed by the slot id `rcl:<target>`) — but an **agent never sends this uplink**, so a plugin only ever sees the downlink. Best-effort, non-ackable, carries **no `dseq`** on either the live or the replay path. See §9.8. |
 | `message.read` | C ↔ S | no | server-stamped (reader) | **no** — the live echo carries no ack; delivery gated by `multi_device` (self-echo to the reader's other devices only). The watermark is durably persisted server-side, independent of the live echo. See §9.7. |
 | `history.transit` | C ↔ S | no | **yes — client-set on uplink** (§11.4) | **no** — E2EE sibling-device history transfer (§11.4). Gated by `capabilities.history_sync` (enforced on uplink). Unknown event values MUST be tolerated. |
 | `message.reply` | C ↔ S | yes (UI) | server-only on downlink | **yes** (`message.ack`) on uplink |
@@ -1660,6 +1661,58 @@ chat for the last **30 days** of watermarks, capped at **500** conversations,
 Apply each watermark with a MAX-guarded local cursor, so re-delivery is
 idempotent. The durable watermark, not the live echo, is what a reconnecting
 device relies on.
+
+### 9.8 Message recall — `message.recall`
+
+A human may unsend a message they sent, within **2 minutes**. The recalled
+message vanishes with **no placeholder** from every recipient. The window and
+the "you are the original sender" check are enforced **server-side**; a client
+that receives this frame has already been told the recall is authorised.
+
+**A plugin only ever receives this frame.** Only a human may originate a recall,
+and only of their own message — agent-authored messages are not recallable, and
+an agent-originated recall is rejected server-side. Do not build an uplink.
+
+**Downlink (S → C).** The complete frame:
+
+```json
+{
+  "version": "2",
+  "event": "message.recall",
+  "trace_id": "trace-recall-1",
+  "chat_id": "cnv_abc",
+  "emitted_at": 1755300000123,
+  "sender": { "id": "usr_alice", "type": "direct", "nick_name": "Alice" },
+  "payload": {
+    "message_id": "rcl:msg-01JXYZ9KMNPQRSTVWXYZ0CD",
+    "target_message_id": "msg-01JXYZ9KMNPQRSTVWXYZ0CD"
+  }
+}
+```
+
+- ⚠️ **`payload.message_id` is the server's `rcl:<target>` slot id, NOT the id to
+  delete.** The id to delete is `payload.target_message_id`. Deleting by the slot
+  id removes nothing and reads exactly like working code.
+- **Ids only, never content.** The frame never carries the recalled text. Nothing
+  may be rendered from it, and nothing may be handed to a model.
+- **No `dseq`** on either the live or the replay path; **no `seq` on the live
+  downlink** — a *replayed* inbox row carries its storage `seq` like any other
+  record — and **no `origin_device_id`**. The frame is `BestEffort` and
+  non-ackable: **send nothing back**. Acking a frame the server never made
+  ackable is how a client teaches the ack-silence sweeper to kick it.
+- **Idempotent and possibly repeated.** Live delivery and inbox replay can both
+  carry it. Treat the handler as an unconditional delete.
+- **Delete your own ledger row.** This plugin stores inbound messages in
+  `clawchat_messages` and re-injects the last ten of them as "Prior group
+  context" on an @-mention flush; there is no retention on that table, so a row
+  left behind stays one @-mention away from being read back aloud indefinitely.
+- **No tombstone is kept.** A Kafka redelivery of the original `message.send` can
+  therefore resurrect the row. Accepted, deliberately: the durable defence lives
+  in the mobile client, not in three plugin ledgers.
+- What is **not** attempted: removing the message from the Hermes host's own
+  conversation history, and injecting a synthetic "the user retracted a message"
+  turn. The first would mean owning host context management wholesale; the
+  second restates the fact being erased.
 
 ---
 

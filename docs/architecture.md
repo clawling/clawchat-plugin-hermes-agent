@@ -204,3 +204,31 @@ registered. Explicit runtime values always win over the merged extra.
 
 See [`./configuration.md`](./configuration.md) for the field-by-field
 table.
+
+## Host `MessageEvent` verification (message-recall open item)
+
+Verified 2026-08-20 against Hermes Agent 0.20.0 (a local Hermes source
+checkout at `tmp/hermes`, git commit `3aeff239bfc49a5e025eb05fb6fd3a724104a1d6`;
+no `hermes` binary is installed on this machine, so the version was read from that checkout's
+`pyproject.toml` — `[project] name = "hermes-agent"` / `version = "0.20.0"`
+— rather than from `hermes --version`). The live SQLite state at
+`$HOME/.hermes/clawchat.sqlite` and `$HOME/.hermes/clawchat/clawchat.sqlite`
+was also inspected (`sqlite3 <db> ".tables"`); neither contains the host's
+own `messages` table — both only hold this plugin's own `clawchat_messages`
+ledger (`activations`, `connections`, `owner_profile`, `tool_calls`,
+`liveware_sample`, `schema_migrations`, `clawchat_messages`) — so the
+`messages` schema below is taken from the source checkout, not a live DB.
+
+| Question | Answer |
+|---|---|
+| Does `gateway.platforms.base.MessageEvent` accept `message_id=`? | yes — it is a `@dataclass` (`gateway/platforms/base.py:2054`) whose fields include `text: str`, `message_type: MessageType = MessageType.TEXT`, `source: SessionSource = None`, `raw_message: Any = None`, `message_id: Optional[str] = None`, `platform_update_id: Optional[int] = None`, `media_urls: List[str] = field(default_factory=list)`, `media_types: List[str] = field(default_factory=list)`, `reply_to_message_id: Optional[str] = None`, `reply_to_text: Optional[str] = None`, plus further reply/prompt/skill/channel fields not relevant here. |
+| Does `messages.platform_message_id` exist? | yes — `hermes_state_common.py`'s `CREATE TABLE IF NOT EXISTS messages (... platform_message_id TEXT, ...)` (verbatim column declaration, no inline `UNIQUE`). |
+| Is it uniquely indexed? | **no.** The only index over it, created in `hermes_state_schema.py`'s `_init_schema`, is:<br>`CREATE INDEX IF NOT EXISTS idx_messages_platform_msg_id ON messages(session_id, platform_message_id) WHERE platform_message_id IS NOT NULL`<br>This is `CREATE INDEX`, not `CREATE UNIQUE INDEX` — it does not enforce uniqueness at all, let alone give a unique lookup keyed on `platform_message_id`. Separately (and this would matter even if it *were* unique): `platform_message_id` is not the leading column — `session_id` is — so a unique index here would still require supplying the host's internal `session_id` alongside `platform_message_id` to get the guarantee, and the adapter's `MessageEvent(...)` construction site (`clawchat_gateway/adapter.py`, method `_handle_inbound`) has no host `session_id` in scope at that point — it builds a ClawChat `source` (`chat_id`, `user_id`, `chat_name`, `chat_type`) via `self.build_source(...)`, not a Hermes-internal session id. Both gaps are independently sufficient to fail the criterion; the non-`UNIQUE` declaration alone already does. |
+
+**Decision:** do not populate `message_id=`. Outcome B: `MessageEvent` accepts `message_id=`, but `messages.platform_message_id` exists without a unique index (`CREATE INDEX`, not `CREATE UNIQUE INDEX`) — a non-unique column cannot be the basis of a host-side soft delete, and passing a kwarg nothing consumes as a reliable key would invite the next reader to assume a linkage that does not exist.
+
+This matters because it is the precondition for any future **host-side** soft
+delete of a recalled message. Today the `message.recall` purge reaches only this
+plugin's own `clawchat_messages` ledger; the host's conversation history is
+explicitly out of scope (spec §8, "What is explicitly NOT attempted"). Nothing
+about the column's schema may be asserted without re-running this verification.

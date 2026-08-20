@@ -2298,6 +2298,9 @@ class ClawChatAdapter(BasePlatformAdapter):
                     frame.get("chat_id"),
                 )
             return
+        if event_name == "message.recall":
+            self._handle_message_recall(frame)
+            return
         protocol_message_id = None
         if event_name in {"message.send", "message.reply"}:
             protocol_message_id = self._extract_protocol_message_id(frame)
@@ -4683,6 +4686,103 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
         except Exception:  # noqa: BLE001
             logger.warning("clawchat message database persistence failed")
+
+    def _handle_message_recall(self, frame: dict[str, Any]) -> None:
+        """Erase this agent's ledger row for a message its sender withdrew.
+
+        **Two sites, not one.** ``connection.py`` has to route the frame here
+        in the first place — its dispatch chain forwards only ``message.send``
+        / ``message.reply`` to ``_on_message``. The dead ``interaction.submit``
+        branch above is the standing evidence of what editing only this file
+        buys: nothing at all.
+
+        Ids only. ``payload.message_id`` is the server's ``rcl:<target>`` slot
+        id, **not** the id to delete — deleting by it erases nothing and reads
+        exactly like working code.
+
+        No tombstone (spec §8, "What is explicitly NOT attempted"): a Kafka
+        redelivery of the original ``message.send`` can therefore resurrect the
+        row. Accepted as a known limitation rather than replicating the mobile
+        client's tombstone table in three runtimes.
+        """
+        payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+        target = payload.get("target_message_id")
+        if not isinstance(target, str) or not target:
+            logger.warning(
+                "clawchat recall ignored chat_id=%s reason=missing_target_message_id",
+                frame.get("chat_id"),
+            )
+            return
+        # Evict the reply-preview cache unconditionally — before the store
+        # lookup and independent of whatever the store delete below does.
+        # This cache backs OUTBOUND message.send/message.reply frames (an
+        # inline quote shown to every human in the chat), not just a model
+        # turn: a withdrawn message must stop being quotable the moment the
+        # recall frame arrives, even if the ledger purge itself fails or
+        # there is no store configured at all.
+        self._reply_preview_by_message_id.pop(target, None)
+        try:
+            self._reply_preview_order.remove(target)
+        except ValueError:
+            pass
+        recall_chat_id = frame.get("chat_id")
+        if (
+            isinstance(recall_chat_id, str)
+            and self._last_inbound_message_id_by_chat.get(recall_chat_id) == target
+        ):
+            del self._last_inbound_message_id_by_chat[recall_chat_id]
+        if self._store is None:
+            logger.warning(
+                "clawchat recall purge unavailable chat_id=%s message_id=%s reason=no_store",
+                frame.get("chat_id"),
+                target,
+            )
+            return
+        try:
+            removed = self._store.delete_messages_by_message_id(
+                # The persist path (_record_message / _claim_message_once) writes
+                # rows under account_id="default"; delete with the same literal.
+                # A paired adapter's _account_id() returns the ClawChat user_id,
+                # not "default" — swapping in self._account_id() here would make
+                # the delete match zero rows and the recall would silently do
+                # nothing.
+                account_id="default",
+                message_id=target,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "clawchat recall purge failed chat_id=%s message_id=%s",
+                frame.get("chat_id"),
+                target,
+                exc_info=True,
+            )
+            return
+        if removed is None:
+            # ClawChatStore._write returns None for two different reasons: the
+            # store is disabled, OR the write raised (SQLITE_BUSY, disk error,
+            # locked DB) and _write caught it — so the except block above never
+            # fires for a write failure; this is the branch that actually does.
+            # Never call this "purged": nothing was, and there is no tombstone
+            # or retry, so the recalled row stays in the ledger.
+            logger.warning(
+                "clawchat recall purge unavailable chat_id=%s message_id=%s",
+                frame.get("chat_id"),
+                target,
+            )
+            return
+        if removed:
+            logger.info(
+                "clawchat recall purged chat_id=%s message_id=%s rows=%s",
+                frame.get("chat_id"),
+                target,
+                removed,
+            )
+        else:
+            logger.info(
+                "clawchat recall no-op chat_id=%s message_id=%s reason=already_absent",
+                frame.get("chat_id"),
+                target,
+            )
 
     def _claim_message_once(
         self,

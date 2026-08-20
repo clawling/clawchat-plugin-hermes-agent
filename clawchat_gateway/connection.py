@@ -1457,6 +1457,39 @@ class ClawChatConnection:
                 )
             )
             return
+        if self._state == ConnectionState.READY and ftype in (None, "event") and frame.get("event") == "message.recall":
+            # A message its sender took back (client-integration.md §9.8).
+            # Ids only — the frame never carries the recalled text — and
+            # `payload.message_id` is the server's `rcl:<target>` slot, NOT the
+            # id to delete.
+            payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+            logger.info(
+                format_ws_log(
+                    event="inbound_control",
+                    account_id=self._account_id,
+                    attempt=self._attempt,
+                    reconnect_count=self._reconnect_count,
+                    state=ConnectionState.READY.value,
+                    action="recall",
+                    fields=[
+                        ("event_name", frame.get("event")),
+                        ("trace_id", frame.get("trace_id") or frame.get("id")),
+                        ("chat_id", frame.get("chat_id")),
+                        ("target_message_id", payload.get("target_message_id")),
+                    ],
+                )
+            )
+            # Guarded, unlike the `message.send` dispatch below. An exception
+            # out of `_read_loop` kills the read task, which triggers a
+            # reconnect — and if the frame is replayed the whole cycle repeats
+            # forever. `on_notify_signal` above is wrapped for exactly this
+            # reason; a purge that raises must cost one message, not the
+            # connection.
+            try:
+                await self._on_message(frame)
+            except Exception:  # noqa: BLE001
+                logger.exception("message.recall handling raised")
+            return
         if self._state == ConnectionState.READY and ftype in (None, "event") and frame.get("event") in {"message.send", "message.reply"}:
             sender = frame.get("sender") if isinstance(frame.get("sender"), dict) else {}
             logger.info(
