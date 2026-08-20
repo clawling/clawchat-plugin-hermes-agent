@@ -1709,7 +1709,7 @@ an agent-originated recall is rejected server-side. Do not build an uplink.
 - **No tombstone is kept.** A Kafka redelivery of the original `message.send` can
   therefore resurrect the row. Accepted, deliberately: the durable defence lives
   in the mobile client, not in three plugin ledgers.
-- What is **not** attempted: removing the message from the OpenClaw host's own
+- What is **not** attempted: removing the message from the Hermes host's own
   conversation history, and injecting a synthetic "the user retracted a message"
   turn. The first would mean owning host context management wholesale; the
   second restates the fact being erased.
