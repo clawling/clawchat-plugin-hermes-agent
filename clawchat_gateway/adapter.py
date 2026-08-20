@@ -4713,6 +4713,24 @@ class ClawChatAdapter(BasePlatformAdapter):
                 frame.get("chat_id"),
             )
             return
+        # Evict the reply-preview cache unconditionally — before the store
+        # lookup and independent of whatever the store delete below does.
+        # This cache backs OUTBOUND message.send/message.reply frames (an
+        # inline quote shown to every human in the chat), not just a model
+        # turn: a withdrawn message must stop being quotable the moment the
+        # recall frame arrives, even if the ledger purge itself fails or
+        # there is no store configured at all.
+        self._reply_preview_by_message_id.pop(target, None)
+        try:
+            self._reply_preview_order.remove(target)
+        except ValueError:
+            pass
+        recall_chat_id = frame.get("chat_id")
+        if (
+            isinstance(recall_chat_id, str)
+            and self._last_inbound_message_id_by_chat.get(recall_chat_id) == target
+        ):
+            del self._last_inbound_message_id_by_chat[recall_chat_id]
         if self._store is None:
             logger.warning(
                 "clawchat recall purge unavailable chat_id=%s message_id=%s reason=no_store",
