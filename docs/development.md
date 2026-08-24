@@ -17,7 +17,7 @@ same modules Hermes loads.
 ├── MANIFEST.in                  # Bundles prompts/*.md when building a wheel
 ├── clawchat_gateway/            # All runtime modules — adapter, connection, protocol, tools, …
 ├── prompts/                     # Required platform.md + optional defaults
-├── skills/clawchat-core/SKILL.md # Bundled Hermes Plugin Bundle skill
+├── skills/                      # Four bundled skill dirs (each a SKILL.md) + manifest.json
 └── docs/                        # This documentation tree
 ```
 
@@ -120,9 +120,10 @@ install.
 
 `MANIFEST.in` only ships `prompts/*.md`, and `[tool.setuptools.packages.find]`
 in `pyproject.toml` only includes the `clawchat_gateway*` package. The
-top-level `skills/` tree — all three bundled skill directories
+top-level `skills/` tree — all four bundled skill directories
 (`skills/clawchat-core/`, `skills/clawchat-liveware/`,
-`skills/clawchat-set-greeting/`, each with a `SKILL.md`) **and**
+`skills/clawchat-liveware-sample/`, `skills/clawchat-set-greeting/`, each with
+a `SKILL.md`) **and**
 `skills/manifest.json` — lives outside that package and is not referenced by
 `MANIFEST.in` either, so none of it is included in a built wheel. A
 wheel-only install therefore has an empty `bundled_skill_ids()` result (the

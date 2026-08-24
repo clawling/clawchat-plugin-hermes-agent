@@ -24,10 +24,12 @@ These names refer to different layers and are not interchangeable:
 | Call                                                         | Provided by              | Effect                                                                                       |
 |--------------------------------------------------------------|--------------------------|----------------------------------------------------------------------------------------------|
 | `ctx.register_platform(name="clawchat", ...)`                | `__init__._register_platform` | Registers the gateway platform. Requires Hermes v0.12.0+; raises otherwise.            |
-| `ctx.register_tool(name, "clawchat", schema, handler, ...)`  | `clawchat_gateway.plugin_tools.register_tools` | Registers all thirty-three `clawchat_*` tools. List is also in `plugin.yaml`. |
+| `ctx.register_tool(name, "clawchat", schema, handler, ...)`  | `clawchat_gateway.plugin_tools.register_tools` | Registers all thirty-four `clawchat_*` tools. List is also in `plugin.yaml`. |
 | `ctx.register_skill("clawchat-core", path, description=...)` | `__init__._register_skill` | Registers the bundled Plugin Bundle skill `clawchat:clawchat-core` (path `skills/clawchat-core/SKILL.md`), then any extra skills present in the managed manifest (`$HERMES_HOME/clawchat-skills/manifest.json`) that were delivered by a dynamic skill update, so they survive restarts. Also captures the registrar (`skill_update.set_skill_registrar`) so a brand-new skill applied after owner consent is hot-registered immediately (`skill_update.hot_register_new_skills`) without a restart. Skipped silently if the host does not implement `register_skill`. Load also runs `skill_update.ensure_external_skills_dir()`, which idempotently adds `clawchat-skills` to the host config's `skills.external_dirs` so all managed skills additionally appear in the `<available_skills>` index / `skills_list` under their bare names. |
 | `ctx.register_cli_command("clawchat", ...)`                  | `__init__._register_cli_commands` | Adds `hermes clawchat activate <CODE>` on Hermes builds that expose `register_cli_command`. |
 | `ctx.register_command("clawchat-activate", ...)`             | `__init__._register_commands` | Adds the `/clawchat-activate <CODE>` slash command for in-session activation.        |
+| `ctx.register_command("clawchat-output", ...)`               | `__init__._register_commands` | Adds the `/clawchat-output minimal\|normal\|full` slash command ([`./output-visibility.md`](./output-visibility.md)). |
+| `ctx.register_hook("pre_api_request", ...)`                  | `__init__._register_llm_context_debug_hooks` | Installs the LLM-context debug observer (inert unless `CLAWCHAT_LLM_CONTEXT_DEBUG` is set). |
 | `ctx.register_hook("pre_gateway_dispatch", ...)`             | `__init__._clawchat_pre_gateway_dispatch` | Drops frames whose sender matches the bot's own ClawChat `user_id` (self-echo). |
 
 `adapter_factory`, `setup_fn`, `check_fn`, `validate_config`, and
@@ -84,9 +86,12 @@ indistinguishable from an absent one. The rule is *a frame that carries a
 is not.
 
 `CHAT_ID_PREFIX` and the rejected/accepted sample set are **cross-plugin
-contract**, pinned by `clawchat_gateway/fixtures/permission_events/invalid-chat-id-outbound.json`
-— a byte-identical copy of the openclaw plugin's fixture, asserted from both
-suites (`tests/test_parity.py`). The openclaw side enforces the same rule at
+contract**, pinned by the tracked fixture
+`clawchat_gateway/fixtures/permission_events/invalid-chat-id-outbound.json`
+— a byte-identical copy of the openclaw plugin's fixture. The fixture is the
+shared artefact; the parity assertions over it live in each plugin's own test
+suite, which is **not** part of this published checkout (`.gitignore: tests/`).
+The openclaw side enforces the same rule at
 its own structured boundaries (`sendRawEnvelope`, `sendAlignedAckableEnvelope`,
 `sendOpenclawClawlingReaction`).
 
@@ -230,5 +235,5 @@ ledger (`activations`, `connections`, `owner_profile`, `tool_calls`,
 This matters because it is the precondition for any future **host-side** soft
 delete of a recalled message. Today the `message.recall` purge reaches only this
 plugin's own `clawchat_messages` ledger; the host's conversation history is
-explicitly out of scope (spec §8, "What is explicitly NOT attempted"). Nothing
+explicitly out of scope (spec §9.8, "What is **not** attempted"). Nothing
 about the column's schema may be asserted without re-running this verification.

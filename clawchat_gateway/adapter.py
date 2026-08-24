@@ -198,8 +198,8 @@ GROUP_SETTINGS_READY_TIMEOUT_SECONDS = 5.0
 COMPLETED_RUN_CACHE_MAX = 1024
 REPLY_PREVIEW_CACHE_MAX = 512
 # Hermes core can deliver the SAME finished response to the platform twice in one
-# turn (observed in prod: a streaming/output-path send + a platforms.base re-send
-# ~0.3s apart), and each send() mints a fresh message_id so the message_id-keyed
+# turn (a streaming/output-path send plus a platforms.base re-send roughly
+# 0.3s apart), and each send() mints a fresh message_id so the message_id-keyed
 # outbound claim never dedups them. Collapse identical (chat_id, text) emits within
 # this short window. The window is intentionally well under real inter-turn reply
 # spacing (LLM generation is multi-second) to avoid suppressing genuine repeats.
@@ -4700,7 +4700,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         id, **not** the id to delete — deleting by it erases nothing and reads
         exactly like working code.
 
-        No tombstone (spec §8, "What is explicitly NOT attempted"): a Kafka
+        No tombstone (spec §9.8, "What is **not** attempted"): a Kafka
         redelivery of the original ``message.send`` can therefore resurrect the
         row. Accepted as a known limitation rather than replicating the mobile
         client's tombstone table in three runtimes.

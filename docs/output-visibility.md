@@ -12,6 +12,13 @@ The command updates the ClawChat platform settings in `$HERMES_HOME/config.yaml`
 It is not a per-chat or per-session preference. `streaming` stays `false` in all
 three presets.
 
+> **Quote `tool_progress: "off"`.** `tool_progress` is a *string* enum
+> (`off` / `new` / `all` / `verbose`), and the plugin writes and compares the
+> string `"off"` (`clawchat_gateway/output_visibility.py`, `DISPLAY_PRESETS`).
+> A bare `off` is parsed as the boolean `false` by YAML 1.1 loaders, which is
+> not the same value — always quote it when hand-editing `config.yaml`. The
+> same applies to `display.background_process_notifications`.
+
 `output_visibility` is the semantic preset. `runtime_status_messages` is the
 adapter-facing boolean used by the existing Hermes runtime/status suppression
 path, and `/clawchat-output` keeps it aligned with the selected preset.
@@ -32,7 +39,7 @@ platforms:
 display:
   platforms:
     clawchat:
-      tool_progress: off
+      tool_progress: "off"
       show_reasoning: false
       streaming: false
       interim_assistant_messages: false
@@ -61,7 +68,7 @@ platforms:
 display:
   platforms:
     clawchat:
-      tool_progress: off
+      tool_progress: "off"
       show_reasoning: false
       streaming: false
       interim_assistant_messages: true
@@ -105,11 +112,12 @@ agent:
 
 ## Runtime/status suppression
 
-The adapter derives runtime-status delivery from the selected preset:
+The adapter derives runtime-status delivery from the selected preset —
+`clawchat_gateway.output_visibility.runtime_status_messages_for_visibility`:
 
 ```text
-allow_runtime_status_output = output_visibility == "full"
-runtime_status_messages = allow_runtime_status_output
+runtime_status_messages_for_visibility(mode) == (mode == "full")
+runtime_status_messages = runtime_status_messages_for_visibility(output_visibility)
 ```
 
 When `runtime_status_messages` is `false`, the adapter suppresses Hermes

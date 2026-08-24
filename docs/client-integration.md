@@ -338,8 +338,15 @@ races your own other session is what produces a takeover storm.
 
 To dampen such storms the server **throttles** repeated takeovers of the
 same `(user_id, device_id)`: more than 3 within a 10s window add a small
-bounded backoff (≤2s) before the new socket is installed. The server never
-*refuses* the new socket — throttling only slows a tight loop.
+bounded backoff (≤2s) before the new socket is installed. Throttling alone only
+slows a tight loop; the socket is still installed.
+
+A deployment MAY additionally enable a duplicate-session **refusal** guard. When
+it is on and the incumbent session is provably healthy, the *new* connection is
+turned away before `hello-ok` with close code **`4002`**
+(`duplicate_session_throttled`) and a `retry_after_ms` hint (§14.1) — the
+incumbent keeps its socket. A client must therefore be prepared for its
+`connect` to be refused rather than always winning the takeover.
 
 **Operator warning — a stable `device_id` makes two instances evict each other
 forever.** §3.3 recommends a stable `device_id` so replay state survives a
@@ -496,7 +503,7 @@ a frame that **carries** a `chat_id` key must carry a valid one, and the
 frame never enters the reconnect send queue. Frames that carry no `chat_id`
 at all (`connect`, `ping`/`pong`, presence) are untouched; an explicit
 `{"chat_id": null}` is a *present* key with an unusable value and is
-refused like any other. Rejected shapes seen in production: a `usr_…` /
+refused like any other. Rejected shapes include: a `usr_…` /
 `agt_…` idcode, a host-composed `direct:{self}:{peer}` key, `cnv_` with no
 body, `cnv_<id>:thr_1`, a display name, an adapter name, a placeholder.
 
@@ -2297,10 +2304,23 @@ The server may close the connection in several scenarios:
 | `4001` | your `(user_id, device_id)` was taken over by a newer session | Back off before reconnecting (raise the floor — an instant reconnect causes a mutual-eviction storm). The token is still valid. |
 | `1009` | an inbound frame exceeded the server's frame cap (8 MiB post-auth, 64 KiB for the pre-auth `connect` frame) | Split the payload, or use media upload (§15). Never resend the frame. |
 | `1005` / close with no status | server-initiated kick: backpressure, ack-silence, unacked-ledger depth, `device.cursor.reset` | Reconnect with backoff; replay recovers the messages. |
+| `4002` | your `connect` was **turned away** instead of being allowed to evict a provably-healthy incumbent session for the same `(user_id, device_id)` — see §3.6 | Wait at least `retry_after_ms` (below) before retrying. The token is still valid, and no `hello-ok` was sent. |
 | `1006` (abnormal, no CLOSE frame) | handshake rejection, or a transport drop | **Read the last frame you received**: a `hello-fail` arrives immediately before the close and carries the real reason (§3.5). |
 
-`4001` is the only application (4000–4999) close code msghub emits. There is no
-close code for auth failure and none for protocol violation.
+`4001` and `4002` are the application (4000–4999) close codes msghub emits.
+There is no close code for auth failure and none for protocol violation.
+
+The `4002` close **reason** is a JSON object, not free text:
+
+```json
+{ "reason": "duplicate_session_throttled", "retry_after_ms": 1500 }
+```
+
+> ⚠️ **`hermes-clawchat` does not implement `4002` today.** Only `4001` is
+> recognised (`CLOSE_CODE_REPLACED` in `clawchat_gateway/connection.py`); a
+> `4002` close falls through to the ordinary exponential backoff and its
+> `retry_after_ms` is ignored. Treat this row as the wire contract to implement,
+> not as a description of current client behaviour.
 
 > Match the two reasons by their **string contract**, not by equality on the full
 > text — exact `"authentication failed"` for terminal, substring

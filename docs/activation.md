@@ -362,15 +362,16 @@ conversation id.
   unpinned-`CLAWCHAT_DEVICE_ID` boot warning.
 - `docs/install.md`, `docs/reference/cli.md`, and `docs/configuration.md`:
   operator-facing activation behavior and persisted state.
-- `tests/test_reply_mode_surface_removed.py`: current focused persistence
-  regression coverage touching activation writes.
 
 ## Verification
 
-Use the smallest command that covers the activation change being touched:
+The regression suite for activation writes lives in `tests/`, which is **not**
+part of this published checkout (`.gitignore: tests/` — see
+[`./development.md`](./development.md)). Run it from a working tree that has
+one; the smallest command that covers the activation change being touched:
 
 ```bash
-uv run pytest tests/test_reply_mode_surface_removed.py
+uv run pytest tests/           # scoped to the file covering the change
 uv run pytest
 ```
 

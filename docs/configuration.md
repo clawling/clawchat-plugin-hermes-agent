@@ -42,6 +42,12 @@ env credentials to take effect.
 | `CLAWCHAT_AGENT_ID`                  | `agent_id`         | JWT `aid` claim from `CLAWCHAT_TOKEN` | Set by activation. This is the REST agent record id (`agt_...`), distinct from owner metadata `agent_user_id` (`usr_...`). |
 | `CLAWCHAT_OWNER_USER_ID`             | `owner_user_id`    | JWT `oid` claim from `CLAWCHAT_TOKEN` | Identifies the human owner of the agent account. When neither the env var nor `extra.owner_user_id` is set, it is derived from the token's `oid` claim (mirrors `agent_id`/`aid`). This keeps an agent connectable when a provisioner injects `CLAWCHAT_TOKEN`+`user_id` but omits the owner — without it the connection gate (`_has_connect_credentials`) leaves the agent stuck in `activation_wait`. |
 
+Activation also stamps one non-credential identity key:
+
+| Env var | `extra.*` key | Default | Notes |
+|---------|---------------|---------|-------|
+| —       | `profile`     | unset   | The Hermes profile name activation ran in (`activate._active_profile_name`). Read back on later boots to detect a `config.yaml` that belongs to a different profile. A config written before this key existed carries no stamp. See [`./activation.md`](./activation.md) (One profile, one agent) and [`./install.md`](./install.md). |
+
 The token / refresh-token pair are stored in plugin SQLite as the
 authoritative runtime credential record; `.env` holds the bootstrap copy
 written by activation for the no-row case. The plugin never copies them into
@@ -137,6 +143,7 @@ refresh survive a reschedule instead of silently logging the agent out.
 | —                                      | `enable_rich_interactions`     | `false`        |
 | —                                      | `output_visibility`            | `"normal"`     |
 | —                                      | `runtime_status_messages`      | `false`        |
+| —                                      | `awareness_note`               | `false`        |
 | —                                      | `liveware_sample`              | `true`         |
 
 `output_visibility` is the ClawChat visibility preset controlled by
@@ -151,6 +158,16 @@ the Hermes display settings below for those categories.
 
 See [`./output-visibility.md`](./output-visibility.md) for the complete
 `minimal`, `normal`, and `full` config mappings.
+
+`awareness_note` controls one **consolidated, content-free** note delivered to
+the owner's direct chat when a lightweight awareness signal arrives
+(`friend.added`, `friend.removed`, `friend.profile_updated`, or any
+`conversation.*` other than `conversation.dissolved`). It is debounced: while a
+note is pending, further events do not schedule another. The default is `false`
+— the events are still logged, just not surfaced to the owner. Moment-comment
+notes (`moment.comment.created` / `moment.comment.replied`) are a separate,
+per-event path and are **not** gated by this flag
+(`adapter._emit_awareness_note` / `adapter._emit_moment_comment_note`).
 
 `liveware_sample` controls the Liveware Sample demo-app auto-boot on first
 activation. The default is `true`; set it to `false` explicitly to disable
@@ -169,9 +186,16 @@ config used different values:
 display:
   busy_input_mode: queue
   busy_ack_enabled: false
-  background_process_notifications: off
+  background_process_notifications: "off"
   tool_progress_command: false
 ```
+
+> **`off` must be quoted.** `background_process_notifications` and
+> `tool_progress` are *string* enums, and the plugin writes and compares the
+> string `"off"` (`clawchat_gateway/activate.py`,
+> `clawchat_gateway/output_visibility.py`). A bare `off` is parsed as the
+> boolean `false` by YAML 1.1 loaders — a different value. Quote it whenever
+> you hand-edit `config.yaml`.
 
 Activation also writes the `normal` platform-scoped default block while leaving
 the setting visible for the operator to edit:
@@ -180,7 +204,7 @@ the setting visible for the operator to edit:
 display:
   platforms:
     clawchat:
-      tool_progress: off
+      tool_progress: "off"
       show_reasoning: false
       streaming: false
       interim_assistant_messages: true
@@ -213,10 +237,10 @@ Use these verified Hermes display keys when tuning ClawChat behavior:
 |---------|-----------------------|--------------------------|-------------------------------|----------|---------------|-------------------------------|
 | `busy_input_mode` | yes | no | `display.busy_input_mode: queue` | Controls how Hermes handles a new message while the agent is already running. Valid values: `interrupt`, `queue`, `steer`. | The agent is running tests; the user sends "also check README". | `queue` keeps the current run alive and handles the new message as the next turn. |
 | `busy_ack_enabled` | yes | no | `display.busy_ack_enabled: false` | Controls whether Hermes sends a busy acknowledgment message. | The agent is busy; the user sends "continue checking logs". | `false` suppresses the busy acknowledgment. The message still follows `busy_input_mode`. |
-| `background_process_notifications` | yes | no | `display.background_process_notifications: off` | Controls notifications from background terminal processes. Valid values: `all`, `result`, `error`, `off`. | The user starts `/background run the deploy check`. | `off` sends no watcher updates for background process output or completion. |
+| `background_process_notifications` | yes | no | `display.background_process_notifications: "off"` | Controls notifications from background terminal processes. Valid values: `all`, `result`, `error`, `off`. | The user starts `/background run the deploy check`. | `off` sends no watcher updates for background process output or completion. |
 | `tool_progress_command` | yes | no | `display.tool_progress_command: false` | Controls whether messaging users can use `/verbose` to cycle tool progress verbosity. | The user sends `/verbose` in ClawChat. | `false` prevents `/verbose` from enabling or changing tool progress display. |
 | `tool_preview_length` | yes | no | `display.tool_preview_length: 0` | Controls maximum tool-call preview length. | Tool progress displays a long shell command. | `0` means no preview length limit; it does not hide previews. |
-| `tool_progress` | yes | yes | `display.platforms.clawchat.tool_progress: off` | Controls tool progress messages. Valid values: `off`, `new`, `all`, `verbose`. | The agent runs `rg`, reads files, or executes commands. | `off` hides ClawChat tool progress messages and leaves only final assistant replies. |
+| `tool_progress` | yes | yes | `display.platforms.clawchat.tool_progress: "off"` | Controls tool progress messages. Valid values: `off`, `new`, `all`, `verbose`. | The agent runs `rg`, reads files, or executes commands. | `off` hides ClawChat tool progress messages and leaves only final assistant replies. |
 | `show_reasoning` | yes | yes | `display.platforms.clawchat.show_reasoning: false` | Controls whether model reasoning/thinking is shown in replies. | The model produces reasoning for a complex question. | `false` hides reasoning in ClawChat replies. |
 | `streaming` | yes | yes | `display.platforms.clawchat.streaming: false` | Controls platform streaming display behavior when supported by the gateway adapter. | The agent writes a long reply. | `false` avoids progressive ClawChat reply streaming. |
 | `interim_assistant_messages` | yes | yes | `display.platforms.clawchat.interim_assistant_messages: true` | Controls natural mid-turn assistant messages sent separately from final replies. | The model says "I will inspect the config first" during a turn. | `true` allows that separate interim ClawChat message in the `normal` and `full` presets. |
@@ -233,7 +257,7 @@ agent:
 display:
   busy_input_mode: queue
   busy_ack_enabled: false
-  background_process_notifications: off
+  background_process_notifications: "off"
   tool_progress_command: false
 ```
 
@@ -243,7 +267,7 @@ Activation writes this platform-scoped ClawChat block when keys are missing:
 display:
   platforms:
     clawchat:
-      tool_progress: off
+      tool_progress: "off"
       show_reasoning: false
       streaming: false
       interim_assistant_messages: true
@@ -326,6 +350,10 @@ by `agents-connect` and `CLAWCHAT_HOME_CHANNEL_NAME` to `ClawChat`.
 | `ack_timeout_ms`                       | `15000`        |
 | `ack_auto_resend_on_timeout`           | `false`        |
 
+`ack_auto_resend_on_timeout` is **parsed but not implemented.** It is read into
+`ClawChatConfig` (`config.py`) and nothing consumes the field, so setting it to
+`true` changes no behaviour today. Do not rely on it for delivery guarantees.
+
 Three reconnect values are **fixed constants, not `extra.*` keys**
 (`clawchat_gateway/connection.py`):
 
@@ -386,8 +414,64 @@ actual backstop against a leaked keepalive that never sends a
 
 | Env var                                | `extra.*` key         | Default                  | Notes |
 |----------------------------------------|-----------------------|--------------------------|-------|
-| `CLAWCHAT_MEDIA_LOCAL_ROOTS`           | `media_local_roots`   | `()`                     | OS-pathsep-separated list (env) or array (extra). Roots from which local file paths may be uploaded. |
+| `CLAWCHAT_MEDIA_BASE_URL`              | `media_base_url`      | `""`                     | Overrides the host used for `/media/upload` and media downloads. When empty, the base is derived from `websocket_url` / `base_url` (`media_runtime.derive_base_url`). Trailing slashes are stripped. Set it when media is served from a different origin than the REST API. |
+| `CLAWCHAT_MEDIA_LOCAL_ROOTS`           | `media_local_roots`   | `()`                     | OS-pathsep-separated list (env) or array (extra). **Legacy / no longer restricting.** See below. |
 | —                                      | `media_download_dir`  | `/tmp/clawchat-media`    | Where inbound media gets staged. |
+
+### `media_local_roots` no longer scopes outbound delivery
+
+`media_local_roots` used to be an allowlist of directories a local file could be
+uploaded from. It is still parsed and still threaded through to
+`media_runtime.ensure_allowed_local_path`, but that function accepts the value
+for backward compatibility only and **does not restrict delivery** any more —
+outbound files may be sent from any directory (parity with the openclaw plugin).
+
+What is actually enforced is a fixed **credential / system-path denylist** in
+`clawchat_gateway/media_runtime.py`, applied after symlinks are resolved so it
+cannot be bypassed via a symlink:
+
+- absolute prefixes `/etc`, `/proc`, `/sys`, `/dev`, `/root`;
+- paths under the user's home: `.ssh`, `.aws`, `.gnupg`, `.kube`,
+  `.config/gcloud`, `.hermes/.env`;
+- the Windows equivalents resolved from the environment (`%SystemRoot%` /
+  `%WINDIR%`, and the Credential Manager / DPAPI / Vault directories under
+  `%APPDATA%` and `%LOCALAPPDATA%`).
+
+A path that matches the denylist is rejected with a `ValueError`; everything
+else is allowed regardless of `media_local_roots`.
+
+## Debug / diagnostics env vars
+
+These are **not** part of the profile-first resolution chain above: they are
+read straight from the process environment (`os.environ` / `os.getenv`), because
+they are per-process debugging switches rather than per-profile settings. All
+of them default to off and none of them are written by activation.
+
+| Env var | Read by | Effect |
+|---------|---------|--------|
+| `CLAWCHAT_DEBUG_PROMPT_INJECTION` | `adapter._debug_prompt_injection_enabled` | Truthy (`1`/`true`/`yes`/`on`) logs the composed channel prompt, the event text, and the Hermes output text at WARNING, wrapped in `----- BEGIN/END CLAWCHAT DEBUG … -----` markers. **Logs full message content** — do not enable on a shared or production log sink. |
+| `CLAWCHAT_LLM_CONTEXT_DEBUG` | `llm_context_debug.ClawChatLlmContextDebug` | Master switch. Truthy enables JSON snapshots of each turn's LLM context. Everything below is inert without it. |
+| `CLAWCHAT_LLM_CONTEXT_CAPTURE_FULL_INPUT` | same | Also capture the full assembled model input (prompt parts, injection parts, request messages, request tools). |
+| `CLAWCHAT_LLM_CONTEXT_CAPTURE_OUTPUT` | same | Also capture the raw model output in the snapshot. |
+| `CLAWCHAT_LLM_CONTEXT_RELOAD_PROMPTS` | same | Re-read the prompt files on each turn instead of using the cached copy, so prompt edits take effect without a restart. |
+| `CLAWCHAT_LLM_CONTEXT_SNAPSHOT_DIR` | same | Snapshot root. Default `.clawchat-llm-context-debug` relative to the process CWD; snapshots land under `<root>/hermes/runs/`. |
+
+Snapshots contain prompts, message text, and (with the capture flags) model
+output — treat the snapshot directory as sensitive.
+
+### Internal restart handoff (not operator-configurable)
+
+`clawchat_gateway.restart.schedule_gateway_restart` spawns a detached launcher
+and passes two variables to it in the child environment:
+
+| Env var | Value |
+|---------|-------|
+| `CLAWCHAT_HERMES_BIN` | The resolved `hermes` executable the launcher `exec`s. |
+| `CLAWCHAT_GATEWAY_RESTART_DELAY` | Seconds the launcher sleeps before restarting the gateway (from the caller's `delay_seconds`, default `2`). |
+
+Both are **set** by the plugin, not read from the operator's environment — the
+child env is built as `{**os.environ, …}` with these keys overwritten last, so
+exporting them yourself has no effect.
 
 ## Database location
 
@@ -421,11 +505,11 @@ platforms:
 display:
   busy_input_mode: queue
   busy_ack_enabled: false
-  background_process_notifications: off
+  background_process_notifications: "off"
   tool_progress_command: false
   platforms:
     clawchat:
-      tool_progress: off
+      tool_progress: "off"
       show_reasoning: false
       streaming: false
       interim_assistant_messages: true

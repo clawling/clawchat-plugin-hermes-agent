@@ -44,7 +44,7 @@ def new_ulid() -> str:
 def new_message_id() -> str:
     """Mint a client message id: ``msg-`` + ULID.
 
-    Required by ClawChat Protocol v2 (§3.1.9): every outbound
+    Required by ClawChat Protocol v2 (§7.6): every outbound
     ``message.send`` / ``message.reply`` MUST carry a client-minted
     ``payload.message_id`` so the server's ``UNIQUE(recipient, message_id)``
     absorbs bounded-timeout resends as a single coalesce (the client then

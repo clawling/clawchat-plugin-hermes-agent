@@ -41,11 +41,26 @@ There are **34** tools, grouped by purpose.
 `clawchat_mention_message` and `clawchat_react_message` take a `chatId`
 straight from the model, so both reject anything that is not a conversation
 idcode (`cnv_` + 26 Crockford base32 chars — see
-[`../client-integration.md` §5.1](../client-integration.md)) with
-`{"error": "validation", "code": "invalid_chat_id"}` before touching the
-WebSocket. A hallucinated `usr_…`, a nickname, or a placeholder therefore
-comes back as a correctable validation error naming the expected shape,
-instead of a generic transport failure.
+[`../client-integration.md` §5.1](../client-integration.md)) before touching the
+WebSocket:
+
+```json
+{
+  "error": "validation",
+  "message": "chatId must be a ClawChat conversation id (cnv_ + 26 Crockford base32 chars), got '<value>' — use the chatId of the conversation you are in, not a user id or a name",
+  "code": "invalid_chat_id"
+}
+```
+
+A hallucinated `usr_…`, a nickname, or a placeholder therefore comes back as a
+correctable validation error naming the expected shape, instead of a generic
+transport failure.
+
+Every tool error body carries `error` (the class — `validation`, `config`,
+`permission`, `subprocess`, or `unknown`) and a human-readable `message`. Extra
+keys appear only on the classes that define them: `code` on the validation
+errors that carry a machine-readable discriminator, and `retryable` / `status` /
+`request_id` on `permission` (`clawchat_gateway/tools.py`).
 
 ## Moments and reactions
 

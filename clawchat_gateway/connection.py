@@ -161,9 +161,10 @@ def build_connect_capabilities() -> dict[str, bool]:
         "chat_meta_events": True,
         # notify_signals: receive §9.4 reliable system notification frames.
         "notify_signals": True,
-        # permission_events: forward-compat: advertises readiness for a future
-        # native ``permission.receipt`` frame; not load-bearing yet — added
-        # for future protocol readiness.
+        # permission_events: opts this owner-side connection in to the live
+        # §9.5 ``permission.request`` / ``permission.resolved`` signals. The
+        # server filters at the hub layer, so a client that does not advertise
+        # it never receives either frame.
         "permission_events": True,
     }
 
