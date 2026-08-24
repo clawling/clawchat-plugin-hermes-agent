@@ -8,10 +8,10 @@
     "emitted_at": 1893456000000,
     "payload": {
       "type": "conversation.dissolved",
-      "entity_id": "cnv_01KYT1QDN2M6XVBZ4HS7EWPG9K",
+      "entity_id": "cnv_00000000000PAR1TYD1SS07VED",
       "event_id": "parity-evt-dead-chat-dissolved-signal",
       "version": 1,
-      "message_id": "notify:conversation.dissolved:cnv_01KYT1QDN2M6XVBZ4HS7EWPG9K"
+      "message_id": "notify:conversation.dissolved:cnv_00000000000PAR1TYD1SS07VED"
     }
   },
   "expected": {

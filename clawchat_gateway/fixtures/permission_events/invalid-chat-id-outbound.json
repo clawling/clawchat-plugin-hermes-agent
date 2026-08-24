@@ -6,42 +6,42 @@
     "event": "message.send",
     "trace_id": "parity-invalid-chat-id",
     "emitted_at": 1893456000000,
-    "chat_id": "usr_01KXY9CACEFP4VMS37VYBW3B07",
+    "chat_id": "usr_0000000000000000PAR1TYPEER",
     "payload": {
       "message_id": "msg-parity-invalid-chat-id",
       "fragments": [{ "kind": "text", "text": "must never leave" }]
     }
   },
   "context": {
-    "note": "Every conversation id is minted by member-backend with the cnv_ prefix and msghub resolves a chat_id only through member-backend, so anything else is answered with code=400 invalid conversation id. Both plugins forward a chat_id chosen upstream (host target parser, channel directory, cron target, tool argument), so each guards its own outbound boundary. The rejected samples below are the shapes observed in msghub production logs on 2026-07-30.",
+    "note": "Every conversation id is minted by member-backend with the cnv_ prefix and msghub resolves a chat_id only through member-backend, so anything else is answered with code=400 invalid conversation id. Both plugins forward a chat_id chosen upstream (host target parser, channel directory, cron target, tool argument), so each guards its own outbound boundary. The rejected samples below are the shapes a prefix-only check lets through, each of which member-backend refuses.",
     "idcode_note": "The prefix alone is not enough: member-backend validates the full shape of every externally-visible id. The shape is <3 lowercase ascii letters>_<26 Crockford base32 chars>, exactly 30 chars, separator at index 3. Crockford's alphabet omits I, L, O and U; decoding is case-insensitive, so a lowercase body is accepted while the 3-char prefix must be lowercase. A prefix-only check still lets cnv_, cnv_<id>:thr_1 and cnv_<display name> reach the wire, where member-backend answers 400 and msghub logs an ERROR for a frame that never had a recipient.",
     "rejected": [
-      "usr_01KXY9CACEFP4VMS37VYBW3B07",
-      "direct:usr_01KYR1TBJY:usr_01KXY9CAC",
-      "agt_01KYRWA3H9F6H8VPR53P2G24ST",
+      "usr_0000000000000000PAR1TYPEER",
+      "direct:usr_0000000000:usr_000000000",
+      "agt_000000000000000PAR1TYAGENT",
       "clawchat-plugin-openclaw",
       "default",
       "0",
       "",
       "cnv_",
-      "cnv_01KYT0ZGPRE4KVBKNKS109FFCG:thr_1",
-      "cnv_01KYT0ZGPRE4KVBKNKS109FFC",
-      "cnv_01KYT0ZGPRE4KVBKNKS109FFCGG",
-      "cnv_01KYT0ZGPRE4KVBKNKS109FFCGX",
-      "cnv_01KYT0ZGPRE4KVBKNKS109FFCI",
-      "cnv_01KYT0ZGPRE4KVBKNKS109FFCL",
-      "cnv_01KYT0ZGPRE4KVBKNKS109FFCO",
-      "cnv_01KYT0ZGPRE4KVBKNKS109FFCU",
-      "cnv_01KYT0ZGPRE4KVBKNKS109FF-G",
-      "cnv-01KYT0ZGPRE4KVBKNKS109FFCG",
-      "CNV_01KYT0ZGPRE4KVBKNKS109FFCG",
+      "cnv_0000000000000000PAR1TYCHAT:thr_1",
+      "cnv_0000000000000000PAR1TYCHA",
+      "cnv_0000000000000000PAR1TYCHATT",
+      "cnv_0000000000000000PAR1TYCHATX",
+      "cnv_0000000000000000PAR1TYCHAI",
+      "cnv_0000000000000000PAR1TYCHAL",
+      "cnv_0000000000000000PAR1TYCHAO",
+      "cnv_0000000000000000PAR1TYCHAU",
+      "cnv_0000000000000000PAR1TYCH-T",
+      "cnv-0000000000000000PAR1TYCHAT",
+      "CNV_0000000000000000PAR1TYCHAT",
       "cnv_Team Standup",
       "cnv_Weekly Standup",
       "cnv_owner activation chat"
     ],
     "accepted": [
-      "cnv_01KYT0ZGPRE4KVBKNKS109FFCG",
-      "cnv_01kyt0zgpre4kvbknks109ffcg"
+      "cnv_0000000000000000PAR1TYCHAT",
+      "cnv_0000000000000000par1tychat"
     ]
   },
   "expected": {

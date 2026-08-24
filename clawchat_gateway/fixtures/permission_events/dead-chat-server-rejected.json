@@ -6,11 +6,11 @@
     "event": "message.error",
     "trace_id": "parity-dead-chat-server-rejected",
     "emitted_at": 1893456000000,
-    "chat_id": "cnv_01KYT1PARQ7Y3ZKBW5RD8VMEJ4",
+    "chat_id": "cnv_000000000000PAR1TYREJECTED",
     "payload": {
       "message_id": "msg-parity-dead-chat-server-rejected",
       "code": "chat_not_found",
-      "reason": "chat cnv_01KYT1PARQ7Y3ZKBW5RD8VMEJ4: chat not found",
+      "reason": "chat cnv_000000000000PAR1TYREJECTED: chat not found",
       "rejected_at": 1893456000000
     }
   },
