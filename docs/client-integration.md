@@ -1713,9 +1713,15 @@ an agent-originated recall is rejected server-side. Do not build an uplink.
   `clawchat_messages` and re-injects the last ten of them as "Prior group
   context" on an @-mention flush; there is no retention on that table, so a row
   left behind stays one @-mention away from being read back aloud indefinitely.
-- **No tombstone is kept.** A Kafka redelivery of the original `message.send` can
-  therefore resurrect the row. Accepted, deliberately: the durable defence lives
-  in the mobile client, not in three plugin ledgers.
+- **Write a permanent tombstone and consult it on every ingest path.** The
+  delete alone loses two races. A replay can carry the original and its recall
+  back-to-back, so the purge can run against a row that has not been ingested
+  yet; and a Kafka redelivery of the original can resurrect the row afterwards.
+  `recall_message` records the tombstone in the same transaction as the purge,
+  and `claim_message_once` refuses a tombstoned `message_id` under
+  `BEGIN IMMEDIATE`, which makes the arrival order irrelevant in both
+  directions. Tombstones are never expired — they are three columns per
+  recalled message.
 - What is **not** attempted: removing the message from the Hermes host's own
   conversation history, and injecting a synthetic "the user retracted a message"
   turn. The first would mean owning host context management wholesale; the

@@ -4700,10 +4700,12 @@ class ClawChatAdapter(BasePlatformAdapter):
         id, **not** the id to delete — deleting by it erases nothing and reads
         exactly like working code.
 
-        No tombstone (spec §9.8, "What is **not** attempted"): a Kafka
-        redelivery of the original ``message.send`` can therefore resurrect the
-        row. Accepted as a known limitation rather than replicating the mobile
-        client's tombstone table in three runtimes.
+        ``recall_message`` writes a permanent tombstone in the same transaction
+        as the purge, and ``claim_message_once`` refuses a tombstoned
+        ``message_id``. That is what makes this handler's timing irrelevant: a
+        replay can carry the original and its recall back-to-back in either
+        order, and a Kafka redelivery of the original can arrive later — neither
+        can put the row back (spec §9.8).
         """
         payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
         target = payload.get("target_message_id")
@@ -4739,7 +4741,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
             return
         try:
-            removed = self._store.delete_messages_by_message_id(
+            removed = self._store.recall_message(
                 # The persist path (_record_message / _claim_message_once) writes
                 # rows under account_id="default"; delete with the same literal.
                 # A paired adapter's _account_id() returns the ClawChat user_id,

@@ -160,6 +160,15 @@ CREATE TABLE IF NOT EXISTS owner_profile (
 );
 """
 
+RECALLED_MESSAGES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS recalled_messages (
+  account_id TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  recalled_at INTEGER NOT NULL,
+  PRIMARY KEY (account_id, message_id)
+);
+"""
+
 MIGRATIONS = [
     (1, "initial_schema", INITIAL_SCHEMA),
     (2, "message_id_dedup", MESSAGE_ID_DEDUP_SCHEMA),
@@ -169,6 +178,7 @@ MIGRATIONS = [
     (6, "activation_device_id", ACTIVATION_DEVICE_ID_SCHEMA),
     (7, "liveware_sample", LIVEWARE_SAMPLE_SCHEMA),
     (8, "owner_profile", OWNER_PROFILE_SCHEMA),
+    (9, "recalled_messages", RECALLED_MESSAGES_SCHEMA),
 ]
 
 _store: ClawChatStore | None = None
@@ -851,6 +861,20 @@ class ClawChatStore:
         try:
             conn = sqlite3.connect(self.db_path)
             try:
+                # §9.8: consult the recall tombstone on every ingest path.
+                # BEGIN IMMEDIATE takes the write lock before the lookup, so a
+                # recall cannot commit between this check and the INSERT below.
+                # That is what makes the two frames order-independent: whichever
+                # the server delivers first, a recalled message_id never ends up
+                # in the ledger.
+                conn.execute("BEGIN IMMEDIATE")
+                recalled = conn.execute(
+                    "SELECT 1 FROM recalled_messages WHERE account_id = ? AND message_id = ?",
+                    (account_id, message_id),
+                ).fetchone()
+                if recalled is not None:
+                    conn.rollback()
+                    return False
                 conn.execute(
                     """
                     INSERT INTO clawchat_messages(
@@ -925,6 +949,83 @@ class ClawChatStore:
 
         self._write("update_message_by_identity", write)
 
+    def is_message_recalled(self, *, account_id: str, message_id: str | None) -> bool:
+        """True when ``message_id`` carries a recall tombstone for this account."""
+        if not message_id:
+            return False
+        self.initialize()
+        if self._disabled:
+            return False
+        try:
+            conn = sqlite3.connect(self.db_path)
+            try:
+                row = conn.execute(
+                    "SELECT 1 FROM recalled_messages WHERE account_id = ? AND message_id = ?",
+                    (account_id, message_id),
+                ).fetchone()
+                return row is not None
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "clawchat database read failed operation=is_message_recalled",
+                exc_info=True,
+            )
+            return False
+
+    def recall_message(
+        self,
+        *,
+        account_id: str,
+        message_id: str,
+        recalled_at: int | None = None,
+    ) -> int | None:
+        """Record the permanent recall tombstone and purge the ledger row.
+
+        The local half of a server-authorised recall (``message.recall``,
+        ``docs/client-integration.md`` §9.8), and the only path that should be
+        used for one. Both halves happen in a single transaction.
+
+        The delete alone is not enough. Live delivery and inbox replay can both
+        carry a recall, and a replay can carry the original and its recall
+        back-to-back — so the purge can run before the message is ingested, and
+        a Kafka redelivery can resurrect the row afterwards. The tombstone is
+        what makes the arrival order irrelevant: :meth:`claim_message_once`
+        refuses a tombstoned ``message_id`` whenever it turns up.
+
+        Scoped to ``account_id`` — the same scope as the purge, never narrower,
+        or a row could slip past the tombstone that the delete would have taken.
+
+        Returns the number of ledger rows removed. ``0`` is a normal outcome,
+        not a failure: the row may never have been stored, or the recall may
+        have arrived first — the tombstone stands either way. ``None`` means the
+        store is unavailable, which is NOT a successful purge.
+        """
+        # An empty id would tombstone and delete every row whose message_id is
+        # '' — everything the store never managed to key. Refuse rather than
+        # guess.
+        if not message_id:
+            return 0
+
+        def write(conn: sqlite3.Connection) -> int:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO recalled_messages(account_id, message_id, recalled_at)
+                VALUES (?, ?, ?)
+                """,
+                (account_id, message_id, recalled_at if recalled_at is not None else _now_ms()),
+            )
+            cursor = conn.execute(
+                """
+                DELETE FROM clawchat_messages
+                WHERE account_id = ? AND message_id = ?
+                """,
+                (account_id, message_id),
+            )
+            return int(cursor.rowcount)
+
+        return self._write("recall_message", write)
+
     def delete_messages_by_message_id(
         self,
         *,
@@ -933,8 +1034,10 @@ class ClawChatStore:
     ) -> int | None:
         """Erase every ledger row for one ``message_id``.
 
-        The local half of a server-authorised recall (``message.recall``,
-        ``docs/client-integration.md`` §9.8).
+        **Not the recall path.** This writes no tombstone, so a recall routed
+        through here loses to a redelivery, and to a replay that carries the
+        recall before the message it withdraws. Use :meth:`recall_message` for
+        ``message.recall`` (``docs/client-integration.md`` §9.8).
 
         **The only DELETE in this store, and deliberately so.** Nothing prunes
         ``clawchat_messages`` and it has no retention policy, so without this a
