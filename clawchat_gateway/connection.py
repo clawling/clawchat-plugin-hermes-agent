@@ -26,7 +26,6 @@ from clawchat_gateway.token_refresh import (
 from clawchat_gateway.protocol import (
     build_connect_request,
     build_offline_ack_event,
-    build_pong_event,
     decode_frame,
     encode_frame,
     extract_nonce,
@@ -134,8 +133,11 @@ ACTIVATION_CREDENTIAL_POLL_INTERVAL_SECONDS = 2.0
 # token may still be valid — the auth service is down. The mandated response is
 # to backoff-reconnect with the SAME token, NOT to discard credentials or
 # trigger a refresh (a 5xx storm must not become a mass token-refresh storm).
-# Every other reason (nonce mismatch, authentication failed, invalid connect)
-# stays terminal per §3.5.
+# §3.5 pins the matching contract in BOTH directions: `"authentication failed"`
+# is the ONLY terminal reason and is matched by exact equality; every other
+# reason — nonce mismatch, invalid connect, and any string msghub adds later —
+# is transient and must backoff-reconnect with the same token. Widening the
+# terminal branch to a substring breaks that forward-compat guarantee.
 _TRANSIENT_AUTH_FAILURE_MARKERS = (
     "remote auth service unavailable",
     "auth service unavailable",
@@ -176,23 +178,18 @@ def _is_transient_auth_failure(reason: str | None) -> bool:
     return any(marker in text for marker in _TRANSIENT_AUTH_FAILURE_MARKERS)
 
 
-# §A.2: a `hello-fail` reason that names a genuine *token* rejection (the access
-# token is bad / expired) — distinct from the transient auth-backend-unavailable
-# markers above. On these, attempt a single-flight refresh.
-_TOKEN_REJECTED_MARKERS = (
-    "authentication failed",
-    "invalid token",
-    "token expired",
-    "expired token",
-    "unauthorized",
-)
+# §3.5: the one reason that is terminal for the current token. Matched by EXACT
+# equality — never a substring or prefix. §3.5 names `"invalid token"` and
+# `"token expired"` as speculative matchers not to add: msghub does not emit
+# them, and matching them turns a future transient reason into a forced re-pair.
+_TERMINAL_AUTH_FAILURE_REASON = "authentication failed"
 
 
 def _is_token_rejected(reason: str | None) -> bool:
+    """True only for the exact §3.5 terminal reason (case/whitespace tolerant)."""
     if not reason:
         return False
-    text = reason.lower()
-    return any(marker in text for marker in _TOKEN_REJECTED_MARKERS)
+    return reason.strip().lower() == _TERMINAL_AUTH_FAILURE_REASON
 
 
 # §C.1 user-visible auto-logout message. MUST be kept identical across both
@@ -1552,27 +1549,6 @@ class ClawChatConnection:
         if self._state == ConnectionState.READY and ftype in (None, "event") and frame.get("event") == "message.error":
             self._handle_message_error(frame)
             return
-        if self._state == ConnectionState.READY and ftype in (None, "event") and frame.get("event") == "ping":
-            trace_id = frame.get("trace_id")
-            logger.info(
-                format_ws_log(
-                    event="protocol_ping_received",
-                    account_id=self._account_id,
-                    attempt=self._attempt,
-                    reconnect_count=self._reconnect_count,
-                    state=ConnectionState.READY.value,
-                    action="send_pong",
-                    fields=[("trace_id", trace_id)],
-                )
-            )
-            if self._ws is not None:
-                emitted_at = frame.get("emitted_at")
-                if not isinstance(trace_id, str) or not trace_id:
-                    return
-                if type(emitted_at) is not int:
-                    return
-                await self._ws.send(encode_frame(build_pong_event(trace_id=trace_id, emitted_at=emitted_at)))
-            return
         if self._state == ConnectionState.READY and ftype in (None, "event") and frame.get("event") == "pong":
             logger.info(
                 format_ws_log(
@@ -1691,13 +1667,18 @@ class ClawChatConnection:
             return
         if frame.get("event") == "hello-fail":
             payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
-            reason = payload.get("reason") if isinstance(payload.get("reason"), str) else None
-            reason = self._sanitize_secret_text(reason)
+            raw_reason = payload.get("reason") if isinstance(payload.get("reason"), str) else None
+            # Classify on the RAW reason and log the sanitized one. The redactor
+            # rewrites any occurrence of the token inside the text, which would
+            # silently break the §3.5 exact-equality match on
+            # "authentication failed" and turn a terminal failure into an
+            # endless backoff loop.
+            reason = self._sanitize_secret_text(raw_reason)
             frame_trace_id = frame.get("trace_id")
             trace_id_match = bool(
                 self._pending_connect_id and frame_trace_id == self._pending_connect_id
             )
-            if _is_transient_auth_failure(reason):
+            if _is_transient_auth_failure(raw_reason):
                 # §14.1 (5xx / auth backend unavailable): keep the token, do NOT
                 # stop or discard credentials — let the supervisor backoff and
                 # reconnect with the same token.
@@ -1729,7 +1710,7 @@ class ClawChatConnection:
             # rejection, or on a generic/unattributed reason WHEN the local exp
             # shows the access token is actually at/near expiry (prevents a
             # refresh storm during a backend outage emitting a generic reason).
-            token_rejected = _is_token_rejected(reason)
+            token_rejected = _is_token_rejected(raw_reason)
             near_expiry = is_token_near_expiry(self._cfg.token, self._activated_at_ms)
             refresh_eligible = bool(
                 self._refresh_manager is not None
@@ -1812,6 +1793,39 @@ class ClawChatConnection:
                         action="wait_activation",
                         fields=[
                             ("trace_id", frame_trace_id),
+                            ("reason", reason),
+                        ],
+                    )
+                )
+                if self._hello_wait is not None and not self._hello_wait.done():
+                    self._hello_wait.set_result(False)
+                if self._ws is not None:
+                    try:
+                        await self._ws.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                return
+            if not token_rejected:
+                # §3.5 forward-compat: the reason is not the exact terminal
+                # string, so the token is NOT known to be rejected — this is a
+                # nonce mismatch, a malformed connect, or a reason msghub added
+                # after this client shipped. Backoff-reconnect with the same
+                # token instead of tearing the account down; a terminal branch
+                # here would force the owner to re-pair after an ordinary
+                # handshake hiccup. (Refresh was either not eligible or not
+                # available; either way the credentials stay untouched.)
+                logger.warning(
+                    format_ws_log(
+                        event="hello_fail_transient",
+                        account_id=self._account_id,
+                        attempt=self._attempt,
+                        reconnect_count=self._reconnect_count,
+                        state=ConnectionState.HANDSHAKING.value,
+                        action="backoff_reconnect",
+                        fields=[
+                            ("trace_id", frame_trace_id),
+                            ("pending_id", self._pending_connect_id),
+                            ("trace_id_match", trace_id_match),
                             ("reason", reason),
                         ],
                     )

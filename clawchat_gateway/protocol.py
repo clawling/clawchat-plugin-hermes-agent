@@ -256,16 +256,6 @@ def build_typing_update_event(
     }
 
 
-def build_pong_event(*, trace_id: str, emitted_at: int) -> dict[str, Any]:
-    return {
-        "version": "2",
-        "event": "pong",
-        "trace_id": trace_id,
-        "emitted_at": emitted_at,
-        "payload": {},
-    }
-
-
 def build_offline_ack_event(*, batch_id: int) -> dict[str, Any]:
     return {
         "version": "2",
