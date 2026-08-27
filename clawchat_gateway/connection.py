@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import json
 import logging
 import os
 import random
@@ -56,6 +57,12 @@ BACKOFF_RESET_AFTER_SECONDS = 5.0
 # msghub closes the OLDER socket with application code 4001 when a newer session
 # for the same (user_id, device_id) takes over (docs/client-integration.md §3.6).
 CLOSE_CODE_REPLACED = 4001
+# msghub closes the NEWER socket with application code 4002 when the operator
+# enabled the duplicate-session refusal guard and the incumbent is provably
+# healthy (docs/client-integration.md §3.6). The close reason is a JSON object
+# carrying retry_after_ms; unlike 4001 the server owns the escalation
+# (60s -> 300s per consecutive refusal), so the client just honours the value.
+CLOSE_CODE_DUPLICATE_THROTTLED = 4002
 # Reconnect floor after being evicted by a takeover, and its ceiling once the
 # eviction keeps repeating.
 #
@@ -233,6 +240,25 @@ def takeover_backoff_floor(streak: int) -> float:
     return min(TAKEOVER_BACKOFF_FLOOR_SECONDS * (2.0 ** (streak - 1)), TAKEOVER_BACKOFF_MAX_SECONDS)
 
 
+def refusal_retry_after_seconds(reason: str | None) -> float:
+    """Seconds to wait after a 4002 duplicate-session refusal.
+
+    Parses ``retry_after_ms`` out of the JSON close reason msghub sends. Falls
+    back to ``TAKEOVER_BACKOFF_FLOOR_SECONDS`` when the reason is missing or
+    unparseable, so a refusal never reconnects at the ordinary initial delay
+    even if the server text changes shape. Clamped to the takeover ceiling.
+    """
+    seconds = TAKEOVER_BACKOFF_FLOOR_SECONDS
+    if reason:
+        try:
+            value = json.loads(reason).get("retry_after_ms")
+        except (ValueError, TypeError, AttributeError):
+            value = None
+        if isinstance(value, (int, float)) and value > 0:
+            seconds = float(value) / 1000.0
+    return min(max(seconds, 0.0), TAKEOVER_BACKOFF_MAX_SECONDS)
+
+
 async def _ws_connect(url: str, **kwargs: Any) -> Any:
     if _ws_connect_impl is None:
         raise RuntimeError("websockets library not available")
@@ -326,6 +352,7 @@ class ClawChatConnection:
         # Close code of the most recent connection, and how many connections in
         # a row ended in a takeover — the input to the takeover backoff floor.
         self._last_close_code: int | None = None
+        self._last_close_reason: str | None = None
         self._takeover_streak = 0
         self._supervisor_task: asyncio.Task[None] | None = None
         self._read_task: asyncio.Task[None] | None = None
@@ -742,6 +769,8 @@ class ClawChatConnection:
             try:
                 await self._set_state(ConnectionState.CONNECTING)
                 self._last_close_code = None
+                self._last_close_reason = None
+                refusal_floor = 0.0
                 await self._run_one_connection()
                 if self._last_close_code == CLOSE_CODE_REPLACED:
                     # Evicted by a newer session for this device. The
@@ -751,6 +780,13 @@ class ClawChatConnection:
                     # kicking each other at the initial delay forever.
                     self._takeover_streak += 1
                     reconnect_reason = "replaced"
+                elif self._last_close_code == CLOSE_CODE_DUPLICATE_THROTTLED:
+                    # Refused by the opt-in duplicate-session guard. Not an
+                    # eviction we lost, so leave the takeover streak alone; wait
+                    # the server's retry_after_ms (it escalates it per refusal).
+                    self._takeover_streak = 0
+                    refusal_floor = refusal_retry_after_seconds(self._last_close_reason)
+                    reconnect_reason = "duplicate_session_throttled"
                 else:
                     self._takeover_streak = 0
                     if self._stable_ready_reset_done or self._refresh_pending_reconnect:
@@ -788,7 +824,7 @@ class ClawChatConnection:
                 break
             await self._set_state(ConnectionState.RECONNECTING)
             takeover_floor = self._takeover_backoff_floor()
-            effective_delay = max(delay_seconds, takeover_floor)
+            effective_delay = max(delay_seconds, takeover_floor, refusal_floor)
             jitter = random.uniform(0.0, effective_delay * self._cfg.reconnect_jitter_ratio)
             delay_with_jitter = effective_delay + jitter
             self._tracker.mark_reconnect_scheduled()
@@ -1242,6 +1278,7 @@ class ClawChatConnection:
             # Read AFTER close() so the code is settled. This is what tells a
             # takeover eviction apart from an ordinary drop.
             self._last_close_code = getattr(ws, "close_code", None)
+            self._last_close_reason = getattr(ws, "close_reason", None)
             self._ws = None
             self._read_task = None
             if not self._stopping and not self._auth_failed:

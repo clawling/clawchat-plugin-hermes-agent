@@ -2376,11 +2376,14 @@ The `4002` close **reason** is a JSON object, not free text:
 { "reason": "duplicate_session_throttled", "retry_after_ms": 60000 }
 ```
 
-> ⚠️ **`hermes-clawchat` does not implement `4002` today.** Only `4001` is
-> recognised (`CLOSE_CODE_REPLACED` in `clawchat_gateway/connection.py`); a
-> `4002` close falls through to the ordinary exponential backoff and its
-> `retry_after_ms` is ignored. Treat this row as the wire contract to implement,
-> not as a description of current client behaviour.
+> **`hermes-clawchat` implements `4002`** (since 2026-08-27): the supervisor
+> reads the close reason, parses `retry_after_ms`
+> (`refusal_retry_after_seconds`, `clawchat_gateway/connection.py`), and floors
+> that reconnect's wait to it — falling back to
+> `TAKEOVER_BACKOFF_FLOOR_SECONDS` (60 s) if the reason is missing or
+> unparseable. The server owns the 60 s → 300 s escalation, so the client just
+> honours whatever value it is handed; the `4001` takeover streak is left
+> untouched by a refusal.
 
 > Match the two reasons by their **string contract**, not by equality on the full
 > text — exact `"authentication failed"` for terminal, substring
