@@ -26,6 +26,15 @@ directions.
 implementation disagree, the implementation is authoritative — please file
 an issue against this document in the repository that ships it.
 
+**Provenance.** Forked from `clawchat-msghub`
+`docs/features/msghub/protocol-v2-client-integration.md`; last re-synced
+2026-08-26 against msghub `6be1352`. Divergences kept on purpose for this
+adapter: the 60 s → 600 s eviction reconnect floor (§3.6), local `chat_id`
+validation (§5.1), the receive-only view of `message.recall` (§6 row, §9.8),
+the `4002` not-yet-implemented note (§14.1), and the dropped cross-links to
+msghub's `protocol-v2-reference.md`. Re-sync by 3-way merging msghub's changes
+since that commit on top of this file — do not overwrite it with a plain copy.
+
 ---
 
 ## Table of contents
@@ -336,17 +345,32 @@ been revoked. A well-behaved client SHOULD treat `4001` as a signal to
 back off rather than reconnect instantly, since an instant reconnect that
 races your own other session is what produces a takeover storm.
 
-To dampen such storms the server **throttles** repeated takeovers of the
-same `(user_id, device_id)`: more than 3 within a 10s window add a small
-bounded backoff (≤2s) before the new socket is installed. Throttling alone only
-slows a tight loop; the socket is still installed.
+To dampen such storms the server judges on two horizons. **Burst:** more than
+3 takeovers of the same `(user_id, device_id)` within a 10s window add a small
+bounded backoff (≤2s) before the new socket is installed. **Sustained:** a
+decaying per-key score (+1.0 per takeover, halving every 10 min) crossing 4.0
+marks a slow self-sustaining loop — the shape the burst window cannot see, and
+the one measured in production at 9–163s per eviction, which no burst rule ever
+caught.
 
-A deployment MAY additionally enable a duplicate-session **refusal** guard. When
-it is on and the incumbent session is provably healthy, the *new* connection is
-turned away before `hello-ok` with close code **`4002`**
-(`duplicate_session_throttled`) and a `retry_after_ms` hint (§14.1) — the
-incumbent keeps its socket. A client must therefore be prepared for its
-`connect` to be refused rather than always winning the takeover.
+**The server may refuse your socket (opt-in, off by default).** Where the
+operator has enabled `takeover_refuse_enabled`, a socket arriving at a key that
+is over the sustained score is turned away instead of being allowed to evict the
+session holding it — **but only while that session is provably alive** (it read a
+frame or a pong within the last 30s). You get no `hello-ok`; you get close
+**`4002`** with a JSON reason:
+
+```json
+{"reason":"duplicate_session_throttled","retry_after_ms":60000}
+```
+
+**Honour `retry_after_ms`.** It starts at 60 000 and doubles per consecutive
+refusal of that key, capped at 300 000. Reconnecting sooner just re-enters the
+loop you are being held out of, and the escalation means the sooner you retry the
+longer you wait. Your token is fine — the refusal says another instance of you is
+working, which is worth investigating on your side. An incumbent that cannot be
+proven alive is still taken over as normal, so a dead session never locks you
+out. With the flag off (the default) the server never refuses a socket.
 
 **Operator warning — a stable `device_id` makes two instances evict each other
 forever.** §3.3 recommends a stable `device_id` so replay state survives a
@@ -539,7 +563,7 @@ C = client, S = server.
 | `message.error` | S → C | yes (UI) | no | **negative ack** for `message.send` / `message.reply` / streaming uplinks — see §14.3 |
 | `message.delivered` | C ↔ S | yes (`to` = original sender) | server-stamped (receiver) | n/a — is a receipt |
 | `message.reaction` | C → S → members | yes (UI) | server-stamped (reactor) | **yes** (`message.ack` to the reactor, keyed by the slot id `rxn:<target>:<reactor>`; clients MAY ignore — reactions self-heal via inbox replay). See §9.6. |
-| `message.recall` | C → S → members | yes (UI) | server-stamped (the recalling human) | **yes** (`message.ack` to the recaller, keyed by the slot id `rcl:<target>`) — but an **agent never sends this uplink**, so a plugin only ever sees the downlink. Best-effort, non-ackable, carries **no `dseq`** on either the live or the replay path. See §9.8. |
+| `message.recall` | C → S → members **incl. sender** | yes (UI) | server-stamped (recaller) | **yes** (`message.ack` to the recaller, keyed by the slot id `rcl:<target>` — **never** the target id). Rejections arrive as `message.error` on the same `trace_id`. An **agent never sends this uplink**, so a plugin only ever sees the downlink. See §9.8. |
 | `message.read` | C ↔ S | no | server-stamped (reader) | **no** — the live echo carries no ack; delivery gated by `multi_device` (self-echo to the reader's other devices only). The watermark is durably persisted server-side, independent of the live echo. See §9.7. |
 | `history.transit` | C ↔ S | no | **yes — client-set on uplink** (§11.4) | **no** — E2EE sibling-device history transfer (§11.4). Gated by `capabilities.history_sync` (enforced on uplink). Unknown event values MUST be tolerated. |
 | `message.reply` | C ↔ S | yes (UI) | server-only on downlink | **yes** (`message.ack`) on uplink |
@@ -1119,12 +1143,16 @@ Invalid / malformed `user_id` is a **silent no-op** — there is no
 negative-ack envelope, matching Protocol v2's general style (§14.5). Legal
 `user_id` values start with `usr_` or `agt_`.
 
-**Visibility gate (deployment-dependent).** A deployment MAY require that you
-share at least one conversation with the target user. When the gate is enabled
-and denies, the subscribe is a silent no-op **with no snapshot at all** — a
-denial is deliberately indistinguishable from an offline user. Tolerate a
-`presence.subscribe` that never produces a snapshot, and do not retry it in a
-loop. Subscribing to yourself is always allowed.
+**Visibility gate (deployment-dependent, off by default).** A deployment MAY
+require that you share at least one conversation with the target user.
+Enforcement hangs off the server config `presence.enforce_subscribe_acl`, which
+**defaults to `false`** — in that default the gate is **log-only**: a would-be
+denial is logged and the subscribe is still answered with a normal snapshot.
+When a deployment turns enforcement on and denies, the subscribe is a silent
+no-op **with no snapshot at all** — a denial is deliberately indistinguishable
+from an offline user. Tolerate a `presence.subscribe` that never produces a
+snapshot, and do not retry it in a loop. Subscribing to yourself is always
+allowed.
 
 **Subscribe** (C → S):
 
@@ -1268,7 +1296,7 @@ Currently produced by `clawchat-member-backend`:
 | `["member_add_policy"]` | Successful change to who may add members (`PATCH /v1/conversations/:cid` with `member_add_policy`). Group-only. | `GET /v1/conversations/:cid`. |
 | `["avatar"]` | Successful group avatar change (`PATCH /v1/conversations/:cid` with `avatar_url`). Group-only. | `GET /v1/conversations/:cid` — the paired `group_avatar_changed` system message carries the actor only, never the new URL, so the GET is the only way to obtain it. |
 | `["announcement"]` | Any announcement add / edit / delete on a group (`POST /v1/conversations/:id/announcements`, `PATCH` / `DELETE /v1/conversations/:id/announcements/:annId`). Group-only. | **Two calls.** `GET /v1/conversations/:cid` for the bumped `announcement_revision`, **and** `GET /v1/conversations/:id/announcements` for the announcements themselves — the detail response carries the revision counter only. Refetching just the detail leaves the banner stale, and on a group's first-ever announcement the banner never appears at all. |
-| `["behavior"]` | Owner edits the per-agent behavior / system prompt (`PATCH /v1/agents/:id` with `behavior`). Fired only when the value actually changes. Fanned over the agent's direct conversation; recipients are the owner and the agent's shadow user. | `GET /v1/agents/:id` against the agent paired in this direct conversation (the agent client typically caches its own id; the owner can resolve it via the conversation's other participant — the agent's shadow `user_id` → `agt_…`). |
+| `["behavior"]` | Owner edits the per-agent behavior / system prompt (`PATCH /v1/agents/:id` with `behavior`), or the agent self-edits via `PATCH /v1/agents/me/behavior`. Both reach `applyBehaviorChange`. Fired only when the value actually changes. Fanned over the agent's direct conversation; recipients are the owner and the agent's shadow user. | `GET /v1/agents/:id` against the agent paired in this direct conversation (the agent client typically caches its own id; the owner can resolve it via the conversation's other participant — the agent's shadow `user_id` → `agt_…`). |
 
 **Multi-element scope is current behavior, not forward-compat
 scaffolding.** One `PATCH /v1/conversations/:cid` can change `title`,
@@ -1636,6 +1664,9 @@ optionally `payload.removed`. **MUST omit** `payload.message_id` and
 - The server stamps `payload.message_id = "rxn:<target_message_id>:<reactor_user_id>"`
   — a **last-write-wins slot** per `(message, reactor)`. A different emoji on the
   same slot overwrites the previous one; `removed: true` is the tombstone.
+- On a removal the server **blanks `payload.emoji` to `""`** before fanout, so a
+  `removed: true` downlink never carries the emoji that was removed. Identify what
+  to un-render from `target_message_id` + `reactor_user_id`, not from `emoji`.
 - The server stamps `payload.reactor_user_id` from the authenticated identity.
   It can be an **agent** identity — do not assume a human reactor.
 - A slot-keyed `message.ack` comes back to the reactor (its `payload.message_id`
@@ -1644,6 +1675,14 @@ optionally `payload.removed`. **MUST omit** `payload.message_id` and
   `code: "bad_request"` (§14.3) — terminal.
 - Reactions never generate a push notification, and a reactor that did not
   advertise `multi_device` receives no self-copy.
+- The **live** downlink is **best-effort**: if a recipient device's send buffer
+  is momentarily full the server drops that one frame instead of kicking the
+  device (since 2026-08-19 — before that a full buffer on a reaction evicted
+  every one of the user's devices on the node). The slot row is already in the
+  inbox, so a device that advertises `device_replay` receives the reaction on its
+  next replay. Do not treat a reaction that did not arrive live as lost, and do
+  not build correctness on the reactor-side `message.ack` — reactions self-heal
+  via replay.
 
 ### 9.7 Read cursor — `message.read`
 
@@ -1669,16 +1708,22 @@ Apply each watermark with a MAX-guarded local cursor, so re-delivery is
 idempotent. The durable watermark, not the live echo, is what a reconnecting
 device relies on.
 
-### 9.8 Message recall — `message.recall`
+### 9.8 Unsend — `message.recall`
 
-A human may unsend a message they sent, within **2 minutes**. The recalled
-message vanishes with **no placeholder** from every recipient. The window and
-the "you are the original sender" check are enforced **server-side**; a client
-that receives this frame has already been told the recall is authorised.
+A human may unsend a message they sent while the server-side window (2 minutes
+by default; operator-configurable) has not elapsed. The recalled message vanishes
+with **no placeholder** from every recipient — including the initiating device —
+and from the agent runtimes' local ledgers. It carries **ids only, never
+content**. The window and the "you are the original sender" check are enforced
+**server-side**; a client that receives this frame has already been told the
+recall is authorised.
 
 **A plugin only ever receives this frame.** Only a human may originate a recall,
 and only of their own message — agent-authored messages are not recallable, and
-an agent-originated recall is rejected server-side. Do not build an uplink.
+an agent-originated recall is rejected server-side with `message.error` (§14.3).
+Do not build an uplink; the uplink contract (fresh `trace_id`, ≤124-byte target,
+`multi_device` prerequisite, `rcl:<target>` ack slot, rejection codes) lives in
+the msghub Protocol v2 client guide §9.8.
 
 **Downlink (S → C).** The complete frame:
 
@@ -1686,9 +1731,9 @@ an agent-originated recall is rejected server-side. Do not build an uplink.
 {
   "version": "2",
   "event": "message.recall",
-  "trace_id": "trace-recall-1",
+  "trace_id": "trace-rcl-01",
+  "emitted_at": 1776162800123,
   "chat_id": "cnv_abc",
-  "emitted_at": 1755300000123,
   "sender": { "id": "usr_alice", "type": "direct", "nick_name": "Alice" },
   "payload": {
     "message_id": "rcl:msg-01JXYZ9KMNPQRSTVWXYZ0CD",
@@ -1702,13 +1747,17 @@ an agent-originated recall is rejected server-side. Do not build an uplink.
   id removes nothing and reads exactly like working code.
 - **Ids only, never content.** The frame never carries the recalled text. Nothing
   may be rendered from it, and nothing may be handed to a model.
-- **No `dseq`** on either the live or the replay path; **no `seq` on the live
-  downlink** — a *replayed* inbox row carries its storage `seq` like any other
-  record — and **no `origin_device_id`**. The frame is `BestEffort` and
-  non-ackable: **send nothing back**. Acking a frame the server never made
-  ackable is how a client teaches the ack-silence sweeper to kick it.
+- **No `dseq`** on either the live or the replay path, and **no
+  `origin_device_id`**. A storage `seq` is stamped only for a client that
+  advertised `reliable_delivery` (v1) — on both paths, like every other
+  inbox-backed event; this plugin does not advertise it, so it never sees one.
+  The frame is `BestEffort` and non-ackable: **send nothing back**. Acking a
+  frame the server never made ackable is how a client teaches the ack-silence
+  sweeper to kick it.
 - **Idempotent and possibly repeated.** Live delivery and inbox replay can both
-  carry it. Treat the handler as an unconditional delete.
+  carry it, and a recall may legitimately arrive for a message you never had
+  (you joined the chat after it was sent). Both are no-ops — treat the handler
+  as an unconditional delete.
 - **Delete your own ledger row.** This plugin stores inbound messages in
   `clawchat_messages` and re-injects the last ten of them as "Prior group
   context" on an @-mention flush; there is no retention on that table, so a row
@@ -1722,6 +1771,8 @@ an agent-originated recall is rejected server-side. Do not build an uplink.
   `BEGIN IMMEDIATE`, which makes the arrival order irrelevant in both
   directions. Tombstones are never expired — they are three columns per
   recalled message.
+  The server's own `rcl:<target>` marker is swept after 72h, so the local
+  tombstone is the only durable record.
 - What is **not** attempted: removing the message from the Hermes host's own
   conversation history, and injecting a synthetic "the user retracted a message"
   turn. The first would mean owning host context management wholesale; the
@@ -2299,6 +2350,7 @@ The server may close the connection in several scenarios:
 | `hello-fail` — token rejected (upstream auth `4xx`) | `hello-fail` with reason **exactly** `"authentication failed"` + close | **Acquire a fresh token** (refresh / re-login) before retry. Do not hot-loop the same token. |
 | `hello-fail` — auth service unavailable (upstream `5xx` / timeout) | `hello-fail` with a reason **containing** `auth service unavailable` (canonical `"remote auth service unavailable"`) + close | **Backoff-reconnect with the same token** — the token may be valid; the auth backend (member-backend) is down. Do **NOT** trigger token refresh/re-login here (a 5xx storm would otherwise become a mass-refresh storm). |
 | Duplicate session for `(user_id, device_id)` — you are the **older** session | No envelope and no `hello-fail`; a CLOSE control frame with application code **`4001`** (best-effort — an already-dead socket may just drop) | A newer instance of you took over; reconnect on a **raised** backoff floor (§3.6). The token is still valid. |
+| Duplicate session for `(user_id, device_id)` — you are the **newer** session and the incumbent is healthy | No envelope and no `hello-fail`; a CLOSE with application code **`4002`** and a JSON reason carrying `retry_after_ms` (only where `takeover_refuse_enabled` is on) | **Wait `retry_after_ms`, then reconnect.** You were refused, not evicted. The token is still valid. |
 | Missed pongs | Close when no `Pong` control frame arrives within `ping_interval * max_miss_pong + pong_timeout` (~70 s with defaults) | Reconnect with backoff |
 | Server backpressure | Close (the server kicks slow clients to protect itself) | Reconnect with backoff; messages will replay via §11 |
 | Any handshake rejection (`hello-fail`) | The `hello-fail` frame, then an abrupt close with **no CLOSE frame** (observed as 1006) | Act on `payload.reason` per §3.5; do not treat 1006 as a distinct failure class here |
@@ -2308,18 +2360,20 @@ The server may close the connection in several scenarios:
 | Code | When | Client action |
 |---|---|---|
 | `4001` | your `(user_id, device_id)` was taken over by a newer session | Back off before reconnecting (raise the floor — an instant reconnect causes a mutual-eviction storm). The token is still valid. |
+| `4002` | you tried to take over a `(user_id, device_id)` in a sustained eviction loop while the session holding it was provably alive | Wait the `retry_after_ms` in the JSON close reason before reconnecting; it doubles per consecutive refusal (60s → 300s cap). The token is still valid. |
 | `1009` | an inbound frame exceeded the server's frame cap (8 MiB post-auth, 64 KiB for the pre-auth `connect` frame) | Split the payload, or use media upload (§15). Never resend the frame. |
 | `1005` / close with no status | server-initiated kick: backpressure, ack-silence, unacked-ledger depth, `device.cursor.reset` | Reconnect with backoff; replay recovers the messages. |
 | `4002` | your `connect` was **turned away** instead of being allowed to evict a provably-healthy incumbent session for the same `(user_id, device_id)` — see §3.6 | Wait at least `retry_after_ms` (below) before retrying. The token is still valid, and no `hello-ok` was sent. |
 | `1006` (abnormal, no CLOSE frame) | handshake rejection, or a transport drop | **Read the last frame you received**: a `hello-fail` arrives immediately before the close and carries the real reason (§3.5). |
 
-`4001` and `4002` are the application (4000–4999) close codes msghub emits.
-There is no close code for auth failure and none for protocol violation.
+`4001` and `4002` are the only application (4000–4999) close codes msghub emits
+(`4002` only where `takeover_refuse_enabled` is on). There is no close code for
+auth failure and none for protocol violation.
 
 The `4002` close **reason** is a JSON object, not free text:
 
 ```json
-{ "reason": "duplicate_session_throttled", "retry_after_ms": 1500 }
+{ "reason": "duplicate_session_throttled", "retry_after_ms": 60000 }
 ```
 
 > ⚠️ **`hermes-clawchat` does not implement `4002` today.** Only `4001` is
@@ -2397,6 +2451,9 @@ The payload has four fields: `message_id` (mirrors the uplink's
 | `bad_request` | The uplink is structurally invalid or carries a semantically wrong value. Two cases: (a) `message.reaction` — the payload does not decode, `target_message_id` is empty, or — on a non-removal reaction — `emoji` is empty, is not valid UTF-8, or exceeds 64 bytes (there is **no** curated emoji allowlist; any valid emoji string within the cap is accepted); (b) `message.send` / `message.reply` / streaming carrying a **malformed `chat_id`** (not a well-formed conversation idcode — e.g. a `usr_`/`agt_` id or a truncated string), rejected before any fanout. Terminal — fix the frame, do not resend it unchanged. For (b) specifically: correct the `chat_id` (re-resolve the conversation); unlike `chat_not_found` this does **not** mean an existing conversation was deleted, so do not purge local state on it. See §5 for what a well-formed `chat_id` looks like in this deployment. |
 | `message_too_large` | The marshaled **downlink** envelope exceeded the server's per-message produce cap (default 1,000,000 bytes). The uplink was consumed before any fanout — no recipient saw it. Terminal — the same payload will never fit; split the content, or upload the media via §15 and send its URL. See the size-limit note below. |
 | `message_id_too_long` | A client-supplied `payload.message_id` exceeded **512 bytes**; `reason` carries the actual and maximum byte counts. Rejected before any fanout. Terminal — retrying the same id fails identically. See §7.6. |
+| `recall_window_expired` | The `message.recall` targeted a message you did send in this chat, but the server-side 2-minute window has elapsed (measured against the server's own record, not your `emitted_at`). Terminal — the message can never be recalled. Leave the local row untouched and surface a "too late" message. |
+| `recall_not_allowed` | The `message.recall` was refused: not your message, wrong chat, the server has no record of it, your connection did not advertise `multi_device`, you are an agent identity, or recall is disabled server-side. Terminal — do not retry, and do **not** delete anything locally. |
+| `recall_rate_limited` | Too many `message.recall` uplinks on this connection in the last minute. Retryable after a short wait; leave the local row untouched. |
 
 Clients MUST implement `message.error` — it is the only wire-level negative ack
 on the send path, but it does **not** cover every rejection (see §14.5). Treating
