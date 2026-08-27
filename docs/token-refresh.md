@@ -118,12 +118,26 @@ and reconnect with the new token** (§D) → re-arm timer from the new token's `
    from any authenticated REST call, run the single-flight refresh; on success rebuild the
    api-client with the new token and **retry the original call once**.
 2. **WS `hello-fail`** — refresh **only** on genuine token rejection:
-   - reason matches token-rejected (e.g. `/authentication failed/i`) → refresh.
+   - reason is **exactly** `"authentication failed"` (msghub §3.5 — equality, not a regex or
+     substring; this is the *only* terminal reason) → refresh.
    - reason matches auth-backend-unavailable (5xx: "auth service unavailable" / "temporarily
      unavailable") → **backoff-reconnect with the same token, do NOT refresh**.
-   - generic / unattributed `hello-fail` → refresh **only if** the local `exp` shows the access
-     token is actually at/near expiry; otherwise treat as transient backoff. (Prevents a refresh
-     storm during a backend outage that emits a generic reason.)
+   - **any other reason — `nonce mismatch`, `invalid connect …`, and any string msghub adds
+     later** → transient: backoff-reconnect with the same token, **no refresh triggered by the
+     reason**. The reason string never decides a refresh here; that is what keeps a new
+     server-side reason from becoming a fleet-wide refresh storm (refresh tokens are single-use).
+   - A client **MAY**, before that transient reconnect, run the §A.1 proactive refresh early
+     when the **local `exp`** is already within the proactive margin — reconnecting with a token
+     about to expire would only produce `"authentication failed"` and a refresh anyway. The
+     trigger is the local clock, not the reason; on a transient/skipped refresh outcome the
+     client still backoff-reconnects with the current token and never tears down.
+
+   Implementation status (2026-08-27): both adapters match `"authentication failed"` by exact
+   equality (trim + case-fold) — hermes `_is_token_rejected` (`connection.py`, since 2026-08-23),
+   openclaw `isTerminalHelloFailReason` (`src/ws-client.ts`) + `classifyHelloFailReason`
+   (`src/runtime.ts`) — and route every other reason as transient with the outbound queue
+   intact. Hermes implements the optional early-refresh; openclaw does not (its ws-client
+   backoff-reconnects without consulting the runtime), which is within the MAY.
 
    On the refresh-eligible branch: attempt one single-flight refresh. Success → reconnect with
    new token. Permanent → auto-logout (§C).
@@ -221,7 +235,11 @@ hot-swapped onto a live WS. Always **close then reconnect** with the new token, 
 | Permanent failure → WS stops | OpenClaw: auth-failed latch stops the reconnect loop, runtime flips not-configured. Hermes: SQLite-creds path → WS stops, supervisor falls into wait-for-activation; (with §C.2 the env path is converted to the SQLite path on first refresh). |
 
 **Never** refresh/reconnect on non-auth closes (duplicate-session takeover, missed pongs,
-backpressure, handshake-timeout) — backoff-reconnect with the same token + device id.
+backpressure, handshake-timeout) — backoff-reconnect with the same token + device id. Two of
+those closes carry timing the client must honour: **`4001`** (takeover) → raise the reconnect
+floor to ≥ 5 s (msghub §3.6); **`4002`** (`duplicate_session_throttled`, opt-in) → wait the JSON
+close reason's `retry_after_ms` (60 s, doubling to 300 s) — longer than openclaw's `maxDelay`
+of 15 s. Neither client reads the close code today.
 
 ---
 
@@ -253,8 +271,8 @@ to be pinned (document + boot warning if unpinned).
   non-200 transient); asserts `X-Device-Id` = stored device id and **no** Authorization header.
 - Single-flight (N concurrent callers → 1 HTTP call), rejected-token latch, min-interval.
 - Proactive timer fires at `refresh_at`; startup refresh-if-near.
-- `hello-fail` gating: auth-unavailable → backoff no-refresh; token-rejected → refresh; generic +
-  token-not-near → backoff; generic + token-expired → refresh.
+- `hello-fail` gating: exact `"authentication failed"` → refresh; every other reason → backoff
+  with the same token, no reason-triggered refresh (optional early §A.1 refresh on local `exp`).
 - Persistence ordering — OpenClaw, store-backed: SQLite write (or self-heal config-seed
   re-write on a 0-row update) succeeds **before** in-memory swap; the channel-config mirror
   write happens after and its failure does not block the swap.
