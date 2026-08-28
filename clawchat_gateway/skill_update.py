@@ -57,7 +57,7 @@ OFFICIAL_SKILLS_BASE = (
 # ``skills-vX.Y.Z`` tag in the install-cli repo, bump this constant, ship it.
 # ``liveware_sample`` imports this same ref, so the pin covers the ``livewares``
 # tree at that tag too.
-DEFAULT_SKILLS_REF = "skills-v1.6.0"
+DEFAULT_SKILLS_REF = "skills-v1.7.0"
 # Defence in depth: refuse an absurdly large response before hashing/writing.
 MAX_SKILL_BYTES = 256 * 1024
 # Which host's skill set this plugin consumes from ``skills.<target>``.
