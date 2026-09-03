@@ -79,7 +79,7 @@ own. Only a genuine **opt-out** returns without scheduling anything:
    [Distribution](#distribution)) into `<sample_root>/app`.
 5. Start the local sample server (`start_sample_server`, default port
    `43110`; requires `node` on `PATH` — see the trigger conditions above).
-   No crash watcher is attached yet — see step 8. The supervisor also passes
+   No crash watcher is attached yet — see step 10. The supervisor also passes
    `--agent-id <cfg.user_id>` (`deps.resolve_agent_user_id`, wired in
    `adapter.py` from `self._clawchat_config.user_id`) so `server.mjs` can
    merge the agent's own ClawChat user id into `/state` and its SSE stream as
@@ -87,8 +87,14 @@ own. Only a genuine **opt-out** returns without scheduling anything:
    sample page uses that id to render a one-tap `clawchat://u/{id}?chat=1`
    back-to-chat deep link; with no id (older/relaunched-without-id cases) the
    page falls back to its plain-text guidance instead of the link.
-6. `liveware login` with the resolved token, then **reuse-or-create** the app:
-   `liveware app list` is parsed for an existing app already named
+6. `liveware login` with the resolved token, then run `liveware status`. If
+   status confirms `running`, the plugin treats that service as externally
+   managed and does not start, watch, or later stop a
+   second tunnel agent. A failed command, an older unsupported CLI, or any
+   status other than `running` retains the direct-start fallback described in
+   step 9.
+7. **Reuse or create** the app: `liveware app list` is parsed for an existing
+   app already named
    `Liveware Sample` (`liveware_app_find_by_name` → `find_app_id_by_name`) and
    its id is reused; only if nothing is found does `liveware app create` run.
    `app create` is not idempotent and nothing here ever reconciled against the
@@ -100,35 +106,33 @@ own. Only a genuine **opt-out** returns without scheduling anything:
    *wrong* id — its text-table branch requires the exact app name plus one
    id-looking token outside the name, where an id-looking token must carry a
    digit / `-` / `_` so a status word (`active`, `running`) cannot pass for an id.
-7. **Upsert the row with `status="pending"`** carrying the app id, the port, the
+8. **Upsert the row with `status="pending"`** carrying the app id, the port, the
    sample version and `public_url=None` — immediately, before anything below can
    fail. A failure anywhere past `app create` used to leave *no* row at all, so
    the next boot re-ran bootstrap and minted yet another orphan app; a `pending`
    row makes the next attempt resume through `_relaunch` with the same app id.
-8. `liveware tunnel bind` — a **one-shot** CLI call (CLI v0.0.11+): it
+9. `liveware tunnel bind` — a **one-shot** CLI call (CLI v0.0.11+): it
    registers the app→local-upstream mapping on the control plane, prints the
    binding table (parsed for the public URL) and exits. It does **not** stay
-   running.
-9. Start the persistent `liveware agent` data-plane daemon
-   (`start_tunnel_agent`) — the long-lived child that actually carries
-   public-URL traffic to the local upstream. Ready once it logs
-   `relay grpc control connected` (again, no crash watcher yet).
+   running. If step 6 did not confirm an existing service, start a persistent
+   `liveware agent` child and attach it to the supervisor lifecycle.
 10. `register_app(name, app_id, url)` against ClawChat, upsert the
-   `liveware_sample` row with `status="active"`, **then** attach crash
-   watchers to both child processes (server and agent), and deliver an
-   intro message to the owner's direct chat (retried — see
+   `liveware_sample` row with `status="active"`, **then** attach a crash
+   watcher to the sample server and, only for the direct-start fallback, its
+   tunnel agent. Finally deliver an intro message to the owner's direct chat
+   (retried — see
    [Owner intro delivery](#owner-intro-delivery)).
 
-Steps up to and including the agent start bail out (and kill whatever
-children are live) if the supervisor was stopped or the generation was
+Steps up to and including the conditional agent start bail out (and kill any
+owned children) if the supervisor was stopped or the generation was
 bumped mid-sequence — a stale flow never overwrites a live status with an
 outdated `"active"` write, with two deliberate exceptions. There is **no bail
-point between `app create` and the `pending` upsert** (step 6 → 7): bailing
+point between `app create` and the `pending` upsert** (step 7 → 8): bailing
 there is exactly what used to lose a freshly minted app id. And from
 `register_app` onward there is deliberately
 **no bail point until the row is upserted**: once the app card exists on the
-server, a mid-sequence child crash must not abort the flow before the row is
-persisted, or it would leave an orphaned app card with nothing for the
+server, a mid-sequence owned-child crash must not abort the flow before the row
+is persisted, or it would leave an orphaned app card with nothing for the
 relaunch path to find. Crash watchers therefore attach only *after* the
 upsert, with a synchronous `proc.returncode is not None` check at attach
 time, so a child that already exited during the earlier awaits is still
@@ -172,7 +176,7 @@ login entirely. It exists because the `liveware` CLI keeps its credentials in
 plugin's SQLite state dir) — a different volume in a containerized deployment.
 A container that persists `$HERMES_HOME` but not `$HOME` therefore comes back
 with a `liveware_sample` row (which forces this relaunch path) **and** a
-logged-out CLI, so every `tunnel bind` / `liveware agent` call failed auth,
+logged-out CLI, so `tunnel bind` and the CLI-managed agent failed auth,
 the `_START_RETRY_DELAYS_S` ladder burnt out, and the sample never returned
 for the rest of the process lifetime.
 
@@ -264,7 +268,8 @@ unchanged).
   `LivewareSampleSupervisor.adoptDeps`; hermes needs no `adopt_deps` because
   every dep is read lazily off the live adapter instance rather than captured in
   a per-call gateway closure.)
-- **Crash backoff**: each watched child (server or `liveware agent`) that exits
+- **Crash backoff**: when the watched sample server or a plugin-started
+  `liveware agent` exits
   unexpectedly triggers a relaunch after a delay of `min(5 * 2**n, 60)`
   seconds, where `n` is the number of restarts already counted in the
   current 30-minute window (5s, 10s, 20s, 40s, 60s, ...). After 5 restarts
@@ -272,8 +277,9 @@ unchanged).
   supervisor stops trying until the next process start.
 - **`disconnect()`**: `_stop_liveware_sample` cancels any in-flight
   supervisor start task and calls `LivewareSampleSupervisor.stop()`, which
-  kills the sample server and tunnel child processes and cancels its
-  internal watcher/relaunch tasks, then clears
+  kills the sample server and any plugin-started tunnel child, then cancels its
+  internal watcher/relaunch tasks. An already-running external Liveware service
+  has no process handle in the supervisor and is left untouched. It then clears
   `self._liveware_sample_supervisor` back to `None` — so the **next**
   connect after a disconnect builds a fresh supervisor and goes through
   `start()` again.

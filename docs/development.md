@@ -120,9 +120,10 @@ install.
 
 `MANIFEST.in` only ships `prompts/*.md`, and `[tool.setuptools.packages.find]`
 in `pyproject.toml` only includes the `clawchat_gateway*` package. The
-top-level `skills/` tree — all four bundled skill directories
+top-level `skills/` tree — all five bundled skill directories
 (`skills/clawchat-core/`, `skills/clawchat-liveware/`,
-`skills/clawchat-liveware-sample/`, `skills/clawchat-set-greeting/`, each with
+`skills/clawchat-liveware-dev/`, `skills/clawchat-liveware-sample/`,
+`skills/clawchat-set-greeting/`, each with
 a `SKILL.md`) **and**
 `skills/manifest.json` — lives outside that package and is not referenced by
 `MANIFEST.in` either, so none of it is included in a built wheel. A
