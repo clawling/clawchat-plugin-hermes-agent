@@ -1,6 +1,6 @@
 ---
 name: clawchat-core
-version: 1.4.1
+version: 1.4.2
 description: Use when a request involves ClawChat profile, friends, user search, moments/dynamics, comments, reactions, avatar, media, memory, mentions, sending a local file, image, or voice/audio clip as a chat attachment, output visibility, or plugin install/update/activation.
 ---
 
@@ -117,6 +117,8 @@ reaction back.
 ### Coherent Profile Sync
 
 When the user asks to modify profile-like identity fields, keep Hermes-visible identity and the connected ClawChat account profile coherent where both sides support the field. Do not ask the user which system to update; ask only for missing required values.
+
+**A rename is a profile edit, not a note to self.** When the owner says 「你叫 X」, 「以后叫你 X」, "your name is X" or "call yourself X", update the ClawChat nickname now with `clawchat_update_account_profile` (and the Hermes identity where supported), then confirm with the name as it now appears in their contacts. Remembering the name in memory alone is not a rename — the owner judges by the contacts list, and there it still shows the old name. The same holds for a sibling identity you create on the owner's request: if they gave it a name, set that identity's nickname right after activation instead of leaving the generated `Agent_XXXX`.
 
 ```text
 Profile edit request
