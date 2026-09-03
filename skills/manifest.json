@@ -9,10 +9,16 @@
         "bytes": 9278
       },
       "clawchat-liveware": {
-        "version": "1.2.1",
+        "version": "1.2.6",
         "path": "shared/clawchat-liveware/SKILL.md",
-        "sha256": "a548b10fb68a1dddea93fadb5d162449c6745f9c2b8eb8ae76b110e28b6bf658",
-        "bytes": 8167
+        "sha256": "a5ff6e9891a2fb7df3906a8f756f0dc8c9786dcb3173ce44d009e5d5d67a86fd",
+        "bytes": 10668
+      },
+      "clawchat-liveware-dev": {
+        "version": "1.0.0",
+        "path": "shared/clawchat-liveware-dev/SKILL.md",
+        "sha256": "5dcf3fc1507f381eb6167c37204570324274fb9c068c25897311cf3ba11dd8b0",
+        "bytes": 8892
       },
       "clawchat-set-greeting": {
         "version": "1.0.0",
@@ -35,10 +41,16 @@
         "bytes": 17557
       },
       "clawchat-liveware": {
-        "version": "1.2.1",
+        "version": "1.2.6",
         "path": "shared/clawchat-liveware/SKILL.md",
-        "sha256": "a548b10fb68a1dddea93fadb5d162449c6745f9c2b8eb8ae76b110e28b6bf658",
-        "bytes": 8167
+        "sha256": "a5ff6e9891a2fb7df3906a8f756f0dc8c9786dcb3173ce44d009e5d5d67a86fd",
+        "bytes": 10668
+      },
+      "clawchat-liveware-dev": {
+        "version": "1.0.0",
+        "path": "shared/clawchat-liveware-dev/SKILL.md",
+        "sha256": "5dcf3fc1507f381eb6167c37204570324274fb9c068c25897311cf3ba11dd8b0",
+        "bytes": 8892
       },
       "clawchat-set-greeting": {
         "version": "1.0.0",

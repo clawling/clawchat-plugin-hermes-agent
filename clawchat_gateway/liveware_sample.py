@@ -601,6 +601,31 @@ async def liveware_login(*, liveware_path, token: str, exec: ExecFn | None = Non
         raise LivewareSampleError(f"liveware login failed: {detail}")
 
 
+async def liveware_agent_is_running(
+    *, liveware_path, exec: ExecFn | None = None, timeout: float = _CLI_TIMEOUT,
+) -> bool:
+    """Return whether `liveware status` confirms the service is running.
+
+    Unknown output, unsupported older CLIs, and command failures deliberately
+    return False so callers retain the direct `liveware agent` fallback.
+    """
+    exec = exec or asyncio.create_subprocess_exec
+    try:
+        proc = await _maybe_await(exec(
+            liveware_path, "status",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        ))
+        out, err = await _communicate(proc, timeout, "liveware status")
+    except Exception:  # noqa: BLE001 — status is an optional compatibility probe
+        return False
+    if proc.returncode:
+        return False
+    output = " ".join(
+        part.decode(errors="replace") for part in (out or b"", err or b"")
+    )
+    return re.search(r"\bstatus:\s*running\b", output, re.IGNORECASE) is not None
+
+
 async def liveware_app_find_by_name(
     *, liveware_path, name: str, exec: ExecFn | None = None,
     log: "logging.Logger | None" = None, timeout: float = _CLI_TIMEOUT,
@@ -949,6 +974,10 @@ class LivewareSampleSupervisor:
             await liveware_login(liveware_path=path, token=token, exec=d.exec)
             if self._bail_if_stale(gen):
                 return
+            agent_running = await liveware_agent_is_running(
+                liveware_path=path, exec=d.exec)
+            if self._bail_if_stale(gen):
+                return
             # Reuse an app we already own before minting another one. `app
             # create` is not idempotent and nothing here ever reconciled against
             # the liveware side, so every bootstrap that died past this point (no
@@ -982,11 +1011,12 @@ class LivewareSampleSupervisor:
                 liveware_path=path, app_id=app_id, port=port, exec=d.exec)
             if self._bail_if_stale(gen):
                 return
-            self._tunnel, agent_drain = await start_tunnel_agent(
-                liveware_path=path, spawn=d.spawn)
-            self._spawn_task(agent_drain)
-            if self._bail_if_stale(gen):
-                return
+            if not agent_running:
+                self._tunnel, agent_drain = await start_tunnel_agent(
+                    liveware_path=path, spawn=d.spawn)
+                self._spawn_task(agent_drain)
+                if self._bail_if_stale(gen):
+                    return
             # From here on we do NOT bail before persisting: once register_app
             # has created the app card, a crash of either child must not abort
             # the flow before the row is written (H8 fix). register -> upsert
@@ -1000,7 +1030,8 @@ class LivewareSampleSupervisor:
                 app_name=LIVEWARE_SAMPLE_APP_NAME, port=port, public_url=public_url,
                 sample_version=version, status="active")
             self._watch_child(self._server)
-            self._watch_child(self._tunnel)
+            if self._tunnel is not None:
+                self._watch_child(self._tunnel)
         await self._deliver_intro()
         self._log.debug("liveware-sample bootstrap complete at %s", public_url)
 
@@ -1064,6 +1095,10 @@ class LivewareSampleSupervisor:
                     return
             else:
                 self._log.debug("liveware-sample no token; relaunch without re-login")
+            agent_running = await liveware_agent_is_running(
+                liveware_path=path, exec=d.exec)
+            if self._bail_if_stale(gen):
+                return
             # Kept AFTER the re-login above so the lookup runs against a CLI that
             # is actually authenticated: a pending row's app id came straight out
             # of `app create`'s parser and was never confirmed by the liveware
@@ -1084,11 +1119,12 @@ class LivewareSampleSupervisor:
                 liveware_path=path, app_id=app_id, port=port, exec=d.exec)
             if self._bail_if_stale(gen):
                 return
-            self._tunnel, agent_drain = await start_tunnel_agent(
-                liveware_path=path, spawn=d.spawn)
-            self._spawn_task(agent_drain)
-            if self._bail_if_stale(gen):
-                return
+            if not agent_running:
+                self._tunnel, agent_drain = await start_tunnel_agent(
+                    liveware_path=path, spawn=d.spawn)
+                self._spawn_task(agent_drain)
+                if self._bail_if_stale(gen):
+                    return
             # See _bootstrap: no bail between register/upsert (H8 fix) so a
             # crash of either child in this window can't orphan the row.
             # A pending row has never been registered with ClawChat (public_url is
@@ -1101,7 +1137,8 @@ class LivewareSampleSupervisor:
                 app_name=row.app_name, port=port, public_url=public_url,
                 sample_version=version, status="active")
             self._watch_child(self._server)
-            self._watch_child(self._tunnel)
+            if self._tunnel is not None:
+                self._watch_child(self._tunnel)
         if row.intro_sent == 0:
             await self._deliver_intro()
 
