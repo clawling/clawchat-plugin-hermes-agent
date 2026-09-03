@@ -116,3 +116,11 @@ When `runtime_status_messages` is `false`, the adapter suppresses Hermes
 lifecycle/provider/fallback/retry notices that would otherwise be sent to the
 ClawChat client, including empty-response and fallback-provider status text.
 Required approval/action controls are still delivered in every preset.
+
+Independently of the preset, Hermes CLI session-status lines that lead a
+turn (`◐ Session automatically reset …` with its paragraph, and the
+`◆ Model:` / `◆ Provider:` / `◆ Context:` lines) are cut out of every
+outbound text before delivery — they are advice for a terminal user
+(`/resume`, `config.yaml`) and are never the agent's words. The match is
+narrow (exact line prefixes); a message that consisted only of those lines is
+not sent at all. See `clawchat_gateway/hermes_session_status.py`.

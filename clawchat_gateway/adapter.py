@@ -103,6 +103,7 @@ from clawchat_gateway.protocol import (
 )
 from clawchat_gateway.group_settings import EffectiveSettings, GroupSettingsCache
 from clawchat_gateway.greeting import load_activation_bootstrap_prompt
+from clawchat_gateway.hermes_session_status import strip_hermes_session_status
 from clawchat_gateway.permission_result import handle_permission_result
 from clawchat_gateway.permissions import PermissionCache
 from clawchat_gateway import skill_update
@@ -3472,6 +3473,23 @@ class ClawChatAdapter(BasePlatformAdapter):
         is_send_message_tool_call = self._is_send_message_tool_call()
         is_immediate_media_send = self._is_immediate_media_send(metadata, kwargs)
         is_stream_intermediate = self._is_stream_intermediate_output(content or "")
+        if (
+            not is_stream_intermediate
+            and (content or "").strip()
+            and not visible_content
+            and not self._has_outbound_media(metadata, kwargs)
+        ):
+            # The whole message was Hermes session-status chrome (W-9); there
+            # is no body left to deliver. A streamed intermediate chunk is
+            # deliberately NOT gated here: it must still open its run so the
+            # later edit/finalize carrying the real reply has something to
+            # attach to.
+            logger.info(
+                "clawchat session status only output suppressed chat_id=%s text_len=%d",
+                chat_id,
+                len(content or ""),
+            )
+            return SendResult(success=True)
         if is_send_message_tool_call or is_immediate_media_send or not is_stream_intermediate:
             fragments = await self._build_fragments(visible_content, metadata, kwargs)
             fragment_count = len(fragments)
@@ -3771,6 +3789,18 @@ class ClawChatAdapter(BasePlatformAdapter):
                 )
                 return SendResult(success=True, message_id=run.message_id)
             final_content = strip_no_reply_tokens(final_content)
+        if not final_content.strip() and not self._has_outbound_media(run.metadata, run.kwargs):
+            # Nothing visible survived filtering (e.g. the run was only Hermes
+            # session-status lines, W-9) and no media rides along: never emit
+            # an empty bubble.
+            self._discard_run(run)
+            self._remember_completed_run(run.message_id)
+            logger.info(
+                "clawchat empty response final suppressed chat_id=%s message_id=%s",
+                chat_id,
+                run.message_id,
+            )
+            return SendResult(success=True, message_id=run.message_id)
         if not self._has_outbound_media(run.metadata, run.kwargs) and self._should_suppress_runtime_status_message(
             final_content
         ):
@@ -4456,6 +4486,11 @@ class ClawChatAdapter(BasePlatformAdapter):
         filtered = content
         filtered = _HERMES_STREAM_CURSOR_RE.sub("", filtered)
         filtered = _STREAMING_CURSOR_RE.sub("", filtered)
+        # W-9: Hermes prefixes a turn with CLI session-status lines
+        # (◐ Session automatically reset… / ◆ Model: …) after a 24h reset.
+        # They are terminal advice, not the agent's words — cut them out of
+        # every outbound path (send / edit / finalize all funnel through here).
+        filtered = strip_hermes_session_status(filtered)
         return filtered.strip()
 
     def _should_suppress_runtime_status_message(self, content: str) -> bool:
