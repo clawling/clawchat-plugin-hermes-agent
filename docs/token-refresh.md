@@ -239,7 +239,9 @@ backpressure, handshake-timeout) — backoff-reconnect with the same token + dev
 those closes carry timing the client must honour: **`4001`** (takeover) → raise the reconnect
 floor to ≥ 5 s (msghub §3.6); **`4002`** (`duplicate_session_throttled`, opt-in) → wait the JSON
 close reason's `retry_after_ms` (60 s, doubling to 300 s) — longer than openclaw's `maxDelay`
-of 15 s. Neither client reads the close code today.
+of 15 s. Both clients read the close code today: openclaw in `ws-client.ts`'s
+`handleClose`, hermes in its supervisor loop in `connection.py`; each keeps its own
+takeover streak and applies these floors.
 
 ---
 

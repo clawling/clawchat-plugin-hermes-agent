@@ -254,16 +254,23 @@ _LONE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{5,}$")
 # ("active"/"running", which _LONE_ID_RE alone happily accepts) can never be
 # mistaken for an app id in `app list`'s text table. See _is_app_id_token.
 _ID_CHAR_RE = re.compile(r"[0-9_-]")
-# `liveware status`'s running marker. Deliberately anchored to a whole line:
-# this is the ONE parser in this module with no captured-output fixture behind
-# it (the CLI was not available when it was written), so it is written to fail
-# closed. A substring match would let an unrelated line - an error message
-# quoting a status, another app's row - read as "running", and a false positive
-# here means no data plane is ever started behind a live app card. A false
-# negative only costs one extra `liveware agent` process. Tighten-only:
-# do not loosen this without a fixture.
+# `liveware status`'s running marker, calibrated against liveware v0.0.33
+# (commit e431646). The command prints ONE sentence and exits 0 whatever the
+# state - the exit code carries no signal at all:
+#     Liveware agent service status: not_installed.
+#     Liveware agent service status: running.
+# from the format string `Liveware agent service status: %s.`, whose values are
+# not_installed / running / stopped / starting / installed / unknown / failed.
+#
+# Anchored to that whole sentence on purpose. A substring match on
+# `status: running` - which is what this first shipped as - also matches an
+# error line quoting a status, or `... status: running-degraded`, and a false
+# positive here means no data plane is ever started behind a live app card.
+# A false negative only costs one extra `liveware agent` process, so ambiguity
+# must resolve to no-match. Re-check against captured output before touching.
 _AGENT_STATUS_RUNNING_RE = re.compile(
-    r"^[ \t]*status[ \t]*:[ \t]*running[ \t]*\r?$", re.IGNORECASE | re.MULTILINE
+    r"^[ \t]*Liveware agent service status:[ \t]*running[ \t]*\.?[ \t]*\r?$",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 SpawnFn = Callable[..., "Awaitable"]
@@ -275,11 +282,12 @@ _CLI_TIMEOUT = 30.0
 
 
 def parse_agent_status_running(output: str) -> bool:
-    """True only when `liveware status` stdout carries a whole `status: running` line.
+    """True only for `liveware status`'s own "running" sentence on stdout.
 
-    Pure so it is testable without the CLI. Anything else - an older CLI that
-    has no `status` subcommand, help text, a status word merely mentioned inside
-    a sentence - is False by design; see _AGENT_STATUS_RUNNING_RE.
+    Pure so it is testable without the CLI; the fixtures live in
+    tests/test_liveware_agent_status.py. Anything else - an older CLI with no
+    `status` subcommand, help text, a status word quoted inside some other
+    sentence - is False by design; see _AGENT_STATUS_RUNNING_RE.
     """
     return _AGENT_STATUS_RUNNING_RE.search(output) is not None
 
@@ -629,9 +637,13 @@ async def liveware_agent_is_running(
     """`liveware status` -> True only if it positively confirms a running agent.
 
     Best-effort by contract and deliberately biased to False: an exec failure, a
-    non-zero exit (what an older CLI without `status` gives), or output this
+    non-zero exit (an older CLI with no `status` subcommand), or output this
     parser does not positively recognise all resolve to False with a debug log,
     so the caller keeps its direct `liveware agent` fallback. Never raises.
+
+    On v0.0.33 the exit code carries NO signal - `status` exits 0 for every
+    state including not_installed - so the parsed sentence is the only evidence
+    there is. The returncode check below is purely a guard for other builds.
 
     The asymmetry is the whole point. A wrong False costs one redundant agent
     process; a wrong True means the tunnel is never started while the app card
