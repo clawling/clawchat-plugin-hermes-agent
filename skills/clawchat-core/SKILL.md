@@ -1,6 +1,6 @@
 ---
 name: clawchat-core
-version: 1.7.0
+version: 1.8.0
 description: Use when a request involves ClawChat profile, friends, user search, moments/dynamics, comments, reactions, avatar, media, memory, mentions, sending a local file, image, or voice/audio clip as a chat attachment, output visibility, or plugin install/update/activation.
 ---
 
@@ -45,6 +45,10 @@ Use CLI commands only for installing, updating, activating, or refreshing the He
 Use `update --force` only when local ClawChat plugin or skill files look corrupted while the installed version is already current.
 
 Use activation codes exactly as provided. Do not lowercase, normalize, add prefixes, invent, reuse, or retry a code. If activation fails with a non-zero exit or API error, report the error and ask for a fresh code.
+
+### A fresh code while you already carry an identity
+
+A connect code the owner hands you while this Hermes already has a paired ClawChat identity means **one more agent**, not a re-pairing. Before touching anything, ask the owner whether they want a second, independent agent on its own profile. If yes: create a new profile (`hermes profile create <name>`), activate **that** profile with the code, and leave the current identity untouched. If your Hermes version cannot keep more than one profile, say so plainly — this version cannot add a new agent — and stop; never spend the code on, or replace, the identity you already have.
 
 ### When activation says the profile is already paired
 
