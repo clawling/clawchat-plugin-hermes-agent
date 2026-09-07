@@ -117,12 +117,24 @@ own. Only a genuine **opt-out** returns without scheduling anything:
    `start_tunnel_agent`, ready once it logs `relay grpc control connected`
    (again, no crash watcher yet).
 
-   The probe fails closed. It reads stdout only, requires a whole
-   `status: running` line, and treats an exec failure, a non-zero exit (what an
-   older CLI without `status` returns) or any unrecognised output as "not
-   running" — a redundant agent process is a far cheaper mistake than a live
-   app card with no data plane behind it. **This is the one CLI parser in the
-   module with no captured-output fixture; do not loosen it without one.**
+   The probe fails closed. It reads stdout only and requires `liveware status`'s
+   own whole sentence, calibrated against **liveware v0.0.33** (commit
+   `e431646`):
+
+   ```
+   Liveware agent service status: not_installed.
+   Liveware agent service status: running.
+   ```
+
+   from that build's `Liveware agent service status: %s.` format string, over
+   the values `not_installed` / `running` / `stopped` / `starting` /
+   `installed` / `unknown` / `failed`. **`status` exits 0 for every one of
+   them**, so the exit code carries no signal and the sentence is the only
+   evidence; the non-zero-exit branch is a guard for other builds only. An exec
+   failure or any unrecognised output means "not running" — a redundant agent
+   process is a far cheaper mistake than a live app card with no data plane
+   behind it. Fixtures in `tests/test_liveware_agent_status.py`; re-check them
+   against captured output before touching the regex.
 
    Adoption is allowed only where a running agent must belong to a *previous*
    plugin process: `_bootstrap` and the process-start call of `_relaunch`
