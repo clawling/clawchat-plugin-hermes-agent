@@ -87,7 +87,8 @@ is expected, not a bug: the managed tree is meant to always converge to
 whatever the official manifest says, never to preserve local edits.
 
 Publish-side constraint: the official manifest's version for a bundled skill
-(`clawchat-core`, `clawchat-liveware`, `clawchat-liveware-sample`) must never be **lower** than the version already
+(`clawchat-core`, `clawchat-liveware`, `clawchat-liveware-dev`,
+`clawchat-liveware-sample`) must never be **lower** than the version already
 shipped in the plugin's own bundled snapshot. `seed_managed_skill` reseeds the
 managed copy from the bundled snapshot whenever the managed version is older
 than the bundled one — a manifest that regresses a bundled skill's version

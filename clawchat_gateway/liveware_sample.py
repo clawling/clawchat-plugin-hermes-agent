@@ -254,6 +254,17 @@ _LONE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{5,}$")
 # ("active"/"running", which _LONE_ID_RE alone happily accepts) can never be
 # mistaken for an app id in `app list`'s text table. See _is_app_id_token.
 _ID_CHAR_RE = re.compile(r"[0-9_-]")
+# `liveware status`'s running marker. Deliberately anchored to a whole line:
+# this is the ONE parser in this module with no captured-output fixture behind
+# it (the CLI was not available when it was written), so it is written to fail
+# closed. A substring match would let an unrelated line - an error message
+# quoting a status, another app's row - read as "running", and a false positive
+# here means no data plane is ever started behind a live app card. A false
+# negative only costs one extra `liveware agent` process. Tighten-only:
+# do not loosen this without a fixture.
+_AGENT_STATUS_RUNNING_RE = re.compile(
+    r"^[ \t]*status[ \t]*:[ \t]*running[ \t]*\r?$", re.IGNORECASE | re.MULTILINE
+)
 
 SpawnFn = Callable[..., "Awaitable"]
 ExecFn = Callable[..., "Awaitable"]
@@ -261,6 +272,16 @@ ExecFn = Callable[..., "Awaitable"]
 _SERVER_START_TIMEOUT = 10.0
 _TUNNEL_START_TIMEOUT = 30.0
 _CLI_TIMEOUT = 30.0
+
+
+def parse_agent_status_running(output: str) -> bool:
+    """True only when `liveware status` stdout carries a whole `status: running` line.
+
+    Pure so it is testable without the CLI. Anything else - an older CLI that
+    has no `status` subcommand, help text, a status word merely mentioned inside
+    a sentence - is False by design; see _AGENT_STATUS_RUNNING_RE.
+    """
+    return _AGENT_STATUS_RUNNING_RE.search(output) is not None
 
 
 def parse_tunnel_public_url(output: str) -> str | None:
@@ -601,6 +622,52 @@ async def liveware_login(*, liveware_path, token: str, exec: ExecFn | None = Non
         raise LivewareSampleError(f"liveware login failed: {detail}")
 
 
+async def liveware_agent_is_running(
+    *, liveware_path, exec: ExecFn | None = None,
+    log: "logging.Logger | None" = None, timeout: float = _CLI_TIMEOUT,
+) -> bool:
+    """`liveware status` -> True only if it positively confirms a running agent.
+
+    Best-effort by contract and deliberately biased to False: an exec failure, a
+    non-zero exit (what an older CLI without `status` gives), or output this
+    parser does not positively recognise all resolve to False with a debug log,
+    so the caller keeps its direct `liveware agent` fallback. Never raises.
+
+    The asymmetry is the whole point. A wrong False costs one redundant agent
+    process; a wrong True means the tunnel is never started while the app card
+    still says "active", i.e. a dead public URL. So ambiguity is always False.
+
+    Only stdout is inspected: a CLI that writes diagnostics to stderr must not
+    be able to talk this into a True.
+
+    Only ``Exception`` is caught, never ``BaseException``: a CancelledError from
+    stop() must keep propagating (``_communicate`` already killed the child) so
+    a one-shot CLI process is not orphaned.
+    """
+    exec = exec or asyncio.create_subprocess_exec
+    logger = log or logging.getLogger("clawchat.liveware_sample")
+    try:
+        proc = await _maybe_await(exec(
+            liveware_path, "status",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        ))
+        out, err = await _communicate(proc, timeout, "liveware status")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "liveware-sample status probe failed; assuming not running: %s", exc)
+        return False
+    stdout = (out or b"").decode(errors="replace")
+    if proc.returncode:
+        stderr = (err or b"").decode(errors="replace")
+        logger.debug(
+            "liveware-sample status probe exited %s; assuming not running: %s",
+            proc.returncode, (stderr or stdout).strip())
+        return False
+    running = parse_agent_status_running(stdout)
+    logger.debug("liveware-sample status probe: running=%s", running)
+    return running
+
+
 async def liveware_app_find_by_name(
     *, liveware_path, name: str, exec: ExecFn | None = None,
     log: "logging.Logger | None" = None, timeout: float = _CLI_TIMEOUT,
@@ -818,7 +885,10 @@ class LivewareSampleSupervisor:
             if row is not None and getattr(row, "status", None) == "disabled":
                 return
             if row is not None:
-                await self._relaunch(row)
+                # Process start: an agent that is up right now was left behind
+                # by a previous plugin process, so adopting it is exactly what
+                # the status probe is for.
+                await self._relaunch(row, may_reuse_agent=True)
             else:
                 await self._bootstrap()
         except Exception as exc:  # noqa: BLE001
@@ -982,10 +1052,7 @@ class LivewareSampleSupervisor:
                 liveware_path=path, app_id=app_id, port=port, exec=d.exec)
             if self._bail_if_stale(gen):
                 return
-            self._tunnel, agent_drain = await start_tunnel_agent(
-                liveware_path=path, spawn=d.spawn)
-            self._spawn_task(agent_drain)
-            if self._bail_if_stale(gen):
+            if await self._ensure_tunnel_agent(path=path, deps=d, gen=gen):
                 return
             # From here on we do NOT bail before persisting: once register_app
             # has created the app card, a crash of either child must not abort
@@ -1004,7 +1071,20 @@ class LivewareSampleSupervisor:
         await self._deliver_intro()
         self._log.debug("liveware-sample bootstrap complete at %s", public_url)
 
-    async def _relaunch(self, row) -> None:
+    async def _relaunch(self, row, *, may_reuse_agent: bool) -> None:
+        """Resume from a persisted row.
+
+        ``may_reuse_agent`` says whether an already-running `liveware agent`
+        found by the status probe may be adopted instead of spawning our own.
+        It is True only on the process-start path, where any running agent
+        belongs to a PREVIOUS plugin process and adopting it is the point of
+        the probe. It is False on the crash path, which runs moments after
+        _kill_children() SIGKILLed our own agent: a probe that still reports
+        "running" there is far more likely to be reporting stale or
+        control-plane state than a live data plane, and believing it would
+        leave us with no tunnel and no watcher until the next process start.
+        Spawning a redundant agent is the cheaper mistake.
+        """
         d = self._d
         # Both of these used to `return` and strand the sample until the next
         # process start; they are transient, so raise and let _start_attempt's
@@ -1084,10 +1164,8 @@ class LivewareSampleSupervisor:
                 liveware_path=path, app_id=app_id, port=port, exec=d.exec)
             if self._bail_if_stale(gen):
                 return
-            self._tunnel, agent_drain = await start_tunnel_agent(
-                liveware_path=path, spawn=d.spawn)
-            self._spawn_task(agent_drain)
-            if self._bail_if_stale(gen):
+            if await self._ensure_tunnel_agent(
+                    path=path, deps=d, gen=gen, may_reuse=may_reuse_agent):
                 return
             # See _bootstrap: no bail between register/upsert (H8 fix) so a
             # crash of either child in this window can't orphan the row.
@@ -1104,6 +1182,33 @@ class LivewareSampleSupervisor:
             self._watch_child(self._tunnel)
         if row.intro_sent == 0:
             await self._deliver_intro()
+
+    async def _ensure_tunnel_agent(
+        self, *, path, deps, gen: int, may_reuse: bool = True,
+    ) -> bool:
+        """Make sure a `liveware agent` is up, reusing an external one if allowed.
+
+        Shared by _bootstrap and _relaunch, which otherwise carried this block
+        verbatim. Returns True when the caller must stop because the launch went
+        stale, mirroring the `if self._bail_if_stale(gen): return` it replaces.
+
+        When an external agent is adopted, self._tunnel stays None on purpose:
+        we did not spawn that process and must not kill or wait on it. The cost
+        is that its death is invisible to us until the next process start -
+        there is no watcher to attach and, without a confirmed CLI contract, no
+        safe way to re-probe. That gap is why may_reuse is False on the crash
+        path; see _relaunch.
+        """
+        if may_reuse and await liveware_agent_is_running(
+                liveware_path=path, exec=deps.exec, log=self._log):
+            self._log.info(
+                "liveware-sample adopting an already-running liveware agent; "
+                "this launch owns no tunnel child to watch")
+            return False
+        self._tunnel, agent_drain = await start_tunnel_agent(
+            liveware_path=path, spawn=deps.spawn)
+        self._spawn_task(agent_drain)
+        return self._bail_if_stale(gen)
 
     def _watch_child(self, proc) -> None:
         """Attach a crash watcher to one of THIS launch's children. Called only
@@ -1173,7 +1278,10 @@ class LivewareSampleSupervisor:
         if row is None or row.status == "disabled":
             return
         try:
-            await self._relaunch(row)
+            # Crash path: _kill_children() SIGKILLed our own agent seconds ago,
+            # so a "running" probe here is untrustworthy. Always spawn a fresh
+            # one - see _relaunch's docstring.
+            await self._relaunch(row, may_reuse_agent=False)
         except Exception as exc:  # noqa: BLE001
             self._kill_children()
             self._log.warning("liveware-sample relaunch failed: %s", exc)

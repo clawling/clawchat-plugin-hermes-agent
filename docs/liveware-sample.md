@@ -109,10 +109,29 @@ own. Only a genuine **opt-out** returns without scheduling anything:
    registers the app→local-upstream mapping on the control plane, prints the
    binding table (parsed for the public URL) and exits. It does **not** stay
    running.
-9. Start the persistent `liveware agent` data-plane daemon
-   (`start_tunnel_agent`) — the long-lived child that actually carries
-   public-URL traffic to the local upstream. Ready once it logs
-   `relay grpc control connected` (again, no crash watcher yet).
+9. Ensure the persistent `liveware agent` data-plane daemon is up
+   (`_ensure_tunnel_agent`) — the long-lived process that actually carries
+   public-URL traffic to the local upstream. It first probes
+   `liveware status` (`liveware_agent_is_running`); only when that does **not**
+   confirm a running agent does it spawn our own child via
+   `start_tunnel_agent`, ready once it logs `relay grpc control connected`
+   (again, no crash watcher yet).
+
+   The probe fails closed. It reads stdout only, requires a whole
+   `status: running` line, and treats an exec failure, a non-zero exit (what an
+   older CLI without `status` returns) or any unrecognised output as "not
+   running" — a redundant agent process is a far cheaper mistake than a live
+   app card with no data plane behind it. **This is the one CLI parser in the
+   module with no captured-output fixture; do not loosen it without one.**
+
+   Adoption is allowed only where a running agent must belong to a *previous*
+   plugin process: `_bootstrap` and the process-start call of `_relaunch`
+   (`may_reuse_agent=True`). The crash path passes `may_reuse_agent=False`,
+   because it runs seconds after `_kill_children()` SIGKILLed our own agent and
+   a probe that still reports "running" there is more likely stale or
+   control-plane state than a live data plane. An adopted agent leaves
+   `self._tunnel` as `None` on purpose — we neither kill nor watch a process we
+   did not spawn, so its death stays invisible until the next process start.
 10. `register_app(name, app_id, url)` against ClawChat, upsert the
    `liveware_sample` row with `status="active"`, **then** attach crash
    watchers to both child processes (server and agent), and deliver an
@@ -269,7 +288,10 @@ unchanged).
   seconds, where `n` is the number of restarts already counted in the
   current 30-minute window (5s, 10s, 20s, 40s, 60s, ...). After 5 restarts
   within that 30-minute window, the row is marked `failed` and the
-  supervisor stops trying until the next process start.
+  supervisor stops trying until the next process start. An **adopted** agent
+  (step 9) is deliberately not a watched child, so its exit triggers none of
+  this; the relaunch it does trigger — from the sample server crashing — spawns
+  a fresh agent rather than adopting again (`may_reuse_agent=False`).
 - **`disconnect()`**: `_stop_liveware_sample` cancels any in-flight
   supervisor start task and calls `LivewareSampleSupervisor.stop()`, which
   kills the sample server and tunnel child processes and cancels its
