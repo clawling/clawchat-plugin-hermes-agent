@@ -43,8 +43,8 @@
       "clawchat-liveware": {
         "version": "1.2.6",
         "path": "shared/clawchat-liveware/SKILL.md",
-        "sha256": "a5ff6e9891a2fb7df3906a8f756f0dc8c9786dcb3173ce44d009e5d5d67a86fd",
-        "bytes": 10668
+        "sha256": "a9f3bb9fc0a34123fb2264d26e21ec2fd239fb48b9ea1a0c7fe9a70ac2f9b0b7",
+        "bytes": 10696
       },
       "clawchat-liveware-dev": {
         "version": "1.0.0",

@@ -70,6 +70,44 @@ live Hermes process; the WebSocket transport
 (`clawchat_gateway/connection.py`) is the main piece that needs a fake
 or recorded server.
 
+## Install-scan regression
+
+Before publishing, scan the complete plugin checkout with the target Hermes
+version's Plugin Guard. Obtain a read-only host checkout as described in
+[Hermes source lookup](hermes-source-lookup.md), then run from this repo root
+with that host's Python environment:
+
+```bash
+PYTHONPATH=tmp/hermes python3 - <<'PY'
+from pathlib import Path
+from tools.plugin_guard import scan_plugin, should_allow_plugin_install
+
+result = scan_plugin(Path.cwd(), source="clawling/clawchat-plugin-hermes-agent")
+print(result.summary)
+allowed, reason = should_allow_plugin_install(result)
+print(reason)
+assert allowed is not False, reason
+PY
+```
+
+Use a checkout without local-only fixtures for release evidence (the scanner
+does not honor Git ignore rules). A caution verdict still requires reviewing
+the findings and confirming installation; this check only guards against a
+hard block, not all security risks. Keep scanning enabled.
+
+The September 2026 blocker was reproduced as 46 findings. Two documentation
+false positives caused the dangerous verdict: a relative-path explanation
+matched the DNS rule, and a rejected-input example matched the destructive
+command rule. The revised wording preserves path semantics and port validation.
+The same scanner reports caution with 44 findings afterward. Runtime code is
+unchanged; configuration-edit, subprocess, and other warnings remain visible.
+
+The bundled Hermes liveware skill has a same-version wording correction, with
+its local manifest digest updated. The independent install-cli skill source
+is not changed here: a later owner-approved dynamic update can restore that
+source's wording. Coordinate that source before publishing a new skills tag;
+do not advance the bundled version past the pinned official manifest.
+
 ## Live debugging against a Hermes process
 
 The supported development loop is:

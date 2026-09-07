@@ -28,8 +28,8 @@ ClawChat so it shows as an app tile in the owner's chat with this agent.
    activated, or login failed), relay that error to the user and STOP.
 2. **Decide the app name and local port.** Ask the user for the local web service port if
    not already known (the port the agent's own web server listens on). Accept ONLY a plain
-   integer in the range 1–65535. Reject anything that is not purely numeric (e.g.
-   `3000; rm -rf /`) — never paste user-supplied text into a shell command. The bind target
+   integer in the range 1–65535. Reject nonnumeric input (such as `3000abc`), including
+   shell operators and additional commands — never paste user-supplied text into a shell command. The bind target
    is then exactly `http://127.0.0.1:<port>`.
 3. **List existing apps** to avoid duplicates and to recover ids:
    `liveware app list`
