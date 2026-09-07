@@ -201,7 +201,7 @@ order:
    never hot-registered (there is nothing to register).
 2. **Skills-index visibility**: `skill_update.ensure_external_skills_dir()`
    idempotently lists the managed dir (relative entry `clawchat-skills`;
-   the host resolves it against `$HERMES_HOME`) in the host config's
+   relative to the active Hermes home directory) in the host config's
    `skills.external_dirs`. Directories there are scanned into the system
    prompt's `<available_skills>` index and `skills_list`, and the host
    treats them as externally owned (read-only for its autonomous skill
