@@ -2023,12 +2023,6 @@ class ClawChatAdapter(BasePlatformAdapter):
                 lambda client: client.register_app(name=name, app_id=app_id, url=url)
             )
 
-        async def _notify_owner(text: str) -> bool:
-            chat_id = self._owner_direct_chat_id()
-            if not chat_id:
-                return False
-            return await self._send_owner_text(chat_id, text)
-
         def _resolve_token() -> str:
             try:
                 token = load_profile_config().token
@@ -2048,7 +2042,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             wait_cli_ready=wait_liveware_cli_ready,
             list_apps=_list_apps,
             register_app=_register_app,
-            notify_owner=_notify_owner,
+            notify_owner=self._dispatch_liveware_intro,
             log=logger,
         )
         self._liveware_sample_supervisor = LivewareSampleSupervisor(deps)
@@ -2084,6 +2078,49 @@ class ClawChatAdapter(BasePlatformAdapter):
         if self._liveware_sample_supervisor is not None:
             await self._liveware_sample_supervisor.stop()
             self._liveware_sample_supervisor = None
+
+    async def _dispatch_liveware_intro(self, prompt: str) -> bool:
+        """Generate the installed-app notice in the owner's existing LLM session."""
+        await self._await_owner_metadata_refreshed()
+        chat_id = self._owner_direct_chat_id()
+        owner_id = self._owner_user_id()
+        if not chat_id or not owner_id:
+            return False
+        return bool(await self._handle_inbound(InboundMessage(
+            chat_id=chat_id,
+            chat_type="direct",
+            sender_id=owner_id,
+            sender_name="",
+            text=prompt,
+            raw_message={"synthetic": True, "liveware_intro": True},
+        )))
+
+    async def _handle_liveware_intro_event(self, event: MessageEvent) -> bool:
+        """Wait for this generated turn, not merely its background dispatch.
+
+        Hermes owns session serialization. Never queue this retryable notice
+        behind a busy turn: a queued event has no task/delivery receipt yet.
+        The session task is captured immediately after dispatch, before any
+        later user turn can replace it. No host tasks are created here.
+        """
+        session_key_fn = getattr(self, "_event_session_key", None)
+        if not callable(session_key_fn):
+            logger.debug("clawchat liveware intro: host lacks session task tracking")
+            return False
+        session_key = session_key_fn(event)
+        if session_key in getattr(self, "_active_sessions", {}):
+            return False
+        chat_id = event.source.chat_id
+        before = self._visible_send_count(chat_id)
+        try:
+            await self.handle_message(event)
+            task = getattr(self, "_session_tasks", {}).get(session_key)
+            if task is not None:
+                await task
+        except Exception:
+            logger.warning("clawchat liveware intro turn failed chat_id=%s", chat_id,
+                           exc_info=True)
+        return self._visible_send_count(chat_id) > before
 
     async def _dispatch_activation_bootstrap(self) -> None:
         if self._store is None:
@@ -2549,7 +2586,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             lines.append(text)
         return "\n".join(lines)
 
-    async def _handle_inbound(self, inbound: InboundMessage) -> None:
+    async def _handle_inbound(self, inbound: InboundMessage) -> bool | None:
         # Pending skill-update consent gate: an owner's direct affirm/deny reply
         # is consumed here (applies/cancels the update) and never reaches the LLM.
         # Ambiguous replies fall through to normal handling, keeping pending.
@@ -2668,6 +2705,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             len(media_urls),
             reply_to_message_id,
         )
+        if inbound.raw_message.get("liveware_intro") is True:
+            return await self._handle_liveware_intro_event(event)
         await self.handle_message(event)
         logger.info(
             "clawchat dispatch accepted by hermes chat_id=%s user_id=%s",

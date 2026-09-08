@@ -314,11 +314,28 @@ unchanged).
 
 ### Owner intro delivery
 
-After a successful bootstrap, the supervisor tries to notify the owner in
-their direct chat. `notify_owner` returns `False` when the owner's direct
-chat id isn't resolvable yet (activation still in flight) — the supervisor
-retries every 30s, up to 20 tries (~10 minutes), until it succeeds or gives
-up silently.
+After a successful bootstrap, the supervisor requests an LLM-generated notice
+in the owner's existing direct-chat session, rather than sending fixed Chinese
+text. The internal installation event includes the app name, Apps-button entry
+point and suggested first interaction; it asks for a brief normal reply without
+tools or installation work. Language priority is the user's explicit preference,
+then recent user messages, then `agent_owner_locale` from refreshed owner
+metadata, with English only as the no-context fallback. Language selection and
+wording are performed by the configured Hermes model, not a translation table.
+
+The adapter waits for the host's background session task and checks visible
+delivery before reporting success. A busy session is not queued: it is retried
+later so retries cannot enqueue multiple notices behind an active conversation.
+Missing owner identity/chat, unavailable host session tracking, or a turn with
+no visible output also returns `False`. The supervisor retains its 30s retry
+interval and 20-attempt limit (~10 minutes plus turn durations). Errors after
+visible delivery do not trigger a duplicate notice. Existing `intro_sent` rows
+are unchanged; this does not resend introductions to previously notified users.
+
+Local regression coverage (requires a Hermes checkout on `PYTHONPATH`):
+`python3 -m unittest discover -s tests -p test_liveware_localized_intro.py -v`.
+It checks the real adapter dispatch and supervisor seams with model execution
+stubbed; it does not assert the language quality of a live model response.
 
 ## Configuration
 
