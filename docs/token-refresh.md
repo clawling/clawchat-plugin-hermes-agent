@@ -83,6 +83,9 @@ and, for OpenClaw, per transport:
   channel-config write is still required before the swap; its failure keeps the refresh
   transient.
 - **Hermes:** unchanged — both `.env` and SQLite must be written before the swap (§C.2).
+- **OpenClaw, named accounts:** the same rules apply per account; the config mirror for a
+  named account writes `channels.<id>.accounts.<accountId>.token` / `.refreshToken`, while the
+  `default` account keeps writing the root `channels.<id>.token` / `.refreshToken`.
 
 ---
 
@@ -199,8 +202,9 @@ single-use connect code.
 
 ### C.1 What logout does (both plugins)
 
-1. **Clear credentials atomically:** blank `token` / `refreshToken` in the config (OpenClaw) or
-   remove `CLAWCHAT_TOKEN` / `CLAWCHAT_REFRESH_TOKEN` from `.env` (Hermes), AND blank the
+1. **Clear credentials atomically:** blank `token` / `refreshToken` in the config (OpenClaw) —
+   in the slot of the affected account (root for `default`, `accounts.<accountId>` otherwise) —
+   or remove `CLAWCHAT_TOKEN` / `CLAWCHAT_REFRESH_TOKEN` from `.env` (Hermes), AND blank the
    `access_token` / `refresh_token` columns of the `activations` row. **Keep** `user_id` /
    `owner_user_id` / `agent_id` so re-pair reuses the same identity (re-pair mode).
 2. **Status:** set the account to not-connected / not-configured / not-running with
