@@ -18,6 +18,7 @@ try:
 except ImportError:  # pragma: no cover
     _ws_connect_impl = None  # type: ignore[assignment]
 
+from clawchat_gateway import __version__
 from clawchat_gateway.config import ClawChatConfig
 from clawchat_gateway.token_refresh import (
     RefreshManager,
@@ -1670,6 +1671,7 @@ class ClawChatConnection:
             nonce=nonce,
             device_id=device_id,
             capabilities=build_connect_capabilities(),
+            client_version=__version__,
         )
         await self._ws.send(encode_frame(connect_req))
         self._record_connection(

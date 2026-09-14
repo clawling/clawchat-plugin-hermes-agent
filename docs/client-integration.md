@@ -202,8 +202,10 @@ literal string `"challenge"` — it is not correlated with the client's
 telemetry: the server records them on its `handshake accepted` log line and no
 code path gates behavior on either value. A new client SHOULD send both — they
 are what an operator greps when triaging a client-specific bug — but omission is
-free, and both current agent adapters (`openclaw-clawchat`, `hermes-clawchat`)
-omit them with no consequence; mobile has sent both since 2026-05-25. A future
+free. Mobile has sent both since 2026-05-25; `hermes-clawchat` sends
+`client_version` (its package version, `clawchat_gateway.__version__`) and
+omits `protocol_version` with no consequence; `openclaw-clawchat` likewise
+sends `client_version` (its npm package version) and omits `protocol_version`. A future
 milestone MAY add minimum-version rejection.
 
 **Capability flags.** Every field is a boolean; omission is equivalent to `false`.

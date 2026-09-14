@@ -103,6 +103,7 @@ def build_connect_request(
     nonce: str,
     device_id: str | None = None,
     capabilities: dict[str, Any] | None = None,
+    client_version: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "token": token,
@@ -110,6 +111,9 @@ def build_connect_request(
     }
     if device_id is not None:
         payload["device_id"] = device_id
+    # Telemetry only (§3.3): the hub logs it on `handshake accepted`, gates nothing.
+    if client_version:
+        payload["client_version"] = client_version
     if capabilities is not None:
         payload["capabilities"] = capabilities
     now_ms = current_time_ms()
