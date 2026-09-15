@@ -412,19 +412,41 @@ def _owner_attention_text(group_id: str, fallback_text: str) -> str:
     return f"ClawChat group {group_id} {GROUP_OWNER_ATTENTION_TITLE}."
 
 
-def _exec_approval_fallback_text(command: str, description: str) -> str:
-    return (
-        "Command approval required:\n"
-        "```shell\n"
-        f"{command}\n"
-        "```\n\n"
-        f"Reason: {description}\n\n"
-        "Choose:\n"
-        "- Approve Once - reply /approve\n"
-        "- Approve Session - reply /approve session\n"
-        "- Always Approve - reply /approve always\n"
-        "- Deny - reply /deny"
-    )
+def _exec_approval_fallback_text(
+    command: str,
+    description: str,
+    *,
+    allow_permanent: bool = True,
+    allow_session: bool = True,
+    smart_denied: bool = False,
+) -> str:
+    """Render the approval prompt, offering only the scopes the host allows.
+
+    Mirrors Hermes' own ``_format_exec_approval_fallback``: a Smart-DENY owner
+    override is a one-operation decision (the host persists nothing for it even
+    if ``session``/``always`` comes back), and ``allow_permanent`` is false when
+    no pattern could be permanently allowlisted. Offering a scope the host will
+    silently downgrade would misstate what the owner is agreeing to.
+    """
+    lines = [
+        "Smart DENY - owner override for one operation:"
+        if smart_denied
+        else "Command approval required:",
+        "```shell",
+        command,
+        "```",
+        "",
+        f"Reason: {description}",
+        "",
+        "Choose:",
+        "- Approve Once - reply /approve",
+    ]
+    if not smart_denied and allow_session:
+        lines.append("- Approve Session - reply /approve session")
+        if allow_permanent:
+            lines.append("- Always Approve - reply /approve always")
+    lines.append("- Deny - reply /deny")
+    return "\n".join(lines)
 
 
 @dataclass
@@ -3437,10 +3459,25 @@ class ClawChatAdapter(BasePlatformAdapter):
         session_key: str,
         description: str = "dangerous command",
         metadata: Any = None,
+        allow_permanent: bool = True,
+        allow_session: bool = True,
+        smart_denied: bool = False,
+        **kwargs: Any,
     ) -> SendResult:
-        chat_type = self._resolve_chat_type(chat_id, metadata, {})
+        # Hermes hosts since v2026.7.20 pass the three scope flags; older hosts
+        # do not, hence the defaults. Without them in the signature the host's
+        # call raised TypeError and fell back to a plain-text send that recorded
+        # no route, so the owner's reply never reached the group session.
+        # `**kwargs` keeps a future host flag from reopening that failure.
+        chat_type = self._resolve_chat_type(chat_id, metadata, kwargs)
         target_chat_id = chat_id
-        fallback_text = _exec_approval_fallback_text(command, description)
+        fallback_text = _exec_approval_fallback_text(
+            command,
+            description,
+            allow_permanent=allow_permanent,
+            allow_session=allow_session,
+            smart_denied=smart_denied,
+        )
         if chat_type == "group":
             owner_chat_id = self._owner_direct_chat_id()
             if not owner_chat_id:
