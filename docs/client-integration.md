@@ -1931,7 +1931,8 @@ replay cursor. Where it starts is a deployment setting:
   device does not re-receive what they already got. If older rows are still
   retained, a v1/v2 connection gets
   `history.truncated{reason:"cursor_started_above_zero"}` at replay start
-  (§11.7); a legacy connection is told nothing.
+  (§11.7), on every connection until the device acks something past that start;
+  a legacy connection is told nothing.
 
 A device that returns after its cursor was garbage-collected (it stayed away past
 the server's cursor retention) is a **new device** under these rules.
@@ -2172,10 +2173,14 @@ Sent to v1 **and** granted-v2 connections (never legacy) at replay start, after
 `hello-ok` and before the read-watermark snapshot, any `dseq`-bearing frame and
 `replay.done`. Render an "earlier messages unavailable" boundary.
 
-- `reason: "pruned"` — the inbox was pruned past your cursor; the server skips the
-  pruned hole (advances your cursor). `reason: "cursor_started_above_zero"` — this
-  connection created your cursor above 0 (§11.1) while older rows are still
-  retained; nothing older will be replayed to this device.
+- `reason: "pruned"` — the inbox was pruned past your cursor; this replay skips
+  the pruned hole, but the server does **not** move your stored cursor — your next
+  ack does. `reason: "cursor_started_above_zero"` — your cursor started above 0
+  (§11.1) and has not advanced since, while older rows are still retained;
+  nothing older will be replayed to this device.
+- **Both repeat on every connection until your cursor moves** (you ack a later
+  frame — on v2, acking `replay.done` is enough). De-duplicate by `oldest_seq`
+  rather than rendering a new boundary on each reconnect.
 - Treat an **absent or unknown** `reason` as `"pruned"`.
 - At most one frame per reason; if you get two, they are in ascending
   `oldest_seq` and the last one is the effective boundary.
