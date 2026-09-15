@@ -2389,6 +2389,22 @@ class ClawChatAdapter(BasePlatformAdapter):
                     event_name,
                 )
                 return
+            if claimed is not True:
+                # Fail closed: a claim that could not be decided (no store,
+                # store disabled, SQLite error) must not dispatch. Live delivery
+                # and device replay both carry the same message, so dispatching
+                # here re-runs the agent turn and can double-reply — and the
+                # outbound reply path refuses to send without a claim anyway.
+                # WARNING, not INFO, so a store outage is visible in logs.
+                logger.warning(
+                    "clawchat inbound skipped chat_id=%s message_id=%s event=%s "
+                    "reason=claim_unavailable result=%r",
+                    inbound.chat_id,
+                    protocol_message_id,
+                    event_name,
+                    claimed,
+                )
+                return
             self._remember_reply_preview(
                 message_id=protocol_message_id, inbound=inbound
             )
@@ -4845,11 +4861,12 @@ class ClawChatAdapter(BasePlatformAdapter):
                 event_type,
             )
             return False
-        if claimed is None:
+        if claimed is not True:
             logger.warning(
-                "clawchat outbound skipped chat_id=%s message_id=%s reason=claim_unavailable",
+                "clawchat outbound skipped chat_id=%s message_id=%s reason=claim_unavailable result=%r",
                 chat_id,
                 message_id,
+                claimed,
             )
             return None
         return True

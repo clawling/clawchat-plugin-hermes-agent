@@ -1901,6 +1901,17 @@ new live ones. Replay is keyed by **`(user_id, device_id)`**:
 - **Connect ordering.** On a connection that advertised `multi_device`, the frames
   arrive as: optional `history.truncated` → the `message.read` watermark snapshot
   (§9.7 — up to 500 chats, ahead of the backlog) → the inbox rows → `replay.done`.
+- **This plugin's replay dedup fails closed.** Live delivery and replay can
+  both carry the same `message.send` / `message.reply`, so every inbound one is
+  claimed by `payload.message_id` in the `clawchat_messages` ledger
+  (`claim_message_once`) before it reaches the agent. Only a successful claim
+  dispatches. A duplicate (or recall-tombstoned) id is skipped at INFO
+  (`clawchat inbound duplicate skipped`). If the claim cannot be decided (no
+  store, store disabled at init, SQLite error), the message is **dropped** with
+  a WARNING carrying `reason=claim_unavailable`, not dispatched. Re-running the
+  turn could produce a second reply, and the outbound reply path refuses to send
+  without a claim anyway. A store outage therefore shows up as those warnings,
+  not as double replies.
 
 ### 11.1 New devices
 
