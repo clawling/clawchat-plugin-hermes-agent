@@ -169,6 +169,68 @@ lifecycle (`clawchat_gateway.connection`), inbound frame parsing
 (`clawchat_gateway.media_runtime`), and per-turn channel-prompt
 injection (`_compose_channel_prompt`).
 
+### Group exec approvals forwarded to the owner
+
+When a dangerous command needs approval inside a **group**, Hermes calls
+`send_exec_approval(chat_id=<group>, command=…, session_key=…,
+description=…, metadata=…, allow_permanent=…, allow_session=…,
+smart_denied=…)`. The three scope flags exist on hosts since v2026.7.20;
+older hosts omit them and the defaults reproduce the previous behaviour.
+The signature also takes `**kwargs`: a host flag the adapter does not
+accept raises `TypeError`, which the host swallows and answers with a
+plain-text fallback that carries no route, so the owner's reply would
+resolve nothing. The prompt offers only the scopes the host allows (no
+session/always choice for a Smart-DENY override, no always choice when
+nothing can be permanently allowlisted), mirroring Hermes' own text
+fallback.
+
+The card is not posted to the group. It goes to the owner's direct chat
+(the activation conversation), and every group shares that one chat, so
+each forwarded card carries an **approval code**: one letter (`A`–`Z`
+without `I`/`O`) followed by one digit (`2`–`9`), e.g. `K7`. A code is
+unique among the owner's pending approvals and is not reused while its
+approval is pending. Routes live in
+`ClawChatAdapter._owner_approval_routes` as `owner_chat_id → code →
+(session_key, group chat_id, expiry)`; the code is reserved before the
+card is sent and released if the send fails.
+
+Owner replies in that direct chat (`_handle_owner_forwarded_approval`;
+codes are case-insensitive and may appear before or after the scope word):
+
+| Reply | Pending group approvals | Result |
+|---|---|---|
+| `/approve <code>` / `/deny <code>` (also `/always`, `/cancel`, `session` / `always` scope words, `all`) | any | Resolves that code's session only. |
+| bare `/approve` / `/deny` | exactly one | Resolves it (the single-approval UX is unchanged). |
+| bare `/approve` / `/deny` | two or more | Nothing is resolved; the reply lists the pending codes and their groups. |
+| code that is unknown, resolved, or expired | any (including none) | Nothing is resolved; the reply lists the pending codes. A code-shaped reply is never handed to the host, which would otherwise apply it to the direct chat's own session. |
+| bare `/approve` / `/deny` | none | Not intercepted; the host's own `/approve` handler runs for the direct chat's session. |
+
+While any group route is pending, a bare `/approve` in the owner's direct
+chat is taken as a group decision, as before. Several approvals from the
+**same** group session get distinct codes, but the host resolves a
+session's queue oldest-first (it does not hand the adapter its
+`request_id`), so the code selects the session, not the individual
+request. `/deny <reason>` text is not relayed.
+
+Routes are bounded by:
+
+- **Resolution** — the code is removed once the host resolves it, or once
+  a card button (`interaction.submit`) resolves the same session.
+- **Host timeout** — at every forward and every owner reply, a route whose
+  session the host no longer blocks on (`tools.approval.has_blocking_approval`
+  is false: `approvals.timeout` elapsed, the run was interrupted, or the
+  decision arrived another way) is dropped. The host timeout is
+  configurable, so it is observed rather than mirrored.
+- **TTL backstop** — `OWNER_APPROVAL_ROUTE_TTL_SECONDS` (1 hour) drops a
+  route even if the host check is unavailable.
+- **Dissolution** — `_evict_chat_state` drops a dissolved group's routes, or
+  every route when the owner's direct chat itself is dissolved.
+- **Capacity** — at most one route per code (192). When every code is
+  pending the card is not sent and `send_exec_approval` fails; the host
+  then sends its own plain-text prompt, which carries no code and records
+  no route, so that approval must be answered once the backlog clears or
+  it times out.
+
 ## Wire protocol
 
 This plugin and the sibling `openclaw-clawchat` plugin are **peer

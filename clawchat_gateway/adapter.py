@@ -7,6 +7,7 @@ import inspect
 import logging
 import os
 import re
+import secrets
 import time
 
 from clawchat_gateway.no_reply import (
@@ -226,6 +227,24 @@ OUTBOUND_MEDIA_FRAGMENT_KINDS = frozenset({"image", "audio", "video", "file"})
 SILENT_RESPONSE_TOKEN = "<clawchat:silent/>"
 NO_REPLY_TOKEN = "<clawchat:no-reply/>"
 GROUP_OWNER_ATTENTION_TITLE = "requires owner attention"
+
+# Group exec approvals forwarded to the owner's direct chat each carry a short
+# code (letter + digit, no I/O/0/1) so concurrent approvals from different
+# groups stay distinguishable in that one chat. See docs/architecture.md
+# "Group exec approvals forwarded to the owner".
+OWNER_APPROVAL_CODE_LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ"
+OWNER_APPROVAL_CODE_DIGITS = "23456789"
+# Backstop only: routes are normally dropped as soon as the host stops blocking
+# on the session (its own, configurable `approvals.timeout`).
+OWNER_APPROVAL_ROUTE_TTL_SECONDS = 3600.0
+_OWNER_APPROVAL_CODE_RE = re.compile(r"^[A-HJ-NP-Z][2-9]$", re.IGNORECASE)
+
+
+@dataclass
+class _OwnerApprovalRoute:
+    session_key: str
+    group_id: str
+    expires_at: float
 LEGACY_EMPTY_RESPONSE_TOKEN = '""'
 CONVERSATION_SEMANTICS = """## ClawChat Conversation Semantics
 - Direct messages and group messages are routed by the runtime.
@@ -419,8 +438,12 @@ def _exec_approval_fallback_text(
     allow_permanent: bool = True,
     allow_session: bool = True,
     smart_denied: bool = False,
+    code: str = "",
 ) -> str:
     """Render the approval prompt, offering only the scopes the host allows.
+
+    ``code`` is the owner-DM approval code of a forwarded group approval; when
+    set, every reply command quotes it.
 
     Mirrors Hermes' own ``_format_exec_approval_fallback``: a Smart-DENY owner
     override is a one-operation decision (the host persists nothing for it even
@@ -428,6 +451,7 @@ def _exec_approval_fallback_text(
     no pattern could be permanently allowlisted. Offering a scope the host will
     silently downgrade would misstate what the owner is agreeing to.
     """
+    suffix = f" {code}" if code else ""
     lines = [
         "Smart DENY - owner override for one operation:"
         if smart_denied
@@ -438,14 +462,15 @@ def _exec_approval_fallback_text(
         "",
         f"Reason: {description}",
         "",
-        "Choose:",
-        "- Approve Once - reply /approve",
     ]
+    if code:
+        lines.extend([f"Approval code: {code}", ""])
+    lines.extend(["Choose:", f"- Approve Once - reply /approve{suffix}"])
     if not smart_denied and allow_session:
-        lines.append("- Approve Session - reply /approve session")
+        lines.append(f"- Approve Session - reply /approve session{suffix}")
         if allow_permanent:
-            lines.append("- Always Approve - reply /approve always")
-    lines.append("- Deny - reply /deny")
+            lines.append(f"- Always Approve - reply /approve always{suffix}")
+    lines.append(f"- Deny - reply /deny{suffix}")
     return "\n".join(lines)
 
 
@@ -543,7 +568,9 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._typing_started_at: dict[str, float] = {}
         self._typing_ttl_warned: set[str] = set()
         self._known_chat_types: dict[str, str] = {}
-        self._owner_approval_routes: dict[str, str] = {}
+        # owner direct chat_id -> approval code -> route; see
+        # _reserve_owner_approval_code.
+        self._owner_approval_routes: dict[str, dict[str, _OwnerApprovalRoute]] = {}
         self._run_counter = 0
         self._inbound_window: dict[str, deque[float]] = {}
         self._completed_run_ids: set[str] = set()
@@ -739,7 +766,7 @@ class ClawChatAdapter(BasePlatformAdapter):
     def _server_rejected(self) -> "OrderedDict[str, float]":
         """Lazily-initialised accessor for the server-rejection tier.
 
-        Mirrors ``_remember_owner_approval_route``'s convention: several test
+        Mirrors ``_owner_approval_route_table``'s convention: several test
         harnesses build the adapter via ``__new__`` and fill fields by hand, so
         a new field must not become a mandatory harness edit.
         """
@@ -833,7 +860,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._typing_started_at.pop(chat_id, None)
         self._typing_ttl_warned.discard(chat_id)
         self._known_chat_types.pop(chat_id, None)
-        self._owner_approval_routes.pop(chat_id, None)
+        self._drop_owner_approval_routes_for_chat(chat_id)
         self._inbound_window.pop(chat_id, None)
         self._last_inbound_message_id_by_chat.pop(chat_id, None)
         self._conversation_metadata_versions.pop(chat_id, None)
@@ -3471,6 +3498,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         # `**kwargs` keeps a future host flag from reopening that failure.
         chat_type = self._resolve_chat_type(chat_id, metadata, kwargs)
         target_chat_id = chat_id
+        approval_code = ""
         fallback_text = _exec_approval_fallback_text(
             command,
             description,
@@ -3490,7 +3518,31 @@ class ClawChatAdapter(BasePlatformAdapter):
                     error="clawchat owner direct chat unavailable",
                 )
             target_chat_id = owner_chat_id
-            fallback_text = _owner_attention_text(chat_id, fallback_text)
+            # Reserve before the send's await so two groups forwarding at once
+            # cannot draw the same code.
+            approval_code = self._reserve_owner_approval_code(
+                owner_chat_id, session_key, chat_id
+            ) or ""
+            if not approval_code:
+                logger.error(
+                    "clawchat exec approval suppressed reason=approval_codes_exhausted group=%s",
+                    chat_id,
+                )
+                return SendResult(
+                    success=False,
+                    error="clawchat owner approval codes exhausted",
+                )
+            fallback_text = _owner_attention_text(
+                chat_id,
+                _exec_approval_fallback_text(
+                    command,
+                    description,
+                    allow_permanent=allow_permanent,
+                    allow_session=allow_session,
+                    smart_denied=smart_denied,
+                    code=approval_code,
+                ),
+            )
 
         fragments = [{"kind": "text", "text": fallback_text}]
         message_id = new_message_id()
@@ -3501,18 +3553,23 @@ class ClawChatAdapter(BasePlatformAdapter):
             fragments=fragments,
             include_message_id=True,
         )
-        sent = await self._connection.send_frame(frame, wait_for_ack=True)
+        try:
+            sent = await self._connection.send_frame(frame, wait_for_ack=True)
+        except BaseException:
+            if approval_code:
+                self._release_owner_approval_code(target_chat_id, approval_code)
+            raise
         if not sent:
+            # Keep a route only for a card that is actually on its way,
+            # otherwise a later owner reply gets matched to an approval that
+            # never arrived.
+            if approval_code:
+                self._release_owner_approval_code(target_chat_id, approval_code)
             return SendResult(
                 success=False,
                 error="clawchat exec approval dropped",
                 message_id=message_id,
             )
-        if target_chat_id != chat_id:
-            # Group approvals are forwarded to the owner's direct chat; remember
-            # the route only once the card is actually on its way, otherwise a
-            # later owner reply gets matched to an approval that never arrived.
-            self._remember_owner_approval_route(target_chat_id, session_key)
         return SendResult(success=True, message_id=message_id)
 
     async def send_or_update_status(
@@ -4329,34 +4386,134 @@ class ClawChatAdapter(BasePlatformAdapter):
             ],
         }
 
-    def _remember_owner_approval_route(self, owner_chat_id: str, session_key: str) -> None:
+    def _owner_approval_route_table(self) -> dict[str, dict[str, _OwnerApprovalRoute]]:
+        """Lazily-initialised route table (several test harnesses build the
+        adapter via ``__new__``)."""
         routes = getattr(self, "_owner_approval_routes", None)
         if routes is None:
             self._owner_approval_routes = {}
             routes = self._owner_approval_routes
-        routes[owner_chat_id] = session_key
+        return routes
 
-    def _owner_approval_session_key(self, inbound: InboundMessage) -> str | None:
-        routes = getattr(self, "_owner_approval_routes", {})
-        return routes.get(inbound.chat_id)
+    def _drop_owner_approval_routes_where(
+        self, predicate: Callable[[str, _OwnerApprovalRoute], str | None]
+    ) -> None:
+        """Drop every route for which ``predicate`` returns a reason."""
+        routes = self._owner_approval_route_table()
+        for owner_chat_id in list(routes):
+            by_code = routes[owner_chat_id]
+            for code, route in list(by_code.items()):
+                reason = predicate(code, route)
+                if reason:
+                    by_code.pop(code, None)
+                    logger.info(
+                        "clawchat owner approval route dropped code=%s group=%s reason=%s",
+                        code,
+                        route.group_id,
+                        reason,
+                    )
+            if not by_code:
+                routes.pop(owner_chat_id, None)
+
+    def _prune_owner_approval_routes(self) -> None:
+        """Drop routes past the TTL backstop or no longer blocking in the host.
+
+        The host drops its queue entry on ``approvals.timeout``, on interrupt,
+        and on a decision taken another way; a route whose session no longer
+        blocks can never resolve anything, so keeping it would only make a bare
+        ``/approve`` look ambiguous.
+        """
+        if not self._owner_approval_route_table():
+            return
+        try:
+            from tools.approval import has_blocking_approval
+        except Exception:  # noqa: BLE001 — host check unavailable; TTL still applies
+            has_blocking_approval = None
+        now = time.monotonic()
+
+        def stale(_code: str, route: _OwnerApprovalRoute) -> str | None:
+            if route.expires_at <= now:
+                return "ttl"
+            if has_blocking_approval is None:
+                return None
+            try:
+                return None if has_blocking_approval(route.session_key) else "host_not_blocking"
+            except Exception:  # noqa: BLE001
+                return None
+
+        self._drop_owner_approval_routes_where(stale)
+
+    def _reserve_owner_approval_code(
+        self, owner_chat_id: str, session_key: str, group_id: str
+    ) -> str | None:
+        """Allocate a code unique among the owner's pending approvals."""
+        self._prune_owner_approval_routes()
+        routes = self._owner_approval_route_table()
+        by_code = routes.get(owner_chat_id, {})
+        free = [
+            letter + digit
+            for letter in OWNER_APPROVAL_CODE_LETTERS
+            for digit in OWNER_APPROVAL_CODE_DIGITS
+            if letter + digit not in by_code
+        ]
+        if not free:
+            return None
+        code = secrets.choice(free)
+        routes.setdefault(owner_chat_id, {})[code] = _OwnerApprovalRoute(
+            session_key=session_key,
+            group_id=group_id,
+            expires_at=time.monotonic() + OWNER_APPROVAL_ROUTE_TTL_SECONDS,
+        )
+        return code
+
+    def _release_owner_approval_code(self, owner_chat_id: str, code: str) -> None:
+        routes = self._owner_approval_route_table()
+        by_code = routes.get(owner_chat_id)
+        if by_code is None:
+            return
+        by_code.pop(code, None)
+        if not by_code:
+            routes.pop(owner_chat_id, None)
 
     def _forget_owner_approval_route(self, session_key: str) -> None:
-        routes = getattr(self, "_owner_approval_routes", {})
-        for key, value in list(routes.items()):
-            if value == session_key:
-                routes.pop(key, None)
+        """Drop every code routed to ``session_key``."""
+        self._drop_owner_approval_routes_where(
+            lambda _code, route: "resolved" if route.session_key == session_key else None
+        )
+
+    def _drop_owner_approval_routes_for_chat(self, chat_id: str) -> None:
+        """Dissolution: the owner's direct chat takes all routes with it; a
+        group takes only its own."""
+        routes = self._owner_approval_route_table()
+        routes.pop(chat_id, None)
+        self._drop_owner_approval_routes_where(
+            lambda _code, route: "group_dissolved" if route.group_id == chat_id else None
+        )
 
     def _owner_approval_route_chat_id(self, session_key: str) -> str:
         """The conversation an approval card was delivered to, by session key.
 
-        `_owner_approval_routes` is keyed by chat_id, so this is the reverse
-        lookup; only group-forwarded approvals record a route.
+        Only group-forwarded approvals record a route.
         """
-        routes = getattr(self, "_owner_approval_routes", {})
-        for chat_id, value in routes.items():
-            if value == session_key:
+        for chat_id, by_code in self._owner_approval_route_table().items():
+            if any(route.session_key == session_key for route in by_code.values()):
                 return str(chat_id or "")
         return ""
+
+    async def _reply_owner_approval_error(
+        self,
+        chat_id: str,
+        message: str,
+        by_code: Mapping[str, _OwnerApprovalRoute],
+    ) -> None:
+        if by_code:
+            pending = ", ".join(
+                f"{code} (group {route.group_id})" for code, route in by_code.items()
+            )
+            text = f"{message} Pending approvals: {pending}."
+        else:
+            text = f"{message} No group approvals are pending."
+        await self.send(chat_id, text, metadata={"chat_type": "direct"})
 
     def _approval_reply_chat_id(self, frame: dict[str, Any], session_key: str) -> str:
         """Where the resolution of `session_key` must be delivered.
@@ -4387,17 +4544,65 @@ class ClawChatAdapter(BasePlatformAdapter):
         command_name = _slash_command_name(inbound.text)
         if command_name not in {"approve", "deny", "always", "cancel"}:
             return False
-        session_key = self._owner_approval_session_key(inbound)
-        if not session_key:
+        self._prune_owner_approval_routes()
+        by_code = dict(self._owner_approval_route_table().get(inbound.chat_id, {}))
+        args = inbound.text.strip().split()[1:]
+        codes = list(
+            dict.fromkeys(arg.upper() for arg in args if _OWNER_APPROVAL_CODE_RE.match(arg))
+        )
+        if not codes and not by_code:
+            # Nothing forwarded is pending: the host's own /approve handler
+            # decides for this direct chat's session.
             return False
+        # A code-shaped reply is always answered here, even when nothing is
+        # pending: handing it to the host would apply a stale code to the
+        # direct chat's own session.
+        if len(codes) > 1:
+            await self._reply_owner_approval_error(
+                inbound.chat_id,
+                "Reply with one approval code at a time; nothing was resolved.",
+                by_code,
+            )
+            return True
+        if codes:
+            code = codes[0]
+            route = by_code.get(code)
+            if route is None:
+                await self._reply_owner_approval_error(
+                    inbound.chat_id,
+                    f"No pending approval has code {code}; nothing was resolved.",
+                    by_code,
+                )
+                return True
+        elif len(by_code) == 1:
+            code, route = next(iter(by_code.items()))
+        else:
+            await self._reply_owner_approval_error(
+                inbound.chat_id,
+                "Several group approvals are pending; nothing was resolved. "
+                f"Reply /{command_name} <code>.",
+                by_code,
+            )
+            return True
         choice, resolve_all = self._approval_choice_from_text(command_name, inbound.text)
-        resolved = self._resolve_gateway_approval(session_key, choice, resolve_all=resolve_all)
+        resolved = self._resolve_gateway_approval(
+            route.session_key, choice, resolve_all=resolve_all
+        )
+        if resolve_all or not resolved:
+            self._forget_owner_approval_route(route.session_key)
+        else:
+            self._release_owner_approval_code(inbound.chat_id, code)
         if not resolved:
-            return False
-        self._forget_owner_approval_route(session_key)
+            await self._reply_owner_approval_error(
+                inbound.chat_id,
+                f"Approval {code} is no longer pending; nothing was resolved.",
+                self._owner_approval_route_table().get(inbound.chat_id, {}),
+            )
+            return True
         await self.send(
             inbound.chat_id,
-            self._approval_resolution_text(choice, resolved),
+            f"{self._approval_resolution_text(choice, resolved)} "
+            f"(code {code}, group {route.group_id})",
             metadata={"chat_type": "direct"},
         )
         return True
