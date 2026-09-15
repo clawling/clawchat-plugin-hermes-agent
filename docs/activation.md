@@ -287,6 +287,18 @@ On success the rotated `{access_token, refresh_token}` pair is written to **both
 SQLite, then the WebSocket reconnects with the new token. Agents no longer die
 at the 24h mark.
 
+Each refresh attempt has a 20s total deadline
+(`REFRESH_ATTEMPT_CEILING_SECONDS` in `clawchat_gateway/api_client.py`; the 15s
+`REFRESH_REQUEST_TIMEOUT_SECONDS` still bounds each socket operation). A hit is
+transient. When a transient failure may have reached the server (deadline hit,
+reset, non-200), the next attempt with the same refresh token starts 31–35s
+after the failed attempt began instead of the usual 1s/2s/4s backoff; failures
+that provably never reached the server, and `code:1`, keep the fast backoff.
+That spacing lets a retry after a lost response redeem the same refresh token
+inside the backend's refresh grace window (requires server grace window
+(member-backend ≥ release TBD)). A `10003` on that retry still logs out. See
+[`./token-refresh.md`](./token-refresh.md) §B.
+
 ### Auto-logout (permanent refresh failure)
 
 When the refresh token is **permanently invalid** — revoked, expired, or a

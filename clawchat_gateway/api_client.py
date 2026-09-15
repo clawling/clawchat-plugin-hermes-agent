@@ -7,6 +7,7 @@ import json
 import logging
 import random
 import socket
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -55,7 +56,22 @@ AGENT_NOT_FOUND_CODE = 16001
 # Transient-refresh backoff (spec §B): min(30s, 1s * 2^(n-1)) ± jitter, cap 30s.
 REFRESH_RETRY_BACKOFF_CAP_SECONDS = 30.0
 REFRESH_RETRY_BASE_SECONDS = 1.0
+# urlopen's timeout: bounds each socket operation, NOT the whole attempt (a slow
+# trickle of bytes, or a DNS stall, can outlast it).
 REFRESH_REQUEST_TIMEOUT_SECONDS = 15.0
+# Spec §B attempt deadline: hard total wall clock for one refresh attempt. A hit
+# is TRANSIENT. The worker thread cannot be cancelled; if it still receives a
+# rotation after the deadline the result is dropped, and the backend refresh
+# grace window lets the retry below redeem the same refresh token again.
+REFRESH_ATTEMPT_CEILING_SECONDS = 20.0
+# Spec §B retry within the grace window: after a transient whose outcome is
+# unknown (deadline hit, reset, non-200 — the server may have rotated), the next
+# attempt with the same refresh token starts 30s + 1-5s jitter after the previous
+# attempt BEGAN. That clears the backend's minimum replay age by a wide margin,
+# lands the first two replays inside its 90s window (~31-35s, ~62-70s) and the
+# third outside it (>= 93s), so normal retrying never exceeds its 2-replay cap.
+REFRESH_UNKNOWN_OUTCOME_SPACING_SECONDS = 30.0
+REFRESH_UNKNOWN_OUTCOME_JITTER_SECONDS = (1.0, 5.0)
 
 
 @dataclass(frozen=True)
@@ -544,12 +560,25 @@ class ClawChatApiClient:
         - ``400`` → PERMANENT client bug (kind ``validation``) → auto-logout.
         - ``1`` → TRANSIENT (kind ``api``, retryable) → server internal error.
         - any non-200 / network error → TRANSIENT (kind ``transport``, retryable).
+        - attempt deadline (``REFRESH_ATTEMPT_CEILING_SECONDS``) hit → TRANSIENT
+          (kind ``transport``, not ``connect_failed``: the outcome is unknown).
         """
-        return await asyncio.to_thread(
-            self._auth_refresh_sync,
-            refresh_token,
-            device_id,
-        )
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._auth_refresh_sync,
+                    refresh_token,
+                    device_id,
+                ),
+                timeout=REFRESH_ATTEMPT_CEILING_SECONDS,
+            )
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            raise ClawChatApiError(
+                "transport",
+                "refresh request timed out",
+                path="/v1/auth/refresh",
+                connect_failed=False,
+            ) from exc
 
     def _auth_refresh_sync(
         self,
@@ -870,10 +899,26 @@ def is_permanent_refresh_error(exc: ClawChatApiError) -> bool:
     Per spec §B, only ``code == 10003`` (invalid refresh) and ``code == 400``
     (client bug) are permanent. ``code == 1`` (internal), non-200, and any
     network error are transient and must keep retrying — a transient failure
-    never auto-logs-out, because no rotation was committed and the old refresh
-    token is still valid.
+    never auto-logs-out. Either no rotation was committed (the old refresh token
+    is still valid), or the server rotated but the response was lost, in which
+    case a retry inside the backend refresh grace window redeems the old token
+    again. A ``10003`` after such a timeout is still permanent: it means the
+    window has passed or the token was revoked (spec §B escalation).
     """
     return exc.code in (REFRESH_CODE_INVALID_REFRESH, REFRESH_CODE_BAD_REQUEST)
+
+
+def _refresh_outcome_unknown(exc: ClawChatApiError) -> bool:
+    """True when the failed attempt may have rotated the token server-side.
+
+    Only a failure that provably never reached the server (DNS / connection
+    refused) or an explicit ``code:1`` (server says no rotation committed) is
+    known not to have rotated; everything else — deadline hit, reset, non-200,
+    malformed success body, unknown code — is ambiguous.
+    """
+    if exc.connect_failed:
+        return False
+    return exc.code != REFRESH_CODE_INTERNAL
 
 
 def _refresh_backoff_delay(attempt: int) -> float:
@@ -892,18 +937,27 @@ async def auth_refresh_with_retry(
     device_id: str,
     max_transient_retries: int | None = None,
     sleep: Callable[[float], Awaitable[None]] | None = None,
+    monotonic: Callable[[], float] | None = None,
 ) -> RefreshResult:
     """Call ``auth_refresh`` and retry ONLY transient failures with exp backoff.
 
-    Transient failures (``code:1``, non-200, network) retry effectively
-    unbounded but rate-limited (mirroring the WS supervisor that retries
-    forever); ``max_transient_retries`` bounds it only for tests. PERMANENT
-    failures (``code:10003`` / ``code:400``) propagate immediately so the caller
-    can auto-logout. (Spec §B.)
+    Transient failures (``code:1``, non-200, network, attempt deadline) retry
+    effectively unbounded but rate-limited (mirroring the WS supervisor that
+    retries forever); ``max_transient_retries`` bounds it only for tests.
+    PERMANENT failures (``code:10003`` / ``code:400``) propagate immediately so
+    the caller can auto-logout. (Spec §B.)
+
+    After a transient whose outcome is unknown, the next attempt is held until
+    ``REFRESH_UNKNOWN_OUTCOME_SPACING_SECONDS`` + 1-5s jitter after the failed
+    attempt began, so replays of the same refresh token land inside the backend
+    grace window without exceeding its replay cap (spec §B "Retry within the
+    grace window").
     """
     sleeper = sleep if sleep is not None else asyncio.sleep
+    clock = monotonic if monotonic is not None else time.monotonic
     attempt = 0
     while True:
+        attempt_started = clock()
         try:
             return await client.auth_refresh(
                 refresh_token=refresh_token,
@@ -916,6 +970,10 @@ async def auth_refresh_with_retry(
             if max_transient_retries is not None and attempt > max_transient_retries:
                 raise
             delay = _refresh_backoff_delay(attempt)
+            if _refresh_outcome_unknown(exc):
+                low, high = REFRESH_UNKNOWN_OUTCOME_JITTER_SECONDS
+                spacing = REFRESH_UNKNOWN_OUTCOME_SPACING_SECONDS + random.uniform(low, high)
+                delay = max(delay, spacing - (clock() - attempt_started))
             logger.warning(
                 "clawchat token refresh transient failure (attempt %d), retrying in %.1fs: %s",
                 attempt,

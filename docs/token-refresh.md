@@ -46,7 +46,7 @@ refresh, correct auto-logout on permanent expiry, and protocol-correct WebSocket
 
 | `code` | meaning | class |
 |--------|---------|-------|
-| `0` | success; `data = { access_token, refresh_token }` — **rotated**, old refresh token dies immediately | success |
+| `0` | success; `data = { access_token, refresh_token }` — **rotated**; the old refresh token is dead for normal use (the backend only tolerates a replay of it inside the short grace window — see Rotation hazard) | success |
 | `10003` (`CodeInvalidRefresh`) | refresh token not found / revoked / expired / **device mismatch** | **PERMANENT** → auto-logout |
 | `400` | bad body / missing or oversized device id | **PERMANENT (client bug)** → auto-logout |
 | `1` (`CodeInternal`) | server internal error (no rotation committed) | **TRANSIENT** → retry |
@@ -57,14 +57,22 @@ refresh, correct auto-logout on permanent expiry, and protocol-correct WebSocket
 
 ### ⚠️ Rotation hazard (drives persistence ordering)
 
-Rotation is strict single-use with **no overlap / no grace window**. On `code:0` the old refresh
-token is dead the instant the response arrives. Therefore:
+Rotation is still single-use: on `code:0` the old refresh token is dead for normal use. The backend
+adds a **replay grace window that exists only to cover attempts whose outcome the client could not
+see** (the server rotated, the response was lost): the old token may be redeemed again **at most 2
+times**, only **~90s** or less after it was rotated (and no sooner than ~2s), only with the same
+device id, and only while the token that rotation issued has not itself been refreshed. Each
+redemption revokes the token issued by the previous one. Outside the window — or after a logout /
+re-pair / explicit revocation — reuse returns `code:10003` exactly as before. **Clients must not
+rely on the window for anything else.** (Requires server grace window (member-backend ≥ release
+TBD); until then the backend is strict single-use and a lost response still ends in `10003`.)
+Therefore:
 
 > **Persist the new `{access_token, refresh_token}` durably BEFORE treating the refresh as
 > complete; swap the in-memory token only AFTER persistence succeeds.**
 
-A crash after the server rotates but before the client persists permanently bricks the agent
-(must re-pair). Persist first, swap second.
+A crash after the server rotates but before the client persists bricks the agent (must re-pair)
+unless the old token is retried within the grace window. Persist first, swap second.
 
 ### Per-plugin persistence semantics
 
@@ -179,12 +187,28 @@ manual re-pair). If refresh returns PERMANENT → auto-logout immediately (skip 
 
 - **Backoff for transient:** `min(30s, 1s * 2^(n-1)) ± jitter`, cap 30s. Retry effectively
   unbounded but rate-limited (mirrors the WS supervisors that retry forever). A transient
-  refresh failure **never** auto-logs-out — no rotation was committed, so the old refresh token
-  is still valid; keep the WS in backoff with the current access token and keep retrying refresh.
+  refresh failure **never** auto-logs-out — either no rotation was committed, so the old refresh
+  token is still valid, or the retry below redeems it inside the grace window; keep the WS in
+  backoff with the current access token and keep retrying refresh.
+- **Attempt deadline:** every refresh attempt (request **and** response body) has a **20s total
+  deadline**; hitting it aborts the attempt and counts as **TRANSIENT**. 20s stays below the 30s
+  §A.3 minimum interval, so the floor, not the deadline, sets the retry cadence.
+- **Retry within the grace window:** after a transient whose outcome is unknown (deadline hit,
+  connection reset, non-200 — anything except a failure that provably never reached the server
+  or an explicit `code:1`), the next attempt with the same refresh token starts **30–45s after
+  the previous attempt began** (implementations: the 30s floor plus 1–5s jitter, or the floor
+  plus WS reconnect backoff). The lower bound keeps replays far above the backend's minimum
+  replay age and puts at most two of them inside the ~90s window (a third would start ≥ ~93s,
+  outside it); the upper bound keeps the first replay well inside. This applies to the
+  proactive path too: a transient proactive refresh arms one retry instead of waiting for the
+  next proactive arm.
 - **Transient→permanent escalation:** a network failure *after* the server committed the
-  rotation but before the response is indistinguishable from transient; the next retry then
-  returns `code:10003`. Rule: escalate to PERMANENT (auto-logout) **only when a subsequent
-  attempt returns `code:10003`** — never on transient alone.
+  rotation but before the response is indistinguishable from transient. The next retry inside
+  the grace window gets `code:0` (the server's grace replay) and proceeds as a normal success.
+  If a subsequent attempt still returns `code:10003` — the window has passed, the token was
+  explicitly revoked, or the replays are used up — escalate to PERMANENT (auto-logout) as
+  before. Rule: escalate **only when a subsequent attempt returns `code:10003`** — never on
+  transient alone. A client cannot and must not try to tell an out-of-window `10003` apart.
 
 ---
 
@@ -287,4 +311,10 @@ to be pinned (document + boot warning if unpinned).
 - Permanent failure clears creds in both stores, flips not-configured, emits the user message.
 - WS: proactive success closes old socket + reconnects with new token; no reconnect with dead
   token while refresh in-flight.
-- Transient→`10003` escalation auto-logs-out.
+- (server returns 10003 after the grace window) Transient→`10003` escalation auto-logs-out.
+- A refresh attempt that reaches the 20s total deadline is aborted and classified TRANSIENT
+  (verified with a fake fetch / `urlopen` that never returns).
+- After a transient whose outcome is unknown (including on the proactive path), the next
+  attempt with the same refresh token starts 30–45s after the previous attempt began; a
+  success on that retry persists the rotated pair, a `10003` takes the permanent path, and no
+  second concurrent refresh is started.

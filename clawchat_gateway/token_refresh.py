@@ -132,7 +132,9 @@ class RefreshManager:
         min_interval_seconds: float = MIN_REFRESH_INTERVAL_SECONDS,
         monotonic: Callable[[], float] | None = None,
         max_transient_retries: int | None = None,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
+        self._sleep = sleep
         self._build_client = build_client
         self._persist_tokens = persist_tokens
         self._persist_logout = persist_logout
@@ -230,6 +232,7 @@ class RefreshManager:
                 refresh_token=refresh_token,
                 device_id=device_id,
                 max_transient_retries=self._max_transient_retries,
+                sleep=self._sleep,
             )
         except ClawChatApiError as exc:
             if is_permanent_refresh_error(exc):
@@ -255,9 +258,10 @@ class RefreshManager:
         persisted = await self._persist_tokens(result.access_token, result.refresh_token)
         if not persisted:
             # A crash/failure to persist after the server rotated would brick the
-            # agent. Surface as transient so we keep the dead-but-unswapped token
-            # and retry (the next attempt with the OLD refresh token returns
-            # 10003 → escalates to permanent, per §B transient→permanent rule).
+            # agent. Surface as transient so we keep the unswapped token and
+            # retry: inside the backend refresh grace window the OLD refresh
+            # token is redeemed again; after it, the attempt returns 10003 →
+            # escalates to permanent, per §B transient→permanent rule.
             logger.error("clawchat token refresh persisted=False after rotation")
             return RefreshOutcome(status="transient", error="persist failed")
         self._rejected_token = None
