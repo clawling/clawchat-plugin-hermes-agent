@@ -28,7 +28,7 @@ an issue against this document in the repository that ships it.
 
 **Provenance.** Forked from `clawchat-msghub`
 `docs/features/msghub/protocol-v2-client-integration.md`; last re-synced
-2026-08-26 against msghub `6be1352`. Divergences kept on purpose for this
+2026-09-16 against msghub `da47fed`. Divergences kept on purpose for this
 adapter: the 60 s → 600 s eviction reconnect floor (§3.6), local `chat_id`
 validation (§5.1), the receive-only view of `message.recall` (§6 row, §9.8),
 the `4002` not-yet-implemented note (§14.1), and the dropped cross-links to
@@ -651,9 +651,16 @@ Forbidden:
 
 **`context.mentions` is untyped and relayed element-for-element.** The
 server carries it as an untyped, opaque JSON array and the uplink →
-downlink rewrite only re-marshals it — nothing validates or normalizes the
-elements, so whatever a producer sends reaches every recipient unchanged.
-Producer and receiver obligations differ:
+downlink rewrite only re-marshals it, so element *types* reach every
+recipient unchanged. The single exception is an inbound repair on
+`message.send` / `message.reply`: on an **object** element the server forces
+`kind` to a string (`"mention"` when it is absent, `null`, `""` or not a
+string) and drops a `user_id` / `display` that is present but neither string
+nor `null` — the three shapes that make a shipped client throw mid-decode and
+wedge into an ack-silence kick loop. Nothing else is touched, the repair does
+not run on streaming events, and it cannot fix already-stored frames, so
+**receivers still carry the full tolerance obligation below.** Producer and
+receiver obligations differ:
 
 - **Producers SHOULD** emit mention objects —
   `{"kind": "mention", "user_id": "usr_…", "display": "Anne"}`. Every
@@ -1084,6 +1091,27 @@ client) MAY push lifecycle events as **uplink** envelopes. Constraints:
 - `chat_id` is **required** on every streaming uplink event — streaming
   events fan out through the same chat routing as `message.send`. The
   server stamps `chat_type` on the downlink.
+- **Stream ownership.** A stream belongs to the authenticated identity that
+  opened its `payload.message_id`. The server-side merger that builds the
+  offline `message.reply` (and the mobile client's live merger) drops any
+  `message.add` / `message.done` / `message.failed` — or a `message.created`
+  that names a stream still in flight — whose `sender.id` differs from the
+  stream's. Producers MUST keep `sender` stable across a stream; because
+  `sender` is rebuilt from the authenticated identity on every streaming
+  event, a conforming producer cannot violate this by accident. Receivers
+  SHOULD apply the same rule locally: never merge a mid-stream frame into a
+  bubble whose sender differs from the frame's. `message_id` alone is not an
+  authorization.
+- **Streaming payloads are relayed verbatim, minus two keys.** Unlike
+  `message.send` / `message.reply`, the four streaming events are not
+  round-tripped through a typed struct: the server removes exactly
+  `payload.metadata` and `payload._metadata` and forwards everything else
+  untouched, undeclared keys included. Receivers MUST NOT treat any payload
+  field on a streaming frame as server-asserted. The only server-asserted
+  facts are the envelope fields the server overwrites — `sender`,
+  `chat_type`, `origin_device_id`, `seq` / `dseq`. In particular, decide
+  "is this a system message?" from `sender.id == "system"` (§9.9), never
+  from a payload key.
 
 ---
 
@@ -1360,7 +1388,7 @@ member-backend uses it for both kinds:
 **Loss tolerance.** This event is **ephemeral, best-effort, and
 capability-gated**:
 
-- Never written to the inbox or offline mirror; reconnect / device
+- Never written to the inbox; reconnect / device
   replay will **not** redeliver it.
 - The hub silently drops the frame if the recipient's send buffer is
   full (no kick on backpressure for signal events).
@@ -1780,6 +1808,62 @@ the msghub Protocol v2 client guide §9.8.
   turn. The first would mean owning host context management wholesale; the
   second restates the fact being erased.
 
+### 9.9 System messages — `sender.id == "system"` and `metadata.kind`
+
+Lifecycle notices (member joined / left, group renamed, announcements,
+permission results, owner-facing service notices…) are injected by the
+deployment's own services and delivered as ordinary **durable `message.send`**
+downlinks: persisted, replayed on reconnect, acked like any chat message. They
+differ from a user message in exactly one envelope field — `sender` is the
+fixed system identity — plus a flat `payload.metadata` block:
+
+```jsonc
+{
+  "version": "2",
+  "event": "message.send",
+  "chat_id": "chat-group-01",
+  "sender": { "id": "system", "type": "direct", "nick_name": "System" },
+  "payload": {
+    "message_id":   "sys-01K…",
+    "message_mode": "normal",
+    "message": {
+      "body":    { "fragments": [{ "kind": "text", "text": "Alice joined the group" }] },
+      "context": { "mentions": [], "reply": null }
+    },
+    "metadata": { "kind": "member_joined", "text_i18n": { "en": "Alice joined the group" } }
+  }
+}
+```
+
+`metadata` is a sibling of `message_id` — **not** nested inside `message` —
+and the key has no underscore.
+
+- **Trust the sender, then route on `kind`.** `sender.id == "system"` is the
+  only server-asserted signal that a frame is a system message. A
+  client-supplied `metadata` on the streaming path is stripped (§8.7) and one
+  on `message.send` / `message.reply` is dropped by the typed round-trip, so a
+  `metadata` block that reaches you next to `sender.id == "system"` was
+  minted by the server.
+- **`kind` is a closed set.** The server accepts exactly fifteen values and
+  rejects any injection outside it — or one that smuggles a `kind` inside the
+  producer payload — with `400`, publishing nothing:
+  `member_joined`, `member_left`, `member_removed`, `group_created`,
+  `group_renamed`, `group_avatar_changed`, `admin_appointed`,
+  `admin_revoked`, `announcement_added`, `announcement_updated`,
+  `announcement_removed`, `permission_result`, `service_error`,
+  `balance_low`, `service_notice`. Widening the set is a cross-repo change
+  (producer, server list and rendering client ship together), so a `kind` you
+  do not recognise is simply newer than your build — never a forgery once
+  `sender.id == "system"` holds.
+- **Unknown `kind` MUST be tolerated.** Render it as a system notice — never
+  as an ordinary chat bubble, never as a blank row, never as an error — using
+  `metadata.text_i18n` (exact tag → bare language → same-language variant →
+  `en` → your own "unsupported message" string; tag matching is
+  case-insensitive and treats `_` and `-` alike). Do not render the `text`
+  fragment for an unrecognised `kind`: it is single-language copy kept for
+  clients that predate `text_i18n`. Unrecognised `metadata` fields MUST be
+  ignored.
+
 ---
 
 ## 10. Fragments — content schema
@@ -1867,6 +1951,26 @@ URL. Two forms are possible (the client should treat both as opaque):
 Always download / display the URL as-is. Do not try to construct or modify
 URLs. There is no re-signing endpoint — if a URL expires, you must re-fetch
 the media from its original source.
+
+**A media fragment may arrive with an absent or empty `url`.** `url` is
+`omitempty` on the wire, so a media fragment sent without one reaches you as
+a bare `{"kind":"image"}`. The server repairs this on the uplink of
+`message.send` / `message.reply` — an absent, `null`, or non-string `url` on
+an `image` / `video` / `audio` / `file` fragment becomes `""`, in both
+`body.fragments` and `context.reply.reply_preview.fragments` — but the repair
+is forward-only: it cannot fix rows stored before it existed, it does not run
+on the streaming events, and in an E2EE chat the decrypted inner object never
+passed through the server's typed round-trip at all.
+
+- Producers SHOULD emit a non-empty `url` on every media fragment and MUST
+  NOT rely on the repair.
+- Receivers MUST tolerate a media fragment whose `url` is absent or empty —
+  render a placeholder, degrade to an unsupported fragment, skip it, anything
+  that does not throw. Reading `url` with a non-nullable cast is the same
+  poison-frame failure §7.1 describes for a strict `context.mentions`
+  decoder: the frame is never acked and the device wedges into the
+  ack-silence kick loop. More generally, never assume a field is present on
+  the wire because some server struct declares it without `omitempty`.
 
 ---
 
@@ -2372,6 +2476,13 @@ client value is dropped:
   omit-`sender` rule above.
 - The four streaming rules above bind only clients that **emit** streaming frames
   (§8.0). A client that never streams violates none of them.
+- The four streaming events are relayed verbatim minus `payload.metadata` and
+  `payload._metadata`, and a mid-stream frame whose sender differs from the
+  stream's is dropped (§8.7). Receivers MUST NOT treat any streaming payload
+  field as server-asserted.
+- Receivers MUST NOT throw on a media fragment with an absent or empty `url`
+  (§10.5), on any `context.mentions` element shape (§7.1), or on an
+  unrecognised system-message `kind` (§9.9).
 
 ### 13.2 Limits and fair use
 
@@ -2585,7 +2696,7 @@ original sender's connected devices that declared `delivery_receipt`.
 
 **Ephemeral — best-effort only.**
 
-- Never persisted server-side (neither the durable inbox nor the offline mirror).
+- Never persisted server-side (not in the durable inbox).
 - Never replayed on reconnect.
 - Never retransmitted on kick / backpressure.
 - Silently dropped if the original sender is offline at delivery time.
@@ -2929,6 +3040,8 @@ Use this list as a final pass before integration testing.
 - [ ] Drop the `data` object directly into your `fragments` array (it is
       already in `Fragment` shape).
 - [ ] Treat `url` as opaque. Do not parse, modify, or reconstruct it.
+- [ ] Tolerate a media fragment whose `url` is absent or empty — never throw
+      on it (§10.5).
 - [ ] Plan for media URLs to expire after the configured retention window
       (default 15 days).
 
