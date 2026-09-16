@@ -1,5 +1,5 @@
 {
-  "name": "awareness event friend.added produces no reasoning turn",
+  "name": "awareness event friend.added produces no reasoning turn (friend_greeting off; with it on, a non-owner friend.added dispatches the first-message greeting turn)",
   "behavior": "awareness",
   "wire": {
     "version": "2",
