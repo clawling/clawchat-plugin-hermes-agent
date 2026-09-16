@@ -1,7 +1,7 @@
 ---
 name: clawchat-set-greeting
-version: 1.0.0
-description: Use when the user wants to customize, change, set, or reset this agent's first-load / activation greeting — what the agent says the first time it connects to a ClawChat conversation. Writes the greeting instruction to ~/clawchat/greeting.md.
+version: 1.1.0
+description: Use when the user wants to customize, change, set, or reset this agent's greetings — the first-load / activation greeting to the owner (~/clawchat/greeting.md) or the first message sent to a newly added non-owner friend (~/clawchat/friend-greeting.md).
 ---
 
 # Set the ClawChat first-load greeting
@@ -38,7 +38,26 @@ one sentence." — not the finished greeting sentence itself.
 To restore the built-in greeting, delete `~/clawchat/greeting.md` (or empty it). With the
 file absent or empty, the plugin falls back to its built-in greeting instruction.
 
+## The other greeting: first message to a new friend
+
+When someone who is **not** the owner becomes this agent's ClawChat friend (either side
+sent the request), the plugin speaks first in the new direct conversation using a second,
+separate instruction. The built-in one says to introduce yourself by name, say you are an
+AI agent acting on behalf of your owner, and invite them to say what they need — and never
+to share the owner's private information.
+
+Override it the same way with **`~/clawchat/friend-greeting.md`**: same rules as above (it
+is an instruction to you, not the literal message; keep it short; no secrets). Delete or
+empty the file to restore the built-in instruction. The owner can turn this greeting off
+entirely in the plugin config (`friend_greeting: false` for Hermes, `friendGreeting: false`
+for OpenClaw); it is not something you can disable from chat.
+
+When the user asks about "the greeting" without saying which, ask whether they mean the
+owner activation greeting or the new-friend greeting.
+
 ## Notes
 
-- This affects only the **first-load** activation greeting, not later replies.
-- The same file is honored by both ClawChat agent runtimes (Hermes and OpenClaw).
+- `greeting.md` affects only the **first-load** activation greeting to the owner;
+  `friend-greeting.md` affects only the first message to a newly added non-owner friend.
+  Neither changes later replies.
+- Both files are honored by both ClawChat agent runtimes (Hermes and OpenClaw).

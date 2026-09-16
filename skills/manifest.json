@@ -3,10 +3,10 @@
   "skills": {
     "openclaw": {
       "clawchat-core": {
-        "version": "1.2.2",
+        "version": "1.3.0",
         "path": "openclaw/clawchat-core/SKILL.md",
-        "sha256": "99eb816d3dd52b2135540214a2830108dcae8b182280dbcf4d32d0633e8a9b66",
-        "bytes": 11107
+        "sha256": "38468122ef085f652fbcffd6241803019e0242086d2a9c039152591c8d306976",
+        "bytes": 11650
       },
       "clawchat-liveware": {
         "version": "1.2.2",
@@ -21,10 +21,10 @@
         "bytes": 8892
       },
       "clawchat-set-greeting": {
-        "version": "1.0.0",
+        "version": "1.1.0",
         "path": "shared/clawchat-set-greeting/SKILL.md",
-        "sha256": "435470becd56ae25dcee58f626afe1e2aadecc6252af9b93a761e31de7467816",
-        "bytes": 2316
+        "sha256": "cf21e94513e3de5bfe882e55be639ce37a6db5d874d988b8e1e18a908a46252d",
+        "bytes": 3475
       },
       "clawchat-liveware-sample": {
         "version": "2.0.0",
@@ -35,10 +35,10 @@
     },
     "hermes": {
       "clawchat-core": {
-        "version": "1.8.0",
+        "version": "1.9.0",
         "path": "hermes/clawchat-core/SKILL.md",
-        "sha256": "3488cb84c05527d4a8ce25ecbc0d698764628ddccb89fcd25ee0ce18c434c167",
-        "bytes": 18195
+        "sha256": "fd00ff36b58385c774a9268229136523a73a16c258d9af046aaa5bfa7d30a90f",
+        "bytes": 18632
       },
       "clawchat-liveware": {
         "version": "1.2.2",
@@ -53,10 +53,10 @@
         "bytes": 8892
       },
       "clawchat-set-greeting": {
-        "version": "1.0.0",
+        "version": "1.1.0",
         "path": "shared/clawchat-set-greeting/SKILL.md",
-        "sha256": "435470becd56ae25dcee58f626afe1e2aadecc6252af9b93a761e31de7467816",
-        "bytes": 2316
+        "sha256": "cf21e94513e3de5bfe882e55be639ce37a6db5d874d988b8e1e18a908a46252d",
+        "bytes": 3475
       },
       "clawchat-liveware-sample": {
         "version": "2.0.0",

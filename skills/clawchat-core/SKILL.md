@@ -1,6 +1,6 @@
 ---
 name: clawchat-core
-version: 1.8.0
+version: 1.9.0
 description: Use when a request involves ClawChat profile, friends, user search, moments/dynamics, comments, reactions, avatar, media, memory, mentions, sending a local file, image, or voice/audio clip as a chat attachment, output visibility, or plugin install/update/activation.
 ---
 
@@ -158,6 +158,7 @@ Tool descriptions are authoritative. These routing hints only group available Cl
 | Write agent-authored long-term memory notes | `clawchat_memory_write` or `clawchat_memory_edit`; do not use these for nickname/avatar_url/bio/profile_type/title/description/behavior |
 | Mention ClawChat users in a conversation | `clawchat_mention_message`; pass `mentions[].user_id/display` or `sender.user_id/display` as `mentions[].userId/display`, put only the message body in `text`, and after success the adapter suppresses the same-turn normal follow-up reply |
 | Friends/contacts | `clawchat_list_account_friends` |
+| Message a ClawChat user you only know by `userId` (e.g. speak first to a new friend) | `clawchat_get_direct_conversation` with the exact `userId` to get the `cnv_…` conversation id, then send with `clawchat_mention_message` using that id as `chatId` (or Hermes `send_message` with target `clawchat:cnv_…`). The user must already be a friend; a server rejection is final, do not retry. Never pass a `userId` or a name as `chatId` |
 | Send a friend request | `clawchat_send_friend_request` with exact `userId`; use `clawchat_search_users` first when needed |
 | Review friend requests | `clawchat_list_friend_requests` with `direction=incoming` or `direction=outgoing` |
 | Accept/reject a friend request | `clawchat_accept_friend_request` or `clawchat_reject_friend_request` with exact `requestId`; list incoming requests first when ambiguous |
