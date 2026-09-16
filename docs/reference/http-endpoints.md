@@ -73,6 +73,7 @@ and an `x-device-id` header. The WebSocket uses `websockets.asyncio.client`.
 ### Conversations
 | Method | Path | Method (Python) |
 |--------|------|-----------------|
+| POST | `/v1/conversations/direct` | `get_direct_conversation` |
 | GET | `/v1/conversations/{conversation_id}` | `get_conversation` |
 | PATCH | `/v1/conversations/{conversation_id}` | `patch_conversation` |
 

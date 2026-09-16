@@ -317,6 +317,22 @@ class ClawChatApiClient:
     async def get_moment(self, moment_id: int) -> dict:
         return await self._call_json("GET", f"/v1/moments/{moment_id}")
 
+    async def get_direct_conversation(self, peer_id: str) -> dict:
+        """Find-or-create the direct conversation with ``peer_id``.
+
+        ``POST /v1/conversations/direct``; the peer must already be a friend
+        (member-backend code 19012 otherwise). Returns
+        ``{"conversation": {"id": "cnv_…", "type": "direct"}}``.
+        """
+        if not isinstance(peer_id, str) or not peer_id.strip():
+            raise ClawChatApiError("validation", "peer_id is required")
+        return await self._call_json(
+            "POST",
+            "/v1/conversations/direct",
+            body=json.dumps({"peer_id": peer_id.strip()}).encode("utf-8"),
+            extra_headers={"content-type": "application/json"},
+        )
+
     async def get_conversation(self, conversation_id: str) -> dict:
         if not conversation_id.strip():
             raise ClawChatApiError("validation", "conversation_id is required")

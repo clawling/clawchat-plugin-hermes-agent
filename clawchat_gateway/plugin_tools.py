@@ -278,6 +278,21 @@ async def handle_clawchat_get_moment(args, **kw):
     return _tool_result(result)
 
 
+async def handle_clawchat_get_direct_conversation(args, **kw):
+    task_id = kw.get("task_id") or "default"
+    logger.info("clawchat_get_direct_conversation start task_id=%s", task_id)
+    from clawchat_gateway import tools
+
+    result = await _recorded_tool_call(
+        "clawchat_get_direct_conversation",
+        args,
+        _account_id_from_kwargs(kw),
+        lambda: tools.get_direct_conversation(args.get("userId")),
+    )
+    logger.info("clawchat_get_direct_conversation done task_id=%s", task_id)
+    return _tool_result(result)
+
+
 async def handle_clawchat_get_conversation(args, **kw):
     task_id = kw.get("task_id") or "default"
     logger.info("clawchat_get_conversation start task_id=%s", task_id)
@@ -1192,6 +1207,31 @@ def register_tools(ctx) -> None:
         is_async=True,
         description="Get ClawChat Moment",
         emoji="🔎",
+    )
+
+    ctx.register_tool(
+        "clawchat_get_direct_conversation",
+        "clawchat",
+        {
+            "name": "clawchat_get_direct_conversation",
+            "description": _direct_tool_description(
+                "Resolve the direct (1:1) ClawChat conversation with a specific user to its conversation id (cnv_...), creating it if needed. "
+                "TRIGGER - invoke when you need to send a message to a ClawChat user and only know their userId (usr_...), for example to start a conversation with a newly added friend. "
+                "The user must already be your friend; otherwise the server rejects the call. "
+                "Use the returned conversation.id as chatId for clawchat_mention_message or as the send_message target clawchat:cnv_.... "
+                "Never pass a userId or a name as a chatId."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "userId": {"type": "string", "minLength": 1, "description": "Concrete ClawChat user id (usr_...) of the friend"},
+                },
+                "required": ["userId"],
+            },
+        },
+        handle_clawchat_get_direct_conversation,
+        is_async=True,
+        description="Get ClawChat Direct Conversation With User",
     )
 
     ctx.register_tool(

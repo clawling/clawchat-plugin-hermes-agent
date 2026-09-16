@@ -685,6 +685,27 @@ async def get_moment(moment_id: int) -> dict[str, Any]:
         return _unknown_error(exc)
 
 
+async def get_direct_conversation(user_id: str) -> dict[str, Any]:
+    """Resolve the direct conversation with a friend to a sendable ``cnv_…`` id.
+
+    Find-or-create on the server side; the peer must already be a friend
+    (member-backend 19012 otherwise), which is surfaced unchanged so the model
+    can act on it.
+    """
+    if not isinstance(user_id, str) or not user_id.strip():
+        return _validation_error("userId is required")
+
+    client, err = _build_client()
+    if err is not None:
+        return err
+    try:
+        return await client.get_direct_conversation(user_id.strip())
+    except ClawChatApiError as exc:
+        return _api_error(exc)
+    except Exception as exc:  # noqa: BLE001
+        return _unknown_error(exc)
+
+
 async def get_conversation(conversation_id: str) -> dict[str, Any]:
     if not isinstance(conversation_id, str) or not conversation_id.strip():
         return _validation_error("conversationId is required")

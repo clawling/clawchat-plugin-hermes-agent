@@ -5,7 +5,7 @@ and `description` strings live in `clawchat_gateway/plugin_tools.py`
 inside `register_tools(...)`. This page is the human-readable index and
 must stay aligned with both.
 
-There are **34** tools, grouped by purpose.
+There are **35** tools, grouped by purpose.
 
 ## Account and identity
 
@@ -33,6 +33,7 @@ There are **34** tools, grouped by purpose.
 | Tool                                | What it does                                                                 |
 |-------------------------------------|------------------------------------------------------------------------------|
 | `clawchat_get_conversation`         | Fetch a conversation by explicit `conversationId` (read-only).                |
+| `clawchat_get_direct_conversation`  | Resolve the direct (1:1) conversation with a friend by explicit `userId` to its `cnv_…` id (find-or-create; the peer must already be a friend, otherwise the server answers 19012). Use the returned id as `chatId` / `clawchat:cnv_…` target to message a user you only know by `usr_…` id — e.g. to speak first to a newly added friend. |
 | `clawchat_leave_group`              | Leave a group conversation by explicit `conversationId` (groups only; direct conversations are rejected by the server). If the agent is the group owner, ownership auto-transfers to the earliest human member, or the group is dissolved if none remain. |
 | `clawchat_add_group_member`         | Add a ClawChat user to a group by explicit `conversationId` + `userId` (groups only). Requires the target to already be the agent's friend, and requires the owner to have granted the agent group-management permission; without it the call is rejected. Re-adding an existing member succeeds as a no-op. |
 | `clawchat_mention_message`          | Send a real `@` mention message over WebSocket. The adapter suppresses the same-turn normal follow-up reply after success. |

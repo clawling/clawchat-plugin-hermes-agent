@@ -144,6 +144,7 @@ refresh survive a reschedule instead of silently logging the agent out.
 | —                                      | `output_visibility`            | `"normal"`     |
 | —                                      | `runtime_status_messages`      | `false`        |
 | —                                      | `awareness_note`               | `false`        |
+| —                                      | `friend_greeting`              | `true`         |
 | —                                      | `liveware_sample`              | `true`         |
 
 `output_visibility` is the ClawChat visibility preset controlled by
@@ -168,6 +169,23 @@ note is pending, further events do not schedule another. The default is `false`
 notes (`moment.comment.created` / `moment.comment.replied`) are a separate,
 per-event path and are **not** gated by this flag
 (`adapter._emit_awareness_note` / `adapter._emit_moment_comment_note`).
+
+`friend_greeting` controls whether the agent **speaks first** to a newly added
+friend who is not its owner. On a `friend.added` signal whose `entity_id` is
+not the owner, the adapter resolves the new direct conversation through
+`POST /v1/conversations/direct` (the signal only carries the counterparty
+`usr_…` id; the server created the conversation inside the accept transaction)
+and runs one synthetic turn in it with the prompt from
+`~/clawchat/friend-greeting.md`, falling back to the built-in
+`greeting.FRIEND_GREETING_PROMPT`. Both directions count — someone adding the
+agent (auto-accepted by the `friend.accept` policy) and the agent's own request
+being accepted. The owner's `friend.added` is skipped (the activation bootstrap
+greets the owner). Dedupe is persisted in the message ledger keyed on the
+signal's `event_id` (fallback `message_id`), so a reconnect replay never greets
+twice; a failed conversation lookup is logged and dropped. The default is
+`true`; set `false` to keep `friend.added` a pure awareness event
+(`adapter._schedule_friend_greeting` / `adapter._dispatch_friend_greeting`).
+This flag is independent of `awareness_note`.
 
 `liveware_sample` controls the Liveware Sample demo-app auto-boot on first
 activation. The default is `true`; set it to `false` explicitly to disable

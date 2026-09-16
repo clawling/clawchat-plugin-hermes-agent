@@ -22,8 +22,42 @@ ACTIVATION_BOOTSTRAP_PROMPT = (
     "Do not ask the user for profile information."
 )
 
-# Cross-plugin, user-editable override lives at ~/clawchat/greeting.md.
+# First message to a newly added NON-owner friend. Distinct from the owner
+# activation prompt: this reader is a stranger, so "you are connected and
+# ready" makes no sense and the agent must say whose agent it is instead.
+FRIEND_GREETING_PROMPT = (
+    "A ClawChat user has just become your friend. You are now in a direct "
+    "conversation with them; they are not your owner.\n\n"
+    "Reply now with one short, friendly greeting message in this conversation: "
+    "introduce yourself by name, say you are an AI agent acting on behalf of "
+    "your owner, and invite them to tell you what they need.\n"
+    "Send it as a normal chat reply. Do not write or create any files or notes, "
+    "and do not call tools just to greet.\n"
+    "Do not share your owner's private information, and do not ask the user "
+    "for personal information."
+)
+
+# Cross-plugin, user-editable overrides live under ~/clawchat/.
 _GREETING_FILE_RELPARTS = ("clawchat", "greeting.md")
+_FRIEND_GREETING_FILE_RELPARTS = ("clawchat", "friend-greeting.md")
+
+
+def _load_prompt_with_override(
+    relparts: tuple[str, ...], default: str, home_dir: Path | None
+) -> str:
+    base = home_dir if home_dir is not None else Path.home()
+    greeting_path = base.joinpath(*relparts)
+    try:
+        content = greeting_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return default
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning(
+            "clawchat: failed to read greeting override %s: %s", greeting_path, exc
+        )
+        return default
+    stripped = content.strip()
+    return stripped or default
 
 
 def load_activation_bootstrap_prompt(home_dir: Path | None = None) -> str:
@@ -35,16 +69,18 @@ def load_activation_bootstrap_prompt(home_dir: Path | None = None) -> str:
     greeting dispatch never fails on a bad override file. ``home_dir`` is
     injectable for tests and defaults to the real home directory.
     """
-    base = home_dir if home_dir is not None else Path.home()
-    greeting_path = base.joinpath(*_GREETING_FILE_RELPARTS)
-    try:
-        content = greeting_path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return ACTIVATION_BOOTSTRAP_PROMPT
-    except (OSError, UnicodeDecodeError) as exc:
-        logger.warning(
-            "clawchat: failed to read greeting override %s: %s", greeting_path, exc
-        )
-        return ACTIVATION_BOOTSTRAP_PROMPT
-    stripped = content.strip()
-    return stripped or ACTIVATION_BOOTSTRAP_PROMPT
+    return _load_prompt_with_override(
+        _GREETING_FILE_RELPARTS, ACTIVATION_BOOTSTRAP_PROMPT, home_dir
+    )
+
+
+def load_friend_greeting_prompt(home_dir: Path | None = None) -> str:
+    """Return the first-message prompt for a newly added non-owner friend.
+
+    Same override contract as :func:`load_activation_bootstrap_prompt`, but the
+    file is ``~/clawchat/friend-greeting.md`` and the fallback is
+    :data:`FRIEND_GREETING_PROMPT`.
+    """
+    return _load_prompt_with_override(
+        _FRIEND_GREETING_FILE_RELPARTS, FRIEND_GREETING_PROMPT, home_dir
+    )

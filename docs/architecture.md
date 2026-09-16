@@ -169,6 +169,17 @@ lifecycle (`clawchat_gateway.connection`), inbound frame parsing
 (`clawchat_gateway.media_runtime`), and per-turn channel-prompt
 injection (`_compose_channel_prompt`).
 
+Besides real inbound messages, three server signals produce **synthetic
+turns** through the same `_handle_inbound` path (each `raw_message` carries
+`synthetic: True` plus a discriminator): the owner activation bootstrap
+(`bootstrap`, `greeting.load_activation_bootstrap_prompt`), the first message
+to a newly added non-owner friend (`friend_greeting`,
+`greeting.load_friend_greeting_prompt`; triggered by `friend.added`, gated by
+the `friend_greeting` config flag, conversation id resolved via
+`ClawChatApiClient.get_direct_conversation`, deduped by signal `event_id` in
+the message ledger — see `docs/configuration.md`), and `permission_result`
+receipts. Each runs on a tracked task set cancelled in `disconnect()`.
+
 ### Group exec approvals forwarded to the owner
 
 When a dangerous command needs approval inside a **group**, Hermes calls

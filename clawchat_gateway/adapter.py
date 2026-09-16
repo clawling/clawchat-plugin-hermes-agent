@@ -104,7 +104,10 @@ from clawchat_gateway.protocol import (
     new_message_id,
 )
 from clawchat_gateway.group_settings import EffectiveSettings, GroupSettingsCache
-from clawchat_gateway.greeting import load_activation_bootstrap_prompt
+from clawchat_gateway.greeting import (
+    load_activation_bootstrap_prompt,
+    load_friend_greeting_prompt,
+)
 from clawchat_gateway.permission_result import handle_permission_result
 from clawchat_gateway.permissions import PermissionCache
 from clawchat_gateway import skill_update
@@ -594,6 +597,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._pending_skill_update: Any = None
         self._pending_awareness_note: bool = False
         self._skill_update_tasks: set[asyncio.Task[None]] = set()
+        self._friend_greeting_tasks: set[asyncio.Task[None]] = set()
         self._activation_bootstrap_tasks: set[asyncio.Task[None]] = set()
         self._liveware_sample_supervisor: LivewareSampleSupervisor | None = None
         self._liveware_sample_tasks: set[asyncio.Task[None]] = set()
@@ -693,6 +697,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         await self._cancel_conversation_refresh_tasks()
         await self._cancel_profile_sync_tasks()
         await self._cancel_skill_update_tasks()
+        await self._cancel_friend_greeting_tasks()
         await self._stop_liveware_sample()
         await self._connection.stop()
         await self._group_message_coalescer.cancel()
@@ -956,6 +961,9 @@ class ClawChatAdapter(BasePlatformAdapter):
         * ``friend.added``, ``friend.removed``, ``friend.profile_updated``,
           ``conversation.*`` — lightweight awareness events; may emit one
           consolidated note to the owner when ``awareness_note`` is enabled.
+        * ``friend.added`` for a NON-owner counterparty additionally resolves
+          the new direct conversation and runs one synthetic greeting turn in
+          it when ``friend_greeting`` is enabled (see ``_dispatch_friend_greeting``).
 
         All other signal types are silently ignored (the connection layer already
         deduplicates and logs them).
@@ -1019,6 +1027,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             if self._clawchat_config.awareness_note and not self._pending_awareness_note:
                 self._pending_awareness_note = True
                 asyncio.ensure_future(self._emit_awareness_note())
+            if sig_type == "friend.added":
+                self._schedule_friend_greeting(payload)
 
     async def _emit_moment_comment_note(self, moment_id: str, replied: bool) -> None:
         """Emit one content-free owner note pointing the agent at get_moment.
@@ -1084,6 +1094,127 @@ class ClawChatAdapter(BasePlatformAdapter):
             await self._handle_inbound(inbound)
         except Exception:  # noqa: BLE001 — best-effort awareness note
             logger.debug("clawchat awareness note delivery failed", exc_info=True)
+
+    def _schedule_friend_greeting(self, payload: dict[str, Any]) -> None:
+        """Kick off the first-message greeting for a ``friend.added`` signal.
+
+        Cheap synchronous gates run here so nothing is spawned for the common
+        no-op cases; the REST lookup and the turn itself run on a tracked task
+        off the read loop.
+        """
+        if not self._clawchat_config.friend_greeting:
+            return
+        friend_user_id = str(payload.get("entity_id") or "").strip()
+        if not friend_user_id:
+            return
+        owner_user_id = self._owner_user_id()
+        if owner_user_id and friend_user_id == owner_user_id:
+            # The owner is greeted by the activation bootstrap; never twice.
+            return
+        # `event_id` is unique per event; `message_id` is
+        # `notify:friend.added:<userId>` and would collide on remove + re-add,
+        # so it is only the fallback key.
+        dedupe_key = str(payload.get("event_id") or payload.get("message_id") or "").strip()
+        if not dedupe_key:
+            logger.info(
+                "clawchat friend greeting skipped friend=%s reason=no_dedupe_key", friend_user_id
+            )
+            return
+        task = asyncio.ensure_future(
+            self._dispatch_friend_greeting(friend_user_id=friend_user_id, dedupe_key=dedupe_key)
+        )
+        self._friend_greeting_tasks.add(task)
+        task.add_done_callback(self._friend_greeting_task_done)
+
+    def _friend_greeting_task_done(self, task: asyncio.Task[None]) -> None:
+        self._friend_greeting_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:  # noqa: BLE001 — best-effort; never affect the connection
+            logger.warning("clawchat friend greeting task failed", exc_info=True)
+
+    async def _cancel_friend_greeting_tasks(self) -> None:
+        tasks = list(self._friend_greeting_tasks)
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            self._friend_greeting_tasks.discard(task)
+
+    async def _dispatch_friend_greeting(self, *, friend_user_id: str, dedupe_key: str) -> None:
+        """Greet a newly added non-owner friend once, in their direct chat.
+
+        The server creates the direct conversation inside the friend-accept
+        transaction but the signal only names the counterparty, so the
+        conversation id is resolved through ``POST /v1/conversations/direct``
+        first. Dedupe is persisted through the message ledger so a reconnect
+        replay of the same signal cannot greet twice. A failed lookup is logged
+        and dropped: there is no conversation to retry into.
+        """
+        # kind must be "message": the ledger's once-only unique index is partial
+        # on kind = 'message' (storage.MESSAGE_ID_DEDUP_SCHEMA); any other kind
+        # would insert freely and never dedupe. chat_id stays NULL so the row
+        # can never be pulled into a group transcript query.
+        claimed = self._claim_message_once(
+            kind="message",
+            direction="inbound",
+            event_type="friend.greeting",
+            trace_id=None,
+            chat_id=None,
+            message_id=f"friend.greeting:{dedupe_key}",
+            text=None,
+            raw={"friend_user_id": friend_user_id},
+        )
+        if claimed is not True:
+            # False = already greeted (replay); None = ledger undecided — fail
+            # closed rather than risk a duplicate unsolicited message.
+            logger.info(
+                "clawchat friend greeting skipped friend=%s key=%s claimed=%s",
+                friend_user_id,
+                dedupe_key,
+                claimed,
+            )
+            return
+        try:
+            result = await self._rest_with_auth_retry(
+                lambda client: client.get_direct_conversation(friend_user_id)
+            )
+        except Exception:  # noqa: BLE001 — best-effort
+            logger.warning(
+                "clawchat friend greeting conversation lookup failed friend=%s",
+                friend_user_id,
+                exc_info=True,
+            )
+            return
+        conversation = result.get("conversation") if isinstance(result, dict) else None
+        chat_id = str(conversation.get("id") or "").strip() if isinstance(conversation, dict) else ""
+        if not chat_id:
+            logger.warning(
+                "clawchat friend greeting skipped friend=%s reason=no_conversation_id", friend_user_id
+            )
+            return
+        logger.info(
+            "clawchat friend greeting dispatch friend=%s chat_id=%s", friend_user_id, chat_id
+        )
+        inbound = InboundMessage(
+            chat_id=chat_id,
+            chat_type="direct",
+            sender_id=friend_user_id,
+            sender_name="",
+            text=load_friend_greeting_prompt(),
+            raw_message={
+                "synthetic": True,
+                "friend_greeting": True,
+                "conversation_id": chat_id,
+                "friend_user_id": friend_user_id,
+            },
+        )
+        await self._handle_inbound(inbound)
 
     def _spawn_skill_update_check(self) -> None:
         task = asyncio.ensure_future(self._handle_skill_update_check())
