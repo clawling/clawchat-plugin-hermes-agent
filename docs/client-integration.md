@@ -221,7 +221,7 @@ milestone MAY add minimum-version rejection.
 | `history_sync` | off | Declares support for `history.transit` sibling-device history transfer (§11.4). **Actively enforced on uplink** — a client that sends `history.transit` without having advertised `history_sync` gets a `message.error` with `code: "capability_missing"` (§14.3). |
 | `e2ee` | off | Declares support for per-device ciphertext-fragment peeling on E2EE envelopes. A capable target receives the matching `ciphertext_fragments[device_id]`; a client that omits it sees only the sender-supplied placeholder payload. E2EE crypto detail is out of this document's scope. |
 | `reliable_delivery` | off | **v1 reliable delivery.** Client emits `message.cursor_ack` after durably persisting received frames and understands `history.truncated`. The server then advances the replay cursor only on the ack (not on socket-write) and stamps the storage `seq` on downlinks. Absent → legacy advance-on-write. See §11 (reconnect/replay) and §6's `seq`/`dseq` field rows. ⚠️ If you advertise it you **MUST** implement `message.cursor_ack`. |
-| `reliable_delivery_v2` | off | **v2 reliable delivery (dseq).** Successor to `reliable_delivery`: client acks the per-connection dense `dseq` via `message.sync_ack{dseq,epoch}`, verifies dseq density at the socket read layer, echoes the hello-ok `ack_epoch`, and quarantines un-persistable frames instead of stalling. Granted only when the server returns `hello-ok.ack_mode="dseq"`; otherwise fall back to v1/legacy. **MUST** be advertised **together with** `reliable_delivery`: v2 does not imply v1 on the server, and both `seq` stamping and the `history.truncated` prune boundary are gated on `reliable_delivery` alone — so a v2-only client gets no `seq` and, worse, **no truncation boundary at all** when the inbox is pruned past its cursor. See §11. ⚠️ If you advertise it you **MUST** implement `message.sync_ack`. |
+| `reliable_delivery_v2` | off | **v2 reliable delivery (dseq).** Successor to `reliable_delivery`: client acks the per-connection dense `dseq` via `message.sync_ack{dseq,epoch}`, verifies dseq density at the socket read layer, echoes the hello-ok `ack_epoch`, and quarantines un-persistable frames instead of stalling. Granted only when the server returns `hello-ok.ack_mode="dseq"`; otherwise fall back to v1/legacy. **MUST** be advertised **together with** `reliable_delivery`: v2 does not imply v1 on the server, `seq` stamping is gated on `reliable_delivery` alone (a v2-only client gets no `seq`), and a server that does not grant v2 falls back to v1 only if you advertised it — otherwise to legacy. `history.truncated` reaches any v1 **or** granted-v2 connection (§11.7). See §11. ⚠️ If you advertise it you **MUST** implement `message.sync_ack`. |
 
 Note that `e2ee` is gated by client-side policy (advertised only when E2EE is enabled), whereas `history_sync` is advertised **unconditionally** by current clients because both the E2EE and plaintext history-transfer paths share the same `history.transit` wire (§11.4).
 
@@ -586,7 +586,7 @@ C = client, S = server.
 | `message.cursor_ack` | C → S | no | no | **no** — v1 reliable-delivery cursor ack (§11.7); only meaningful if you advertised `reliable_delivery`. |
 | `message.sync_ack` | C → S | no | no | **no** — v2 reliable-delivery (dseq) ack (§11.7); replaces `message.cursor_ack`; only meaningful if the server granted `reliable_delivery_v2`. |
 | `sync.mark` | S → C | no | no | v2 skip-coverage advance frame carrying `dseq` (§11.7); record + ack, do not persist. |
-| `history.truncated` | S → C | no | no | reliable-delivery prune boundary (§11.7); render "earlier messages unavailable". |
+| `history.truncated` | S → C | no | no | reliable-delivery (v1 **and** v2) history boundary at replay start (§11.7), `payload {oldest_seq, reason}`; render "earlier messages unavailable". **Never carries `dseq`; never ack it.** Unknown/absent `reason` = `"pruned"`. |
 | `device.cursor.reset` | C → S | no | no | **no** — server rewinds the cursor and closes the socket; the close is the signal (§11.6) |
 | `offline.batch` | S → C | no | no | **deprecated / legacy** — superseded by device replay + `replay.done` (§11.5); see §11.3 |
 | `offline.ack` | C → S | no | no | **deprecated / legacy** — superseded by device replay + `replay.done` (§11.5); see §11.3 |
@@ -1898,9 +1898,13 @@ new live ones. Replay is keyed by **`(user_id, device_id)`**:
 - The server marks the end of replay with an explicit `replay.done`
   control frame (§11.5) — it always precedes the first live frame, and
   fires even when the backlog was empty.
-- **Connect ordering.** On a connection that advertised `multi_device`, the frames
-  arrive as: optional `history.truncated` → the `message.read` watermark snapshot
-  (§9.7 — up to 500 chats, ahead of the backlog) → the inbox rows → `replay.done`.
+- **Connect ordering.** After `hello-ok`, the frames arrive as: on a v1 or
+  granted-v2 connection, zero, one or two `history.truncated` frames (at most one
+  per `reason`, ascending `oldest_seq`; never `dseq`-bearing, §11.7) → on a
+  connection that advertised `multi_device`, the `message.read` watermark
+  snapshot (§9.7 — up to 500 chats, ahead of the backlog) → the inbox rows →
+  `replay.done`. On v2 the first `dseq` is therefore on the first inbox row, or
+  on `replay.done` when there is no backlog.
 - **This plugin's replay dedup fails closed.** Live delivery and replay can
   both carry the same `message.send` / `message.reply`, so every inbound one is
   claimed by `payload.message_id` in the `clawchat_messages` ledger
@@ -1915,17 +1919,34 @@ new live ones. Replay is keyed by **`(user_id, device_id)`**:
 
 ### 11.1 New devices
 
-The first time a `(user_id, device_id)` pair connects, the server
-initialises its cursor to **seq 0** — meaning a fresh device backfills the
-full retained inbox (server retention window) on first connect, recovering
-all chat history the server has kept.
+The first time a `(user_id, device_id)` pair connects, the server creates its
+replay cursor. Where it starts is a deployment setting:
+
+- **At 0 (default).** The device replays the whole **retained** inbox. The inbox
+  is a short delivery buffer (rows are pruned after a retention window, or
+  earlier once every active device has acked them), so this is recent undelivered
+  traffic, not the user's chat history.
+- **At the user's live high-water mark** (when the deployment enables it). The
+  cursor starts where the user's other active devices have reached, so the new
+  device does not re-receive what they already got. If older rows are still
+  retained, a v1/v2 connection gets
+  `history.truncated{reason:"cursor_started_above_zero"}` at replay start
+  (§11.7), on every connection until the device acks something past that start;
+  a legacy connection is told nothing.
+
+A device that returns after its cursor was garbage-collected (it stayed away past
+the server's cursor retention) is a **new device** under these rules.
+
+The inbox is **not** a history store. To give a new device the conversation
+history, use sibling-device transfer — `history.transit` (§11.4).
 
 ### 11.2 `device_id` choice
 
 - Pick a stable, per-device identifier and reuse it across reconnects.
   Replay state will not be lost.
-- Choosing a fresh `device_id` on every connection effectively resets the
-  cursor → you will only see new messages and never get backlog.
+- Choosing a fresh `device_id` on every connection makes every connection a new
+  device (§11.1): depending on the deployment you either re-replay the retained
+  inbox each time or skip straight to the live high-water mark.
 - Omitting `device_id` makes the server use `user_id` — fine for
   single-device deployments, but **all** of the user's connections then
   share one cursor and will fight each other.
@@ -2146,9 +2167,27 @@ are two generations; advertise **both** so an older server cleanly falls back.
     "emitted_at": 1776162710000, "payload": { "seq": 42 } }
   ```
 
-- `history.truncated{oldest_seq}` arrives at replay start if the inbox was pruned
-  past your cursor; render an "earlier messages unavailable" boundary and accept
-  that the server skips the pruned hole.
+**Both generations — `history.truncated{oldest_seq, reason}`.**
+
+Sent to v1 **and** granted-v2 connections (never legacy) at replay start, after
+`hello-ok` and before the read-watermark snapshot, any `dseq`-bearing frame and
+`replay.done`. Render an "earlier messages unavailable" boundary.
+
+- `reason: "pruned"` — the inbox was pruned past your cursor; this replay skips
+  the pruned hole, but the server does **not** move your stored cursor — your next
+  ack does. `reason: "cursor_started_above_zero"` — your cursor started above 0
+  (§11.1) and has not advanced since, while older rows are still retained;
+  nothing older will be replayed to this device.
+- **Both repeat on every connection until your cursor moves** (you ack a later
+  frame — on v2, acking `replay.done` is enough). De-duplicate by `oldest_seq`
+  rather than rendering a new boundary on each reconnect.
+- Treat an **absent or unknown** `reason` as `"pruned"`.
+- At most one frame per reason; if you get two, they are in ascending
+  `oldest_seq` and the last one is the effective boundary.
+- `oldest_seq` is comparable to `seq` on v1 only. On v2 it is an opaque boundary
+  token — **never** compare it with `dseq`.
+- **Never ack it.** It carries no `seq` and no `dseq` and is not part of the v2
+  dense sequence; do not count it in your density check.
 
 **v2 — `reliable_delivery_v2` (per-connection `dseq`, dense + gap-free + epoch-bound).**
 
@@ -2846,8 +2885,11 @@ Use this list as a final pass before integration testing.
       200ms/replay.done/disconnect/30s ack rhythm, upsert-by-`message_id`
       persistence, and poison-frame quarantine.
 - [ ] Advertise **both** `reliable_delivery` and `reliable_delivery_v2`. v2 alone
-      loses `seq` **and** `history.truncated`, so you never learn your backlog was
-      pruned (§3.3).
+      loses `seq`, and falls back to legacy (not v1) on a server that does not
+      grant v2 (§3.3).
+- [ ] Handle `history.truncated{oldest_seq, reason}` on v1 **and** v2: render the
+      boundary, treat an absent/unknown `reason` as `"pruned"`, and **never ack
+      it** — it carries no `dseq` (§11.7).
 - [ ] On v2, ack **every** frame that carries a `dseq` — including an event whose
       name you do not recognise. Dropping one wedges the connection in a
       kick/replay loop (§11.7).

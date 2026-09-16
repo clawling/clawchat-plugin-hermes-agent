@@ -1476,6 +1476,37 @@ class ClawChatConnection:
                 )
             )
             return
+        if self._state == ConnectionState.READY and ftype in (None, "event") and frame.get("event") == "history.truncated":
+            # §11.7 replay-start boundary frame: part of the retained history
+            # will not be replayed to this device. This plugin advertises no
+            # reliable-delivery flag, so the server does not send it today; if
+            # one arrives it is logged explicitly. It carries no seq/dseq, so it
+            # is never acked, and it is never dispatched to the agent. An absent
+            # or unrecognised `reason` means "pruned"; `oldest_seq` is opaque.
+            payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+            raw_reason = payload.get("reason")
+            known_reason = raw_reason in ("pruned", "cursor_started_above_zero")
+            oldest_seq = payload.get("oldest_seq")
+            fields: list[tuple[str, Any]] = [
+                ("event_name", frame.get("event")),
+                ("trace_id", frame.get("trace_id") or frame.get("id")),
+                ("oldest_seq", oldest_seq if isinstance(oldest_seq, int) and not isinstance(oldest_seq, bool) else None),
+                ("reason", raw_reason if known_reason else "pruned"),
+            ]
+            if not known_reason and isinstance(raw_reason, str) and raw_reason:
+                fields.append(("raw_reason", raw_reason))
+            logger.info(
+                format_ws_log(
+                    event="inbound_control",
+                    account_id=self._account_id,
+                    attempt=self._attempt,
+                    reconnect_count=self._reconnect_count,
+                    state=ConnectionState.READY.value,
+                    action="history_truncated",
+                    fields=fields,
+                )
+            )
+            return
         if self._state == ConnectionState.READY and ftype in (None, "event") and frame.get("event") in {"presence.snapshot", "presence.update"}:
             logger.info(
                 format_ws_log(
