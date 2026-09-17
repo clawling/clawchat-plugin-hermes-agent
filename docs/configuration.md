@@ -107,9 +107,8 @@ session was minted with. Only a brand-new activation derives the new id.
 `CLAWCHAT_DEVICE_ID` is read profile-first (`$HERMES_HOME/.env` before the
 process env), because a named profile's gateway inherits the default profile's
 exported value. The id itself is now **agent**-scoped — one per profile — not
-host-scoped: see [`./activation.md`](./activation.md) (One profile, one agent)
-for why a second agent on the same host must not be mistaken for the first,
-and for how an already-paired profile keeps the id it connected with.
+host-scoped, so it matches the one-identity-per-profile invariant: see
+[`./activation.md`](./activation.md) (One profile, one agent).
 
 The server-assigned `resolved_device_id` from the `hello-ok` handshake is
 recorded in plugin SQLite (`connections.resolved_device_id`) for diagnostics.

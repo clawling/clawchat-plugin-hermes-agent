@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from clawchat_gateway.api_client import ClawChatApiClient, ClawChatApiError
+from clawchat_gateway.device_id import get_device_id, resolve_paired_device_id
 from clawchat_gateway.gate_outcome import map_gate_outcome
 from clawchat_gateway.liveware_cli import resolve_liveware_path
 from clawchat_gateway.clawchat_memory import (
@@ -159,6 +160,25 @@ def _unknown_error(exc: BaseException) -> dict[str, Any]:
     return {"error": "unknown", "message": str(exc)}
 
 
+def _resolve_tool_device_id(token: str) -> str:
+    """The device id this already-paired agent connects with.
+
+    Never the new per-profile ``get_device_id()`` id for an existing agent —
+    that would present these tool calls as a different device than the one
+    the backend's per-device cursor and the redeem safety gate know about.
+    Same row → token ``did`` → legacy-host-id resolution as
+    ``connection.py::_resolve_device_id`` / ``activate.py``'s repair path.
+    """
+    try:
+        credentials = get_clawchat_store().get_activation_credentials(
+            platform="hermes", account_id="default"
+        )
+    except Exception:  # noqa: BLE001
+        credentials = None
+    stored = getattr(credentials, "device_id", None) if credentials else None
+    return resolve_paired_device_id(stored=stored, token=token) or get_device_id()
+
+
 def _build_client() -> tuple[ClawChatApiClient | None, dict[str, Any] | None]:
     try:
         config = load_profile_config()
@@ -169,6 +189,7 @@ def _build_client() -> tuple[ClawChatApiClient | None, dict[str, Any] | None]:
             base_url=config.base_url,
             token=config.token,
             user_id=config.user_id,
+            device_id=_resolve_tool_device_id(config.token),
         ),
         None,
     )

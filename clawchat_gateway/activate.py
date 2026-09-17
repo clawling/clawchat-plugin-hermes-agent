@@ -31,7 +31,7 @@ from clawchat_gateway.api_client import (
     agents_connect_with_retry,
 )
 from clawchat_gateway.config import _get_env
-from clawchat_gateway.device_id import get_device_id
+from clawchat_gateway.device_id import get_device_id, resolve_paired_device_id
 from clawchat_gateway.onboarding import RECONNECT_GUIDE_URL, onboarding_context
 from clawchat_gateway.output_visibility import (
     normalize_output_visibility,
@@ -298,6 +298,37 @@ def _identity_is_this_profiles_own(user_id: str) -> bool:
         return True
     stored = str(getattr(credentials, "user_id", "") or "").strip()
     return bool(stored) and stored == user_id
+
+
+def _resolve_activation_device_id(*, existing_user_id: str, new_account: bool) -> str:
+    """Device id sent as ``x-device-id`` on activation's HTTP calls, and later
+    persisted onto the activations row for that connect.
+
+    A fresh pairing — no identity to replay at all, or an explicit
+    ``--new-account`` — gets the new agent-scoped ``get_device_id()`` id: this
+    IS the "brand-new activation" rule 5 talks about. Reusing an EXISTING
+    identity (``existing_user_id`` truthy: covers ``--repair``, the
+    server-confirmed bound-agent auto-repair, and even the about-to-be-refused
+    ``ExistingActivationError`` / ``UnprovenRepairError`` paths, since all of
+    them replay that user_id in the very ``/connect/check`` call this device id
+    heads) must keep presenting whatever id that identity paired with — via
+    the same row → token ``did`` → legacy-host-id resolution
+    ``connection.py::_resolve_device_id`` uses — or the backend's redeem
+    safety gate (``paired_device_id``, keyed on device id alone) sees a
+    different device, and a successful repair anyway orphans the backend's
+    per-device delivery cursor for the id it used to present.
+    """
+    if not existing_user_id or new_account:
+        return get_device_id()
+    try:
+        credentials = get_clawchat_store().get_activation_credentials(
+            platform="hermes", account_id="default"
+        )
+    except Exception:  # noqa: BLE001
+        credentials = None
+    stored = getattr(credentials, "device_id", None) if credentials else None
+    token = _get_env("CLAWCHAT_TOKEN")
+    return resolve_paired_device_id(stored=stored, token=token) or get_device_id()
 
 
 def _derive_websocket_url(base_url: str) -> str:
@@ -615,14 +646,18 @@ async def activate(
     new_account: bool = False,
     repair: bool = False,
 ) -> dict[str, Any]:
+    config_path, config = _load_config()
+    existing_user_id = _read_existing_user_id(config, base_url=base_url)
+    device_id = _resolve_activation_device_id(
+        existing_user_id=existing_user_id, new_account=new_account
+    )
     client = ClawChatApiClient(
         base_url=base_url.rstrip("/"),
         token="",
         user_id="",
+        device_id=device_id,
         timeout=ACTIVATION_TIMEOUT_SECONDS,
     )
-    config_path, config = _load_config()
-    existing_user_id = _read_existing_user_id(config, base_url=base_url)
     context = onboarding_context()
     try:
         raw = await client.agents_connect_check(
@@ -721,7 +756,10 @@ async def activate(
             # connect (this is the x-device-id baked into the session), so the
             # later /v1/auth/refresh sends it verbatim and avoids a 10003
             # device-mismatch on pod reschedule when CLAWCHAT_DEVICE_ID is pinned.
-            device_id=get_device_id(),
+            # `device_id` is the same value the client above sent as
+            # `x-device-id` — the resolved legacy/stored id on a repair, the new
+            # per-profile id only for a genuinely fresh pairing (rule 5).
+            device_id=device_id,
         )
     except Exception:  # noqa: BLE001
         logger.warning("clawchat activation database persistence failed")

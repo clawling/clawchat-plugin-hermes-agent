@@ -102,6 +102,29 @@ def legacy_host_device_id() -> str:
     return _mac_platform_uuid() or _machine_id() or _host_fingerprint()
 
 
+def resolve_paired_device_id(*, stored: str | None, token: str) -> str | None:
+    """Row → token ``did`` claim → legacy host id (only when a token exists).
+
+    Shared by ``connection.py::_resolve_device_id`` (a live connection's
+    connect/refresh id) and ``activate.py``'s ``--repair`` / server-confirmed
+    bound-agent auto-repair path: **replaying an EXISTING identity must never
+    assign the new per-profile id** — only a truly fresh pairing (no stored
+    row, no token at all) does. Returns ``None`` in exactly that "nothing to
+    resolve" case; the caller then treats it as unpaired and calls
+    ``get_device_id()``.
+    """
+    if stored:
+        return stored
+    from clawchat_gateway.config import _jwt_claim
+
+    token_did = _jwt_claim(token, "did") if token else ""
+    if token_did:
+        return token_did
+    if (token or "").strip():
+        return legacy_host_device_id()
+    return None
+
+
 @functools.lru_cache(maxsize=1)
 def get_device_id() -> str:
     """Return a stable ClawChat device id for this Hermes agent (profile).
