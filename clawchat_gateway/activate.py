@@ -144,6 +144,15 @@ def _clawchat_extra(config: dict[str, Any]) -> dict[str, Any]:
     return extra if isinstance(extra, dict) else {}
 
 
+# Parallel to the OpenClaw plugin's boundCodeNewIdentityMessage(). No flags,
+# no minutes, no URL.
+BOUND_CODE_NEW_IDENTITY_REFUSAL = (
+    "this is a reconnect code bound to an existing agent, so it cannot create a new agent. "
+    "Ask your owner for a normal connect code from the ClawChat app, or use this reconnect "
+    "prompt on the agent it belongs to."
+)
+
+
 @dataclass(frozen=True)
 class PrecheckOutcome:
     pairable: bool
@@ -691,6 +700,11 @@ async def activate(
     precheck = evaluate_precheck(raw)
     if not precheck.pairable:
         raise ClawChatApiError("validation", precheck.refusal)
+    # --new-account sends no user_id, and /connect without one on a bound code
+    # silently RESTORES the bound agent and spends the code. A reconnect code
+    # can never mint an agent, so refuse before spending it.
+    if new_account and precheck.bound_agent:
+        raise ClawChatApiError("validation", BOUND_CODE_NEW_IDENTITY_REFUSAL)
     # A bound code is the owner's reconnect prompt: it can only restore the
     # incumbent identity, so it settles the new-vs-restore question and needs
     # no local provenance proof — the server enforces the binding.

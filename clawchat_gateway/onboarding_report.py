@@ -46,8 +46,9 @@ def read_onboarding_report(home_dir: Path | None = None) -> dict[str, Any] | Non
         return None
     out: dict[str, Any] = {}
     rid = raw.get("wiki_report_id")
-    # fullmatch, not match: `$` also matches before a trailing newline, which
-    # the TS side and the backend's Go regexp both reject.
+    # fullmatch, not match: Python's `$` also matches before a trailing
+    # newline. Parity with the TS reader, which drops such an id; the field is
+    # optional, so dropping it only omits it from the report.
     if isinstance(rid, str) and _REPORT_ID_RE.fullmatch(rid):
         out["wiki_report_id"] = rid
     tier = _tier(raw.get("capability_tier"))

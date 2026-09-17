@@ -236,7 +236,9 @@ backend stores it when present and ignores its absence).
 Since 0.14.0-86, `activate()` runs that pre-check itself — with the
 stored `user_id` whenever `/connect` will replay it, so `user_id_status` is
 evaluated; never under `--new-account`, which drops the id and so must not be
-refused over it — and attaches
+refused over it (and which is refused outright on a `bound_agent: true` code:
+without a `user_id` the server would restore the bound agent and spend the code,
+never mint one) — and attaches
 `agent_kind` / `os` / `lane` / `wiki_version` / `matched_install`
 (`clawchat_gateway/onboarding.py`) to both calls. A code issued from the agent's
 own reconnect card in the ClawChat app answers `bound_agent: true`; it can only
