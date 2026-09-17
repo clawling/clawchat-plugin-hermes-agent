@@ -219,6 +219,14 @@ only exercised against older deployments.
 which plugin build paired at connect time (optional, backward-compatible — the
 backend stores it when present and ignores its absence).
 
+Since 0.14.0-86, `activate()` runs that pre-check itself — with the
+stored `user_id`, so `user_id_status` is evaluated — and attaches
+`agent_kind` / `os` / `lane` / `wiki_version` / `matched_install`
+(`clawchat_gateway/onboarding.py`) to both calls. A code issued from the agent's
+own reconnect card in the ClawChat app answers `bound_agent: true`; it can only
+restore this identity, so activation treats it as `--repair` without the flag
+and without the local-provenance check (the server enforces the binding).
+
 The Hermes activation path currently requires the response to include
 `access_token`, `agent.user_id`, `agent.owner_id`, and `conversation.id`.
 `agent.id` is optional and is persisted when returned.

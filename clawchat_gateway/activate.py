@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse, urlunparse
@@ -31,6 +32,7 @@ from clawchat_gateway.api_client import (
 )
 from clawchat_gateway.config import _get_env
 from clawchat_gateway.device_id import get_device_id
+from clawchat_gateway.onboarding import RECONNECT_GUIDE_URL, onboarding_context
 from clawchat_gateway.output_visibility import (
     normalize_output_visibility,
     runtime_status_messages_for_visibility,
@@ -140,6 +142,49 @@ def _clawchat_extra(config: dict[str, Any]) -> dict[str, Any]:
         return {}
     extra = clawchat.get("extra")
     return extra if isinstance(extra, dict) else {}
+
+
+@dataclass(frozen=True)
+class PrecheckOutcome:
+    pairable: bool
+    bound_agent: bool
+    refusal: str
+
+
+def evaluate_precheck(result: dict[str, Any] | None) -> PrecheckOutcome:
+    """Turn a ``/connect/check`` response into a decision.
+
+    ``None`` (endpoint unreachable, older backend, rate limited) means "no
+    pre-check": proceed exactly as before. Only an explicit ``pairable: false``
+    refuses, and the refusal never names a flag, a minute count, or a second
+    URL — the owner's ClawChat app and the reconnect page are the only exits.
+    """
+    if not result:
+        return PrecheckOutcome(pairable=True, bound_agent=False, refusal="")
+    bound = result.get("bound_agent") is True
+    if result.get("pairable") is True:
+        return PrecheckOutcome(pairable=True, bound_agent=bound, refusal="")
+    status = str(result.get("status") or "unknown")
+    if result.get("user_id_status") == "owner_mismatch":
+        refusal = (
+            "this connect code belongs to a different ClawChat account than the identity "
+            "stored in this profile. Ask the owner of THIS agent for a code, or activate as "
+            "a brand-new agent with --new-account."
+        )
+    elif status == "paired":
+        refusal = (
+            "this connect code was already redeemed. If this agent lost its connection, ask "
+            "your owner to send you the reconnect prompt from the ClawChat app and follow "
+            f"{RECONNECT_GUIDE_URL}; otherwise ask for a fresh code."
+        )
+    elif status in ("expired", "invalid"):
+        refusal = f"this connect code is {status}. Ask your owner for a fresh code from the ClawChat app."
+    else:
+        refusal = (
+            f"this connect code is not pairable (status={status}). "
+            "Ask your owner for a fresh code from the ClawChat app."
+        )
+    return PrecheckOutcome(pairable=False, bound_agent=bound, refusal=refusal)
 
 
 class ExistingActivationError(RuntimeError):
@@ -578,6 +623,22 @@ async def activate(
     )
     config_path, config = _load_config()
     existing_user_id = _read_existing_user_id(config, base_url=base_url)
+    context = onboarding_context()
+    try:
+        raw = await client.agents_connect_check(
+            code=code, user_id=existing_user_id or None, context=context
+        )
+    except Exception as exc:  # noqa: BLE001 — pre-check is telemetry + courtesy, never a gate
+        logger.info("clawchat activation pre-check unavailable (%s); continuing", type(exc).__name__)
+        raw = None
+    precheck = evaluate_precheck(raw)
+    if not precheck.pairable:
+        raise ClawChatApiError("validation", precheck.refusal)
+    # A bound code is the owner's reconnect prompt: it can only restore the
+    # incumbent identity, so it settles the new-vs-restore question and needs
+    # no local provenance proof — the server enforces the binding.
+    if precheck.bound_agent and existing_user_id:
+        repair = True
     # Deliberately NOT gated on "does a live token exist". A config written
     # before `extra.profile` existed is indistinguishable from a clone, and a
     # clone's inherited token is routinely stale — so "identity present, token
@@ -594,7 +655,12 @@ async def activate(
     # --repair keeps the replay, so it is only safe on an identity this profile
     # can prove it paired. An inherited one re-pairs the SOURCE agent and
     # leaves this profile with none — the failure the flag looks most like.
-    if existing_user_id and repair and not _identity_is_this_profiles_own(existing_user_id):
+    if (
+        existing_user_id
+        and repair
+        and not precheck.bound_agent
+        and not _identity_is_this_profiles_own(existing_user_id)
+    ):
         extra = _clawchat_extra(config)
         agent_id = extra.get("agent_id")
         raise UnprovenRepairError(
@@ -609,7 +675,7 @@ async def activate(
         existing_user_id = ""
     try:
         result = await agents_connect_with_retry(
-            client, code=code, user_id=existing_user_id or None
+            client, code=code, user_id=existing_user_id or None, context=context
         )
     except ClawChatApiError as exc:
         # AGENT_NOT_FOUND means the replayed user_id has no agent row on this
@@ -627,7 +693,7 @@ async def activate(
             existing_user_id,
             base_url,
         )
-        result = await agents_connect_with_retry(client, code=code, user_id=None)
+        result = await agents_connect_with_retry(client, code=code, user_id=None, context=context)
     agent = result["agent"]
     agent_id = str(agent.get("id") or "")
     user_id = str(agent["user_id"])

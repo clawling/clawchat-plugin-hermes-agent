@@ -505,11 +505,47 @@ class ClawChatApiClient:
             extra_headers={"content-type": "application/json"},
         )
 
+    async def agents_connect_check(
+        self,
+        *,
+        code: str,
+        user_id: str | None = None,
+        context: dict[str, str] | None = None,
+    ) -> dict:
+        """``POST /v1/agents/connect/check`` — non-consuming pairability check.
+
+        Same ``X-Device-Id`` as ``agents_connect`` so the funnel row is keyed
+        identically. ``context`` carries the optional onboarding telemetry
+        (``clawchat_gateway.onboarding.onboarding_context``); older backends
+        ignore unknown keys. Response: ``{pairable, status, expires_at?,
+        user_id_status?, bound_agent?}``.
+        """
+        if not code.strip():
+            raise ClawChatApiError("validation", "connect code is required")
+        payload: dict[str, str] = {
+            "code": code.strip(),
+            "platform": AGENTS_CONNECT_PLATFORM,
+            "plugin_version": __version__,
+        }
+        if user_id and user_id.strip():
+            payload["user_id"] = user_id.strip()
+        for key, value in (context or {}).items():
+            if value:
+                payload[key] = value
+        body = json.dumps(payload).encode("utf-8")
+        return await self._call_json(
+            "POST",
+            "/v1/agents/connect/check",
+            body=body,
+            extra_headers={"content-type": "application/json"},
+        )
+
     async def agents_connect(
         self,
         *,
         code: str,
         user_id: str | None = None,
+        context: dict[str, str] | None = None,
     ) -> dict:
         if not code.strip():
             raise ClawChatApiError("validation", "invite code is required")
@@ -521,6 +557,9 @@ class ClawChatApiClient:
         }
         if user_id and user_id.strip():
             payload["user_id"] = user_id.strip()
+        for key, value in (context or {}).items():
+            if value:
+                payload[key] = value
         body = json.dumps(payload).encode("utf-8")
         return await self._call_json(
             "POST",
@@ -1005,6 +1044,7 @@ async def agents_connect_with_retry(
     *,
     code: str,
     user_id: str | None = None,
+    context: dict[str, str] | None = None,
     retries: int = ACTIVATION_CONNECT_RETRIES,
     backoff: tuple[float, ...] = ACTIVATION_RETRY_BACKOFF_SECONDS,
     attempt_ceiling: float | None = ACTIVATION_ATTEMPT_CEILING_SECONDS,
@@ -1017,9 +1057,10 @@ async def agents_connect_with_retry(
     resolution, which urlopen's timeout does not); a ceiling hit is ambiguous
     and therefore not retried.
     """
-    connect_kwargs: dict[str, str] = {"code": code}
+    connect_kwargs: dict[str, object] = {"code": code}
     if user_id and user_id.strip():
         connect_kwargs["user_id"] = user_id
+    connect_kwargs["context"] = context
     attempt = 0
     while True:
         try:

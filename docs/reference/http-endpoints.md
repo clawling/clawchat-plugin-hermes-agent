@@ -33,6 +33,7 @@ and an `x-device-id` header. The WebSocket uses `websockets.asyncio.client`.
 | Method | Path | Method (Python) |
 |--------|------|-----------------|
 | POST | `/v1/agents/connect` | `agents_connect` |
+| POST | `/v1/agents/connect/check` | `agents_connect_check` (no auth; non-consuming pairability pre-check run by `activate()` before `connect`) |
 
 ### Auth
 | Method | Path | Method (Python) |
@@ -98,7 +99,7 @@ and an `x-device-id` header. The WebSocket uses `websockets.asyncio.client`.
 
 ## Totals
 
-1 WebSocket endpoint + 32 fixed REST endpoints (distinct verb + path) + 2
+1 WebSocket endpoint + 33 fixed REST endpoints (distinct verb + path) + 2
 dynamic media-download call sites (arbitrary remote URLs carried in message
 payloads). The two `/v1/agents/.../plugin-report` paths count as two endpoints
 (`report_plugin` picks one based on whether the caller is authenticated); the
