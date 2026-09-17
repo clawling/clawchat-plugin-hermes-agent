@@ -93,6 +93,7 @@ from clawchat_gateway.mention_message import (
     normalize_mention_targets,
     validate_mention_payload,
 )
+from clawchat_gateway.onboarding_report import read_onboarding_report
 from clawchat_gateway.profile import load_profile_config
 from clawchat_gateway.profile_sync import relation_for_sender
 from clawchat_gateway.protocol import (
@@ -684,6 +685,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 runtime_name="python",
                 runtime_version=_python_version(),
                 authenticated=authenticated,
+                onboarding=read_onboarding_report(),
             )
         except Exception as exc:  # noqa: BLE001 — best-effort; must never break startup
             logger.debug(

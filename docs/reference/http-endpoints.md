@@ -61,6 +61,11 @@ and an `x-device-id` header. The WebSocket uses `websockets.asyncio.client`.
 | POST | `/v1/agents/me/plugin-report` | `report_plugin` (authenticated) |
 | POST | `/v1/agents/plugin-report` | `report_plugin` (unauthenticated fallback) |
 
+Both plugin-report calls accept optional fields, read from
+`~/clawchat/onboarding.json` written by the agent: `wiki_report_id`,
+`capability_tier`, `capability_ceiling`, `capabilities`
+`{headless,mcp,permission_hook,session_line}`.
+
 ### Friendships
 | Method | Path | Method (Python) |
 |--------|------|-----------------|

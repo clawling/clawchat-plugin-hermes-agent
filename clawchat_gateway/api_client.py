@@ -11,6 +11,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
@@ -111,9 +112,15 @@ def build_plugin_report_payload(
     agent_version: str,
     runtime_name: str,
     runtime_version: str,
+    onboarding: dict[str, Any] | None = None,
 ) -> dict:
-    """Pure builder for the plugin-report wire body (snake_case keys)."""
-    return {
+    """Pure builder for the plugin-report wire body (snake_case keys).
+
+    ``onboarding`` carries the already-validated agent-written facts from
+    ``~/clawchat/onboarding.json`` (see ``clawchat_gateway.onboarding_report``);
+    only the four contract keys are ever merged in.
+    """
+    payload = {
         "device_id": device_id,
         "platform": platform,
         "plugin_version": plugin_version,
@@ -121,6 +128,10 @@ def build_plugin_report_payload(
         "runtime_name": runtime_name,
         "runtime_version": runtime_version,
     }
+    for key in ("wiki_report_id", "capability_tier", "capability_ceiling", "capabilities"):
+        if onboarding and onboarding.get(key) is not None:
+            payload[key] = onboarding[key]
+    return payload
 
 
 @dataclass(frozen=True)
@@ -578,6 +589,7 @@ class ClawChatApiClient:
         runtime_name: str,
         runtime_version: str,
         authenticated: bool = False,
+        onboarding: dict[str, Any] | None = None,
     ) -> dict:
         payload = build_plugin_report_payload(
             device_id=device_id,
@@ -586,6 +598,7 @@ class ClawChatApiClient:
             agent_version=agent_version,
             runtime_name=runtime_name,
             runtime_version=runtime_version,
+            onboarding=onboarding,
         )
         body = json.dumps(payload).encode("utf-8")
         path = "/v1/agents/me/plugin-report" if authenticated else "/v1/agents/plugin-report"
