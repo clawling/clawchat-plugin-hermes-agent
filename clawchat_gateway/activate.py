@@ -728,6 +728,20 @@ async def activate(
             existing_user_id,
             base_url,
         )
+        # The replayed identity doesn't exist on this backend: this IS a
+        # brand-new agent (rule 5), so it must get its own per-profile
+        # get_device_id() id — never the stale identity's resolved
+        # legacy/stored id the client above was built with, which could
+        # otherwise collide with another agent on this host (e.g. the default
+        # profile's agent, if that one paired under the legacy host id).
+        device_id = get_device_id()
+        client = ClawChatApiClient(
+            base_url=base_url.rstrip("/"),
+            token="",
+            user_id="",
+            device_id=device_id,
+            timeout=ACTIVATION_TIMEOUT_SECONDS,
+        )
         result = await agents_connect_with_retry(client, code=code, user_id=None, context=context)
     agent = result["agent"]
     agent_id = str(agent.get("id") or "")
