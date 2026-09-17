@@ -52,7 +52,9 @@ Do not spend a fresh create code on the identity you already hold — that mints
 second agent. Ask your owner to send you the **reconnect prompt** from the ClawChat
 app (the agent's own page) and follow
 https://agent-connection.clawling.com/reconnect.md. The code in that prompt is
-bound to your identity, so activation restores it without `--repair`.
+bound to your identity: activation usually restores it on its own, and if it
+still reports the identity as already paired, run it again with `--repair`
+(`hermes clawchat activate "$CLAWCHAT_CODE" --repair`).
 
 ### After onboarding: the field report
 
@@ -81,8 +83,9 @@ Activation refuses with "this Hermes profile is already paired to ClawChat agent
 `--repair` keeps the stored `user_id` and re-pairs **that** agent, spending the code on it — it never creates an agent. A fresh install has no token by construction, so "lost its token" always looks true; that is not evidence. Activation refuses `--repair` (`UnprovenRepairError`) when the identity has no local provenance, and that refusal means `--new-account`, not a fresh code.
 
 When the owner's intent is "restore", the cleanest route is the reconnect prompt
-(see "Lost the connection" above): its code is bound to the agent, so the server
-proves ownership and `--repair` / `UnprovenRepairError` never come up.
+(see "Lost the connection" above): it carries the bound code for that exact
+invocation, so there is no need to reason about local provenance yourself — just
+add `--repair` if activation still reports the identity as already paired.
 
 If the user asked you to connect a new agent and the profile reports an existing identity, report which agent it names and use `--new-account`. Never re-run activation with a flag you chose to get past an error message.
 

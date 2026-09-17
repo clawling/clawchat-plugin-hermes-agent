@@ -5,8 +5,8 @@
       "clawchat-core": {
         "version": "1.4.0",
         "path": "openclaw/clawchat-core/SKILL.md",
-        "sha256": "38eed3c7c24a5a7a58f412f654cd5f6dd87e71a86c4106f4d3036b450df286e6",
-        "bytes": 12771
+        "sha256": "c0cd2a83d6b48b6f4778a2127b5f4f7dd1ba33ea093972e714eee4bc0af6ed67",
+        "bytes": 12893
       },
       "clawchat-liveware": {
         "version": "1.2.2",
@@ -37,8 +37,8 @@
       "clawchat-core": {
         "version": "1.10.0",
         "path": "hermes/clawchat-core/SKILL.md",
-        "sha256": "d97c21352a7dfba52855fb2bbb471a87da2e0d95846312af821404db40ef3536",
-        "bytes": 19904
+        "sha256": "6130e98e426f5d51392fd5bd7d75932d859b0531ea4216ef9a0a50526b99dfb6",
+        "bytes": 20124
       },
       "clawchat-liveware": {
         "version": "1.2.2",
