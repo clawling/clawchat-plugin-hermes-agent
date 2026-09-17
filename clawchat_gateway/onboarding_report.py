@@ -19,12 +19,26 @@ _CAP_KEYS = ("headless", "mcp", "permission_hook", "session_line")
 
 
 def _tier(value: Any) -> int | None:
-    return value if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 4 else None
+    # Mirrors the TS side's `Number.isInteger`, which has no separate float
+    # type: a JSON `4.0` must validate the same as `4` on both plugins. Bool
+    # is excluded first since `isinstance(True, int)` is otherwise True.
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if 1 <= value <= 4 else None
+    if isinstance(value, float) and value.is_integer():
+        as_int = int(value)
+        return as_int if 1 <= as_int <= 4 else None
+    return None
 
 
 def read_onboarding_report(home_dir: Path | None = None) -> dict[str, Any] | None:
-    base = home_dir if home_dir is not None else Path.home()
+    # Never throws: an unresolvable home directory, an absent/unreadable
+    # file, or malformed JSON all fall through to `None`, same as a file with
+    # no valid fields — this must be safe to call unconditionally from a
+    # best-effort report path.
     try:
+        base = home_dir if home_dir is not None else Path.home()
         raw = json.loads((base / "clawchat" / "onboarding.json").read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001 — absent or unreadable == nothing to relay
         return None
