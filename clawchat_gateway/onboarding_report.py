@@ -46,12 +46,19 @@ def read_onboarding_report(home_dir: Path | None = None) -> dict[str, Any] | Non
         return None
     out: dict[str, Any] = {}
     rid = raw.get("wiki_report_id")
-    if isinstance(rid, str) and _REPORT_ID_RE.match(rid):
+    # fullmatch, not match: `$` also matches before a trailing newline, which
+    # the TS side and the backend's Go regexp both reject.
+    if isinstance(rid, str) and _REPORT_ID_RE.fullmatch(rid):
         out["wiki_report_id"] = rid
-    for key in ("capability_tier", "capability_ceiling"):
-        tier = _tier(raw.get(key))
-        if tier is not None:
-            out[key] = tier
+    tier = _tier(raw.get("capability_tier"))
+    if tier is not None:
+        out["capability_tier"] = tier
+    ceiling = _tier(raw.get("capability_ceiling"))
+    # The backend rejects the WHOLE report (22004) when ceiling < tier, which
+    # would silently stop the version row updating. Keep the tier, drop the
+    # inconsistent ceiling (parity with the TS reader).
+    if ceiling is not None and (tier is None or ceiling >= tier):
+        out["capability_ceiling"] = ceiling
     caps = raw.get("capabilities")
     if isinstance(caps, dict):
         clean = {k: caps[k] for k in _CAP_KEYS if isinstance(caps.get(k), bool)}

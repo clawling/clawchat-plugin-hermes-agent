@@ -234,7 +234,9 @@ which plugin build paired at connect time (optional, backward-compatible — the
 backend stores it when present and ignores its absence).
 
 Since 0.14.0-86, `activate()` runs that pre-check itself — with the
-stored `user_id`, so `user_id_status` is evaluated — and attaches
+stored `user_id` whenever `/connect` will replay it, so `user_id_status` is
+evaluated; never under `--new-account`, which drops the id and so must not be
+refused over it — and attaches
 `agent_kind` / `os` / `lane` / `wiki_version` / `matched_install`
 (`clawchat_gateway/onboarding.py`) to both calls. A code issued from the agent's
 own reconnect card in the ClawChat app answers `bound_agent: true`; it can only
@@ -336,9 +338,13 @@ device-mismatch (see
 
    > ClawChat token expired and could not be refreshed. Ask your owner to send you the reconnect prompt from the ClawChat app, then follow https://agent-connection.clawling.com/reconnect.md.
 
-**Operator recovery:** request a fresh single-use connect code and re-activate
-with any activation entrypoint above (e.g. `/clawchat-activate <CODE>` or
-`hermes clawchat activate <CODE>`). The waiting-for-activation supervisor picks
+**Operator recovery:** do not spend a fresh connect code on it. The owner sends
+the agent the reconnect prompt from the ClawChat app (its code is bound to this
+agent), and the agent follows the reconnect page linked in the message above,
+re-activating with any activation entrypoint above (e.g. `/clawchat-activate
+<CODE>` or `hermes clawchat activate <CODE>`). Activation usually restores the
+identity on its own; if it still reports the identity as already paired, re-run
+it with `--repair`. The waiting-for-activation supervisor picks
 up the new credentials without a Hermes restart. Note that an env-booted process
 switches onto the SQLite-credentials path after its first successful refresh, so
 it can self-recover into this waiting state on a later permanent expiry instead

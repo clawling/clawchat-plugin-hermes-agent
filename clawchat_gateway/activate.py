@@ -165,7 +165,21 @@ def evaluate_precheck(result: dict[str, Any] | None) -> PrecheckOutcome:
     if result.get("pairable") is True:
         return PrecheckOutcome(pairable=True, bound_agent=bound, refusal="")
     status = str(result.get("status") or "unknown")
-    if result.get("user_id_status") == "owner_mismatch":
+    user_id_status = result.get("user_id_status")
+    if user_id_status == "owner_mismatch" and bound:
+        # The server cannot tell whether the bound agent shares this identity's
+        # owner, only that it is a different agent — so say exactly that.
+        refusal = (
+            "this connect code is the reconnect prompt for a different agent than the "
+            "identity stored in this profile. Ask your owner to send the reconnect prompt "
+            "from THIS agent's chat in the ClawChat app."
+        )
+    elif user_id_status == "invalid":
+        refusal = (
+            "the identity stored in this profile is not a valid ClawChat user id, so it "
+            "cannot be restored. Activate as a brand-new agent with --new-account."
+        )
+    elif user_id_status == "owner_mismatch":
         refusal = (
             "this connect code belongs to a different ClawChat account than the identity "
             "stored in this profile. Ask the owner of THIS agent for a code, or activate as "
@@ -662,8 +676,14 @@ async def activate(
     )
     context = onboarding_context()
     try:
+        # Only send the user_id /connect will actually replay. --new-account
+        # never replays it, and the server marks `pairable: false` for an
+        # owner_mismatch / invalid id — judging the dropped id would block the
+        # very escape the refusal recommends.
         raw = await client.agents_connect_check(
-            code=code, user_id=existing_user_id or None, context=context
+            code=code,
+            user_id=(existing_user_id or None) if not new_account else None,
+            context=context,
         )
     except Exception as exc:  # noqa: BLE001 — pre-check is telemetry + courtesy, never a gate
         logger.info("clawchat activation pre-check unavailable (%s); continuing", type(exc).__name__)
