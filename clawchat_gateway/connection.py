@@ -43,6 +43,7 @@ from clawchat_gateway.device_id import (
 )
 from clawchat_gateway.storage import get_clawchat_store
 from clawchat_gateway.notify_signal import NotifySignalObserver
+from clawchat_gateway.onboarding import RECONNECT_GUIDE_URL
 from clawchat_gateway.ws_log import format_ws_log
 from clawchat_gateway.ws_state import ReconnectTracker
 
@@ -202,10 +203,12 @@ def _is_token_rejected(reason: str | None) -> bool:
 
 
 # §C.1 user-visible auto-logout message. MUST be kept identical across both
-# plugins (Hermes + OpenClaw).
+# plugins (Hermes + OpenClaw). Points the owner at the reconnect prompt (a
+# code bound to this identity) rather than at a slash command: a fresh create
+# code spent here would mint a second agent.
 AUTO_LOGOUT_STATUS_MESSAGE = (
-    "ClawChat token expired and could not be refreshed. "
-    "Re-pair with `/clawchat-activate <code>`."
+    "ClawChat token expired and could not be refreshed. Ask your owner to send you "
+    f"the reconnect prompt from the ClawChat app, then follow {RECONNECT_GUIDE_URL}."
 )
 AUTO_LOGOUT_LAST_ERROR = "token expired — re-pair required"
 

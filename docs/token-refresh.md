@@ -233,11 +233,17 @@ single-use connect code.
    `owner_user_id` / `agent_id` so re-pair reuses the same identity (re-pair mode).
 2. **Status:** set the account to not-connected / not-configured / not-running with
    `lastError` = "token expired — re-pair required", via the existing auth-failure path.
-3. **Recovery entrypoint:** human runs `/clawchat-activate <CODE>` (or `openclaw channels
-   login` / `hermes clawchat activate <CODE>`), which re-feeds credentials the
-   wait-for-activation loop picks up — no process restart needed.
+3. **Recovery entrypoint:** the owner sends the agent the **reconnect prompt** from the
+   ClawChat app (a connect code bound to this identity; the agent follows the public
+   reconnect page). `/clawchat-activate <CODE>` / `openclaw channels login` /
+   `hermes clawchat activate <CODE>` remain the mechanics underneath; the bound code
+   usually restores the incumbent identity on its own, and if activation still reports
+   it as already paired, run it again with `--repair`. Credentials are re-fed to the
+   wait-for-activation loop — no process restart needed.
 4. **User-visible notification** (decision): emit a status/chat message in addition to logs:
-   *"ClawChat token expired and could not be refreshed. Re-pair with `/clawchat-activate <code>`."*
+   *"ClawChat token expired and could not be refreshed. Ask your owner to send you the
+   reconnect prompt from the ClawChat app, then follow
+   https://agent-connection.clawling.com/reconnect.md."*
    Keep wording identical across both plugins.
 
 ### C.2 Hermes recovery unification (decision)

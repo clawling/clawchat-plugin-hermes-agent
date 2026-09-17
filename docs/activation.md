@@ -112,7 +112,10 @@ local credentials are overwritten in place, losing the first agent.
 Activation refuses that case (`ExistingActivationError`, exit 1) **without
 sending the code**, so it stays redeemable. The refusal is not conditional on
 the profile still having a usable token: a logged-out profile (see auto-logout
-below) must now ask for its re-pair with `--repair`. Identity-present-but-
+below) should ask its owner for the ClawChat app's reconnect prompt instead of
+a fresh code (see [`./token-refresh.md`](./token-refresh.md) §C.1) — the bound
+code usually restores it on its own, and `--repair` remains the fallback when
+activation still reports it as already paired. Identity-present-but-
 token-absent is exactly the shape a cloned profile has (below), and the
 unflagged replay used to spend the code on the *source* profile's agent.
 
@@ -331,7 +334,7 @@ device-mismatch (see
    re-pair reuses the same identity).
 2. Surfaces a user-visible message (in addition to logs):
 
-   > ClawChat token expired and could not be refreshed. Re-pair with `/clawchat-activate <code>`.
+   > ClawChat token expired and could not be refreshed. Ask your owner to send you the reconnect prompt from the ClawChat app, then follow https://agent-connection.clawling.com/reconnect.md.
 
 **Operator recovery:** request a fresh single-use connect code and re-activate
 with any activation entrypoint above (e.g. `/clawchat-activate <CODE>` or

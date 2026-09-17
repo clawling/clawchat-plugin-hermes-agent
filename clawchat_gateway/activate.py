@@ -214,9 +214,11 @@ class ExistingActivationError(RuntimeError):
             "      hermes profile create <name>\n"
             "      hermes -p <name> plugins install clawling/clawchat-plugin-hermes-agent --enable\n"
             "      hermes -p <name> clawchat activate <CODE>\n"
-            f"  - ONLY when the owner confirms this profile itself paired {who} and it "
-            "merely lost its token: re-run with --repair. --repair keeps that identity "
-            "and spends the code on it; it never produces a new agent."
+            f"  - Want to RESTORE {who} (it only lost its token): do not spend a fresh "
+            "code on it. Ask your owner to send you the reconnect prompt from the "
+            "ClawChat app — its code is bound to this identity and usually restores it "
+            "on its own; if activation still reports it as already paired, run it "
+            f"again with --repair — and follow {RECONNECT_GUIDE_URL}"
         )
 
 
@@ -254,9 +256,9 @@ class UnprovenRepairError(ExistingActivationError):
             "the code to the SOURCE profile's agent — this profile still ends up with no "
             "agent of its own.\n"
             "  - To give THIS profile its own new agent: re-run with --new-account\n"
-            "  - Only if the owner confirms this profile really owns that agent: record "
-            f"it first by setting platforms.clawchat.extra.profile: {profile} in "
-            f"{config_path or 'config.yaml'}, then re-run with --repair"
+            "  - To restore that agent instead: ask its owner to send you the reconnect "
+            "prompt from the ClawChat app — that code is bound to the agent, so the "
+            f"server, not this config, proves ownership — and follow {RECONNECT_GUIDE_URL}"
         )
         self.user_id = user_id
         self.agent_id = agent_id
