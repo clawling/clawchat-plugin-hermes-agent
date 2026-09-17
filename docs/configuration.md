@@ -95,21 +95,34 @@ env:
     value: "hermes-agt-<stable-agent-id>"
 ```
 
+**Agent-scoped since 0.14.0-86.** Without a pin, the fingerprint is suffixed
+`-p<12 hex>` for a *named* profile, so two Hermes profiles on one host no
+longer share a device id (the redeem safety gate and the plugin-report row are
+keyed on device id alone). The default profile keeps the exact legacy value.
+Nothing changes for an agent that is already paired: it keeps the id stored on
+its `activations` row (or the token's `did`); a named profile paired before
+that column existed keeps presenting the legacy host id, which is what its
+session was minted with. Only a brand-new activation derives the new id.
+
 `CLAWCHAT_DEVICE_ID` is read profile-first (`$HERMES_HOME/.env` before the
 process env), because a named profile's gateway inherits the default profile's
-exported value. The id itself stays **host**-scoped, not profile-scoped — see
-[`./activation.md`](./activation.md) (One profile, one agent) for why co-located
-profiles sharing one device id is not a conflict.
+exported value. The id itself is now **agent**-scoped — one per profile — not
+host-scoped: see [`./activation.md`](./activation.md) (One profile, one agent)
+for why a second agent on the same host must not be mistaken for the first,
+and for how an already-paired profile keeps the id it connected with.
 
 The server-assigned `resolved_device_id` from the `hello-ok` handshake is
 recorded in plugin SQLite (`connections.resolved_device_id`) for diagnostics.
 The id the plugin *presents* on connect resolves in order: the
 `activations.device_id` persisted in plugin SQLite → the `did` claim of the
-current access token → the `get_device_id()` fingerprint (used only for a
-truly unpaired process, then persisted to SQLite at first connect). The first
-two sources are re-read on every boot, so an already-paired agent keeps a
-stable device id across container recreation even without the env pin —
-provided the SQLite database lives on a persistent volume.
+current access token → (a token is present but neither above resolved) the
+legacy `legacy_host_device_id()` fingerprint, for a named profile paired
+before device ids were persisted → the `get_device_id()` fingerprint (used
+only for a truly unpaired process, then persisted to SQLite at first
+connect). The first three sources are re-read on every boot, so an
+already-paired agent keeps a stable device id across container recreation
+even without the env pin — provided the SQLite database lives on a
+persistent volume.
 
 ### Device id is also the token-refresh precondition
 

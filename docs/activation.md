@@ -92,6 +92,11 @@ A Hermes profile holds exactly **one** ClawChat identity: `config.yaml`
 (`platforms.clawchat.extra`), `.env` (`CLAWCHAT_TOKEN`) and the `activations`
 row (primary key `("hermes", "default")`) are all single-slot.
 
+The device id is agent-scoped (one per profile, see
+[`docs/configuration.md`](./configuration.md) — Device id durability); it used
+to be host-scoped, and already-paired profiles keep the id they connected
+with.
+
 Activating a **new** connect code in a profile that already holds an identity
 therefore cannot produce a second agent. The stored `user_id` is replayed as a
 re-pair hint, so the server binds the new code to the *existing* agent — the

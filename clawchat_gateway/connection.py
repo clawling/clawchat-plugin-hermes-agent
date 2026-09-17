@@ -38,6 +38,7 @@ from clawchat_gateway.config import _get_env, _jwt_claim
 from clawchat_gateway.device_id import (
     device_id_is_pinned,
     get_device_id,
+    legacy_host_device_id,
     warn_if_device_id_unpinned,
 )
 from clawchat_gateway.storage import get_clawchat_store
@@ -454,6 +455,11 @@ class ClawChatConnection:
            login time).
         3. The deterministic ``get_device_id()`` fingerprint — only for a truly
            unpaired process with no stored row and no token yet.
+        4. ``legacy_host_device_id()`` — a token is present but neither of the
+           above yielded an id: this is a named profile paired before device
+           ids were persisted and before tokens carried ``did``. The backend
+           baked the (pre-agent-scoped) host fingerprint into that session, so
+           refresh must keep presenting it, never the new per-profile id.
         """
         if self._store is not None:
             try:
@@ -469,6 +475,11 @@ class ClawChatConnection:
         token_did = _jwt_claim(self._cfg.token, "did")
         if token_did:
             return token_did, True
+        if (self._cfg.token or "").strip():
+            # Paired before device ids were persisted and before tokens carried
+            # `did`: the backend baked the LEGACY host id into this session, so
+            # refresh must keep presenting it. The backfill below persists it.
+            return legacy_host_device_id(), device_id_is_pinned()
         return get_device_id(), device_id_is_pinned()
 
     def _refresh_device_id(self) -> str:

@@ -68,36 +68,68 @@ def _host_fingerprint() -> str:
     return f"hermes-host-{digest}"
 
 
-@functools.lru_cache(maxsize=1)
-def get_device_id() -> str:
-    """Return a stable ClawChat device id for this Hermes installation.
+def _profile_name() -> str:
+    """Active Hermes profile ("default" when unnamed). Imported lazily: storage
+    imports config which imports nothing from here, so no cycle at call time."""
+    try:
+        from clawchat_gateway.storage import _active_profile_name
 
-    Resolution order:
+        return _active_profile_name() or "default"
+    except Exception:  # noqa: BLE001 — a broken host resolver must not break the id
+        return "default"
 
-    1. ``CLAWCHAT_DEVICE_ID`` — used **verbatim** when already a well-formed
-       ``hermes-`` id, otherwise sanitized to the transport-safe charset and
-       ``hermes-`` prefixed. This is the durable, deployment-pinned path: the
-       same value always yields the same device id across pod
-       restarts/reschedules. **Deployments MUST set this** (see
-       ``docs/configuration.md`` — Device id durability) so the server-side
-       per-device cursor stays stable. Read through ``_get_env`` (not raw
-       ``os.getenv``) so a named profile's own ``.env`` beats a value it
-       inherited from the default profile's gateway process.
-    2. Host fingerprint fallback (macOS ``IOPlatformUUID`` → Linux
-       ``machine-id`` → hostname+MAC hash) — only when the env var is unset.
-       In a container this fingerprint changes on every reschedule, which the
-       server treats as a brand-new device (full replay + orphan cursor).
 
-    The id is deliberately **host**-scoped, not profile-scoped: co-located
-    Hermes profiles sharing one id is not a conflict, because every backend
-    structure that consumes it is keyed on the composite ``(user_id,
-    device_id)`` and the two agents have different ``user_id``s. See
-    ``docs/activation.md`` — One profile, one agent.
+def profile_scope() -> str:
+    """12-hex scope for a NAMED profile; "" for the default profile.
+
+    Hashed rather than embedded so a profile name never leaks into a wire
+    header and the id stays in the transport-safe charset.
     """
+    name = _profile_name()
+    if not name or name == "default":
+        return ""
+    return hashlib.sha256(name.encode("utf-8")).hexdigest()[:12]
+
+
+def legacy_host_device_id() -> str:
+    """The pre-agent-scoped id: host fingerprint only, byte-identical to what
+    every profile derived before device ids became agent-scoped. Used for
+    already-paired named profiles that persisted no device id (see
+    ``connection._resolve_device_id``)."""
     override = _env("CLAWCHAT_DEVICE_ID")
     if override:
         return override if override.startswith("hermes-") else _safe_id("hermes", override)
     return _mac_platform_uuid() or _machine_id() or _host_fingerprint()
+
+
+@functools.lru_cache(maxsize=1)
+def get_device_id() -> str:
+    """Return a stable ClawChat device id for this Hermes agent (profile).
+
+    Resolution order:
+
+    1. ``CLAWCHAT_DEVICE_ID`` — verbatim when already a well-formed ``hermes-``
+       id, else sanitized + ``hermes-`` prefixed. Deployments MUST set this
+       (``docs/configuration.md`` — Device id durability). Read through
+       ``_get_env`` so a named profile's own ``.env`` beats the default
+       profile's inherited environment.
+    2. Host fingerprint (macOS ``IOPlatformUUID`` → Linux ``machine-id`` →
+       hostname+MAC hash), **plus ``-p<scope>`` for a named profile**.
+
+    The id is agent-scoped since 0.14.0-86: one Hermes profile is one agent,
+    and the redeem safety gate (``paired_device_id``) and the plugin-report row
+    are keyed on device id alone, so two agents on one host must not share one.
+    The default profile keeps the exact legacy value, and an already-paired
+    agent always reuses the id it connected with (persisted on its activations
+    row / the token's ``did``) — only a NEW activation ever sees the new
+    derivation.
+    """
+    override = _env("CLAWCHAT_DEVICE_ID")
+    if override:
+        return override if override.startswith("hermes-") else _safe_id("hermes", override)
+    host = _mac_platform_uuid() or _machine_id() or _host_fingerprint()
+    scope = profile_scope()
+    return f"{host}-p{scope}" if scope else host
 
 
 def device_id_is_pinned() -> bool:
