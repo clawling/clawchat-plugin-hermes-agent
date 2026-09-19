@@ -201,12 +201,22 @@ This flag is independent of `awareness_note`.
 
 Both `~/clawchat/greeting.md` and `~/clawchat/friend-greeting.md` are
 **partial** overrides, not full replacements: whichever body they supply (or
-the built-in fallback, if the file is absent/empty/unreadable) always gets a
-trailing `Reply in <Language>.` instruction appended — the override says what
-to say, not which language to say it in. The language is resolved from the
-owner's reported app locale (`owner_language.resolve_owner_language`,
-falling back to English), read via `adapter._owner_locale()`. The
-friend-greeting turn uses the **owner's** resolved language even though its
+the built-in fallback, if the file is absent/empty/unreadable) gets a trailing
+`Reply in <Language>.` instruction appended — the override says what to say,
+not which language to say it in.
+
+That line is **conditional**. The language is resolved from the owner's
+reported app locale, read off disk via `adapter._owner_locale()` through
+`owner_language.resolve_owner_language_if_known` — which returns `None`, not
+`en`, when no locale has been reported or the owner metadata has not landed
+yet. A `None` language appends **no line at all**. Neither greeting dispatch
+path may grow an await to chase the locale, and hard-asserting "Reply in
+English." at an owner who may not speak English is worse than asserting
+nothing: with no line the model infers the language from context. (The
+Liveware Sample intro lookup is the opposite case and keeps its English
+fallback — there a copy has to be chosen and `en` is the documented default.)
+
+The friend-greeting turn uses the **owner's** resolved language even though its
 recipient is the new friend, not the owner: friends are usually in the same
 language circle, and the backend only exposes `locale` on the owner profile
 endpoint, so no third-party locale is obtainable.

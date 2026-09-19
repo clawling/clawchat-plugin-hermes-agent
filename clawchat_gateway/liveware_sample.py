@@ -764,15 +764,50 @@ def load_intro_text(app_dir: Path, language: str) -> str:
 
     Any failure returns the English fallback — delivery must never be blocked
     by a content-tree problem.
+
+    Every one of the four degradation modes (missing file / corrupt JSON /
+    missing key / empty value) warns first. This used to log only inside
+    ``except``, so a missing key and an empty value fell through silently: a
+    mistake in the content tree would then ship English to every non-English
+    owner with zero signal anywhere. The fallback is the safety net, not the
+    plan. Kept symmetric with ``loadIntroText`` in the openclaw plugin.
     """
+    table_path = Path(app_dir) / "intro.i18n.json"
     try:
-        raw = (Path(app_dir) / "intro.i18n.json").read_text(encoding="utf-8")
-        value = json.loads(raw).get("intro", {}).get(language)
-        if isinstance(value, str) and value.strip():
-            return value
+        raw = table_path.read_text(encoding="utf-8")
     except Exception:  # noqa: BLE001 — a bad table must never block the intro
-        logger.warning("clawchat liveware intro table unreadable; using English", exc_info=True)
-    return LIVEWARE_SAMPLE_INTRO_FALLBACK_EN
+        logger.warning(
+            "clawchat liveware intro table unreadable at %s; using the English fallback",
+            table_path,
+            exc_info=True,
+        )
+        return LIVEWARE_SAMPLE_INTRO_FALLBACK_EN
+    try:
+        table = json.loads(raw)
+    except Exception:  # noqa: BLE001 — a bad table must never block the intro
+        logger.warning(
+            "clawchat liveware intro table at %s is not valid JSON; using the English fallback",
+            table_path,
+            exc_info=True,
+        )
+        return LIVEWARE_SAMPLE_INTRO_FALLBACK_EN
+    intro = table.get("intro") if isinstance(table, dict) else None
+    value = intro.get(language) if isinstance(intro, dict) else None
+    if not isinstance(value, str):
+        logger.warning(
+            'clawchat liveware intro table at %s has no "%s" entry; using the English fallback',
+            table_path,
+            language,
+        )
+        return LIVEWARE_SAMPLE_INTRO_FALLBACK_EN
+    if not value.strip():
+        logger.warning(
+            'clawchat liveware intro table at %s has an empty "%s" entry; using the English fallback',
+            table_path,
+            language,
+        )
+        return LIVEWARE_SAMPLE_INTRO_FALLBACK_EN
+    return value
 
 
 _DEFAULT_SAMPLE_PORT = 43110

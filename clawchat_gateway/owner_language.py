@@ -6,6 +6,9 @@ omitted entirely when they never reported one, so every unresolvable case
 lands on English rather than guessing. Mirrors ``src/owner-language.ts`` in
 the openclaw plugin — keep the two in sync.
 
+Callers on the *greeting* path want the opposite of that fallback and use
+:func:`resolve_owner_language_if_known` instead — see its docstring.
+
 Note: ``language_display_name()`` includes a defensive default that TypeScript's
 type system prevents, documented at that function.
 """
@@ -38,6 +41,23 @@ def resolve_owner_language(locale: str | None) -> str:
         if tag.startswith(prefix):
             return language
     return "en"
+
+
+def resolve_owner_language_if_known(locale: str | None) -> str | None:
+    """Resolve a locale ONLY when one was actually reported; ``None`` otherwise.
+
+    :func:`resolve_owner_language` must answer with a language because the
+    Liveware intro lookup has to pick one copy and ``en`` is the documented
+    default. The greeting path is the opposite case: the language line is an
+    explicit assertion to the model, and the owner metadata may not have landed
+    yet (the friend-greeting dispatch reads it synchronously and must not grow
+    an await). Collapsing "unknown" into ``en`` there tells a Chinese owner's
+    agent to reply in English. Callers on the greeting path use this and omit
+    the line entirely when it returns ``None``.
+
+    Mirrors ``resolveOwnerLanguageIfKnown`` in the openclaw plugin.
+    """
+    return resolve_owner_language(locale) if str(locale or "").strip() else None
 
 
 def language_display_name(language: str) -> str:

@@ -94,7 +94,7 @@ from clawchat_gateway.mention_message import (
     validate_mention_payload,
 )
 from clawchat_gateway.onboarding_report import read_onboarding_report
-from clawchat_gateway.owner_language import resolve_owner_language
+from clawchat_gateway.owner_language import resolve_owner_language_if_known
 from clawchat_gateway.profile import load_profile_config
 from clawchat_gateway.profile_sync import relation_for_sender
 from clawchat_gateway.protocol import (
@@ -1217,10 +1217,13 @@ class ClawChatAdapter(BasePlatformAdapter):
             # third-party locale is obtainable. Do not "fix" this into a
             # friend-specific lookup. This path must not await owner-metadata
             # refresh (see `_dispatch_friend_greeting`'s docstring); reading
-            # whatever `_owner_locale()` returns right now is correct — the
-            # "en" fallback applies if it has not landed yet.
+            # whatever `_owner_locale()` returns right now is correct.
+            #
+            # `…_if_known`, not `resolve_owner_language`: if the locale has not
+            # landed yet the greeting carries NO language line, rather than
+            # hard-asserting English at an owner who may not speak it.
             text=load_friend_greeting_prompt(
-                language=resolve_owner_language(self._owner_locale())
+                language=resolve_owner_language_if_known(self._owner_locale())
             ),
             raw_message={
                 "synthetic": True,
@@ -2319,8 +2322,13 @@ class ClawChatAdapter(BasePlatformAdapter):
             chat_type="direct",
             sender_id=owner_user_id,
             sender_name="",
+            # `…_if_known`: `_await_owner_metadata_refreshed()` above gives the
+            # locale its best chance to land, but it can still be absent (no
+            # agent_id, a failed pull, an owner who never reported one). An
+            # absent locale means NO language line — not an "en" guess. Do not
+            # add a further await here to chase it.
             text=load_activation_bootstrap_prompt(
-                language=resolve_owner_language(self._owner_locale())
+                language=resolve_owner_language_if_known(self._owner_locale())
             ),
             raw_message={
                 "synthetic": True,
