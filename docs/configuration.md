@@ -199,6 +199,18 @@ twice; a failed conversation lookup is logged and dropped. The default is
 (`adapter._schedule_friend_greeting` / `adapter._dispatch_friend_greeting`).
 This flag is independent of `awareness_note`.
 
+Both `~/clawchat/greeting.md` and `~/clawchat/friend-greeting.md` are
+**partial** overrides, not full replacements: whichever body they supply (or
+the built-in fallback, if the file is absent/empty/unreadable) always gets a
+trailing `Reply in <Language>.` instruction appended — the override says what
+to say, not which language to say it in. The language is resolved from the
+owner's reported app locale (`owner_language.resolve_owner_language`,
+falling back to English), read via `adapter._owner_locale()`. The
+friend-greeting turn uses the **owner's** resolved language even though its
+recipient is the new friend, not the owner: friends are usually in the same
+language circle, and the backend only exposes `locale` on the owner profile
+endpoint, so no third-party locale is obtainable.
+
 `liveware_sample` controls the Liveware Sample demo-app auto-boot on first
 activation. The default is `true`; set it to `false` explicitly to disable
 auto-boot for an agent. See

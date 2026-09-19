@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from clawchat_gateway.owner_language import language_display_name
+
 logger = logging.getLogger("clawchat_gateway.greeting")
 
 # Worded to make the greeting the single required action. Earlier wording
@@ -60,27 +62,36 @@ def _load_prompt_with_override(
     return stripped or default
 
 
-def load_activation_bootstrap_prompt(home_dir: Path | None = None) -> str:
-    """Return the first-load greeting prompt.
+def load_activation_bootstrap_prompt(
+    home_dir: Path | None = None, language: str = "en"
+) -> str:
+    """Return the first-load greeting prompt, in the owner's language.
 
     If ``~/clawchat/greeting.md`` exists and is non-empty after stripping, its
-    content replaces the built-in prompt. A missing file, an empty/whitespace
-    file, or any read error falls back to :data:`ACTIVATION_BOOTSTRAP_PROMPT` so
-    greeting dispatch never fails on a bad override file. ``home_dir`` is
-    injectable for tests and defaults to the real home directory.
+    content replaces the built-in prompt **body**. The language instruction is
+    appended either way: the override says what to say, not which language to
+    say it in. A missing file, an empty file, or any read error falls back to
+    :data:`ACTIVATION_BOOTSTRAP_PROMPT`. ``home_dir`` is injectable for tests
+    and defaults to the real home directory.
     """
-    return _load_prompt_with_override(
+    base = _load_prompt_with_override(
         _GREETING_FILE_RELPARTS, ACTIVATION_BOOTSTRAP_PROMPT, home_dir
     )
+    return f"{base}\n\nReply in {language_display_name(language)}."
 
 
-def load_friend_greeting_prompt(home_dir: Path | None = None) -> str:
+def load_friend_greeting_prompt(
+    home_dir: Path | None = None, language: str = "en"
+) -> str:
     """Return the first-message prompt for a newly added non-owner friend.
 
-    Same override contract as :func:`load_activation_bootstrap_prompt`, but the
-    file is ``~/clawchat/friend-greeting.md`` and the fallback is
-    :data:`FRIEND_GREETING_PROMPT`.
+    Same override contract as :func:`load_activation_bootstrap_prompt` — the
+    file is ``~/clawchat/friend-greeting.md``, the fallback is
+    :data:`FRIEND_GREETING_PROMPT`, and the override replaces the prompt
+    **body** only: the language instruction is always appended, since the
+    override says what to say, not which language to say it in.
     """
-    return _load_prompt_with_override(
+    base = _load_prompt_with_override(
         _FRIEND_GREETING_FILE_RELPARTS, FRIEND_GREETING_PROMPT, home_dir
     )
+    return f"{base}\n\nReply in {language_display_name(language)}."

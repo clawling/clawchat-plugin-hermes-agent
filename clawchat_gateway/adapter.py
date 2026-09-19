@@ -94,6 +94,7 @@ from clawchat_gateway.mention_message import (
     validate_mention_payload,
 )
 from clawchat_gateway.onboarding_report import read_onboarding_report
+from clawchat_gateway.owner_language import resolve_owner_language
 from clawchat_gateway.profile import load_profile_config
 from clawchat_gateway.profile_sync import relation_for_sender
 from clawchat_gateway.protocol import (
@@ -1209,7 +1210,18 @@ class ClawChatAdapter(BasePlatformAdapter):
             chat_type="direct",
             sender_id=friend_user_id,
             sender_name="",
-            text=load_friend_greeting_prompt(),
+            # The recipient here is the new friend, NOT the owner — but we
+            # deliberately use the OWNER's language anyway: friends are
+            # usually in the same language circle, and the backend only
+            # exposes `locale` on the owner profile endpoint, so no
+            # third-party locale is obtainable. Do not "fix" this into a
+            # friend-specific lookup. This path must not await owner-metadata
+            # refresh (see `_dispatch_friend_greeting`'s docstring); reading
+            # whatever `_owner_locale()` returns right now is correct — the
+            # "en" fallback applies if it has not landed yet.
+            text=load_friend_greeting_prompt(
+                language=resolve_owner_language(self._owner_locale())
+            ),
             raw_message={
                 "synthetic": True,
                 "friend_greeting": True,
@@ -2054,7 +2066,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         """The owner's reported app language, or None before metadata lands.
 
         Synchronous and non-blocking by contract: this is called from the
-        liveware-sample intro retry loop and (soon) the friend-greeting
+        liveware-sample intro retry loop and the friend-greeting dispatch
         path, neither of which may pick up a new await. Reads owner.md the
         same way `_sender_metadata`/`_format_owner_metadata_sections` do —
         off disk via `_read_memory_metadata`, never over the network — so a
@@ -2307,7 +2319,9 @@ class ClawChatAdapter(BasePlatformAdapter):
             chat_type="direct",
             sender_id=owner_user_id,
             sender_name="",
-            text=load_activation_bootstrap_prompt(),
+            text=load_activation_bootstrap_prompt(
+                language=resolve_owner_language(self._owner_locale())
+            ),
             raw_message={
                 "synthetic": True,
                 "bootstrap": True,
