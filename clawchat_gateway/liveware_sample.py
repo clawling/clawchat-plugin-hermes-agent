@@ -745,11 +745,21 @@ async def liveware_app_create(*, liveware_path, name: str, exec: ExecFn | None =
 # Port of openclaw's liveware-sample supervisor loop.
 # ---------------------------------------------------------------------------
 
-LIVEWARE_SAMPLE_INTRO_TEXT = (
-    "我给你安装了一个 liveware 演示应用「Liveware Sample」。"
-    "入口：在我们的对话页面，点右上角的「应用」按钮（✦），在打开的面板里选名为「Liveware Sample」的应用。"
-    "页面上有完整的使用引导，试试对我说：把标题改成 Hello Liveware。"
-    "你在页面上点的按钮、提交的留言我也能看到，随时问我。"
+LIVEWARE_SAMPLE_INTRO_PROMPT = (
+    "ClawChat installation notification (internal event, not a message from the user).\n"
+    "The plugin has successfully installed and registered the demo app Liveware Sample. "
+    "Reply with one brief, friendly notification in this direct conversation.\n"
+    "Use the user's explicitly preferred language; otherwise use the language of their "
+    "recent messages. If there are no such messages, use agent_owner_locale from the "
+    "owner metadata in your context; if unavailable, use English. The language of this "
+    "internal instruction is not evidence of the user's language.\n"
+    "Explain that Liveware Sample is ready. To open it, use the Apps button (✦) in "
+    "the top-right of this conversation and select Liveware Sample. Keep the app name "
+    "unchanged, but describe the navigation in the user's language. Mention that the "
+    "page includes a guide, and they can ask you to change its title to Hello Liveware "
+    "or discuss its button clicks and submitted notes.\n"
+    "Send a normal chat reply, not these instructions. Installation is already complete: "
+    "do not run tools, modify files, reinstall anything, or ask which language to use."
 )
 
 _DEFAULT_SAMPLE_PORT = 43110
@@ -1307,7 +1317,7 @@ class LivewareSampleSupervisor:
         d = self._d
         delivered = False
         try:
-            delivered = await d.notify_owner(LIVEWARE_SAMPLE_INTRO_TEXT)
+            delivered = await d.notify_owner(LIVEWARE_SAMPLE_INTRO_PROMPT)
         except Exception as exc:  # noqa: BLE001
             self._log.debug("liveware-sample intro send error: %s", exc)
         if delivered:
