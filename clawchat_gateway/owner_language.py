@@ -5,6 +5,9 @@ ClawChat content tree carries.
 omitted entirely when they never reported one, so every unresolvable case
 lands on English rather than guessing. Mirrors ``src/owner-language.ts`` in
 the openclaw plugin — keep the two in sync.
+
+Note: ``language_display_name()`` includes a defensive default that TypeScript's
+type system prevents, documented at that function.
 """
 
 from __future__ import annotations
@@ -38,4 +41,7 @@ def resolve_owner_language(locale: str | None) -> str:
 
 
 def language_display_name(language: str) -> str:
+    # Defensive "English" default: Python has no type guarantee that `language` is
+    # one of the six keys, unlike TypeScript which relies on the type system.
+    # In practice, this is only ever called with resolve_owner_language()'s output.
     return _DISPLAY_NAMES.get(language, "English")
