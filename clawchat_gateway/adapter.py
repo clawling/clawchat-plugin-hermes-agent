@@ -2050,6 +2050,22 @@ class ClawChatAdapter(BasePlatformAdapter):
             return self._read_memory_metadata("owner", "owner")
         return self._read_memory_metadata("user", inbound.sender_id)
 
+    def _owner_locale(self) -> str | None:
+        """The owner's reported app language, or None before metadata lands.
+
+        Synchronous and non-blocking by contract: this is called from the
+        liveware-sample intro retry loop and (soon) the friend-greeting
+        path, neither of which may pick up a new await. Reads owner.md the
+        same way `_sender_metadata`/`_format_owner_metadata_sections` do —
+        off disk via `_read_memory_metadata`, never over the network — so a
+        locale that lands mid-retry is picked up on the next attempt without
+        awaiting anything here.
+        """
+        try:
+            return self._read_memory_metadata("owner", "owner").get("agent_owner_locale")
+        except Exception:  # noqa: BLE001
+            return None
+
     def _schedule_profile_sync(self, coro: Any) -> None:
         task = asyncio.create_task(coro, name="clawchat-profile-sync")
         self._profile_sync_tasks.add(task)
@@ -2229,6 +2245,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             resolve_liveware_path=resolve_liveware_path,
             resolve_agent_user_id=lambda: (self._clawchat_config.user_id or None),
             wait_cli_ready=wait_liveware_cli_ready,
+            resolve_owner_locale=self._owner_locale,
             list_apps=_list_apps,
             register_app=_register_app,
             notify_owner=_notify_owner,

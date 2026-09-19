@@ -20,7 +20,10 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from . import skill_update as _skill_update
+from .owner_language import resolve_owner_language
 from .skill_update import DEFAULT_SKILLS_REF, OFFICIAL_SKILLS_BASE, Fetcher
+
+logger = logging.getLogger("clawchat.liveware_sample")
 
 LIVEWARES_TARGET = "hermes"
 LIVEWARE_SAMPLE_ID = "liveware-sample"
@@ -745,12 +748,32 @@ async def liveware_app_create(*, liveware_path, name: str, exec: ExecFn | None =
 # Port of openclaw's liveware-sample supervisor loop.
 # ---------------------------------------------------------------------------
 
-LIVEWARE_SAMPLE_INTRO_TEXT = (
-    "我给你安装了一个 liveware 演示应用「Liveware Sample」。"
-    "入口：在我们的对话页面，点右上角的「应用」按钮（✦），在打开的面板里选名为「Liveware Sample」的应用。"
-    "页面上有完整的使用引导，试试对我说：把标题改成 Hello Liveware。"
-    "你在页面上点的按钮、提交的留言我也能看到，随时问我。"
+# Last-resort copy when the content tree's table cannot be read. English only:
+# a second full translation set in-process would be a competing source of truth.
+LIVEWARE_SAMPLE_INTRO_FALLBACK_EN = (
+    "I've installed a liveware demo app for you — \"Liveware Sample\". "
+    "To open it: in our chat, tap the Apps button (✦) in the top-right corner, "
+    "then pick \"Liveware Sample\" in the panel. "
+    "The page has a full walkthrough — try saying to me: Change the title to Hello Liveware. "
+    "I can also see the buttons you tap and the notes you submit there, so just ask me anytime."
 )
+
+
+def load_intro_text(app_dir: Path, language: str) -> str:
+    """Read the localized intro from the installed sample's intro.i18n.json.
+
+    Any failure returns the English fallback — delivery must never be blocked
+    by a content-tree problem.
+    """
+    try:
+        raw = (Path(app_dir) / "intro.i18n.json").read_text(encoding="utf-8")
+        value = json.loads(raw).get("intro", {}).get(language)
+        if isinstance(value, str) and value.strip():
+            return value
+    except Exception:  # noqa: BLE001 — a bad table must never block the intro
+        logger.warning("clawchat liveware intro table unreadable; using English", exc_info=True)
+    return LIVEWARE_SAMPLE_INTRO_FALLBACK_EN
+
 
 _DEFAULT_SAMPLE_PORT = 43110
 _RESTART_WINDOW_S = 30 * 60
@@ -782,6 +805,10 @@ class LivewareSampleDeps:
     # download finished (either way), so a first boot doesn't race it, see the
     # gate to None, and silently skip forever.
     wait_cli_ready: "Callable[[], Awaitable[None]] | None" = None
+    # The owner's reported app locale (`agent_owner_locale`), read lazily: the
+    # intro can be retried for ~10 minutes, by which time a locale that was
+    # absent at construction may have landed.
+    resolve_owner_locale: "Callable[[], str | None] | None" = None
     fetch: Fetcher = _skill_update._default_fetch
     ref: str = DEFAULT_SKILLS_REF
     spawn: "SpawnFn | None" = None
@@ -1307,7 +1334,10 @@ class LivewareSampleSupervisor:
         d = self._d
         delivered = False
         try:
-            delivered = await d.notify_owner(LIVEWARE_SAMPLE_INTRO_TEXT)
+            language = resolve_owner_language(
+                d.resolve_owner_locale() if d.resolve_owner_locale else None
+            )
+            delivered = await d.notify_owner(load_intro_text(d.sample_root / "app", language))
         except Exception as exc:  # noqa: BLE001
             self._log.debug("liveware-sample intro send error: %s", exc)
         if delivered:
