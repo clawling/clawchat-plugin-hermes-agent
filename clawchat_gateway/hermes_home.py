@@ -8,10 +8,12 @@ outside a ``hermes -p <name>`` invocation — the plugin therefore looked for th
 ``.env``, the SQLite database and the memory root in ``C:\\Users\\<u>\\.hermes``,
 a directory Hermes never writes.
 
-Deliberately mirrors ``hermes_constants._hermes_home_from_env`` rather than
-importing it: every call site here already resolved the env var directly, and
-following Hermes' context-local per-task override would be a wider semantic
-change than these paths want.
+Mirrors ``hermes_constants._hermes_home_from_env`` rather than importing it —
+every call site here already resolved the env var directly — but DOES follow
+Hermes' context-local per-task home override. Under a multiplexing gateway that
+override is the only thing distinguishing one served profile from another, so
+ignoring it (as this module originally did) collapses every profile's ``.env``,
+SQLite database and pairing state onto the process-wide home.
 """
 
 from __future__ import annotations
@@ -31,7 +33,22 @@ def platform_default_hermes_home() -> Path:
 
 
 def hermes_home() -> Path:
-    """``$HERMES_HOME`` when exported, else the platform-native default."""
+    """Multiplex override, then ``$HERMES_HOME``, else the platform-native default.
+
+    Under a multiplexing gateway Hermes runs every profile in one process and
+    scopes each profile's work with a context-local home override
+    (``hermes_constants.set_hermes_home_override``). Follow it first so
+    per-profile storage (.env, sqlite, pairing) resolves to the served
+    profile's home instead of the process-wide default home.
+    """
+    try:
+        from hermes_constants import get_hermes_home_override
+
+        override = (get_hermes_home_override() or "").strip()
+        if override:
+            return Path(override)
+    except Exception:  # standalone CLI: hermes_constants is not importable
+        pass
     configured = os.environ.get("HERMES_HOME", "").strip()
     if configured:
         return Path(configured)

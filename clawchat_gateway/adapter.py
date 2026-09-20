@@ -66,6 +66,7 @@ from clawchat_gateway.group_message_coalescer import (
     format_coalesced_group_text,
 )
 from clawchat_gateway.inbound import InboundMessage, parse_inbound_message
+from clawchat_gateway.hermes_home import hermes_home
 from clawchat_gateway.liveware_cli import resolve_liveware_path, wait_liveware_cli_ready
 from clawchat_gateway.liveware_sample import LivewareSampleDeps, LivewareSampleSupervisor
 try:
@@ -2226,8 +2227,9 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
             return
         cfg = self._clawchat_config
-        hermes_home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
-        sample_root = hermes_home / "clawchat" / "liveware-sample"
+        # Scoped, not process-wide: this adapter belongs to ONE profile, and a
+        # multiplexed named profile must not drive the default profile's sample.
+        sample_root = hermes_home() / "clawchat" / "liveware-sample"
 
         async def _list_apps() -> dict[str, Any]:
             return await self._rest_with_auth_retry(lambda client: client.list_apps())

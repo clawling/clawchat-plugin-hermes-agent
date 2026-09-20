@@ -181,7 +181,7 @@ MIGRATIONS = [
     (9, "recalled_messages", RECALLED_MESSAGES_SCHEMA),
 ]
 
-_store: ClawChatStore | None = None
+_stores: dict[Path, ClawChatStore] = {}
 _store_lock = threading.Lock()
 
 
@@ -1505,11 +1505,11 @@ class ClawChatStore:
 
 
 def get_clawchat_store() -> ClawChatStore:
-    global _store
+    path = default_db_path().expanduser().resolve()
     with _store_lock:
-        if _store is None:
-            _store = ClawChatStore(default_db_path())
-        return _store
+        if path not in _stores:
+            _stores[path] = ClawChatStore(path)
+        return _stores[path]
 
 
 def make_owner_profile_persister(

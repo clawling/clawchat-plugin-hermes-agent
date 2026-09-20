@@ -29,6 +29,14 @@ _started = False
 
 
 def _hermes_home() -> Path:
+    """Process-wide ON PURPOSE — do NOT route this through the scoped resolver.
+
+    This is a host-level binary CACHE. The download runs once per process
+    (``ensure_liveware_cli_background``), so under a multiplexing gateway a
+    per-profile path would send every named profile looking for a binary only
+    the default profile's home ever received. Sharing one copy is the intent;
+    nothing per-profile or mutable lives here.
+    """
     return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
 
 

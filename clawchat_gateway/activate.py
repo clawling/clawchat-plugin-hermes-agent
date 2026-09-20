@@ -639,18 +639,25 @@ def persist_rotated_tokens(
 
 
 def clear_persisted_credentials(*, account_id: str = "default") -> None:
-    """Remove ClawChat credentials from BOTH .env and SQLite, keeping identity.
+    """Clear ClawChat credentials in BOTH .env and SQLite, keeping identity.
 
-    Token-refresh spec §C.1: auto-logout on permanent refresh failure removes
-    ``CLAWCHAT_TOKEN`` / ``CLAWCHAT_REFRESH_TOKEN`` from .env and blanks the
+    Token-refresh spec §C.1: auto-logout on permanent refresh failure clears
+    ``CLAWCHAT_TOKEN`` / ``CLAWCHAT_REFRESH_TOKEN`` in .env and blanks the
     token columns of the activations row, while preserving user_id /
     owner_user_id / conversation_id so re-pair reuses the same identity.
+
+    The keys are written back EMPTY rather than deleted. Under a multiplexing
+    gateway the profile's secret scope is a snapshot of ``.env`` taken at
+    startup, and deleting the line leaves that snapshot (and any ambient
+    ``os.environ`` value) as the surviving copy of the token we just revoked —
+    the next adapter would read it straight back and keep retrying auth. An
+    empty value is a tombstone ``config._env_tombstoned`` resolves to "".
     """
     try:
         _write_env_values(
             {
-                "CLAWCHAT_TOKEN": None,
-                "CLAWCHAT_REFRESH_TOKEN": None,
+                "CLAWCHAT_TOKEN": "",
+                "CLAWCHAT_REFRESH_TOKEN": "",
             }
         )
     except Exception:  # noqa: BLE001

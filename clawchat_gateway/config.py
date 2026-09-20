@@ -12,12 +12,17 @@ from clawchat_gateway.hermes_home import hermes_home
 logger = logging.getLogger("clawchat_gateway.config")
 
 
-def _read_env_file_value(name: str) -> str:
+def _read_env_file_entry(name: str) -> tuple[bool, str]:
+    """``(present, value)`` for ``name`` in this profile's ``.env``.
+
+    Presence is reported separately because an EMPTY managed value is a
+    tombstone, not an absence — see ``_env_tombstoned``.
+    """
     env_path = hermes_home().expanduser() / ".env"
     try:
         lines = env_path.read_text(encoding="utf-8").splitlines()
     except OSError:
-        return ""
+        return False, ""
 
     for line in lines:
         stripped = line.strip()
@@ -27,8 +32,45 @@ def _read_env_file_value(name: str) -> str:
             stripped = stripped[len("export ") :].lstrip()
         key, sep, value = stripped.partition("=")
         if sep and key.strip() == name:
-            return value.strip().strip("\"'")
-    return ""
+            return True, value.strip().strip("\"'")
+    return False, ""
+
+
+def _read_env_file_value(name: str) -> str:
+    return _read_env_file_entry(name)[1]
+
+
+# The only keys auto-logout writes back empty to mean "revoked"
+# (``activate.clear_persisted_credentials``). The rule CANNOT be widened to
+# every ``CLAWCHAT_*`` key: an empty value is ordinary elsewhere — activation
+# always writes ``CLAWCHAT_HOME_CHANNEL_THREAD_ID=`` when it records a home
+# channel — and treating those as tombstones strips optional settings of the
+# env fallback this module documents.
+_TOMBSTONE_KEYS = frozenset({"CLAWCHAT_TOKEN", "CLAWCHAT_REFRESH_TOKEN"})
+
+
+def _env_tombstoned(name: str) -> bool:
+    """True when ``name`` is a revoked credential: in ``.env``, but EMPTY.
+
+    ``clear_persisted_credentials`` (auto-logout on a permanent refresh
+    failure) writes the key back empty instead of deleting the line, because
+    deleting it is indistinguishable from "this profile never had one" — and
+    the two must resolve differently:
+
+    * never had one — a value may legitimately arrive from elsewhere: the
+      profile secret scope (which Hermes builds from ``.env`` PLUS external
+      secret sources) or, for an env-only deployment, ``os.environ``.
+    * logged out — every one of those is a stale copy of the credential we
+      just revoked. The scope snapshot in particular is frozen at gateway
+      start, so without a tombstone the next adapter reads the revoked token
+      straight back out of it and retries authentication forever.
+
+    So a tombstone short-circuits every fallback and resolves to "".
+    """
+    if name not in _TOMBSTONE_KEYS:
+        return False
+    present, value = _read_env_file_entry(name)
+    return present and not value
 
 
 def _read_hermes_env_value(name: str) -> str:
@@ -60,9 +102,9 @@ def _read_hermes_env_value(name: str) -> str:
 def _get_env(*names: str) -> str:
     """Resolve a ``CLAWCHAT_*`` value, profile-scoped sources first.
 
-    Order: Hermes env store (profile ``.env`` -> scope-checked ``os.environ``)
-    -> ``$HERMES_HOME/.env`` parsed directly (standalone CLI, where
-    ``hermes_cli`` is not importable) -> raw ``os.environ``.
+    Unscoped order: Hermes env store (profile ``.env`` -> scope-checked
+    ``os.environ``) -> ``$HERMES_HOME/.env`` parsed directly (standalone CLI,
+    where ``hermes_cli`` is not importable) -> raw ``os.environ``.
 
     ``os.environ`` is LAST on purpose. Hermes launches a named profile's
     gateway as a child of a default-profile process with only an env overlay,
@@ -72,7 +114,55 @@ def _get_env(*names: str) -> str:
     the first one. It stays in the chain because env-only deployments (a pod
     with credentials injected and no ``.env``) legitimately have nowhere else
     to put them.
+
+    A multiplexing gateway serves every profile from ONE process, so that last
+    resort has to be re-decided per read. The branch below covers both
+    multiplex shapes at once and leans on ``get_scoped_secret`` to sort them
+    out — do NOT narrow the condition to
+    ``is_multiplex_active() and current_secret_scope() is not None`` (Hermes'
+    own ``profile_scoped()``) thinking it is equivalent, and do NOT swap
+    ``get_scoped_secret`` for a bare ``get_secret``. Both would cut a fallback
+    the host deliberately keeps (``agent/secret_scope.py``,
+    ``docs/design/multiplexing-gateway.md``):
+
+    * Multiplex ON, NO scope installed — the DEFAULT profile, which constructs
+      and sends unscoped. A bare ``get_secret`` raises ``UnscopedSecretError``;
+      ``get_scoped_secret`` catches it and reads ``os.environ``, which for that
+      profile is its OWN value.
+    * Scope installed, multiplex OFF — a single-profile deployment whose scope
+      is a ``.env`` overlay, not a blindfold. ``get_secret`` falls through to
+      ``os.environ`` itself; credentials injected by systemd / ``op run`` /
+      a container live nowhere else, and cutting it 401s every cron delivery.
+    * Scope installed AND multiplex ON — a secondary profile. Only here does
+      ``os.environ`` provably belong to someone else, and only here does a miss
+      correctly resolve to "".
+
+    Ahead of all of that, a tombstone (``_env_tombstoned``) wins outright: a
+    revoked credential must never be resurrected from a scope snapshot or from
+    ambient env. Only the two credential keys qualify — see ``_TOMBSTONE_KEYS``
+    for why an empty value cannot mean "revoked" anywhere else, aliases
+    included.
+
+    ``tests/test_multiplex_isolation.py`` pins all three.
     """
+    for name in names:
+        if _env_tombstoned(name):
+            return ""
+    try:
+        from agent.secret_scope import current_secret_scope, is_multiplex_active
+        from gateway.platforms._shared import get_scoped_secret
+    except ImportError:
+        pass  # Standalone plugin CLI without Hermes.
+    else:
+        if current_secret_scope() is not None or is_multiplex_active():
+            for name in names:
+                # Managed .env edits (including rotation) beat an old scope snapshot.
+                value = _read_env_file_value(name).strip()
+                if not value:
+                    value = str(get_scoped_secret(name, "") or "").strip()
+                if value:
+                    return value
+            return ""
     for name in names:
         value = _read_hermes_env_value(name)
         if value:

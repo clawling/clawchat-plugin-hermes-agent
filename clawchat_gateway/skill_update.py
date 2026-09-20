@@ -35,6 +35,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from clawchat_gateway.hermes_home import hermes_home
+
 logger = logging.getLogger(__name__)
 
 # --- Fixed contract constants (other repos depend on these) -----------------
@@ -168,8 +170,12 @@ def skill_version(path: Path) -> str | None:
 # --- Managed-dir layout -----------------------------------------------------
 
 
-def hermes_home() -> Path:
-    return Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+# ``hermes_home`` comes from the shared resolver, and must not be re-inlined
+# here: the managed skills dir, its manifest and pending.json are per-profile
+# MUTABLE state, so a bare ``os.environ["HERMES_HOME"]`` read pointed a
+# multiplexed named profile at the DEFAULT profile's skill state — profiles
+# consumed each other's pending approvals and installed updates into the wrong
+# home. (It also restores the Windows-native default.)
 
 
 def managed_skills_dir() -> Path:

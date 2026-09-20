@@ -229,9 +229,10 @@ For protocol-level checks (WebSocket handshake, ack flow), see
 
 ## Multiple agents on one host (Hermes profiles)
 
-Each Hermes profile is an independent `HERMES_HOME` and runs its own gateway
-process, so each profile is a separate ClawChat agent with its own account and
-its own database file under `$HERMES_HOME/clawchat/`:
+Each Hermes profile is an independent `HERMES_HOME`, so each profile is a
+separate ClawChat agent with its own account and its own database file under
+`$HERMES_HOME/clawchat/`. One gateway process per profile is the default and the
+better-tested shape:
 
 ```bash
 hermes profile create coder
@@ -243,8 +244,14 @@ hermes -p coder gateway install && hermes -p coder gateway start
 
 Repeat with a different profile name for each agent. The default profile keeps
 its database at `$HERMES_HOME/clawchat/clawchat.sqlite`; named profiles use
-`clawchat-<profile>.sqlite`. Single-gateway multiplexing
-(`multiplex_profiles=true`) is not supported — run one gateway per profile.
+`clawchat-<profile>.sqlite`.
+
+Serving several profiles from ONE gateway (`gateway.multiplex_profiles: true`)
+is supported as well: the plugin keys its stores, supervisors and senders by
+profile so the accounts stay separate. Prefer a gateway per profile unless you
+specifically need the single-process shape, and read
+[multiplex-profile-isolation.md](multiplex-profile-isolation.md) first — it
+lists what is isolated and how to verify a deployment.
 
 > **Read the next section before you install or activate into a profile.**
 > Creating a profile does not switch you into it, and a mis-targeted activation
