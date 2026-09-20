@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import enum
 import json
 import logging
@@ -11,6 +12,7 @@ import random
 import time
 from collections import deque
 from dataclasses import dataclass, replace
+from functools import wraps
 from typing import Any, Awaitable, Callable, ClassVar
 
 try:
@@ -20,6 +22,7 @@ except ImportError:  # pragma: no cover
 
 from clawchat_gateway import __version__
 from clawchat_gateway.config import ClawChatConfig
+from clawchat_gateway.hermes_home import hermes_home
 from clawchat_gateway.token_refresh import (
     RefreshManager,
     RefreshOutcome,
@@ -300,15 +303,30 @@ OnMessageError = Callable[[dict[str, Any]], Awaitable[None]]
 IsChatRejected = Callable[[str], bool]
 
 
+def _in_connection_context(method):
+    """Run lifecycle/credential callbacks in the owning profile, including workers.
+
+    Coroutine creation alone does not capture ContextVars; task creation does.
+    A copy also permits overlapping callbacks without re-entering one Context.
+    """
+    @wraps(method)
+    async def scoped(self, *args, **kwargs):
+        task = self._profile_context.copy().run(
+            asyncio.create_task, method(self, *args, **kwargs)
+        )
+        return await task
+    return scoped
+
+
 class ClawChatConnection:
-    # Process-wide guard: at most one live supervisor per ``account_id``. The Hermes
+    # Process-wide guard: at most one live supervisor per (profile home, account_id). The Hermes
     # reconnect watcher builds a FRESH adapter (=> new ``ClawChatConnection``) on every
     # retry and only best-effort disconnects the old one (a ~5s budget it abandons on
     # timeout; a ``wait_for``-cancelled ``connect()`` never disconnects at all). A
     # leaked supervisor keeps reconnecting with the SAME ``device_id``, so msghub
     # mutually kicks the live connection in an endless reconnect storm. Superseding the
     # prior supervisor when a fresh one starts makes such duplicates impossible.
-    _live_supervisors: ClassVar[dict[str, "ClawChatConnection"]] = {}
+    _live_supervisors: ClassVar[dict[tuple[str, str], "ClawChatConnection"]] = {}
 
     def __init__(
         self,
@@ -340,6 +358,9 @@ class ClawChatConnection:
         self._on_message_error = on_message_error
         self._is_chat_rejected = is_chat_rejected
         self._account_id = account_id
+        self._profile_home = hermes_home().expanduser().resolve()
+        self._profile_context = contextvars.copy_context()
+        self._supervisor_key = (str(self._profile_home), account_id)
         self._state = ConnectionState.DISCONNECTED
         self._ws: Any = None
         self._stopping = False
@@ -388,12 +409,13 @@ class ClawChatConnection:
     def config(self) -> ClawChatConfig:
         return self._cfg
 
+    @_in_connection_context
     async def start(self) -> None:
         if self._supervisor_task is not None:
             return
         # Supersede any orphaned supervisor for the same account before starting
         # ours, so only one WS session per account is ever live in this process.
-        prior = ClawChatConnection._live_supervisors.get(self._account_id)
+        prior = ClawChatConnection._live_supervisors.get(self._supervisor_key)
         if prior is not None and prior is not self:
             logger.info(
                 format_ws_log(
@@ -416,7 +438,7 @@ class ClawChatConnection:
             self._supervisor(),
             name="clawchat-supervisor",
         )
-        ClawChatConnection._live_supervisors[self._account_id] = self
+        ClawChatConnection._live_supervisors[self._supervisor_key] = self
 
     def _build_refresh_manager(self) -> RefreshManager:
         return RefreshManager(
@@ -556,6 +578,7 @@ class ClawChatConnection:
         # row with it points the agent at the main agent's conversation.
         return _get_env("CLAWCHAT_HOME_CHANNEL") or None
 
+    @_in_connection_context
     async def _persist_rotated_tokens(self, access_token: str, refresh_token: str) -> bool:
         from clawchat_gateway.activate import persist_rotated_tokens
 
@@ -583,6 +606,7 @@ class ClawChatConnection:
             logger.warning("clawchat rotated-token persistence raised", exc_info=True)
             return False
 
+    @_in_connection_context
     async def _persist_auth_logout(self, reason: str) -> None:
         from clawchat_gateway.activate import clear_persisted_credentials
 
@@ -600,6 +624,7 @@ class ClawChatConnection:
             except Exception:  # noqa: BLE001
                 logger.warning("clawchat auth-logout notification failed", exc_info=True)
 
+    @_in_connection_context
     async def stop(self) -> None:
         self._stopping = True
         self._cancel_stable_ready_reset()
@@ -629,8 +654,8 @@ class ClawChatConnection:
                 pass
             self._supervisor_task = None
         # Release our slot only if a newer ``start`` hasn't already claimed it.
-        if ClawChatConnection._live_supervisors.get(self._account_id) is self:
-            del ClawChatConnection._live_supervisors[self._account_id]
+        if ClawChatConnection._live_supervisors.get(self._supervisor_key) is self:
+            del ClawChatConnection._live_supervisors[self._supervisor_key]
 
     async def send_frame(
         self,

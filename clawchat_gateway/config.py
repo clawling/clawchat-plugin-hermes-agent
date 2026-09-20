@@ -58,21 +58,22 @@ def _read_hermes_env_value(name: str) -> str:
 
 
 def _get_env(*names: str) -> str:
-    """Resolve a ``CLAWCHAT_*`` value, profile-scoped sources first.
-
-    Order: Hermes env store (profile ``.env`` -> scope-checked ``os.environ``)
-    -> ``$HERMES_HOME/.env`` parsed directly (standalone CLI, where
-    ``hermes_cli`` is not importable) -> raw ``os.environ``.
-
-    ``os.environ`` is LAST on purpose. Hermes launches a named profile's
-    gateway as a child of a default-profile process with only an env overlay,
-    and its inherited-key scrub covers a hardcoded first-party allow-list that
-    a plugin's keys can never join — so a raw ``os.getenv`` here returned the
-    DEFAULT profile's token/home-channel and the second agent silently became
-    the first one. It stays in the chain because env-only deployments (a pod
-    with credentials injected and no ``.env``) legitimately have nowhere else
-    to put them.
-    """
+    """Read profile credentials; legacy unscoped CLI retains env fallback."""
+    try:
+        from agent.secret_scope import current_secret_scope, is_multiplex_active
+        from gateway.platforms._shared import get_scoped_secret
+    except ImportError:
+        pass  # Standalone plugin CLI without Hermes.
+    else:
+        if current_secret_scope() is not None or is_multiplex_active():
+            for name in names:
+                # Managed .env edits (including rotation) beat an old scope snapshot.
+                value = _read_env_file_value(name).strip()
+                if not value:
+                    value = str(get_scoped_secret(name, "") or "").strip()
+                if value:
+                    return value
+            return ""
     for name in names:
         value = _read_hermes_env_value(name)
         if value:

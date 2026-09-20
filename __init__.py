@@ -30,7 +30,9 @@ def _setup_clawchat_platform() -> None:
 
 
 def _hermes_home() -> Path:
-    return Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+    from clawchat_gateway.hermes_home import hermes_home
+
+    return hermes_home()
 
 
 def _clawchat_home_extra() -> dict:
@@ -242,19 +244,9 @@ async def _send_clawchat_media_via_live_adapter(
     thread_id=None,
     media_files=None,
 ):
-    try:
-        from gateway.run import _gateway_runner_ref
+    from clawchat_gateway.terminal_send import get_clawchat_sender
 
-        runner = _gateway_runner_ref()
-    except Exception:
-        runner = None
-
-    adapter = None
-    if runner is not None:
-        try:
-            adapter = runner.adapters.get(platform)
-        except Exception:
-            adapter = None
+    adapter = get_clawchat_sender()
     if adapter is None:
         # Out-of-process `hermes send` / cron delivery: no gateway runner in
         # this process. The standalone path uploads media over REST and sends

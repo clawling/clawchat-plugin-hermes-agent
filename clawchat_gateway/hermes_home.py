@@ -31,7 +31,22 @@ def platform_default_hermes_home() -> Path:
 
 
 def hermes_home() -> Path:
-    """``$HERMES_HOME`` when exported, else the platform-native default."""
+    """Multiplex override, then ``$HERMES_HOME``, else the platform-native default.
+
+    Under a multiplexing gateway Hermes runs every profile in one process and
+    scopes each profile's work with a context-local home override
+    (``hermes_constants.set_hermes_home_override``). Follow it first so
+    per-profile storage (.env, sqlite, pairing) resolves to the served
+    profile's home instead of the process-wide default home.
+    """
+    try:
+        from hermes_constants import get_hermes_home_override
+
+        override = (get_hermes_home_override() or "").strip()
+        if override:
+            return Path(override)
+    except Exception:  # standalone CLI: hermes_constants is not importable
+        pass
     configured = os.environ.get("HERMES_HOME", "").strip()
     if configured:
         return Path(configured)

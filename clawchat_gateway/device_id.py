@@ -99,7 +99,7 @@ def legacy_host_device_id() -> str:
     override = _env("CLAWCHAT_DEVICE_ID")
     if override:
         return override if override.startswith("hermes-") else _safe_id("hermes", override)
-    return _mac_platform_uuid() or _machine_id() or _host_fingerprint()
+    return _host_device_id()
 
 
 def resolve_paired_device_id(*, stored: str | None, token: str) -> str | None:
@@ -125,7 +125,6 @@ def resolve_paired_device_id(*, stored: str | None, token: str) -> str | None:
     return None
 
 
-@functools.lru_cache(maxsize=1)
 def get_device_id() -> str:
     """Return a stable ClawChat device id for this Hermes agent (profile).
 
@@ -150,7 +149,7 @@ def get_device_id() -> str:
     override = _env("CLAWCHAT_DEVICE_ID")
     if override:
         return override if override.startswith("hermes-") else _safe_id("hermes", override)
-    host = _mac_platform_uuid() or _machine_id() or _host_fingerprint()
+    host = _host_device_id()
     scope = profile_scope()
     return f"{host}-p{scope}" if scope else host
 
@@ -184,3 +183,9 @@ def warn_if_device_id_unpinned() -> None:
         "containerized/Kubernetes deployment (see docs/configuration.md).",
         get_device_id(),
     )
+
+
+@functools.lru_cache(maxsize=1)
+def _host_device_id() -> str:
+    """Cache only the host fingerprint, never profile-specific overrides or suffixes."""
+    return _mac_platform_uuid() or _machine_id() or _host_fingerprint()

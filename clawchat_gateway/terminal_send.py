@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextvars
+from clawchat_gateway.hermes_home import hermes_home
 import time
 import uuid
 from dataclasses import dataclass
@@ -39,7 +40,7 @@ class ClawChatMentionSender(Protocol):
         ...
 
 
-_active_sender: ClawChatMentionSender | None = None
+_senders: dict[str, ClawChatMentionSender] = {}
 _terminal_send_scope: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "clawchat_terminal_send_scope",
     default=None,
@@ -56,14 +57,22 @@ def _current_terminal_send_scope(*, create: bool = False) -> str | None:
 
 
 def set_clawchat_mention_sender(sender: ClawChatMentionSender) -> None:
-    global _active_sender
-    _active_sender = sender
+    _senders[str(hermes_home().expanduser().resolve())] = sender
 
 
 def clear_clawchat_mention_sender(sender: ClawChatMentionSender | None = None) -> None:
-    global _active_sender
-    if sender is None or _active_sender is sender:
-        _active_sender = None
+    if sender is None:
+        _senders.pop(str(hermes_home().expanduser().resolve()), None)
+        return
+    # Disconnect can be called outside the adapter's original profile scope.
+    # Identity checks protect a replacement registered before old cleanup ends.
+    for key, registered in list(_senders.items()):
+        if registered is sender:
+            del _senders[key]
+
+
+def get_clawchat_sender() -> ClawChatMentionSender | None:
+    return _senders.get(str(hermes_home().expanduser().resolve()))
 
 
 async def send_clawchat_mention_message(
@@ -74,9 +83,10 @@ async def send_clawchat_mention_message(
     mentions: list[dict[str, Any]],
     reply_to_message_id: str | None = None,
 ) -> dict[str, Any]:
-    if _active_sender is None:
+    sender = get_clawchat_sender()
+    if sender is None:
         raise RuntimeError("ClawChat websocket sender is not ready")
-    return await _active_sender.send_mention_message(
+    return await sender.send_mention_message(
         chat_id=chat_id,
         chat_type=chat_type,
         text=text,
@@ -92,9 +102,10 @@ async def send_clawchat_reaction_message(
     emoji: str,
     removed: bool = False,
 ) -> dict[str, Any]:
-    if _active_sender is None:
+    sender = get_clawchat_sender()
+    if sender is None:
         raise RuntimeError("ClawChat websocket sender is not ready")
-    return await _active_sender.send_reaction_message(
+    return await sender.send_reaction_message(
         chat_id=chat_id,
         target_message_id=target_message_id,
         emoji=emoji,
