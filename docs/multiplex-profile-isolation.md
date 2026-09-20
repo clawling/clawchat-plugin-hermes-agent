@@ -40,6 +40,16 @@ through the same scoped resolver. Reading `CLAWCHAT_HOME_CHANNEL` and the
 endpoint overrides from process-wide `os.environ` handed a named profile the
 default profile's home conversation, so home delivery went to the wrong chat.
 
+Every module that needs the home goes through `clawchat_gateway.hermes_home`;
+inlining `os.environ["HERMES_HOME"]` is what breaks isolation. `skill_update`
+(managed skills, manifest, `pending.json`) and the adapter's `liveware-sample`
+root were the last two holdouts — both are per-profile mutable state, and a
+process-wide read let profiles consume each other's pending approvals or drive
+each other's sample app. Two sites stay process-wide ON PURPOSE and say so in
+place: `liveware_cli` (a host-level binary cache downloaded once per process)
+and `profile_collision` (it needs the native/root home precisely to notice that
+two profiles share one identity).
+
 Device identity keeps the current paired-device compatibility rules and named
 profile suffix. Only the host fingerprint is globally cached; explicit device
 IDs and profile suffixes are resolved per call. The `functools.lru_cache` moved

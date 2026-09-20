@@ -143,6 +143,19 @@ class Isolation(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(_get_env('CLAWCHAT_HOME_CHANNEL_THREAD_ID'), 'thread-A')
             self.assertEqual(_get_env('CLAWCHAT_WEBSOCKET_URL', 'CLAWCHAT_WS_URL'), 'wss://alias.example')
 
+    async def test_skill_update_state_follows_the_scoped_home(self):
+        """Managed skills, the manifest and pending.json are per-profile MUTABLE
+        state: a process-wide home let profiles consume each other's pending
+        approvals and install updates into the wrong home."""
+        from clawchat_gateway import skill_update
+        with scope(self.a): a_dir, a_pending = skill_update.managed_skills_dir(), skill_update.pending_path()
+        with scope(self.b): b_dir, b_pending = skill_update.managed_skills_dir(), skill_update.pending_path()
+        self.assertNotEqual(a_dir, b_dir)
+        self.assertNotEqual(a_pending, b_pending)
+        self.assertEqual(a_dir.parent, self.a)
+        self.assertEqual(b_dir.parent, self.b)
+        with scope(self.a): self.assertEqual(skill_update.managed_skills_dir(), a_dir)
+
     async def test_device_override_is_profile_scoped(self):
         from clawchat_gateway.device_id import get_device_id
         for home, name in [(self.a, 'A'), (self.b, 'B')]:
