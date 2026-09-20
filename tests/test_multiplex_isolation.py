@@ -132,6 +132,17 @@ class Isolation(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(_get_env('CLAWCHAT_REFRESH_TOKEN'), '')
             self.assertEqual(load_env_file(self.b/'.env').get('CLAWCHAT_TOKEN'), '')
 
+    async def test_only_revoked_credential_keys_are_tombstoned(self):
+        """An empty value is ordinary outside the two credential keys: activation
+        always writes CLAWCHAT_HOME_CHANNEL_THREAD_ID= when it records a home
+        channel. Treating that as a logout would strip optional settings — and,
+        via the alias loop, a second alias too — of their env fallback."""
+        (self.a/'.env').write_text('CLAWCHAT_HOME_CHANNEL_THREAD_ID=\nCLAWCHAT_WEBSOCKET_URL=\n')
+        env = {'CLAWCHAT_HOME_CHANNEL_THREAD_ID': 'thread-A', 'CLAWCHAT_WS_URL': 'wss://alias.example'}
+        with patch.dict(os.environ, env), home_only(self.a):
+            self.assertEqual(_get_env('CLAWCHAT_HOME_CHANNEL_THREAD_ID'), 'thread-A')
+            self.assertEqual(_get_env('CLAWCHAT_WEBSOCKET_URL', 'CLAWCHAT_WS_URL'), 'wss://alias.example')
+
     async def test_device_override_is_profile_scoped(self):
         from clawchat_gateway.device_id import get_device_id
         for home, name in [(self.a, 'A'), (self.b, 'B')]:

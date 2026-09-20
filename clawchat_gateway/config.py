@@ -40,8 +40,17 @@ def _read_env_file_value(name: str) -> str:
     return _read_env_file_entry(name)[1]
 
 
+# The only keys auto-logout writes back empty to mean "revoked"
+# (``activate.clear_persisted_credentials``). The rule CANNOT be widened to
+# every ``CLAWCHAT_*`` key: an empty value is ordinary elsewhere — activation
+# always writes ``CLAWCHAT_HOME_CHANNEL_THREAD_ID=`` when it records a home
+# channel — and treating those as tombstones strips optional settings of the
+# env fallback this module documents.
+_TOMBSTONE_KEYS = frozenset({"CLAWCHAT_TOKEN", "CLAWCHAT_REFRESH_TOKEN"})
+
+
 def _env_tombstoned(name: str) -> bool:
-    """True when this profile's ``.env`` holds ``name`` with an EMPTY value.
+    """True when ``name`` is a revoked credential: in ``.env``, but EMPTY.
 
     ``clear_persisted_credentials`` (auto-logout on a permanent refresh
     failure) writes the key back empty instead of deleting the line, because
@@ -58,6 +67,8 @@ def _env_tombstoned(name: str) -> bool:
 
     So a tombstone short-circuits every fallback and resolves to "".
     """
+    if name not in _TOMBSTONE_KEYS:
+        return False
     present, value = _read_env_file_entry(name)
     return present and not value
 
@@ -127,8 +138,10 @@ def _get_env(*names: str) -> str:
       correctly resolve to "".
 
     Ahead of all of that, a tombstone (``_env_tombstoned``) wins outright: a
-    managed credential this profile deleted must never be resurrected from a
-    scope snapshot or from ambient env.
+    revoked credential must never be resurrected from a scope snapshot or from
+    ambient env. Only the two credential keys qualify — see ``_TOMBSTONE_KEYS``
+    for why an empty value cannot mean "revoked" anywhere else, aliases
+    included.
 
     ``tests/test_multiplex_isolation.py`` pins all three.
     """

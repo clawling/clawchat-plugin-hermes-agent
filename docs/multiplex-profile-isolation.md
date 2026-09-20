@@ -30,7 +30,10 @@ Auto-logout leaves a tombstone. `clear_persisted_credentials` writes
 lines, because the secret scope is a snapshot taken at gateway start: a deleted
 line leaves that snapshot (and any ambient `os.environ` value) holding the token
 we just revoked, and the next adapter reads it straight back and retries auth
-forever. An empty managed value resolves to `""` ahead of every fallback.
+forever. An empty value in those two keys resolves to `""` ahead of every
+fallback. Only those two: an empty value is ordinary elsewhere — activation
+writes `CLAWCHAT_HOME_CHANNEL_THREAD_ID=` whenever it records a home channel —
+so a blanket rule would strip optional settings of their env fallback.
 
 The platform seed Hermes builds per profile (`_clawchat_env_enablement`) reads
 through the same scoped resolver. Reading `CLAWCHAT_HOME_CHANNEL` and the
