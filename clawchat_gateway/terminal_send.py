@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import contextvars
-from clawchat_gateway.hermes_home import hermes_home
 import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol
+
+from clawchat_gateway.hermes_home import hermes_home
 
 DEFAULT_TERMINAL_SEND_TTL_SECONDS = 60.0
 

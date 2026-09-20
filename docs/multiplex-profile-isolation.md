@@ -16,9 +16,20 @@ files even when invoked from another context. Mention, reaction and media sends
 resolve the active profile's adapter. Missing scoped credentials do not fall back
 to another profile's ambient environment.
 
+Credential reads stay delegated to Hermes rather than re-deciding the fallback
+here. `_get_env` takes its scoped branch whenever a secret scope is installed
+*or* multiplexing is on, and lets `get_scoped_secret` separate the three shapes:
+the default profile (multiplex on, unscoped) and a single-profile deployment
+(scoped, multiplex off) both still reach `os.environ`, because there it is their
+own value and env-injected deployments keep nothing else; only a scoped profile
+under multiplexing fails closed on a miss. Narrowing that condition, or dropping
+to a bare `get_secret`, silently 401s cron deliveries and env-only containers.
+
 Device identity keeps the current paired-device compatibility rules and named
 profile suffix. Only the host fingerprint is globally cached; explicit device
-IDs and profile suffixes are resolved per call.
+IDs and profile suffixes are resolved per call. The `functools.lru_cache` moved
+off `get_device_id` onto `_host_device_id`, so any test fixture that used to
+call `get_device_id.cache_clear()` must now clear `_host_device_id` instead.
 
 ## Regression checks
 
@@ -33,10 +44,20 @@ PYTHONPATH="$HOME/.hermes/hermes-agent" \
 tests/test_multiplex_isolation.py
 ```
 
+Any Hermes 0.21+ checkout on `PYTHONPATH` works; the plugin's own dependencies
+are not needed for this file.
+
 The tests use temporary profiles, synthetic credentials and an offline supervisor.
 They cover connection coexistence and replacement, A/B/A database identity,
-scoped sends, missing secrets, cross-context token rotation/logout, and device
-identity compatibility. They do not contact ClawChat or change existing profiles.
+scoped sends, missing secrets and the two env-fallback shapes that must survive,
+cross-context token rotation/logout, and device identity compatibility. They do
+not contact ClawChat or change existing profiles.
+
+This file is the one exception to the repository's `tests/` ignore rule — see
+`.gitignore` — so the multiplex invariants ship with the code instead of relying
+on `git add -f`. The rest of the suite stays untracked, which also means a
+change like the device-id cache move above cannot be caught by CI: run the local
+suite before merging anything that touches these modules.
 
 After deploying and restarting the gateway, verify each profile has its own
 `ready` connection and test actual messages with both accounts. A systemd

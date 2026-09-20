@@ -16,6 +16,13 @@ def scope(home):
     try: yield
     finally: reset_secret_scope(s); reset_hermes_home_override(h)
 
+@contextlib.contextmanager
+def home_only(home):
+    """Home override with NO secret scope: how the DEFAULT profile runs under multiplexing."""
+    h = set_hermes_home_override(str(home))
+    try: yield
+    finally: reset_hermes_home_override(h)
+
 class OfflineConnection(ClawChatConnection):
     def _warn_if_device_id_volatile(self): pass
     def _build_refresh_manager(self): return object()
@@ -82,6 +89,21 @@ class Isolation(unittest.IsolatedAsyncioTestCase):
     async def test_scoped_missing_secret_never_uses_default_environment(self):
         (self.b/'.env').write_text('')
         with scope(self.b): self.assertEqual(_get_env('CLAWCHAT_TOKEN'),'')
+
+    async def test_default_profile_under_multiplex_keeps_env_fallback(self):
+        """Multiplex on, no scope installed = the DEFAULT profile. os.environ is
+        then its OWN value, so cutting the fallback would strip credentials from
+        env-injected deployments (systemd / `op run` / a container)."""
+        (self.a/'.env').write_text('')
+        with home_only(self.a): self.assertEqual(_get_env('CLAWCHAT_TOKEN'),'ambient-A')
+
+    async def test_scope_without_multiplex_keeps_env_fallback(self):
+        """A scope outside multiplexing is a `.env` overlay, not a blindfold —
+        Hermes' own get_secret falls through here, and so must we (cron 401s)."""
+        set_multiplex_active(False)
+        (self.b/'.env').write_text('')
+        with scope(self.b): self.assertEqual(_get_env('CLAWCHAT_TOKEN'),'ambient-A')
+
     async def test_device_override_is_profile_scoped(self):
         from clawchat_gateway.device_id import get_device_id
         for home, name in [(self.a, 'A'), (self.b, 'B')]:

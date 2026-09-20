@@ -8,10 +8,12 @@ outside a ``hermes -p <name>`` invocation — the plugin therefore looked for th
 ``.env``, the SQLite database and the memory root in ``C:\\Users\\<u>\\.hermes``,
 a directory Hermes never writes.
 
-Deliberately mirrors ``hermes_constants._hermes_home_from_env`` rather than
-importing it: every call site here already resolved the env var directly, and
-following Hermes' context-local per-task override would be a wider semantic
-change than these paths want.
+Mirrors ``hermes_constants._hermes_home_from_env`` rather than importing it —
+every call site here already resolved the env var directly — but DOES follow
+Hermes' context-local per-task home override. Under a multiplexing gateway that
+override is the only thing distinguishing one served profile from another, so
+ignoring it (as this module originally did) collapses every profile's ``.env``,
+SQLite database and pairing state onto the process-wide home.
 """
 
 from __future__ import annotations

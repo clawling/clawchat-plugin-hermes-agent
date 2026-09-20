@@ -58,7 +58,45 @@ def _read_hermes_env_value(name: str) -> str:
 
 
 def _get_env(*names: str) -> str:
-    """Read profile credentials; legacy unscoped CLI retains env fallback."""
+    """Resolve a ``CLAWCHAT_*`` value, profile-scoped sources first.
+
+    Unscoped order: Hermes env store (profile ``.env`` -> scope-checked
+    ``os.environ``) -> ``$HERMES_HOME/.env`` parsed directly (standalone CLI,
+    where ``hermes_cli`` is not importable) -> raw ``os.environ``.
+
+    ``os.environ`` is LAST on purpose. Hermes launches a named profile's
+    gateway as a child of a default-profile process with only an env overlay,
+    and its inherited-key scrub covers a hardcoded first-party allow-list that
+    a plugin's keys can never join — so a raw ``os.getenv`` here returned the
+    DEFAULT profile's token/home-channel and the second agent silently became
+    the first one. It stays in the chain because env-only deployments (a pod
+    with credentials injected and no ``.env``) legitimately have nowhere else
+    to put them.
+
+    A multiplexing gateway serves every profile from ONE process, so that last
+    resort has to be re-decided per read. The branch below covers both
+    multiplex shapes at once and leans on ``get_scoped_secret`` to sort them
+    out — do NOT narrow the condition to
+    ``is_multiplex_active() and current_secret_scope() is not None`` (Hermes'
+    own ``profile_scoped()``) thinking it is equivalent, and do NOT swap
+    ``get_scoped_secret`` for a bare ``get_secret``. Both would cut a fallback
+    the host deliberately keeps (``agent/secret_scope.py``,
+    ``docs/design/multiplexing-gateway.md``):
+
+    * Multiplex ON, NO scope installed — the DEFAULT profile, which constructs
+      and sends unscoped. A bare ``get_secret`` raises ``UnscopedSecretError``;
+      ``get_scoped_secret`` catches it and reads ``os.environ``, which for that
+      profile is its OWN value.
+    * Scope installed, multiplex OFF — a single-profile deployment whose scope
+      is a ``.env`` overlay, not a blindfold. ``get_secret`` falls through to
+      ``os.environ`` itself; credentials injected by systemd / ``op run`` /
+      a container live nowhere else, and cutting it 401s every cron delivery.
+    * Scope installed AND multiplex ON — a secondary profile. Only here does
+      ``os.environ`` provably belong to someone else, and only here does a miss
+      correctly resolve to "".
+
+    ``tests/test_multiplex_isolation.py`` pins all three.
+    """
     try:
         from agent.secret_scope import current_secret_scope, is_multiplex_active
         from gateway.platforms._shared import get_scoped_secret

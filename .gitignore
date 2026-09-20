@@ -26,7 +26,11 @@ tmp
 # repository directly into $HERMES_HOME/plugins/clawchat, so keep GitHub's
 # tracked tree focused on runtime plugin files plus repository documentation.
 .e2e/
-tests/
+# Ignored wholesale EXCEPT the named regression checks below. Those cover
+# invariants that are invisible to a single-profile run (multiplex profile
+# isolation), so they ship with the code instead of relying on `git add -f`.
+tests/*
+!tests/test_multiplex_isolation.py
 deploy/
 scripts/
 docs/superpowers/
