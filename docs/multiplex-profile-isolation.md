@@ -25,6 +25,18 @@ own value and env-injected deployments keep nothing else; only a scoped profile
 under multiplexing fails closed on a miss. Narrowing that condition, or dropping
 to a bare `get_secret`, silently 401s cron deliveries and env-only containers.
 
+Auto-logout leaves a tombstone. `clear_persisted_credentials` writes
+`CLAWCHAT_TOKEN` / `CLAWCHAT_REFRESH_TOKEN` back EMPTY instead of deleting the
+lines, because the secret scope is a snapshot taken at gateway start: a deleted
+line leaves that snapshot (and any ambient `os.environ` value) holding the token
+we just revoked, and the next adapter reads it straight back and retries auth
+forever. An empty managed value resolves to `""` ahead of every fallback.
+
+The platform seed Hermes builds per profile (`_clawchat_env_enablement`) reads
+through the same scoped resolver. Reading `CLAWCHAT_HOME_CHANNEL` and the
+endpoint overrides from process-wide `os.environ` handed a named profile the
+default profile's home conversation, so home delivery went to the wrong chat.
+
 Device identity keeps the current paired-device compatibility rules and named
 profile suffix. Only the host fingerprint is globally cached; explicit device
 IDs and profile suffixes are resolved per call. The `functools.lru_cache` moved

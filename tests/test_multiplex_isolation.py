@@ -1,11 +1,27 @@
-"""Offline regression checks. Only temporary profiles; no network or real credentials."""
+"""Offline regression checks. Only temporary profiles; no network or real credentials.
+
+Needs a Hermes Agent checkout on PYTHONPATH (validated with 0.21.x). The
+plugin's declared ``test`` extra does NOT install Hermes and ``testpaths`` is
+``tests``, so on a plugin-only checkout this module skips itself — importing
+``hermes_constants`` unconditionally would abort collection for the whole suite.
+See docs/multiplex-profile-isolation.md for the run command.
+"""
 import asyncio, contextlib, importlib.util, os, pathlib, sys, tempfile, unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 PLUGIN = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN))
-from hermes_constants import set_hermes_home_override, reset_hermes_home_override
-from agent.secret_scope import set_secret_scope, reset_secret_scope, set_multiplex_active, load_env_file
+try:
+    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+    from agent.secret_scope import set_secret_scope, reset_secret_scope, set_multiplex_active, load_env_file
+except ImportError as exc:  # pragma: no cover - environment gate
+    _REASON = f"needs a Hermes Agent checkout on PYTHONPATH ({exc})"
+    try:
+        import pytest
+    except ImportError:
+        print(f"SKIP: {_REASON}")
+        raise SystemExit(0) from None
+    pytest.skip(_REASON, allow_module_level=True)
 from clawchat_gateway import storage, terminal_send
 from clawchat_gateway.config import ClawChatConfig, _get_env
 from clawchat_gateway.connection import ClawChatConnection
@@ -104,6 +120,18 @@ class Isolation(unittest.IsolatedAsyncioTestCase):
         (self.b/'.env').write_text('')
         with scope(self.b): self.assertEqual(_get_env('CLAWCHAT_TOKEN'),'ambient-A')
 
+    async def test_logout_tombstone_beats_the_stale_scope_snapshot(self):
+        """The secret scope is frozen at gateway start. Deleting the .env line
+        would leave that snapshot holding the token we just revoked, so the next
+        adapter reads it back and retries auth forever; an empty value must win."""
+        b = self.connection(self.b, 'B')
+        with scope(self.b):
+            self.assertEqual(_get_env('CLAWCHAT_TOKEN'), 'token-B')
+            await b._persist_auth_logout('test')
+            self.assertEqual(_get_env('CLAWCHAT_TOKEN'), '')
+            self.assertEqual(_get_env('CLAWCHAT_REFRESH_TOKEN'), '')
+            self.assertEqual(load_env_file(self.b/'.env').get('CLAWCHAT_TOKEN'), '')
+
     async def test_device_override_is_profile_scoped(self):
         from clawchat_gateway.device_id import get_device_id
         for home, name in [(self.a, 'A'), (self.b, 'B')]:
@@ -131,7 +159,7 @@ class Isolation(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(b._store.get_activation_credentials(platform='hermes',account_id='default').access_token,'rotated-B')
         with scope(self.a): await b._persist_auth_logout('test')
         self.assertEqual(load_env_file(self.a/'.env')['CLAWCHAT_TOKEN'],'token-A')
-        self.assertNotIn('CLAWCHAT_TOKEN',load_env_file(self.b/'.env'))
+        self.assertEqual(load_env_file(self.b/'.env').get('CLAWCHAT_TOKEN'),'')
         self.assertIsNone(b._store.get_activation_credentials(platform='hermes',account_id='default'))
 
 if __name__ == '__main__': unittest.main(verbosity=2)

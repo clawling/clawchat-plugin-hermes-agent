@@ -12,12 +12,17 @@ from clawchat_gateway.hermes_home import hermes_home
 logger = logging.getLogger("clawchat_gateway.config")
 
 
-def _read_env_file_value(name: str) -> str:
+def _read_env_file_entry(name: str) -> tuple[bool, str]:
+    """``(present, value)`` for ``name`` in this profile's ``.env``.
+
+    Presence is reported separately because an EMPTY managed value is a
+    tombstone, not an absence — see ``_env_tombstoned``.
+    """
     env_path = hermes_home().expanduser() / ".env"
     try:
         lines = env_path.read_text(encoding="utf-8").splitlines()
     except OSError:
-        return ""
+        return False, ""
 
     for line in lines:
         stripped = line.strip()
@@ -27,8 +32,34 @@ def _read_env_file_value(name: str) -> str:
             stripped = stripped[len("export ") :].lstrip()
         key, sep, value = stripped.partition("=")
         if sep and key.strip() == name:
-            return value.strip().strip("\"'")
-    return ""
+            return True, value.strip().strip("\"'")
+    return False, ""
+
+
+def _read_env_file_value(name: str) -> str:
+    return _read_env_file_entry(name)[1]
+
+
+def _env_tombstoned(name: str) -> bool:
+    """True when this profile's ``.env`` holds ``name`` with an EMPTY value.
+
+    ``clear_persisted_credentials`` (auto-logout on a permanent refresh
+    failure) writes the key back empty instead of deleting the line, because
+    deleting it is indistinguishable from "this profile never had one" — and
+    the two must resolve differently:
+
+    * never had one — a value may legitimately arrive from elsewhere: the
+      profile secret scope (which Hermes builds from ``.env`` PLUS external
+      secret sources) or, for an env-only deployment, ``os.environ``.
+    * logged out — every one of those is a stale copy of the credential we
+      just revoked. The scope snapshot in particular is frozen at gateway
+      start, so without a tombstone the next adapter reads the revoked token
+      straight back out of it and retries authentication forever.
+
+    So a tombstone short-circuits every fallback and resolves to "".
+    """
+    present, value = _read_env_file_entry(name)
+    return present and not value
 
 
 def _read_hermes_env_value(name: str) -> str:
@@ -95,8 +126,15 @@ def _get_env(*names: str) -> str:
       ``os.environ`` provably belong to someone else, and only here does a miss
       correctly resolve to "".
 
+    Ahead of all of that, a tombstone (``_env_tombstoned``) wins outright: a
+    managed credential this profile deleted must never be resurrected from a
+    scope snapshot or from ambient env.
+
     ``tests/test_multiplex_isolation.py`` pins all three.
     """
+    for name in names:
+        if _env_tombstoned(name):
+            return ""
     try:
         from agent.secret_scope import current_secret_scope, is_multiplex_active
         from gateway.platforms._shared import get_scoped_secret

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import sys
 from copy import copy
 from pathlib import Path
@@ -90,25 +89,32 @@ def _clawchat_platform_config_with_home_extra(config):
 
 
 def _clawchat_env_enablement() -> dict | None:
+    """Seed the platform config Hermes builds for the profile it is serving.
+
+    Reads go through ``config._get_env``, never bare ``os.getenv``. Hermes calls
+    this while constructing each profile inside a multiplexed process, where the
+    process environment belongs to the DEFAULT profile: a raw read here handed a
+    named profile the default profile's home conversation (or none at all), so
+    home-channel delivery went to the wrong chat or silently vanished.
+    """
     from clawchat_gateway.api_client import DEFAULT_BASE_URL, DEFAULT_WEBSOCKET_URL
+    from clawchat_gateway.config import _get_env
 
     seed = {
-        "base_url": os.getenv("CLAWCHAT_BASE_URL", "").strip() or DEFAULT_BASE_URL,
+        "base_url": _get_env("CLAWCHAT_BASE_URL") or DEFAULT_BASE_URL,
         "websocket_url": (
-            os.getenv("CLAWCHAT_WEBSOCKET_URL", "").strip()
-            or os.getenv("CLAWCHAT_WS_URL", "").strip()
-            or DEFAULT_WEBSOCKET_URL
+            _get_env("CLAWCHAT_WEBSOCKET_URL", "CLAWCHAT_WS_URL") or DEFAULT_WEBSOCKET_URL
         ),
     }
-    home_channel = os.getenv("CLAWCHAT_HOME_CHANNEL", "").strip()
+    home_channel = _get_env("CLAWCHAT_HOME_CHANNEL")
     if not home_channel:
         return seed
 
     home = {
         "chat_id": home_channel,
-        "name": os.getenv("CLAWCHAT_HOME_CHANNEL_NAME", "").strip() or "ClawChat",
+        "name": _get_env("CLAWCHAT_HOME_CHANNEL_NAME") or "ClawChat",
     }
-    thread_id = os.getenv("CLAWCHAT_HOME_CHANNEL_THREAD_ID", "").strip()
+    thread_id = _get_env("CLAWCHAT_HOME_CHANNEL_THREAD_ID")
     if thread_id:
         home["thread_id"] = thread_id
     seed["home_channel"] = home
