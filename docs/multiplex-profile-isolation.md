@@ -72,16 +72,30 @@ tests/test_multiplex_isolation.py
 Any Hermes 0.21+ checkout on `PYTHONPATH` works; the plugin's own dependencies
 are not needed for this file.
 
+Note the suite has TWO run modes and neither runs everything:
+
+| Mode | Command | Result |
+|---|---|---|
+| Host double (default) | `pytest tests/` | 231 pass, this module skips |
+| Real Hermes | `PYTHONPATH=<hermes> pytest tests/` | this module runs; ~58 others error |
+
+`conftest.py` prefers a real host when one is importable, but the real
+`gateway.config.Platform` enum has no `clawchat` member — the plugin registers
+the platform at runtime — so every test that builds a `ClawChatAdapter` fails
+there. Run this file on its own against real Hermes, and the rest against the
+double.
+
 The tests use temporary profiles, synthetic credentials and an offline supervisor.
 They cover connection coexistence and replacement, A/B/A database identity,
 scoped sends, missing secrets and the two env-fallback shapes that must survive,
 cross-context token rotation/logout, and device identity compatibility. They do
 not contact ClawChat or change existing profiles.
 
-This file is the one exception to the repository's `tests/` ignore rule — see
-`.gitignore` — so the multiplex invariants ship with the code instead of relying
-on `git add -f`. The rest of the suite stays untracked, which also means a
-change like the device-id cache move above cannot be caught by CI: run the local
+This file is one of five exceptions to the repository's `tests/` ignore rule —
+see `.gitignore` for the list and the reasoning. The device-id trio is tracked
+alongside it precisely because the cache move above broke all three with no CI
+signal at all. The REST of the suite is still untracked, so it remains true that
+a fresh clone cannot catch a regression outside those five: run the full local
 suite before merging anything that touches these modules.
 
 After deploying and restarting the gateway, verify each profile has its own
