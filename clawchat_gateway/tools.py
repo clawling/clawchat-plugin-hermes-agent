@@ -1201,3 +1201,146 @@ async def liveware_login() -> dict[str, Any]:
         "error": "subprocess",
         "message": f"liveware login failed (exit {proc.returncode}): {detail}",
     }
+
+
+# --- cloud orchestration ---------------------------------------------------
+# Local validation mirrors docs/features/agentorch.md so an obviously-bad call
+# fails without a round trip. It deliberately does NOT check id prefixes:
+# 29002/29003/29005 fold "not yours" into "does not exist", and a local prefix
+# check would hand the model a distinction the server refuses to make.
+
+_BEHAVIOR_MAX_RUNES = 3000
+_GROUP_TITLE_MAX_RUNES = 60
+_REPLY_MODES = ("all", "mention")
+
+
+def _require_id(value, field: str):
+    if not isinstance(value, str) or not value.strip():
+        return _validation_error(f"{field} is required")
+    return None
+
+
+async def _orchestrate(call):
+    """Run one orchestration call, mapping only transport-level failures.
+
+    The envelope is returned untouched: every orchestration response is HTTP
+    200 and the business code (21003, 29002, …) is the model's to read.
+    """
+    client, err = _build_client()
+    if err is not None:
+        return err
+    try:
+        return await call(client)
+    except ClawChatApiError as exc:
+        return _api_error(exc)
+    except Exception as exc:  # noqa: BLE001
+        return _unknown_error(exc)
+
+
+async def orchestrate_list_agents() -> dict[str, Any]:
+    return await _orchestrate(lambda c: c.orch_list_agents())
+
+
+async def orchestrate_get_agent(agent_id: str) -> dict[str, Any]:
+    if (err := _require_id(agent_id, "agentId")) is not None:
+        return err
+    return await _orchestrate(lambda c: c.orch_get_agent(agent_id))
+
+
+async def orchestrate_set_agent_behavior(agent_id: str, behavior: str) -> dict[str, Any]:
+    if (err := _require_id(agent_id, "agentId")) is not None:
+        return err
+    if not isinstance(behavior, str):
+        return _validation_error("behavior must be a string")
+    if len(behavior) > _BEHAVIOR_MAX_RUNES:
+        return _validation_error(f"behavior exceeds {_BEHAVIOR_MAX_RUNES} runes (got {len(behavior)})")
+    return await _orchestrate(lambda c: c.orch_set_agent_behavior(agent_id, behavior))
+
+
+async def orchestrate_list_groups() -> dict[str, Any]:
+    return await _orchestrate(lambda c: c.orch_list_groups())
+
+
+async def orchestrate_get_group(conversation_id: str) -> dict[str, Any]:
+    if (err := _require_id(conversation_id, "conversationId")) is not None:
+        return err
+    return await _orchestrate(lambda c: c.orch_get_group(conversation_id))
+
+
+async def orchestrate_set_group_prompt(conversation_id: str, description: str) -> dict[str, Any]:
+    if (err := _require_id(conversation_id, "conversationId")) is not None:
+        return err
+    if not isinstance(description, str):
+        return _validation_error("description must be a string")
+    if len(description) > _BEHAVIOR_MAX_RUNES:
+        return _validation_error(f"description exceeds {_BEHAVIOR_MAX_RUNES} runes (got {len(description)})")
+    return await _orchestrate(lambda c: c.orch_set_group_prompt(conversation_id, description))
+
+
+async def orchestrate_create_group(title: str, agent_ids: list[str]) -> dict[str, Any]:
+    if not isinstance(title, str) or not (1 <= len(title) <= _GROUP_TITLE_MAX_RUNES):
+        return _validation_error(f"title must be 1..{_GROUP_TITLE_MAX_RUNES} runes")
+    if not isinstance(agent_ids, list) or not agent_ids:
+        return _validation_error("agentIds must be a non-empty list")
+    if any(not isinstance(a, str) or not a.strip() for a in agent_ids):
+        return _validation_error("every agentIds entry must be a non-empty string")
+    return await _orchestrate(lambda c: c.orch_create_group(title, agent_ids))
+
+
+async def orchestrate_add_group_member(conversation_id: str, agent_id: str) -> dict[str, Any]:
+    if (err := _require_id(conversation_id, "conversationId")) is not None:
+        return err
+    if (err := _require_id(agent_id, "agentId")) is not None:
+        return err
+    return await _orchestrate(lambda c: c.orch_add_group_member(conversation_id, agent_id))
+
+
+async def orchestrate_remove_group_member(conversation_id: str, agent_id: str) -> dict[str, Any]:
+    if (err := _require_id(conversation_id, "conversationId")) is not None:
+        return err
+    if (err := _require_id(agent_id, "agentId")) is not None:
+        return err
+    return await _orchestrate(lambda c: c.orch_remove_group_member(conversation_id, agent_id))
+
+
+async def orchestrate_set_group_agent_settings(
+    conversation_id: str,
+    agent_id: str,
+    muted: bool | None = None,
+    reply_mode: str | None = None,
+    batch_delay_seconds: int | None = None,
+) -> dict[str, Any]:
+    if (err := _require_id(conversation_id, "conversationId")) is not None:
+        return err
+    if (err := _require_id(agent_id, "agentId")) is not None:
+        return err
+    if muted is None and reply_mode is None and batch_delay_seconds is None:
+        return _validation_error("set at least one of muted, replyMode, batchDelaySeconds")
+    if muted is not None and not isinstance(muted, bool):
+        return _validation_error("muted must be a boolean")
+    if reply_mode is not None and reply_mode not in _REPLY_MODES:
+        return _validation_error(f"replyMode must be one of {', '.join(_REPLY_MODES)}")
+    if batch_delay_seconds is not None:
+        if not isinstance(batch_delay_seconds, int) or isinstance(batch_delay_seconds, bool):
+            return _validation_error("batchDelaySeconds must be an integer")
+        if not (1 <= batch_delay_seconds <= 3600):
+            return _validation_error("batchDelaySeconds must be in 1..3600")
+    return await _orchestrate(
+        lambda c: c.orch_set_group_agent_settings(
+            conversation_id,
+            agent_id,
+            muted=muted,
+            reply_mode=reply_mode,
+            batch_delay_seconds=batch_delay_seconds,
+        )
+    )
+
+
+async def orchestrate_create_connect_code() -> dict[str, Any]:
+    return await _orchestrate(lambda c: c.orch_create_connect_code())
+
+
+async def orchestrate_get_connect_code(code: str) -> dict[str, Any]:
+    if (err := _require_id(code, "code")) is not None:
+        return err
+    return await _orchestrate(lambda c: c.orch_get_connect_code(code))

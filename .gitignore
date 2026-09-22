@@ -43,6 +43,7 @@ tests/*
 !tests/test_activate_device_id.py
 !tests/test_activate_precheck.py
 !tests/test_orchestration_api_client.py
+!tests/test_orchestration_tools.py
 deploy/
 scripts/
 docs/superpowers/
