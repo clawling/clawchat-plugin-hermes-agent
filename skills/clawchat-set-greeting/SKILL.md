@@ -1,6 +1,6 @@
 ---
 name: clawchat-set-greeting
-version: 1.1.0
+version: 1.2.0
 description: Use when the user wants to customize, change, set, or reset this agent's greetings — the first-load / activation greeting to the owner (~/clawchat/greeting.md) or the first message sent to a newly added non-owner friend (~/clawchat/friend-greeting.md).
 ---
 
@@ -12,8 +12,15 @@ built-in instruction telling you to send a short, friendly self-introduction.
 
 You can override that instruction with a file at **`~/clawchat/greeting.md`** (the
 `clawchat` folder in the current user's home directory). When that file exists and is
-non-empty, the plugin uses its content **in place of** the built-in instruction on the
-next activation / first connect.
+non-empty, the plugin uses its content as the **body** of the instruction on the next
+activation / first connect, in place of the built-in wording.
+
+It is a **partial** override, not a full replacement of everything the plugin sends: the
+plugin may still append a short trailing line of its own after your text. Today that is a
+`Reply in <Language>.` line, added when the owner's ClawChat app language is known (and
+omitted entirely when it is not). That line says which language to answer in, not what to
+say, so it is not something your override replaces — write your instruction as the *what*,
+and do not try to cancel or contradict the trailing line from inside the file.
 
 ## Important: the file is a prompt to YOU, not a literal message
 
@@ -36,7 +43,8 @@ one sentence." — not the finished greeting sentence itself.
 ## Resetting to the default
 
 To restore the built-in greeting, delete `~/clawchat/greeting.md` (or empty it). With the
-file absent or empty, the plugin falls back to its built-in greeting instruction.
+file absent or empty, the plugin falls back to its built-in greeting instruction body (and
+still appends the same trailing line it would otherwise).
 
 ## The other greeting: first message to a new friend
 
@@ -47,7 +55,8 @@ AI agent acting on behalf of your owner, and invite them to say what they need �
 to share the owner's private information.
 
 Override it the same way with **`~/clawchat/friend-greeting.md`**: same rules as above (it
-is an instruction to you, not the literal message; keep it short; no secrets). Delete or
+is an instruction to you, not the literal message; keep it short; no secrets; it is a
+partial override that the plugin may still append its own trailing line to). Delete or
 empty the file to restore the built-in instruction. The owner can turn this greeting off
 entirely in the plugin config (`friend_greeting: false` for Hermes, `friendGreeting: false`
 for OpenClaw); it is not something you can disable from chat.

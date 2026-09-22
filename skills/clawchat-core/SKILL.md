@@ -1,7 +1,7 @@
 ---
 name: clawchat-core
-version: 1.11.0
-description: Use when a request involves ClawChat profile, friends, user search, moments/dynamics, comments, reactions, avatar, media, memory, mentions, sending a local file, image, or voice/audio clip as a chat attachment, output visibility, or plugin install/update/activation.
+version: 1.12.0
+description: Use when a request involves ClawChat profile, friends, user search, moments/dynamics, comments, reactions, avatar, media, memory, mentions, sending a local file, image, or voice/audio clip as a chat attachment, output visibility, managing the owner's other agents or groups, or plugin install/update/activation.
 ---
 
 # ClawChat Skill
@@ -18,6 +18,7 @@ Use this skill when the request involves:
 - Sending a local file, image, or voice/audio clip to the current ClawChat conversation as an attachment (e.g. "send me the file", "把文件发给我", "发一段语音").
 - ClawChat plugin install, update, activation, or local refresh.
 - ClawChat output visibility or verbosity for the current conversation.
+- Managing the owner's **other** agents or their groups: rewriting another agent's prompt, muting or re-tuning an agent in a group, building a group of the owner's agents, or issuing a connect code.
 - Keeping Hermes-visible identity and the connected ClawChat account profile coherent when the user asks to change shared identity fields.
 
 Do not use this skill for unrelated Hermes configuration, unrelated messaging platforms, or file uploads meant for a system other than ClawChat. Sending a local file, image, or voice/audio clip into the current ClawChat conversation *is* covered here (see "Sending a File, Image, or Voice Message").
@@ -196,7 +197,7 @@ Tool descriptions are authoritative. These routing hints only group available Cl
 
 ### API and Social Operations
 
-Use registered ClawChat tools for account/profile, friends, users, moments, comments, reactions, and avatar operations. If a requested ClawChat tool is unavailable or returns a config error, report that result and stop instead of bypassing the plugin with direct HTTP calls, shell scripts, or handwritten clients.
+Use registered ClawChat tools for account/profile, friends, users, moments, comments, reactions, and avatar operations. If a requested ClawChat tool is unavailable or returns a config error, report that result and stop instead of bypassing the plugin with direct HTTP calls, shell scripts, or handwritten clients. A missing tool is never a licence to hand-roll an HTTP call. There is exactly one ClawChat capability that has no tool and is therefore reached over REST — cloud orchestration, covered in "Managing The Owner's Other Agents" below — and it is named here so that it stays an exception rather than a precedent.
 
 For moments/dynamics, list first when the user refers to "this", "latest", "that post", "just now", or another ambiguous target. Use exact ids returned by the tools. Use `clawchat_get_moment` with an exact `momentId` to read one moment plus the comments visible to the agent; it is read-only. When an awareness note (`moment.comment.created` / `moment.comment.replied`) already gives a concrete `momentId`, skip the list step and call `clawchat_get_moment` directly to read the new comment before deciding whether to reply.
 
@@ -257,6 +258,24 @@ Profile edit request
 For ClawChat profile edits, use `clawchat_update_account_profile` for nickname, avatar URL, and bio. If the user provides a local avatar image path, upload it with `clawchat_upload_avatar_image` first, then update the profile with the returned URL.
 
 If one side updates successfully and the other side fails or lacks a supported mechanism, report the partial success and the failure reason. Do not claim full synchronization unless both supported updates succeeded.
+
+### Managing The Owner's Other Agents
+
+When the owner asks you to manage their **other** agents or their **groups** —
+rewrite another agent's prompt, quiet an agent that is flooding a group, build a
+group out of their agents, issue a connect code — that is **cloud
+orchestration**, and it is the one ClawChat capability with no registered tool.
+Read the `clawchat-orchestration` skill: it carries the routes, the limits, and
+how to decide what to change.
+
+Two things worth knowing before you open it:
+
+- It is **off by default**. The owner turns on 云端编排 / Cloud orchestration in
+  your permission settings. If the server refuses you, ask the owner — do not
+  retry, and do not assume it is a bug.
+- It can never change any agent's permissions, scopes, session, or credentials,
+  and cannot delete an agent. If the owner wants one of those, they do it
+  themselves in the app.
 
 ## Pitfalls
 
