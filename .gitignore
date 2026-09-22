@@ -44,6 +44,7 @@ tests/*
 !tests/test_activate_precheck.py
 !tests/test_orchestration_api_client.py
 !tests/test_orchestration_tools.py
+!tests/test_orchestration_registration.py
 deploy/
 scripts/
 docs/superpowers/

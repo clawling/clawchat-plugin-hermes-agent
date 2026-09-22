@@ -736,6 +736,66 @@ def _direct_tool_description(description: str) -> str:
     return description + " " + _DIRECT_TOOL_USE_INSTRUCTION
 
 
+def _orchestration_handler(tool_name: str, invoke):
+    """Build one orchestration handler.
+
+    Twelve handlers that differ only in which `tools.orchestrate_*` they call
+    and how they unpack `args`; writing them out longhand would be twelve
+    copies of the same four lines.
+    """
+
+    async def handler(args, **kw):
+        task_id = kw.get("task_id") or "default"
+        logger.info("%s start task_id=%s", tool_name, task_id)
+        from clawchat_gateway import tools
+
+        result = await _recorded_tool_call(
+            tool_name, args, _account_id_from_kwargs(kw), lambda: invoke(tools, args)
+        )
+        logger.info("%s done task_id=%s", tool_name, task_id)
+        return _tool_result(result)
+
+    handler.__name__ = f"handle_{tool_name}"
+    return handler
+
+
+def _s(args, key: str) -> str:
+    value = args.get(key)
+    return value if isinstance(value, str) else ""
+
+
+_ORCHESTRATION_HANDLERS = {
+    "clawchat_orchestrate_list_agents": lambda t, a: t.orchestrate_list_agents(),
+    "clawchat_orchestrate_get_agent": lambda t, a: t.orchestrate_get_agent(_s(a, "agentId")),
+    "clawchat_orchestrate_set_agent_behavior": lambda t, a: t.orchestrate_set_agent_behavior(
+        _s(a, "agentId"), _s(a, "behavior")
+    ),
+    "clawchat_orchestrate_list_groups": lambda t, a: t.orchestrate_list_groups(),
+    "clawchat_orchestrate_get_group": lambda t, a: t.orchestrate_get_group(_s(a, "conversationId")),
+    "clawchat_orchestrate_set_group_prompt": lambda t, a: t.orchestrate_set_group_prompt(
+        _s(a, "conversationId"), _s(a, "description")
+    ),
+    "clawchat_orchestrate_create_group": lambda t, a: t.orchestrate_create_group(
+        _s(a, "title"), a.get("agentIds") if isinstance(a.get("agentIds"), list) else []
+    ),
+    "clawchat_orchestrate_add_group_member": lambda t, a: t.orchestrate_add_group_member(
+        _s(a, "conversationId"), _s(a, "agentId")
+    ),
+    "clawchat_orchestrate_remove_group_member": lambda t, a: t.orchestrate_remove_group_member(
+        _s(a, "conversationId"), _s(a, "agentId")
+    ),
+    "clawchat_orchestrate_set_group_agent_settings": lambda t, a: t.orchestrate_set_group_agent_settings(
+        _s(a, "conversationId"),
+        _s(a, "agentId"),
+        muted=a.get("muted") if isinstance(a.get("muted"), bool) else None,
+        reply_mode=a.get("replyMode") if isinstance(a.get("replyMode"), str) else None,
+        batch_delay_seconds=_optional_int_arg(a.get("batchDelaySeconds")),
+    ),
+    "clawchat_orchestrate_create_connect_code": lambda t, a: t.orchestrate_create_connect_code(),
+    "clawchat_orchestrate_get_connect_code": lambda t, a: t.orchestrate_get_connect_code(_s(a, "code")),
+}
+
+
 def register_tools(ctx) -> None:
     target_properties = {
         "targetType": {
@@ -1709,3 +1769,104 @@ def register_tools(ctx) -> None:
         description="liveware login",
         emoji="A",
     )
+
+    _agent_id_prop = {
+        "type": "string",
+        "minLength": 1,
+        "description": "Explicit agent id from clawchat_orchestrate_list_agents. Never guess one from a nickname.",
+    }
+    _cid_prop = {
+        "type": "string",
+        "minLength": 1,
+        "description": "Explicit group conversation id from clawchat_orchestrate_list_groups.",
+    }
+    orchestration_specs = [
+        ("clawchat_orchestrate_list_agents", "List The Owner's Agents",
+         "List every agent the owner owns, including this one (flagged is_self). "
+         "TRIGGER — invoke first whenever the owner asks about, or asks to change, one of their OTHER agents. "
+         "This is the only way to learn a sibling's agentId; never guess one from a nickname.",
+         {}, []),
+        ("clawchat_orchestrate_get_agent", "Get A Sibling Agent",
+         "Read one of the owner's agents by explicit agentId, including its read-only permission map. "
+         "TRIGGER — invoke before rewriting a sibling's system prompt (the PATCH replaces the whole field, so read it first), "
+         "or to explain why a sibling cannot do something instead of retrying on its behalf.",
+         {"agentId": _agent_id_prop}, ["agentId"]),
+        ("clawchat_orchestrate_set_agent_behavior", "Rewrite A Sibling's System Prompt",
+         "Replace the WHOLE system prompt (behavior) of one of the owner's other agents. "
+         "TRIGGER — invoke when the owner asks to change how another agent behaves, talks, or what it is for. "
+         "This REPLACES the entire field — call clawchat_orchestrate_get_agent first, edit the text you got back, and send the full new value. "
+         "Sending a fragment deletes everything else and the owner cannot recover it. Max 3000 runes. "
+         "Nickname and bio cannot be changed here.",
+         {"agentId": _agent_id_prop,
+          "behavior": {"type": "string", "maxLength": 3000,
+                       "description": "The complete new system prompt. Replaces the whole field."}},
+         ["agentId", "behavior"]),
+        ("clawchat_orchestrate_list_groups", "List Manageable Groups",
+         "List the groups the owner can administer. "
+         "TRIGGER — invoke when the owner talks about a group of their agents without naming a conversation id.",
+         {}, []),
+        ("clawchat_orchestrate_get_group", "Get A Managed Group",
+         "Read one group by explicit conversationId, including its system prompt and member agent ids. "
+         "TRIGGER — invoke before rewriting a group prompt, and after any write, to report what the server now says.",
+         {"conversationId": _cid_prop}, ["conversationId"]),
+        ("clawchat_orchestrate_set_group_prompt", "Rewrite A Group's System Prompt",
+         "Replace the WHOLE system prompt (description) of a group the owner administers. "
+         "TRIGGER — invoke when the owner asks to change how a group behaves as a whole. "
+         "This REPLACES the entire field — call clawchat_orchestrate_get_group first and send the full new value. Max 3000 runes. "
+         "The group title cannot be changed here.",
+         {"conversationId": _cid_prop,
+          "description": {"type": "string", "maxLength": 3000,
+                          "description": "The complete new group system prompt. Replaces the whole field."}},
+         ["conversationId", "description"]),
+        ("clawchat_orchestrate_create_group", "Create A Group Of The Owner's Agents",
+         "Create a new group containing the owner's own agents. "
+         "TRIGGER — invoke when the owner asks to put several of their agents in a group together.",
+         {"title": {"type": "string", "minLength": 1, "maxLength": 60, "description": "Group title, 1-60 runes."},
+          "agentIds": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1},
+                       "description": "Agent ids from clawchat_orchestrate_list_agents. Must be the owner's own agents."}},
+         ["title", "agentIds"]),
+        ("clawchat_orchestrate_add_group_member", "Add An Agent To A Group",
+         "Add one of the owner's agents to a group the owner administers. "
+         "TRIGGER — invoke when the owner asks to bring another of their agents into an existing group. "
+         "You cannot add yourself; that is rejected outright.",
+         {"conversationId": _cid_prop, "agentId": _agent_id_prop}, ["conversationId", "agentId"]),
+        ("clawchat_orchestrate_remove_group_member", "Remove An Agent From A Group",
+         "Remove one of the owner's agents from a group the owner administers. "
+         "TRIGGER — invoke when the owner asks to take an agent out of a group.",
+         {"conversationId": _cid_prop, "agentId": _agent_id_prop}, ["conversationId", "agentId"]),
+        ("clawchat_orchestrate_set_group_agent_settings", "Set An Agent's Speaking Settings In A Group",
+         "Set how one agent speaks inside one group: muted, reply mode, and batching delay. "
+         "TRIGGER — invoke FIRST when a group is flooding, echoing, or an agent will not stop. "
+         "These are the hard controls; a rule written into a prompt stops working after compaction or a restart, so pair every soft rule with one of these. "
+         "Omitted fields are left unchanged.",
+         {"conversationId": _cid_prop, "agentId": _agent_id_prop,
+          "muted": {"type": "boolean", "description": "Mute or unmute this agent in this group."},
+          "replyMode": {"type": "string", "enum": ["all", "mention"],
+                        "description": "all = speaks on every message; mention = only when @-mentioned."},
+          "batchDelaySeconds": {"type": "integer", "minimum": 1, "maximum": 3600,
+                                "description": "Seconds this agent batches incoming messages before replying. Default 10. Pacing, not a limit."}},
+         ["conversationId", "agentId"]),
+        ("clawchat_orchestrate_create_connect_code", "Issue A Connect Code",
+         "Mint a connect code on the owner's behalf, valid 30 minutes. "
+         "TRIGGER — invoke when the owner asks for a code to connect a new agent. "
+         "The rate limit bucket belongs to the owner and is shared with their own manual issuance, so do not retry on a limit.",
+         {}, []),
+        ("clawchat_orchestrate_get_connect_code", "Read A Connect Code's Status",
+         "Read the status of a connect code the owner minted. "
+         "TRIGGER — invoke when the owner asks whether a code was used or has expired.",
+         {"code": {"type": "string", "minLength": 1, "description": "The connect code to look up."}}, ["code"]),
+    ]
+    for tool_name, label, description, properties, required in orchestration_specs:
+        ctx.register_tool(
+            tool_name,
+            "clawchat",
+            {
+                "name": tool_name,
+                "description": _direct_tool_description(description),
+                "parameters": {"type": "object", "properties": properties, "required": required},
+            },
+            _orchestration_handler(tool_name, _ORCHESTRATION_HANDLERS[tool_name]),
+            is_async=True,
+            description=label,
+            emoji="O",
+        )
