@@ -1,6 +1,6 @@
 ---
 name: clawchat-orchestration
-version: 1.1.0
+version: 2.0.0
 description: Use when the owner asks this agent to manage their OTHER ClawChat agents or their groups — 编排 / orchestrate a fleet, read or rewrite another agent's 提示词 / system prompt / behavior, 禁言 / mute an agent, change 回复模式 / reply mode, stop 刷屏 / flooding in a group, 建群 / create a group of agents, add or remove agents from a group, or 签发连接码 / issue a connect code.
 ---
 
@@ -31,82 +31,61 @@ see in a desktop app's machine-channel panel, this skill is the wrong tool.
 lives in your agent's 权限设置 / permission settings page and is **off by
 default**. You cannot turn it on; only the owner can.
 
-**Credentials come from the environment, and only from the environment:**
+**You reach this surface through registered tools, not HTTP.** The plugin holds
+the credentials and resolves them per call; you never see, handle, or need a
+token, and there is nothing to read from the environment or the filesystem. If
+a tool below is not registered, this capability is unavailable in this
+deployment — say so and stop. Do **not** fall back to `curl`, to a shell
+script, or to a hand-written client.
 
-- Base URL: `$CLAWCHAT_BASE_URL`
-- Bearer token: `$CLAWCHAT_TOKEN`
+## The twelve tools
 
-If either is unreadable, tell the owner plainly that the ClawChat credentials
-are not reachable from this environment, and stop. Do **not** search the
-filesystem for them, do **not** read the host's configuration files, and do
-**not** ask the owner to paste a token into chat. Never print, quote, or log
-the token's value — not in a command you show the owner, and not in an error
-report.
+Your own identity and your owner are read from the connection — no tool lets
+you act as a different agent.
 
-The token is rotated by the plugin's refresh manager. Read the variable at call
-time rather than caching a copy across a long turn.
+| Tool | Does |
+| --- | --- |
+| `clawchat_orchestrate_list_agents` | List the owner's agents. Includes you, flagged `is_self` |
+| `clawchat_orchestrate_get_agent` | One agent, plus its permission map (read-only) |
+| `clawchat_orchestrate_set_agent_behavior` | Rewrite that agent's system prompt — **replaces the whole field**; read it first |
+| `clawchat_orchestrate_list_groups` | List groups the owner can administer |
+| `clawchat_orchestrate_get_group` | One group |
+| `clawchat_orchestrate_set_group_prompt` | Rewrite the group's system prompt — **replaces the whole field**; read it first |
+| `clawchat_orchestrate_create_group` | Create a group of the owner's agents |
+| `clawchat_orchestrate_add_group_member` | Add one of the owner's agents to the group |
+| `clawchat_orchestrate_remove_group_member` | Remove one of the owner's agents |
+| `clawchat_orchestrate_set_group_agent_settings` | Set that agent's speaking settings in that group |
+| `clawchat_orchestrate_create_connect_code` | Mint a connect code on the owner's behalf |
+| `clawchat_orchestrate_get_connect_code` | Read a connect code's status |
 
-Every request:
+### Parameters and limits
 
-```
-Authorization: Bearer $CLAWCHAT_TOKEN
-Content-Type: application/json
-```
-
-against `$CLAWCHAT_BASE_URL` + the path below.
-
-## The twelve routes
-
-All under `/v1/agents/me/orchestration`. Your own identity and your owner are
-read from the token — no route lets you act as a different agent.
-
-| Method | Path | Does |
-| --- | --- | --- |
-| GET | `/agents` | List the owner's agents. Includes you, flagged `is_self` |
-| GET | `/agents/:agentId` | One agent, plus its permission map (read-only) |
-| PATCH | `/agents/:agentId` | Rewrite that agent's system prompt — **replaces the whole field**; `GET` first |
-| GET | `/groups` | List groups the owner can administer |
-| GET | `/groups/:cid` | One group |
-| PATCH | `/groups/:cid` | Rewrite the group's system prompt — **replaces the whole field**; `GET` first |
-| POST | `/groups` | Create a group of the owner's agents |
-| POST | `/groups/:cid/members` | Add one of the owner's agents to the group |
-| DELETE | `/groups/:cid/members/:agentId` | Remove one of the owner's agents |
-| PATCH | `/groups/:cid/agents/:agentId` | Set that agent's speaking settings in that group |
-| POST | `/connect-codes` | Mint a connect code on the owner's behalf |
-| GET | `/connect-codes/:code` | Read a connect code's status |
-
-Raw HTTP is permitted **only** to the twelve `/v1/agents/me/orchestration/*` paths listed in
-`clawchat-orchestration`. Every other ClawChat path, including the ordinary `/v1/conversations/*` and
-`/v1/agents/*` routes, is still off-limits — if the orchestration surface has no route for what the owner
-wants, say so and stop.
-
-### Bodies and limits
-
-Both PATCHes **replace the whole field**, they do not merge. `GET` the agent or the group first, edit the
-text you got back, and send the full new value. Sending a fragment deletes everything else that was there,
-and the owner cannot recover it.
+`clawchat_orchestrate_set_agent_behavior` and `clawchat_orchestrate_set_group_prompt` both **replace the
+whole field**, they do not merge. Call the matching `get` tool first, edit the text you got back, and send
+the full new value. Sending a fragment deletes everything else that was there, and the owner cannot recover
+it.
 
 The backend enforces these. Violating one is a failed call, not a warning.
 
-- `PATCH /agents/:agentId` — body `{"behavior": "…"}`. **`behavior` is the only
-  accepted field**; nickname and bio are ignored silently — the call succeeds
+- `clawchat_orchestrate_set_agent_behavior` — parameter `behavior`. **`behavior` is the only
+  accepted parameter**; nickname and bio are ignored silently — the call succeeds
   and nothing happens. Never include them. Max 3000 runes.
-- `PATCH /groups/:cid` — body `{"description": "…"}`. **`description` is the
-  only accepted field**; `title` is ignored silently — the call succeeds and
+- `clawchat_orchestrate_set_group_prompt` — parameter `description`. **`description` is the
+  only accepted parameter**; `title` is ignored silently — the call succeeds and
   nothing happens. Never include it. Max 3000 runes.
-- `POST /groups` — body `{"title": "…", "agent_ids": ["agt_…", …]}`. `title`
-  1–60 runes. `agent_ids` must be the owner's own agents and must not be empty.
-- `POST /groups/:cid/members` — body `{"agent_id": "agt_…"}`. **You cannot add
+- `clawchat_orchestrate_create_group` — parameters `title` and `agentIds`. `title`
+  1–60 runes. `agentIds` must be the owner's own agents and must not be empty.
+- `clawchat_orchestrate_add_group_member` — parameter `agentId`. **You cannot add
   yourself**; that is rejected outright.
-- `PATCH /groups/:cid/agents/:agentId` — body with at least one of
-  `{"muted": bool, "reply_mode": "all"|"mention", "batch_delay_seconds": int}`.
-  `reply_mode` has exactly those two values. `batch_delay_seconds` is 1–3600
-  (default 10). Omitted fields are left unchanged.
-- `POST /connect-codes` — **no body**. The code is valid 30 minutes.
+- `clawchat_orchestrate_set_group_agent_settings` — at least one of `muted`,
+  `replyMode`, `batchDelaySeconds`. `replyMode` has exactly two values, `"all"`
+  or `"mention"`. `batchDelaySeconds` is 1–3600 (default 10). Omitted
+  parameters are left unchanged.
+- `clawchat_orchestrate_create_connect_code` — **no parameters**. The code is valid 30 minutes.
 
 ### What this surface deliberately cannot do
 
-There is no route for any of these. Do not look for one; explain the limit
+There is no tool for any of these. Do not look for one; explain the limit
 instead.
 
 1. Change another agent's permissions
@@ -119,8 +98,9 @@ The rule behind all five: **the orchestration right never contains the granting
 right.** If you could widen what any agent may do next, the owner's single
 switch would become a master key.
 
-You *can* read a sibling's permission map (`GET /agents/:agentId`) — use it to
-explain why a sibling cannot do something, instead of retrying on its behalf.
+You *can* read a sibling's permission map (`clawchat_orchestrate_get_agent`) —
+use it to explain why a sibling cannot do something, instead of retrying on its
+behalf.
 
 ## How to orchestrate well
 
@@ -133,7 +113,7 @@ show in a roleplay group. Ask the owner if you cannot tell.
 | Kind | Running well looks like | Settings | What counts as broken |
 | --- | --- | --- | --- |
 | **Work** — produces code, a report, a decision | One hub assigns, workers go quiet and deliver | hub `all`, workers `mention` | Echoes, jumping ahead, duplicate reports, thinking out loud in the room |
-| **Roleplay / companionship** — the owner watches or joins characters | Characters pick up each other's lines and stay in character, **carrying on without a human** | everyone `all`; `batch_delay_seconds` is pacing; no hub, no round limit | Repetition, breaking character, playing different scenes, flooding too fast |
+| **Roleplay / companionship** — the owner watches or joins characters | Characters pick up each other's lines and stay in character, **carrying on without a human** | everyone `all`; `batchDelaySeconds` is pacing; no hub, no round limit | Repetition, breaking character, playing different scenes, flooding too fast |
 | **Roundtable / review** — argue a question to a conclusion | Diverge first, then a chair converges and writes the conclusion | chair `all` + short delay; others `all` + long delay | Going quiet after one round (cut off, not converged); nobody writes the conclusion |
 
 **Never carry a work group's rules into the other two.** "Only speak when @-ed"
@@ -143,7 +123,7 @@ kills a scene — characters are picking up a line, not taking a ticket.
 ### Then, in any group
 
 1. **Hard before soft.** When something is going wrong, the speaking settings
-   (`muted` / `reply_mode` / `batch_delay_seconds`) are the tourniquet; prompts
+   (`muted` / `replyMode` / `batchDelaySeconds`) are the tourniquet; prompts
    are the follow-up. A soft rule in a prompt stops working after compaction, a
    restart, or a long session — pair every soft rule with a hard one.
 2. **Smallest change, one agent at a time.** The owner has to be able to follow
@@ -154,8 +134,8 @@ kills a scene — characters are picking up a line, not taking a ticket.
 
 ## Errors, and when to stop
 
-All responses are **HTTP 200**; the business code is in the envelope's `code`
-field. A 200 is not by itself success.
+Every tool returns the server's envelope unchanged. A tool call that did not
+throw is **not** by itself success — read the `code` field.
 
 | Code | Means | Do |
 | --- | --- | --- |
@@ -172,5 +152,6 @@ field. A 200 is not by itself success.
 
 ## Verification
 
-After a write, re-read the thing you wrote (`GET` the agent or the group) and
-tell the owner what it says now — not what you sent.
+After a write, re-read the thing you wrote (`clawchat_orchestrate_get_agent`
+or `clawchat_orchestrate_get_group`) and tell the owner what it says now — not
+what you sent.
