@@ -143,6 +143,18 @@ class UploadResult:
     name: str | None = None
 
 
+_ORCH = "/v1/agents/me/orchestration"
+
+
+def _orch_json(payload: dict) -> dict:
+    """Body + content-type for an orchestration write, in one place.
+
+    Every orchestration write is a small JSON object and the backend rejects a
+    missing content-type, so the two always travel together.
+    """
+    return {"body": json.dumps(payload).encode("utf-8"), "extra_headers": {"content-type": "application/json"}}
+
+
 class ClawChatApiClient:
     def __init__(
         self,
@@ -249,6 +261,79 @@ class ClawChatApiClient:
 
     async def list_friends(self, *, page: int = 1, page_size: int = 20) -> dict:
         return await self._call_json("GET", "/v1/friendships")
+
+    # --- cloud orchestration (`agent.orchestrate`) -------------------------
+    # Twelve routes, 1:1 with docs/features/agentorch.md. Every response is
+    # HTTP 200 with the business code in the envelope; these methods do not
+    # interpret it, the caller does.
+
+    async def orch_list_agents(self) -> dict:
+        return await self._call_json("GET", f"{_ORCH}/agents")
+
+    async def orch_get_agent(self, agent_id: str) -> dict:
+        return await self._call_json("GET", f"{_ORCH}/agents/{quote(agent_id, safe='')}")
+
+    async def orch_set_agent_behavior(self, agent_id: str, behavior: str) -> dict:
+        return await self._call_json(
+            "PATCH", f"{_ORCH}/agents/{quote(agent_id, safe='')}", **_orch_json({"behavior": behavior})
+        )
+
+    async def orch_list_groups(self) -> dict:
+        return await self._call_json("GET", f"{_ORCH}/groups")
+
+    async def orch_get_group(self, cid: str) -> dict:
+        return await self._call_json("GET", f"{_ORCH}/groups/{quote(cid, safe='')}")
+
+    async def orch_set_group_prompt(self, cid: str, description: str) -> dict:
+        return await self._call_json(
+            "PATCH", f"{_ORCH}/groups/{quote(cid, safe='')}", **_orch_json({"description": description})
+        )
+
+    async def orch_create_group(self, title: str, agent_ids: list[str]) -> dict:
+        return await self._call_json(
+            "POST", f"{_ORCH}/groups", **_orch_json({"title": title, "agent_ids": list(agent_ids)})
+        )
+
+    async def orch_add_group_member(self, cid: str, agent_id: str) -> dict:
+        return await self._call_json(
+            "POST", f"{_ORCH}/groups/{quote(cid, safe='')}/members", **_orch_json({"agent_id": agent_id})
+        )
+
+    async def orch_remove_group_member(self, cid: str, agent_id: str) -> dict:
+        return await self._call_json(
+            "DELETE", f"{_ORCH}/groups/{quote(cid, safe='')}/members/{quote(agent_id, safe='')}"
+        )
+
+    async def orch_set_group_agent_settings(
+        self,
+        cid: str,
+        agent_id: str,
+        *,
+        muted: bool | None = None,
+        reply_mode: str | None = None,
+        batch_delay_seconds: int | None = None,
+    ) -> dict:
+        # `is not None` rather than truthiness: `muted=False` and
+        # `batch_delay_seconds=0` are meaningful values the backend must see,
+        # while an omitted field means "leave unchanged".
+        payload: dict = {}
+        if muted is not None:
+            payload["muted"] = muted
+        if reply_mode is not None:
+            payload["reply_mode"] = reply_mode
+        if batch_delay_seconds is not None:
+            payload["batch_delay_seconds"] = batch_delay_seconds
+        return await self._call_json(
+            "PATCH",
+            f"{_ORCH}/groups/{quote(cid, safe='')}/agents/{quote(agent_id, safe='')}",
+            **_orch_json(payload),
+        )
+
+    async def orch_create_connect_code(self) -> dict:
+        return await self._call_json("POST", f"{_ORCH}/connect-codes")
+
+    async def orch_get_connect_code(self, code: str) -> dict:
+        return await self._call_json("GET", f"{_ORCH}/connect-codes/{quote(code, safe='')}")
 
     async def send_friend_request(self, *, user_id: str, greeting: str | None = None) -> dict:
         if not user_id.strip():

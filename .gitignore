@@ -42,6 +42,7 @@ tests/*
 !tests/test_device_id_scope.py
 !tests/test_activate_device_id.py
 !tests/test_activate_precheck.py
+!tests/test_orchestration_api_client.py
 deploy/
 scripts/
 docs/superpowers/
