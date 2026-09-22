@@ -1,6 +1,6 @@
 ---
 name: clawchat-core
-version: 1.12.0
+version: 1.13.0
 description: Use when a request involves ClawChat profile, friends, user search, moments/dynamics, comments, reactions, avatar, media, memory, mentions, sending a local file, image, or voice/audio clip as a chat attachment, output visibility, managing the owner's other agents or groups, or plugin install/update/activation.
 ---
 
@@ -197,7 +197,12 @@ Tool descriptions are authoritative. These routing hints only group available Cl
 
 ### API and Social Operations
 
-Use registered ClawChat tools for account/profile, friends, users, moments, comments, reactions, and avatar operations. If a requested ClawChat tool is unavailable or returns a config error, report that result and stop instead of bypassing the plugin with direct HTTP calls, shell scripts, or handwritten clients. A missing tool is never a licence to hand-roll an HTTP call. There is exactly one ClawChat capability that has no tool and is therefore reached over REST — cloud orchestration, covered in "Managing The Owner's Other Agents" below — and it is named here so that it stays an exception rather than a precedent.
+Use registered ClawChat tools for account/profile, friends, users, moments, comments, reactions, and avatar operations. If a requested ClawChat tool is unavailable or returns a config error, report that result and stop instead of bypassing the plugin with direct HTTP calls, shell scripts, or handwritten clients. A missing tool is never a licence to hand-roll an HTTP call. There is exactly one ClawChat capability reached over raw REST — cloud orchestration, covered in "Managing The Owner's Other Agents" below — and it is named here so that it stays an exception rather than a precedent.
+
+Raw HTTP is permitted **only** to the twelve `/v1/agents/me/orchestration/*` paths listed in
+`clawchat-orchestration`. Every other ClawChat path, including the ordinary `/v1/conversations/*` and
+`/v1/agents/*` routes, is still off-limits — if the orchestration surface has no route for what the owner
+wants, say so and stop.
 
 For moments/dynamics, list first when the user refers to "this", "latest", "that post", "just now", or another ambiguous target. Use exact ids returned by the tools. Use `clawchat_get_moment` with an exact `momentId` to read one moment plus the comments visible to the agent; it is read-only. When an awareness note (`moment.comment.created` / `moment.comment.replied`) already gives a concrete `momentId`, skip the list step and call `clawchat_get_moment` directly to read the new comment before deciding whether to reply.
 

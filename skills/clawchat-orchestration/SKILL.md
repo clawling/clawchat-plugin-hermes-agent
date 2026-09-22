@@ -1,6 +1,6 @@
 ---
 name: clawchat-orchestration
-version: 1.0.0
+version: 1.1.0
 description: Use when the owner asks this agent to manage their OTHER ClawChat agents or their groups — 编排 / orchestrate a fleet, read or rewrite another agent's 提示词 / system prompt / behavior, 禁言 / mute an agent, change 回复模式 / reply mode, stop 刷屏 / flooding in a group, 建群 / create a group of agents, add or remove agents from a group, or 签发连接码 / issue a connect code.
 ---
 
@@ -39,7 +39,9 @@ default**. You cannot turn it on; only the owner can.
 If either is unreadable, tell the owner plainly that the ClawChat credentials
 are not reachable from this environment, and stop. Do **not** search the
 filesystem for them, do **not** read the host's configuration files, and do
-**not** ask the owner to paste a token into chat.
+**not** ask the owner to paste a token into chat. Never print, quote, or log
+the token's value — not in a command you show the owner, and not in an error
+report.
 
 The token is rotated by the plugin's refresh manager. Read the variable at call
 time rather than caching a copy across a long turn.
@@ -62,10 +64,10 @@ read from the token — no route lets you act as a different agent.
 | --- | --- | --- |
 | GET | `/agents` | List the owner's agents. Includes you, flagged `is_self` |
 | GET | `/agents/:agentId` | One agent, plus its permission map (read-only) |
-| PATCH | `/agents/:agentId` | Rewrite that agent's system prompt |
+| PATCH | `/agents/:agentId` | Rewrite that agent's system prompt — **replaces the whole field**; `GET` first |
 | GET | `/groups` | List groups the owner can administer |
 | GET | `/groups/:cid` | One group |
-| PATCH | `/groups/:cid` | Rewrite the group's system prompt |
+| PATCH | `/groups/:cid` | Rewrite the group's system prompt — **replaces the whole field**; `GET` first |
 | POST | `/groups` | Create a group of the owner's agents |
 | POST | `/groups/:cid/members` | Add one of the owner's agents to the group |
 | DELETE | `/groups/:cid/members/:agentId` | Remove one of the owner's agents |
@@ -73,14 +75,25 @@ read from the token — no route lets you act as a different agent.
 | POST | `/connect-codes` | Mint a connect code on the owner's behalf |
 | GET | `/connect-codes/:code` | Read a connect code's status |
 
+Raw HTTP is permitted **only** to the twelve `/v1/agents/me/orchestration/*` paths listed in
+`clawchat-orchestration`. Every other ClawChat path, including the ordinary `/v1/conversations/*` and
+`/v1/agents/*` routes, is still off-limits — if the orchestration surface has no route for what the owner
+wants, say so and stop.
+
 ### Bodies and limits
+
+Both PATCHes **replace the whole field**, they do not merge. `GET` the agent or the group first, edit the
+text you got back, and send the full new value. Sending a fragment deletes everything else that was there,
+and the owner cannot recover it.
 
 The backend enforces these. Violating one is a failed call, not a warning.
 
 - `PATCH /agents/:agentId` — body `{"behavior": "…"}`. **`behavior` is the only
-  accepted field**; nickname and bio are rejected, not ignored. Max 3000 runes.
+  accepted field**; nickname and bio are ignored silently — the call succeeds
+  and nothing happens. Never include them. Max 3000 runes.
 - `PATCH /groups/:cid` — body `{"description": "…"}`. **`description` is the
-  only accepted field**; `title` is rejected. Max 3000 runes.
+  only accepted field**; `title` is ignored silently — the call succeeds and
+  nothing happens. Never include it. Max 3000 runes.
 - `POST /groups` — body `{"title": "…", "agent_ids": ["agt_…", …]}`. `title`
   1–60 runes. `agent_ids` must be the owner's own agents and must not be empty.
 - `POST /groups/:cid/members` — body `{"agent_id": "agt_…"}`. **You cannot add
@@ -146,21 +159,16 @@ field. A 200 is not by itself success.
 
 | Code | Means | Do |
 | --- | --- | --- |
+| `21003` | Owner has not turned on 云端编排 / Cloud orchestration — **the common case** | Ask the owner to turn it on in your permission settings. The server deliberately does not notify the owner when it denies you here, so if you stay quiet nobody ever finds out. Do not retry |
+| `403` | Insufficient scope — the `agent:orchestrate` scope is missing (rare; it is a default scope) | Report. Do not retry |
+| `401` | Credentials stale or revoked | Report once. Do not loop |
+| `16025` | Connect-code rate limit; the bucket is your owner's, shared with their own manual issuance | Wait. Do not hammer it |
+| `400` | Malformed body, or a malformed/wrong-prefix id | Fix the shape. Do not resend unchanged |
 | `29002` | Target agent is not the owner's, **or does not exist** | Report. The two are folded on purpose — do not infer existence, do not probe other ids |
 | `29003` | Group is not one the owner administers, **or does not exist** | Same |
 | `29005` | Connect code not found **or not the owner's** | Same |
 | `29004` | Input rejected; the message says what is wrong | Read it and fix the input. Do not resend unchanged |
 | `29001` | No agent identity on the call | Report; this is a configuration fault, not something to retry |
-
-HTTP-level:
-
-- **`403` / insufficient scope / orchestration denied** — the owner has not
-  turned the switch on. **Ask the owner to turn on 云端编排 in your permission
-  settings. Do not retry.** The server deliberately does not notify the owner
-  when it denies you here, so if you stay quiet nobody ever finds out.
-- **`401`** — credentials stale or revoked. Report once. Do not loop.
-- **`429` / rate limited on connect codes** — the quota is your owner's, shared
-  with their own manual issuance. Wait; do not hammer it.
 
 ## Verification
 
