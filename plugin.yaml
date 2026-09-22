@@ -43,3 +43,15 @@ provides_tools:
   - clawchat_list_apps
   - clawchat_unregister_app
   - clawchat_liveware_login
+  - clawchat_orchestrate_list_agents
+  - clawchat_orchestrate_get_agent
+  - clawchat_orchestrate_set_agent_behavior
+  - clawchat_orchestrate_list_groups
+  - clawchat_orchestrate_get_group
+  - clawchat_orchestrate_set_group_prompt
+  - clawchat_orchestrate_create_group
+  - clawchat_orchestrate_add_group_member
+  - clawchat_orchestrate_remove_group_member
+  - clawchat_orchestrate_set_group_agent_settings
+  - clawchat_orchestrate_create_connect_code
+  - clawchat_orchestrate_get_connect_code

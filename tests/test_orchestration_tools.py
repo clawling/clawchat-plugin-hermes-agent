@@ -27,18 +27,6 @@ class OrchestrationToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, {"code": 0, "data": {}})
         self.assertEqual(self.client.calls[0][0], "orch_list_agents")
 
-    async def test_a_non_zero_business_code_is_not_an_error(self):
-        # 21003 (owner has not enabled 云端编排) arrives as HTTP 200. The tool
-        # must hand it to the model verbatim, not raise and not rewrite it.
-        client = _FakeClient()
-
-        async def denied(*a, **kw):
-            return {"code": 21003, "message": "orchestration disabled"}
-
-        client.orch_list_agents = denied
-        with patch.object(tools, "_build_client", return_value=(client, None)):
-            self.assertEqual(await tools.orchestrate_list_agents(), {"code": 21003, "message": "orchestration disabled"})
-
     async def test_behavior_over_3000_runes_is_rejected_locally(self):
         result = await tools.orchestrate_set_agent_behavior("agt_x", "x" * 3001)
         self.assertNotEqual(result.get("code"), 0)

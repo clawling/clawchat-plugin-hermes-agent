@@ -264,43 +264,46 @@ class ClawChatApiClient:
 
     # --- cloud orchestration (`agent.orchestrate`) -------------------------
     # Twelve routes, 1:1 with docs/features/agentorch.md. Every response is
-    # HTTP 200 with the business code in the envelope; these methods do not
-    # interpret it, the caller does.
+    # HTTP 200 with the business code in the envelope. These methods call
+    # `_call_envelope`, NOT `_call_json` — the envelope must reach the caller
+    # untouched (code/msg/data, unwrapped nowhere along the way) so the model
+    # can read `code` itself; `_call_json`'s raise-on-nonzero-code and
+    # unwrap-data behavior would destroy exactly that.
 
     async def orch_list_agents(self) -> dict:
-        return await self._call_json("GET", f"{_ORCH}/agents")
+        return await self._call_envelope("GET", f"{_ORCH}/agents")
 
     async def orch_get_agent(self, agent_id: str) -> dict:
-        return await self._call_json("GET", f"{_ORCH}/agents/{quote(agent_id, safe='')}")
+        return await self._call_envelope("GET", f"{_ORCH}/agents/{quote(agent_id, safe='')}")
 
     async def orch_set_agent_behavior(self, agent_id: str, behavior: str) -> dict:
-        return await self._call_json(
+        return await self._call_envelope(
             "PATCH", f"{_ORCH}/agents/{quote(agent_id, safe='')}", **_orch_json({"behavior": behavior})
         )
 
     async def orch_list_groups(self) -> dict:
-        return await self._call_json("GET", f"{_ORCH}/groups")
+        return await self._call_envelope("GET", f"{_ORCH}/groups")
 
     async def orch_get_group(self, cid: str) -> dict:
-        return await self._call_json("GET", f"{_ORCH}/groups/{quote(cid, safe='')}")
+        return await self._call_envelope("GET", f"{_ORCH}/groups/{quote(cid, safe='')}")
 
     async def orch_set_group_prompt(self, cid: str, description: str) -> dict:
-        return await self._call_json(
+        return await self._call_envelope(
             "PATCH", f"{_ORCH}/groups/{quote(cid, safe='')}", **_orch_json({"description": description})
         )
 
     async def orch_create_group(self, title: str, agent_ids: list[str]) -> dict:
-        return await self._call_json(
+        return await self._call_envelope(
             "POST", f"{_ORCH}/groups", **_orch_json({"title": title, "agent_ids": list(agent_ids)})
         )
 
     async def orch_add_group_member(self, cid: str, agent_id: str) -> dict:
-        return await self._call_json(
+        return await self._call_envelope(
             "POST", f"{_ORCH}/groups/{quote(cid, safe='')}/members", **_orch_json({"agent_id": agent_id})
         )
 
     async def orch_remove_group_member(self, cid: str, agent_id: str) -> dict:
-        return await self._call_json(
+        return await self._call_envelope(
             "DELETE", f"{_ORCH}/groups/{quote(cid, safe='')}/members/{quote(agent_id, safe='')}"
         )
 
@@ -323,17 +326,17 @@ class ClawChatApiClient:
             payload["reply_mode"] = reply_mode
         if batch_delay_seconds is not None:
             payload["batch_delay_seconds"] = batch_delay_seconds
-        return await self._call_json(
+        return await self._call_envelope(
             "PATCH",
             f"{_ORCH}/groups/{quote(cid, safe='')}/agents/{quote(agent_id, safe='')}",
             **_orch_json(payload),
         )
 
     async def orch_create_connect_code(self) -> dict:
-        return await self._call_json("POST", f"{_ORCH}/connect-codes")
+        return await self._call_envelope("POST", f"{_ORCH}/connect-codes")
 
     async def orch_get_connect_code(self, code: str) -> dict:
-        return await self._call_json("GET", f"{_ORCH}/connect-codes/{quote(code, safe='')}")
+        return await self._call_envelope("GET", f"{_ORCH}/connect-codes/{quote(code, safe='')}")
 
     async def send_friend_request(self, *, user_id: str, greeting: str | None = None) -> dict:
         if not user_id.strip():
@@ -966,6 +969,86 @@ class ClawChatApiClient:
         body: bytes | None,
         extra_headers: dict[str, str],
     ) -> dict:
+        payload, status = self._request_envelope_sync(method, path, body, extra_headers)
+
+        code = payload.get("code") if isinstance(payload, dict) else None
+        msg = ""
+        if isinstance(payload, dict):
+            msg = str(payload.get("msg") or payload.get("message") or "")
+        if code != 0:
+            kind = "auth" if status in (401, 403) else "api"
+            gate_data = payload.get("data") if isinstance(payload, dict) else None
+            raise ClawChatApiError(
+                kind,
+                msg or f"code={code}",
+                status=status,
+                path=path,
+                code=code,
+                data=gate_data if isinstance(gate_data, dict) else None,
+            )
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            raise ClawChatApiError("transport", "invalid envelope: missing object data", status=status, path=path)
+        return data
+
+    async def _call_envelope(
+        self,
+        method: str,
+        path: str,
+        *,
+        body: bytes | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict:
+        """Envelope-preserving counterpart to :meth:`_call_json`.
+
+        Used ONLY by the twelve ``orch_*`` orchestration methods, whose HTTP
+        contract is: the business outcome always travels inside the envelope
+        (``{code, msg, data}``) with HTTP status 200 on every business path.
+        Unlike :meth:`_call_json`, this does NOT raise on a non-zero envelope
+        ``code`` and does NOT unwrap ``data`` — it returns the parsed envelope
+        exactly as received so the caller (the model, via the tool layer) can
+        read ``code`` itself. A genuine transport failure (network error,
+        timeout, non-JSON body, or a non-2xx HTTP status — including 401/403,
+        which still raise with ``kind="auth"``) still raises
+        :class:`ClawChatApiError`, identically to :meth:`_call_json`.
+        """
+        return await asyncio.to_thread(
+            self._call_envelope_sync,
+            method,
+            path,
+            body,
+            extra_headers or {},
+        )
+
+    def _call_envelope_sync(
+        self,
+        method: str,
+        path: str,
+        body: bytes | None,
+        extra_headers: dict[str, str],
+    ) -> dict:
+        payload, status = self._request_envelope_sync(method, path, body, extra_headers)
+        if not isinstance(payload, dict):
+            raise ClawChatApiError("transport", "invalid envelope: not an object", status=status, path=path)
+        return payload
+
+    def _request_envelope_sync(
+        self,
+        method: str,
+        path: str,
+        body: bytes | None,
+        extra_headers: dict[str, str],
+    ) -> tuple[Any, int]:
+        """Perform the HTTP request and return the parsed JSON body + status.
+
+        Shared transport for :meth:`_call_json_sync` and
+        :meth:`_call_envelope_sync`: raises :class:`ClawChatApiError` for every
+        genuine transport-level failure (non-2xx HTTP status — ``kind="auth"``
+        for 401/403, else ``kind="api"``; network/timeout errors; a non-JSON
+        body), and otherwise returns ``(payload, status)`` untouched. Neither
+        the envelope ``code`` nor ``data`` is interpreted here — that is each
+        caller's own job.
+        """
         request = Request(
             f"{self._base_url}{path}",
             method=method,
@@ -1015,25 +1098,7 @@ class ClawChatApiClient:
         except Exception as exc:
             raise ClawChatApiError("transport", "non-JSON response", status=status, path=path) from exc
 
-        code = payload.get("code") if isinstance(payload, dict) else None
-        msg = ""
-        if isinstance(payload, dict):
-            msg = str(payload.get("msg") or payload.get("message") or "")
-        if code != 0:
-            kind = "auth" if status in (401, 403) else "api"
-            gate_data = payload.get("data") if isinstance(payload, dict) else None
-            raise ClawChatApiError(
-                kind,
-                msg or f"code={code}",
-                status=status,
-                path=path,
-                code=code,
-                data=gate_data if isinstance(gate_data, dict) else None,
-            )
-        data = payload.get("data") if isinstance(payload, dict) else None
-        if not isinstance(data, dict):
-            raise ClawChatApiError("transport", "invalid envelope: missing object data", status=status, path=path)
-        return data
+        return payload, status
 
     def _headers(self, extra_headers: dict[str, str], body: bytes | None) -> dict[str, str]:
         headers = {

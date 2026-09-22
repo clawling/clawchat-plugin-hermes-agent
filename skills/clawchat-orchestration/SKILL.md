@@ -1,6 +1,6 @@
 ---
 name: clawchat-orchestration
-version: 2.0.0
+version: 2.0.1
 description: Use when the owner asks this agent to manage their OTHER ClawChat agents or their groups — 编排 / orchestrate a fleet, read or rewrite another agent's 提示词 / system prompt / behavior, 禁言 / mute an agent, change 回复模式 / reply mode, stop 刷屏 / flooding in a group, 建群 / create a group of agents, add or remove agents from a group, or 签发连接码 / issue a connect code.
 ---
 
@@ -68,11 +68,12 @@ it.
 The backend enforces these. Violating one is a failed call, not a warning.
 
 - `clawchat_orchestrate_set_agent_behavior` — parameter `behavior`. **`behavior` is the only
-  accepted parameter**; nickname and bio are ignored silently — the call succeeds
-  and nothing happens. Never include them. Max 3000 runes.
+  accepted parameter** — there is no `nickname` or `bio` parameter on this tool. Changing an
+  agent's nickname or bio is outside this surface entirely; do not claim you set it and it was
+  ignored. Max 3000 runes.
 - `clawchat_orchestrate_set_group_prompt` — parameter `description`. **`description` is the
-  only accepted parameter**; `title` is ignored silently — the call succeeds and
-  nothing happens. Never include it. Max 3000 runes.
+  only accepted parameter** — there is no `title` parameter on this tool. Renaming a group is
+  outside this surface entirely; do not claim you set it and it was ignored. Max 3000 runes.
 - `clawchat_orchestrate_create_group` — parameters `title` and `agentIds`. `title`
   1–60 runes. `agentIds` must be the owner's own agents and must not be empty.
 - `clawchat_orchestrate_add_group_member` — parameter `agentId`. **You cannot add

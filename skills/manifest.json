@@ -33,10 +33,10 @@
         "bytes": 13938
       },
       "clawchat-orchestration": {
-        "version": "2.0.0",
+        "version": "2.0.1",
         "path": "shared/clawchat-orchestration/SKILL.md",
-        "sha256": "f2dceef71a34c0d692b86542ddb375af8d301870864133444ab926182d23f154",
-        "bytes": 9350
+        "sha256": "f477b627b73243c9b41ad871b074cba644a8074fc73ce30b719c59ab32434c9d",
+        "bytes": 9477
       }
     },
     "hermes": {
@@ -71,10 +71,10 @@
         "bytes": 13838
       },
       "clawchat-orchestration": {
-        "version": "2.0.0",
+        "version": "2.0.1",
         "path": "shared/clawchat-orchestration/SKILL.md",
-        "sha256": "f2dceef71a34c0d692b86542ddb375af8d301870864133444ab926182d23f154",
-        "bytes": 9350
+        "sha256": "f477b627b73243c9b41ad871b074cba644a8074fc73ce30b719c59ab32434c9d",
+        "bytes": 9477
       }
     }
   },

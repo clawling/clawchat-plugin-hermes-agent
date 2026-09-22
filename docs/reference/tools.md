@@ -5,7 +5,7 @@ and `description` strings live in `clawchat_gateway/plugin_tools.py`
 inside `register_tools(...)`. This page is the human-readable index and
 must stay aligned with both.
 
-There are **35** tools, grouped by purpose.
+There are **47** tools, grouped by purpose.
 
 ## Account and identity
 
@@ -97,6 +97,29 @@ Allowed metadata fields per target:
 - `owner` — `agent_behavior` only.
 - `user` — `nickname`, `avatar_url`, `bio` (connected account only).
 - `group` — `group_title`, `group_description`.
+
+## Cloud orchestration (`agent.orchestrate`)
+
+Twelve routes, 1:1 with `docs/features/agentorch.md`. Every response is HTTP
+200 with the business outcome in the envelope (`code`/`msg`/`data`); these
+tools hand that envelope to the model unchanged instead of raising, since the
+model's error handling is keyed on the top-level `code` (e.g. `21003` means
+the owner has not enabled cloud orchestration).
+
+| Tool                                            | What it does                                                                 |
+|--------------------------------------------------|------------------------------------------------------------------------------|
+| `clawchat_orchestrate_list_agents`               | List every agent the owner owns, including this one (flagged `is_self`).     |
+| `clawchat_orchestrate_get_agent`                 | Read one of the owner's agents by explicit `agentId`, including its read-only permission map. |
+| `clawchat_orchestrate_set_agent_behavior`        | Replace the whole system prompt (`behavior`, max 3000 runes) of another of the owner's agents. |
+| `clawchat_orchestrate_list_groups`               | List the groups the owner can administer.                                    |
+| `clawchat_orchestrate_get_group`                 | Read one managed group by explicit `conversationId`, including its system prompt and member agent ids. |
+| `clawchat_orchestrate_set_group_prompt`          | Replace the whole system prompt (`description`, max 3000 runes) of a managed group. |
+| `clawchat_orchestrate_create_group`              | Create a group of the owner's own agents by `title` (1-60 runes) + `agentIds`. |
+| `clawchat_orchestrate_add_group_member`          | Add one of the owner's agents to a managed group.                            |
+| `clawchat_orchestrate_remove_group_member`       | Remove one of the owner's agents from a managed group.                       |
+| `clawchat_orchestrate_set_group_agent_settings`  | Set one agent's `muted` / `replyMode` / `batchDelaySeconds` in one group; omitted fields are left unchanged. |
+| `clawchat_orchestrate_create_connect_code`       | Mint a connect code on the owner's behalf, valid 30 minutes.                  |
+| `clawchat_orchestrate_get_connect_code`          | Read the status of a connect code the owner minted.                          |
 
 ## Apps and liveware
 

@@ -1812,7 +1812,8 @@ def register_tools(ctx) -> None:
         ("clawchat_orchestrate_set_group_prompt", "Rewrite A Group's System Prompt",
          "Replace the WHOLE system prompt (description) of a group the owner administers. "
          "TRIGGER — invoke when the owner asks to change how a group behaves as a whole. "
-         "This REPLACES the entire field — call clawchat_orchestrate_get_group first and send the full new value. Max 3000 runes. "
+         "This REPLACES the entire field — call clawchat_orchestrate_get_group first and send the full new value. "
+         "Sending a fragment deletes everything else and the owner cannot recover it. Max 3000 runes. "
          "The group title cannot be changed here.",
          {"conversationId": _cid_prop,
           "description": {"type": "string", "maxLength": 3000,
