@@ -90,3 +90,14 @@ It injects `ClawChat Sender Metadata` for direct chats and `ClawChat Group
 Message Metadata` for group chats. Current direct message text and group
 transcript text stay in the host user-message body and are not duplicated in
 the system context.
+
+`ClawChat Turn Metadata` also carries the message time taken from the
+Protocol-v2 envelope's `emitted_at`: `sent_at` (local timezone, ISO-8601 with an
+explicit UTC offset, second precision) and `sent_age` (`3s` / `4m` / `5h` /
+`6d`). In group turns each indexed `[message N]` in `ClawChat Group Message
+Metadata` carries its own `sent_at` as well, with no per-message `sent_age`; for
+a coalesced batch the turn-level `sent_at`/`sent_age` are the last message's.
+A replayed frame keeps its original `emitted_at`, so a large `sent_age` means
+late delivery rather than a just-written message — the metadata glossary tells
+the agent exactly that. When the envelope carries no usable `emitted_at`, both
+fields render as `null` rather than disappearing.

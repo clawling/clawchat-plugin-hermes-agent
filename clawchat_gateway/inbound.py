@@ -24,6 +24,25 @@ class InboundMessage:
     sender_relation: str = ""
     sender_profile_type: str = ""
     sender_is_group_owner: bool = False
+    # Protocol-v2 envelope `emitted_at`: the ClawChat server's stamp on this
+    # downlink, in milliseconds since epoch. A *replayed* frame keeps the
+    # `emitted_at` it was originally sent with, not the replay time, so a large
+    # age means "delivered late", never "just written". None when the field is
+    # absent or unusable.
+    emitted_at: int | None = None
+
+
+def _coerce_emitted_at(value: Any) -> int | None:
+    """Envelope `emitted_at` (epoch ms) or None when absent/unusable.
+
+    `bool` is a subclass of `int`, so `True` would otherwise read as epoch 1ms.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    milliseconds = int(value)
+    if milliseconds <= 0:
+        return None
+    return milliseconds
 
 
 def _as_dict(value: Any) -> dict[str, Any] | None:
@@ -243,4 +262,5 @@ def parse_inbound_message(
         was_mentioned=was_mentioned,
         mentioned_user_ids=mentioned_user_ids,
         mentioned_users=mentioned_users,
+        emitted_at=_coerce_emitted_at(envelope.get("emitted_at")),
     )
