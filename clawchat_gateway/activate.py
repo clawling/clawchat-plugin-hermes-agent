@@ -37,7 +37,12 @@ from clawchat_gateway.output_visibility import (
     normalize_output_visibility,
     runtime_status_messages_for_visibility,
 )
-from clawchat_gateway.restart import schedule_gateway_restart
+from clawchat_gateway.restart import (
+    plan_gateway_restart,
+    restart_log_path,
+    restart_next_steps,
+    schedule_gateway_restart,
+)
 from clawchat_gateway.storage import _active_profile_name, get_clawchat_store
 
 logger = logging.getLogger(__name__)
@@ -837,12 +842,28 @@ async def activate_and_maybe_restart(
     )
     payload["ok"] = True
     if restart:
+        plan = plan_gateway_restart()
+        if plan.action != "schedule":
+            # Scheduling would fail silently (multiplexer refuses a per-profile
+            # restart) or start an unmanaged gateway (none installed); tell the
+            # operator the exact next step instead.
+            payload["restart_scheduled"] = False
+            payload["restart_skipped_reason"] = plan.action
+            payload["restart_next_steps"] = restart_next_steps(plan)
+            payload["restart_message"] = (
+                "ClawChat activation is saved. The Hermes gateway was not restarted; "
+                "see restart_next_steps."
+            )
+            return payload
         payload["restart_scheduled"] = True
         payload["restart_delay_seconds"] = restart_delay_seconds
+        payload["restart_multiplex_owner"] = plan.multiplex_owner
         payload["restart_command"] = schedule_gateway_restart(
             delay_seconds=restart_delay_seconds
         )
+        payload["restart_log"] = str(restart_log_path())
         payload["restart_message"] = (
-            "ClawChat activation is saved. Hermes restart has been scheduled in the background."
+            "ClawChat activation is saved. A Hermes gateway restart was requested in the "
+            "background; its output and exit code are written to restart_log."
         )
     return payload

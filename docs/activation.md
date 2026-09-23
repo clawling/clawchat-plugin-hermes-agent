@@ -363,8 +363,35 @@ automatically from the deterministic connect-time device id. Keep
 
 ## Restart Or Reload
 
-CLI activation and in-session slash activation schedule a detached Hermes
+CLI activation and in-session slash activation request a detached Hermes
 gateway restart by default. Use `--no-restart` to skip that restart.
+
+Before requesting it, activation checks the active profile
+(`clawchat_gateway/restart.py`, `plan_gateway_restart`) and does **not** spawn a
+restart that cannot work; it prints the next step instead:
+
+| Detected | What activation does |
+|---|---|
+| No gateway has run for this profile (neither `gateway.pid` nor `gateway_state.json` in `$HERMES_HOME`) | Prints `hermes -p <name> gateway install` then `hermes -p <name> gateway start` (no `-p` for the default profile). A bare `hermes gateway restart` with no service installed would instead start an unmanaged foreground gateway. |
+| A named profile served by the default profile's multiplexing gateway (`gateway.multiplex_profiles` in the default profile's `config.yaml` or `GATEWAY_MULTIPLEX_PROFILES`, narrowed by `gateway.multiplex_profile_allowlist`) | Prints `hermes -p default gateway restart` and warns that it restarts every profile that gateway serves. Hermes refuses a per-profile restart there. |
+| Otherwise | Requests the restart; on the multiplexing default profile it notes that all served profiles restart. |
+
+A requested restart is not a confirmed one. The detached process runs from
+`$HERMES_HOME` (never from the plugin folder, which a lingering process would
+keep locked on Windows) and writes the output of `hermes gateway restart` plus a
+final `exit_code=<n>` line to `$HERMES_HOME/clawchat/gateway-restart.log`,
+overwritten on each request. To verify:
+
+1. The restart log ends with `exit_code=0`.
+2. The Hermes log (under `$HERMES_HOME/logs/`) has a `clawchat state -> ready`
+   line from after the activation.
+
+No `exit_code` line after a few minutes means the restart is still waiting
+(for example for open sessions to finish) or the launcher was stopped together
+with the old gateway; the ready line is what confirms the restart. What the
+check cannot see: a second, separately installed gateway holding the profile
+(seen on Windows), service-manager errors, and the drain wait itself; those only
+show up in the restart log.
 
 `hermes gateway setup` exchanges the code without scheduling that detached
 restart because the surrounding setup flow manages start/restart behavior.

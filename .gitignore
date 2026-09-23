@@ -36,6 +36,8 @@ tmp
 #   * device_id_scope / activate_device_id / activate_precheck — device-id
 #     derivation and its paired-device compatibility rules, which a caching
 #     change can silently break (it did: see 642be46).
+#   * restart_outcome — the post-activation restart pre-check, its cwd, and the
+#     captured outcome log; a regression here is silent by construction.
 tests/*
 !tests/conftest.py
 !tests/test_multiplex_isolation.py
@@ -45,6 +47,7 @@ tests/*
 !tests/test_orchestration_api_client.py
 !tests/test_orchestration_tools.py
 !tests/test_orchestration_registration.py
+!tests/test_restart_outcome.py
 deploy/
 scripts/
 docs/superpowers/

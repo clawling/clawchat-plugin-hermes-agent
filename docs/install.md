@@ -144,8 +144,13 @@ docker exec hermes sh -lc \
 
 | Flag           | Effect                                                  |
 |----------------|---------------------------------------------------------|
-| `--restart`    | Compatibility flag; activation schedules a detached Hermes gateway restart by default. |
+| `--restart`    | Compatibility flag; activation requests a detached Hermes gateway restart by default. |
 | `--no-restart` | Skip the detached Hermes gateway restart after activation. |
+
+The restart is only *requested*: activation prints where its outcome is logged
+(`$HERMES_HOME/clawchat/gateway-restart.log`) and skips it with a next step when
+the profile has no gateway yet or is served by a multiplexing gateway. See
+[`./activation.md`](./activation.md#restart-or-reload).
 
 ### What gets written
 
@@ -221,6 +226,21 @@ For protocol-level checks (WebSocket handshake, ack flow), see
   against the wrong home. The plugin ignores the stale `user_id` and pairs this
   profile fresh; verify the live account with the Step 2 check in
   [Confirm the target profile](#confirm-the-target-profile-before-every-install--activate).
+- **Activation said the restart was requested, but the agent never came
+  online** — read `$HERMES_HOME/clawchat/gateway-restart.log`: it holds the
+  output of `hermes gateway restart` and a final `exit_code=<n>`. A non-zero
+  exit names the reason (for example another gateway already running on
+  Windows). No `exit_code` line yet usually means the restart is waiting for
+  open sessions to finish; ask the owner before restarting the service directly,
+  since that ends those sessions. Success is a `clawchat state -> ready` line
+  in the Hermes log from after the activation.
+- **Activation printed `gateway install` / `gateway start` instead of
+  restarting** — this profile has never run a gateway; run the two printed
+  commands.
+- **Activation printed `hermes -p default gateway restart`** — the profile is
+  served by the default profile's multiplexing gateway, which refuses a
+  per-profile restart. Restarting it restarts every profile it serves, so check
+  with the owner first.
 - **The bot replies to its own messages in a loop** — the
   `pre_gateway_dispatch` hook drops self-echo frames; if you are seeing
   loops, confirm the plugin was registered (look for

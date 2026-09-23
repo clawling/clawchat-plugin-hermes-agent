@@ -17,7 +17,10 @@ backs the host's own `hermes gateway setup` flow (Interactive setup, below) via
 - Registered through `ctx.register_command("clawchat-activate", ...)`
   (`__init__._register_commands`).
 - Handler: `clawchat_gateway.commands.handle_clawchat_activate_command`.
-- Schedules a detached gateway restart by default. Use `--no-restart` to skip it.
+- Requests a detached gateway restart by default. Use `--no-restart` to skip it.
+  The reply says where the outcome is logged, or gives the next step instead
+  when no restart is possible (see
+  [`../activation.md`](../activation.md#restart-or-reload)).
 
 ## Top-level `hermes clawchat …`
 
@@ -82,7 +85,7 @@ hermes gateway setup
 | Flag           | Default                              | Behavior                                                                                  |
 |----------------|--------------------------------------|-------------------------------------------------------------------------------------------|
 | `CODE`         | required                             | Single-use activation code. Use exactly as provided; do not normalize, lowercase, or retry. |
-| `--restart`    | absent                               | Compatibility flag; activation schedules a detached Hermes gateway restart by default. |
+| `--restart`    | absent                               | Compatibility flag; activation requests a detached Hermes gateway restart by default. |
 | `--no-restart` | absent                               | Skip the detached Hermes gateway restart after activation. |
 | `--new-account` | absent                              | Replace this profile's ClawChat identity with a brand-new agent. Drops the stored `extra.user_id` from the replay so the code pairs a fresh agent instead of re-binding to the incumbent one. Required when the profile is already paired and you want a *second* agent under the same profile — or when the identity was inherited from a cloned config. |
 | `--repair`     | absent                               | Re-pair the agent this profile already holds, keeping its identity. Replays the stored `extra.user_id` and spends the code on it; it never creates a new agent. Only for "this profile paired its own agent and lost its token". Refused with `UnprovenRepairError` when the profile cannot prove it owns that identity (no matching `extra.profile` stamp and no local pairing record) — the shape of a cloned or copied `config.yaml`. |
