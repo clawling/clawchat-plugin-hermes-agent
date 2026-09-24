@@ -6,6 +6,7 @@ import sys
 
 from clawchat_gateway.api_client import ClawChatApiError
 from clawchat_gateway.config import resolve_activation_base_url
+from clawchat_gateway.restart import format_restart_lines
 
 activate_and_maybe_restart = None
 
@@ -86,9 +87,6 @@ def handle_clawchat_cli(args: argparse.Namespace) -> int:
         return 1
 
     print(f"clawchat: activation complete for {payload['user_id']}")
-    if payload.get("restart_scheduled"):
-        print(
-            "clawchat: Hermes restart scheduled in "
-            f"{payload.get('restart_delay_seconds')}s"
-        )
+    for line in format_restart_lines(payload):
+        print(line)
     return 0

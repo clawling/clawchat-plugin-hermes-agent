@@ -8,6 +8,7 @@ from contextlib import redirect_stderr
 from clawchat_gateway.activate import ExistingActivationError, activate_and_maybe_restart
 from clawchat_gateway.config import resolve_activation_base_url
 from clawchat_gateway.output_visibility import apply_output_visibility
+from clawchat_gateway.restart import format_restart_lines
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -96,11 +97,7 @@ async def handle_clawchat_activate_command(raw_args: str) -> str:
         # owner can redeem it into a fresh profile instead.
         return f"clawchat: activation refused — {exc}"
     lines = [f"clawchat: activation complete for {payload['user_id']}"]
-    if payload.get("restart_scheduled"):
-        lines.append(
-            "clawchat: Hermes restart scheduled in "
-            f"{payload.get('restart_delay_seconds')}s"
-        )
+    lines.extend(format_restart_lines(payload))
     return "\n".join(lines)
 
 
