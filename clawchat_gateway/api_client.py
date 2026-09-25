@@ -156,7 +156,12 @@ def _orch_json(payload: dict) -> dict:
 
 
 def _is_liveware_view(view: object) -> bool:
-    return isinstance(view, dict) and isinstance(view.get("liveware_id"), str) and view["liveware_id"] != ""
+    """Every field the tool-facing app shape declares, with the right type."""
+    if not isinstance(view, dict):
+        return False
+    required_ok = all(isinstance(view.get(k), str) for k in ("id", "liveware_id", "name", "url"))
+    optional_ok = all(k not in view or isinstance(view[k], str) for k in ("subtitle", "icon_url"))
+    return required_ok and optional_ok and view["liveware_id"] != ""
 
 
 def _liveware_to_app_view(view: dict) -> dict:

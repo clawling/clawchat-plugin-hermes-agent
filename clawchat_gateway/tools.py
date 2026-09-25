@@ -1104,11 +1104,13 @@ def _normalize_liveware_subtitle(raw: Any) -> tuple[str | None, dict[str, Any] |
         return None, None
     if not isinstance(raw, str):
         return None, _validation_error("subtitle must be a string")
+    # Line breaks are checked on the raw value: strip() would hide a trailing
+    # "\n" and let a caller believe a multi-line value was accepted.
+    if "\r" in raw or "\n" in raw:
+        return None, _validation_error("subtitle must be one line (no line breaks)")
     value = raw.strip()
     if not value:
         return None, None
-    if "\r" in value or "\n" in value:
-        return None, _validation_error("subtitle must be one line (no line breaks)")
     if len(value) > LIVEWARE_SUBTITLE_MAX_CHARS:
         return None, _validation_error("subtitle must be at most 200 characters")
     return value, None

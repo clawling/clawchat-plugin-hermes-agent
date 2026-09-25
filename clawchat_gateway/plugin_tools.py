@@ -1714,7 +1714,6 @@ def register_tools(ctx) -> None:
                     },
                     "subtitle": {
                         "type": "string",
-                        "maxLength": 200,
                         "description": "Optional one-line subtitle for the tile (one line, max 200 characters, surrounding spaces trimmed). An omitted or empty subtitle keeps the current one: re-registering cannot clear a subtitle.",
                     },
                     "iconPath": {
