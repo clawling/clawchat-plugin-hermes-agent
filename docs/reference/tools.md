@@ -118,7 +118,7 @@ the owner has not enabled cloud orchestration).
 | `clawchat_orchestrate_add_group_member`          | Add one of the owner's agents to a managed group.                            |
 | `clawchat_orchestrate_remove_group_member`       | Remove one of the owner's agents from a managed group.                       |
 | `clawchat_orchestrate_set_group_agent_settings`  | Set one agent's `muted` / `replyMode` / `batchDelaySeconds` in one group; omitted fields are left unchanged. |
-| `clawchat_orchestrate_create_connect_code`       | Mint a connect code on the owner's behalf, valid 30 minutes.                  |
+| `clawchat_orchestrate_create_connect_code`       | Mint a connect code on the owner's behalf, valid 45 minutes.                  |
 | `clawchat_orchestrate_get_connect_code`          | Read the status of a connect code the owner minted.                          |
 
 ## Apps and liveware
