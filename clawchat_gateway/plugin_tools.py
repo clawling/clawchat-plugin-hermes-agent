@@ -1848,7 +1848,7 @@ def register_tools(ctx) -> None:
                                 "description": "Seconds this agent batches incoming messages before replying. Default 10. Pacing, not a limit."}},
          ["conversationId", "agentId"]),
         ("clawchat_orchestrate_create_connect_code", "Issue A Connect Code",
-         "Mint a connect code on the owner's behalf, valid 30 minutes. "
+         "Mint a connect code on the owner's behalf, valid 45 minutes. "
          "TRIGGER — invoke when the owner asks for a code to connect a new agent. "
          "The rate limit bucket belongs to the owner and is shared with their own manual issuance, so do not retry on a limit.",
          {}, []),

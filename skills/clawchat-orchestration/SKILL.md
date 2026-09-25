@@ -1,6 +1,6 @@
 ---
 name: clawchat-orchestration
-version: 2.0.1
+version: 2.0.2
 description: Use when the owner asks this agent to manage their OTHER ClawChat agents or their groups — 编排 / orchestrate a fleet, read or rewrite another agent's 提示词 / system prompt / behavior, 禁言 / mute an agent, change 回复模式 / reply mode, stop 刷屏 / flooding in a group, 建群 / create a group of agents, add or remove agents from a group, or 签发连接码 / issue a connect code.
 ---
 
@@ -82,7 +82,7 @@ The backend enforces these. Violating one is a failed call, not a warning.
   `replyMode`, `batchDelaySeconds`. `replyMode` has exactly two values, `"all"`
   or `"mention"`. `batchDelaySeconds` is 1–3600 (default 10). Omitted
   parameters are left unchanged.
-- `clawchat_orchestrate_create_connect_code` — **no parameters**. The code is valid 30 minutes.
+- `clawchat_orchestrate_create_connect_code` — **no parameters**. The code is valid 45 minutes.
 
 ### What this surface deliberately cannot do
 
