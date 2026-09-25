@@ -107,7 +107,11 @@ from clawchat_gateway.protocol import (
     new_frame_id,
     new_message_id,
 )
-from clawchat_gateway.group_settings import EffectiveSettings, GroupSettingsCache
+from clawchat_gateway.group_settings import (
+    DEFAULT_BATCH_DELAY_SECONDS,
+    EffectiveSettings,
+    GroupSettingsCache,
+)
 from clawchat_gateway.greeting import (
     load_activation_bootstrap_prompt,
     load_friend_greeting_prompt,
@@ -666,7 +670,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._group_message_coalescer = GroupMessageCoalescer(
             idle_seconds=10.0,
             max_wait_seconds=30.0,
-            dispatch=self._handle_inbound,
+            dispatch=self._dispatch_group_batch,
         )
         self._group_settings_cache = GroupSettingsCache()
         # Monotonic fetch sequence assigned per dispatched settings pull. Passed
@@ -2693,13 +2697,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             # cache via static fallback before the GET lands. Bounded so a dead
             # network never stalls group traffic; non-group traffic is never gated.
             await self._await_group_settings_ready()
-            _static_reply_mode = effective_group_mode(self._clawchat_config, inbound.chat_id)
-            _static_fallback = EffectiveSettings(
-                muted=False,
-                reply_mode=_static_reply_mode,
-                batch_delay_seconds=10,
-            )
-            _eff = self._group_settings_cache.effective(inbound.chat_id, _static_fallback)
+            _eff = self._effective_group_settings(inbound.chat_id)
             if _eff.muted:
                 logger.info(
                     "clawchat group muted chat_id=%s sender_id=%s reason=backend_mute",
@@ -2764,6 +2762,49 @@ class ClawChatAdapter(BasePlatformAdapter):
                 inbound.chat_id,
                 inbound.sender_id,
                 len(inbound.text),
+            )
+            return
+        await self._handle_inbound(inbound)
+
+    def _effective_group_settings(self, chat_id: str) -> EffectiveSettings:
+        """Live mute / reply-mode / batch delay for *chat_id*.
+
+        Backend row if cached, else the server defaults (not muted, 10 s delay)
+        with the static channel-config reply mode. Shared by the enqueue-time
+        gate and the flush-time re-gate so both read the same source of truth.
+        """
+        static_fallback = EffectiveSettings(
+            muted=False,
+            reply_mode=effective_group_mode(self._clawchat_config, chat_id),
+            batch_delay_seconds=DEFAULT_BATCH_DELAY_SECONDS,
+        )
+        return self._group_settings_cache.effective(chat_id, static_fallback)
+
+    async def _dispatch_group_batch(self, inbound: InboundMessage) -> None:
+        """Coalescer dispatch: re-check mute / reply mode at FLUSH time.
+
+        A non-mention batch waits ``batch_delay_seconds`` before it runs. If an
+        ``agent.config.changed`` refresh mutes the agent or switches the group to
+        mention-only in that window, the enqueue-time decision is stale. Wait
+        (bounded) for any in-flight settings refresh, then drop the batch if the
+        chat is now muted, or if it is now mention-only and no message in the
+        batch addressed this agent (own id or ``"all"``; the coalescer ORs
+        ``was_mentioned`` across the batch). Mirrors the OpenClaw plugin.
+        """
+        await self._await_group_settings_ready()
+        eff = self._effective_group_settings(inbound.chat_id)
+        if eff.muted:
+            logger.info(
+                "clawchat group batch dropped at flush chat_id=%s sender_id=%s reason=backend_mute",
+                inbound.chat_id,
+                inbound.sender_id,
+            )
+            return
+        if eff.reply_mode == "mention" and not inbound.was_mentioned:
+            logger.info(
+                "clawchat group batch dropped at flush chat_id=%s sender_id=%s reason=reply_mode_mention",
+                inbound.chat_id,
+                inbound.sender_id,
             )
             return
         await self._handle_inbound(inbound)

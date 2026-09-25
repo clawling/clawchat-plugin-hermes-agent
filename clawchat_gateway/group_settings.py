@@ -36,6 +36,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+# Server default for ``batch_delay_seconds`` (a group with no stored row, and
+# the column default). Used for the static fallback and for a row that omits
+# the field, so a missing value never degrades to "no batching".
+DEFAULT_BATCH_DELAY_SECONDS = 10
+
 
 @dataclass(eq=True, frozen=True)
 class GroupSettings:
