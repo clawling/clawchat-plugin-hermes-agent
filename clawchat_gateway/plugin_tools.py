@@ -1690,8 +1690,9 @@ def register_tools(ctx) -> None:
             "description": _direct_tool_description(
                 "Register a liveware-tunneled web app to ClawChat so it appears in the owner's chat with this agent. "
                 "Call AFTER `liveware tunnel bind` returns a public URL. Params: name, appId (liveware app id), url (public URL), "
-                "optional subtitle (max 200 characters) and optional iconPath (absolute local PNG/JPEG/WebP file, max 25MB). "
-                "Registering the same appId again updates that tile: name and url are replaced; subtitle and icon only when given."
+                "optional subtitle (one line, max 200 characters) and optional iconPath (absolute local PNG/JPEG/WebP file, under 25MB). "
+                "Registering the same appId again updates that tile: name and url are replaced; subtitle and icon only when given "
+                "(an empty subtitle keeps the current one, so re-registering cannot clear a subtitle)."
             ),
             "parameters": {
                 "type": "object",
@@ -1714,11 +1715,11 @@ def register_tools(ctx) -> None:
                     "subtitle": {
                         "type": "string",
                         "maxLength": 200,
-                        "description": "Optional one-line subtitle for the tile (max 200 characters). Omit to keep the current subtitle on re-registration.",
+                        "description": "Optional one-line subtitle for the tile (one line, max 200 characters, surrounding spaces trimmed). An omitted or empty subtitle keeps the current one: re-registering cannot clear a subtitle.",
                     },
                     "iconPath": {
                         "type": "string",
-                        "description": "Optional absolute local path of the tile icon: a PNG, JPEG or WebP image, max 25MB. Omit to keep the current icon on re-registration.",
+                        "description": "Optional absolute local path of the tile icon: a PNG, JPEG or WebP image, under 25MB (the whole request is capped at 25MB). Omit to keep the current icon on re-registration.",
                     },
                 },
                 "required": ["name", "appId", "url"],

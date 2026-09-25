@@ -155,6 +155,10 @@ def _orch_json(payload: dict) -> dict:
     return {"body": json.dumps(payload).encode("utf-8"), "extra_headers": {"content-type": "application/json"}}
 
 
+def _is_liveware_view(view: object) -> bool:
+    return isinstance(view, dict) and isinstance(view.get("liveware_id"), str) and view["liveware_id"] != ""
+
+
 def _liveware_to_app_view(view: dict) -> dict:
     """Map a ``/v1/agents/me/liveware`` entry to the tool-facing app shape.
 
@@ -442,8 +446,11 @@ class ClawChatApiClient:
         if not url.strip():
             raise ClawChatApiError("validation", "url is required")
         fields = {"name": name, "liveware_id": app_id, "url": url}
-        if subtitle and subtitle.strip():
-            fields["subtitle"] = subtitle
+        # The server only replaces a subtitle when the new one is non-empty, so
+        # an empty value cannot clear it; do not send one.
+        trimmed_subtitle = subtitle.strip() if subtitle else ""
+        if trimmed_subtitle:
+            fields["subtitle"] = trimmed_subtitle
         body, content_type = _encode_multipart(fields, {"icon": icon} if icon else {})
         path = "/v1/agents/me/liveware"
         data = await self._call_json(
@@ -453,16 +460,19 @@ class ClawChatApiClient:
             extra_headers={"content-type": content_type},
         )
         view = data.get("liveware")
-        if not isinstance(view, dict):
-            raise ClawChatApiError("transport", "invalid liveware response: missing liveware", path=path)
+        if not _is_liveware_view(view):
+            raise ClawChatApiError("transport", "invalid liveware response: missing liveware entry", path=path)
         return {"app": _liveware_to_app_view(view)}
 
     async def list_apps(self) -> dict:
-        data = await self._call_json("GET", "/v1/agents/me/liveware")
+        path = "/v1/agents/me/liveware"
+        data = await self._call_json("GET", path)
         views = data.get("liveware")
-        if not isinstance(views, list):
-            views = []
-        return {"apps": [_liveware_to_app_view(v) for v in views if isinstance(v, dict)]}
+        # A malformed body must not read as "no apps": the liveware sample
+        # bootstrap would take that as a fresh account and register a duplicate.
+        if not isinstance(views, list) or not all(_is_liveware_view(v) for v in views):
+            raise ClawChatApiError("transport", "invalid liveware response: malformed liveware list", path=path)
+        return {"apps": [_liveware_to_app_view(v) for v in views]}
 
     async def unregister_app(self, app_id: str) -> dict:
         if not app_id.strip():
