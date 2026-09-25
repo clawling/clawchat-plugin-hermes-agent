@@ -1076,18 +1076,80 @@ async def upload_avatar_image(file_path: str) -> dict[str, Any]:
         return _unknown_error(exc)
 
 
-async def register_app(name: str, app_id: str, url: str) -> dict[str, Any]:
+LIVEWARE_ICON_MAX_BYTES = 25 * 1024 * 1024
+LIVEWARE_SUBTITLE_MAX_CHARS = 200
+
+
+def _sniff_liveware_icon_mime(head: bytes) -> str | None:
+    """Detect a liveware icon's type from its leading bytes.
+
+    Mirrors the server, which sniffs the content and ignores the declared
+    type and the file extension.
+    """
+    if head[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if head[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if len(head) >= 14 and head[:4] == b"RIFF" and head[8:14] == b"WEBPVP":
+        return "image/webp"
+    return None
+
+
+def _read_liveware_icon(icon_path: str) -> tuple[tuple[bytes, str, str] | None, dict[str, Any] | None]:
+    if not isinstance(icon_path, str) or not icon_path:
+        return None, _validation_error("iconPath must be an absolute local path")
+    path = Path(icon_path)
+    if not path.is_absolute():
+        return None, _validation_error(f"iconPath must be an absolute local path (got {icon_path!r})")
+    if not path.exists():
+        return None, _validation_error(f"icon file does not exist: {path}")
+    if not path.is_file():
+        return None, _validation_error(f"icon is not a regular file: {path}")
+    size = path.stat().st_size
+    if size > LIVEWARE_ICON_MAX_BYTES:
+        return None, _validation_error(f"icon too large ({size} bytes; max 25MB)")
+    data = path.read_bytes()
+    mime = _sniff_liveware_icon_mime(data[:16])
+    if mime is None:
+        return None, _validation_error(
+            f"icon must be a PNG, JPEG or WebP image (checked from the file's bytes): {path}"
+        )
+    return (data, path.name, mime), None
+
+
+async def register_app(
+    name: str,
+    app_id: str,
+    url: str,
+    subtitle: str | None = None,
+    icon_path: str | None = None,
+) -> dict[str, Any]:
     if not isinstance(name, str) or not name.strip():
         return _validation_error("name is required")
     if not isinstance(app_id, str) or not app_id.strip():
         return _validation_error("app_id is required")
     if not isinstance(url, str) or not url.strip():
         return _validation_error("url is required")
+    if subtitle is not None and not isinstance(subtitle, str):
+        return _validation_error("subtitle must be a string")
+    if subtitle and len(subtitle.strip()) > LIVEWARE_SUBTITLE_MAX_CHARS:
+        return _validation_error("subtitle must be at most 200 characters")
+    icon = None
+    if icon_path:
+        icon, ierr = _read_liveware_icon(icon_path)
+        if ierr is not None:
+            return ierr
     client, err = _build_client()
     if err is not None:
         return err
     try:
-        return await client.register_app(name=name.strip(), app_id=app_id.strip(), url=url.strip())
+        return await client.register_app(
+            name=name.strip(),
+            app_id=app_id.strip(),
+            url=url.strip(),
+            subtitle=subtitle,
+            icon=icon,
+        )
     except ClawChatApiError as exc:
         return _api_error(exc)
     except Exception as exc:  # noqa: BLE001

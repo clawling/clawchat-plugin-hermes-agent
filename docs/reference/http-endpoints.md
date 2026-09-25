@@ -54,9 +54,9 @@ and an `x-device-id` header. The WebSocket uses `websockets.asyncio.client`.
 | GET | `/v1/agents/{agent_id}` | `get_agent` / `get_agent_detail` |
 | PATCH | `/v1/agents/{agent_id}` | `patch_agent` |
 | PATCH | `/v1/agents/me/behavior` | `update_agent_behavior` |
-| GET | `/v1/agents/me/apps` | `list_apps` |
-| POST | `/v1/agents/me/apps` | `register_app` |
-| DELETE | `/v1/agents/me/apps/{app_id}` | `unregister_app` |
+| GET | `/v1/agents/me/liveware` | `list_apps` (maps `{liveware: [...]}` to `{apps: [...]}`, `app_id` = `liveware_id`) |
+| POST | `/v1/agents/me/liveware` | `register_app` (multipart: `name`, `liveware_id`, `url`, optional `subtitle`, optional `icon` file) |
+| DELETE | `/v1/agents/me/liveware/{app_id}` | `unregister_app` |
 | GET | `/v1/agents/me/group-settings` | `get_my_group_settings` |
 | POST | `/v1/agents/me/plugin-report` | `report_plugin` (authenticated) |
 | POST | `/v1/agents/plugin-report` | `report_plugin` (unauthenticated fallback) |

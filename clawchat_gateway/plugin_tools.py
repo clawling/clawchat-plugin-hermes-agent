@@ -661,6 +661,12 @@ async def handle_clawchat_upload_avatar_image(args, **kw):
     return _tool_result(result)
 
 
+def _optional_str(value: object) -> str | None:
+    if value is None or value == "":
+        return None
+    return str(value)
+
+
 async def handle_clawchat_register_app(args, **kw):
     task_id = kw.get("task_id") or "default"
     logger.info("clawchat_register_app start task_id=%s", task_id)
@@ -674,6 +680,8 @@ async def handle_clawchat_register_app(args, **kw):
             name=str(args.get("name", "")),
             app_id=str(args.get("appId", "") or args.get("app_id", "")),
             url=str(args.get("url", "")),
+            subtitle=_optional_str(args.get("subtitle")),
+            icon_path=_optional_str(args.get("iconPath") or args.get("icon_path")),
         ),
     )
     logger.info("clawchat_register_app done task_id=%s", task_id)
@@ -1680,8 +1688,10 @@ def register_tools(ctx) -> None:
         {
             "name": "clawchat_register_app",
             "description": _direct_tool_description(
-                "Register a liveware-tunneled web app to ClawChat so it shows in the owner's chat. "
-                "Call after `liveware tunnel bind` succeeds."
+                "Register a liveware-tunneled web app to ClawChat so it appears in the owner's chat with this agent. "
+                "Call AFTER `liveware tunnel bind` returns a public URL. Params: name, appId (liveware app id), url (public URL), "
+                "optional subtitle (max 200 characters) and optional iconPath (absolute local PNG/JPEG/WebP file, max 25MB). "
+                "Registering the same appId again updates that tile: name and url are replaced; subtitle and icon only when given."
             ),
             "parameters": {
                 "type": "object",
@@ -1699,7 +1709,16 @@ def register_tools(ctx) -> None:
                     "url": {
                         "type": "string",
                         "minLength": 1,
-                        "description": "The public tunnel URL from `liveware tunnel bind` (http/https).",
+                        "description": "Public tunnel URL from `liveware tunnel bind` (http/https).",
+                    },
+                    "subtitle": {
+                        "type": "string",
+                        "maxLength": 200,
+                        "description": "Optional one-line subtitle for the tile (max 200 characters). Omit to keep the current subtitle on re-registration.",
+                    },
+                    "iconPath": {
+                        "type": "string",
+                        "description": "Optional absolute local path of the tile icon: a PNG, JPEG or WebP image, max 25MB. Omit to keep the current icon on re-registration.",
                     },
                 },
                 "required": ["name", "appId", "url"],

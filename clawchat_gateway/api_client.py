@@ -155,6 +155,56 @@ def _orch_json(payload: dict) -> dict:
     return {"body": json.dumps(payload).encode("utf-8"), "extra_headers": {"content-type": "application/json"}}
 
 
+def _liveware_to_app_view(view: dict) -> dict:
+    """Map a ``/v1/agents/me/liveware`` entry to the tool-facing app shape.
+
+    ``app_id`` mirrors ``liveware_id`` so callers written against the older
+    app routes keep working.
+    """
+    return {
+        "id": view.get("id"),
+        "app_id": view.get("liveware_id"),
+        "liveware_id": view.get("liveware_id"),
+        "name": view.get("name"),
+        "subtitle": view.get("subtitle") or "",
+        "icon_url": view.get("icon_url") or "",
+        "url": view.get("url"),
+    }
+
+
+def _multipart_quote(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\r", " ").replace("\n", " ")
+
+
+def _encode_multipart(
+    fields: dict[str, str],
+    files: dict[str, tuple[bytes, str, str]],
+) -> tuple[bytes, str]:
+    boundary = f"----clawchat-{uuid.uuid4().hex}"
+    chunks: list[bytes] = []
+    for key, value in fields.items():
+        chunks.append(
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
+            ).encode("utf-8")
+            + value.encode("utf-8")
+            + b"\r\n"
+        )
+    for key, (data, filename, mime) in files.items():
+        chunks.append(
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{key}"; filename="{_multipart_quote(filename)}"\r\n'
+                f"Content-Type: {mime}\r\n\r\n"
+            ).encode("utf-8")
+            + data
+            + b"\r\n"
+        )
+    chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
+    return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
+
+
 class ClawChatApiClient:
     def __init__(
         self,
@@ -370,28 +420,54 @@ class ClawChatApiClient:
             raise ClawChatApiError("validation", "friend_user_id is required")
         return await self._call_json("DELETE", f"/v1/friendships/{friend_user_id}")
 
-    async def register_app(self, *, name: str, app_id: str, url: str) -> dict:
+    async def register_app(
+        self,
+        *,
+        name: str,
+        app_id: str,
+        url: str,
+        subtitle: str | None = None,
+        icon: tuple[bytes, str, str] | None = None,
+    ) -> dict:
+        """Register (or update) a liveware tile via ``POST /v1/agents/me/liveware``.
+
+        The route takes multipart form fields even without an icon. ``icon`` is
+        ``(bytes, filename, mime)``. Returns ``{"app": {...}}`` in the shape of
+        :func:`_liveware_to_app_view`.
+        """
         if not name.strip():
             raise ClawChatApiError("validation", "name is required")
         if not app_id.strip():
             raise ClawChatApiError("validation", "app_id is required")
         if not url.strip():
             raise ClawChatApiError("validation", "url is required")
-        payload = {"name": name, "app_id": app_id, "url": url}
-        return await self._call_json(
+        fields = {"name": name, "liveware_id": app_id, "url": url}
+        if subtitle and subtitle.strip():
+            fields["subtitle"] = subtitle
+        body, content_type = _encode_multipart(fields, {"icon": icon} if icon else {})
+        path = "/v1/agents/me/liveware"
+        data = await self._call_json(
             "POST",
-            "/v1/agents/me/apps",
-            body=json.dumps(payload).encode("utf-8"),
-            extra_headers={"content-type": "application/json"},
+            path,
+            body=body,
+            extra_headers={"content-type": content_type},
         )
+        view = data.get("liveware")
+        if not isinstance(view, dict):
+            raise ClawChatApiError("transport", "invalid liveware response: missing liveware", path=path)
+        return {"app": _liveware_to_app_view(view)}
 
     async def list_apps(self) -> dict:
-        return await self._call_json("GET", "/v1/agents/me/apps")
+        data = await self._call_json("GET", "/v1/agents/me/liveware")
+        views = data.get("liveware")
+        if not isinstance(views, list):
+            views = []
+        return {"apps": [_liveware_to_app_view(v) for v in views if isinstance(v, dict)]}
 
     async def unregister_app(self, app_id: str) -> dict:
         if not app_id.strip():
             raise ClawChatApiError("validation", "app_id is required")
-        return await self._call_json("DELETE", f"/v1/agents/me/apps/{app_id}")
+        return await self._call_json("DELETE", f"/v1/agents/me/liveware/{quote(app_id, safe='')}")
 
     async def search_users(self, *, q: str = "", limit: int | None = None) -> dict:
         params: dict[str, str | int] = {}

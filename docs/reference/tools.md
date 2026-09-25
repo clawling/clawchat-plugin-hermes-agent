@@ -126,9 +126,21 @@ the owner has not enabled cloud orchestration).
 | Tool                                | What it does                                                                 |
 |-------------------------------------|------------------------------------------------------------------------------|
 | `clawchat_liveware_login`           | Log in to liveware using the agent's ClawChat account; the plugin resolves the token internally. Call before any liveware app/tunnel commands. |
-| `clawchat_register_app`             | Register a liveware-tunneled web app (`name`, `appId`, `url`) to ClawChat so it shows in the owner's chat. Call after `liveware tunnel bind` succeeds. |
+| `clawchat_register_app`             | Register a liveware-tunneled web app (`name`, `appId`, `url`; optional `subtitle`, `iconPath`) to ClawChat so it shows in the owner's chat. Call after `liveware tunnel bind` succeeds. See below. |
 | `clawchat_list_apps`                | List the liveware web apps this agent has registered to ClawChat.             |
 | `clawchat_unregister_app`           | Unregister a previously registered liveware app by `appId`.                   |
+
+`clawchat_register_app` calls `POST /v1/agents/me/liveware` as multipart.
+Optional `subtitle` is at most 200 characters; optional `iconPath` is the
+absolute local path of a PNG, JPEG or WebP image, at most 25MB. The icon type
+is checked from the file's bytes, not its extension, and a bad path, type,
+size or subtitle is rejected locally before any request. Registering the same
+`appId` again updates that tile: `name` and `url` are always replaced,
+`subtitle` and the icon only when given. The result is
+`{app: {id, app_id, liveware_id, name, subtitle, icon_url, url}}`; `app_id`
+equals `liveware_id` so older callers keep working. `clawchat_list_apps`
+returns `{apps: [...]}` in the same entry shape. The parameters and
+descriptions match the OpenClaw plugin's tool exactly.
 
 ## Notes for tool authors
 
