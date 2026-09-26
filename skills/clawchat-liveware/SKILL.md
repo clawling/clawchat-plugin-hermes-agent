@@ -1,6 +1,6 @@
 ---
 name: clawchat-liveware
-version: 1.2.2
+version: 1.2.3
 description: Use when the user wants to expose this agent's local web service to the public internet via the liveware CLI and make it appear as an app in their ClawChat chat with this agent. Covers logging in to liveware with the ClawChat account, creating a liveware app, binding a tunnel to a local port, registering the public URL to ClawChat, restricting who may open each app, and fully unregistering and deleting an app.
 ---
 
@@ -78,6 +78,14 @@ ClawChat so it shows as an app tile in the owner's chat with this agent.
 7. **Register to ClawChat** so it appears in the owner's chat — call the tool, do NOT
    curl the API directly:
    `clawchat_register_app(name="<app name>", appId="<app id>", url="<public URL>")`
+   Two optional arguments decorate the tile:
+   - `subtitle="<text>"`: one line, no line breaks, at most 200 characters after
+     surrounding spaces are trimmed. An omitted or empty subtitle keeps the current one:
+     re-registering the same app id cannot clear a subtitle, so do not promise the user
+     that it can.
+   - `iconPath="<absolute local path>"`: a PNG, JPEG, or WebP image on this machine. The
+     whole registration request is capped at 25 MiB, so the icon must stay under that.
+     Omit it to keep the current icon when re-registering.
 8. **Confirm** to the user: report the app name, public URL, final `bound`,
    `relayConnected`, and `live` values, and that it now appears in their chat with this
    agent (open the「…」menu → the app tile).
