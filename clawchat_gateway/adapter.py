@@ -293,12 +293,12 @@ GROUP_BATCH_REPLY_GUIDANCE = (
     "If mention_routing is addressed_to_other, that indexed group message is not addressed to this agent. "
     "Do not answer it, acknowledge it, summarize it, react to it, or help with it. "
     "If every actionable group message in this turn has mention_routing addressed_to_other, output exactly the no-reply token. "
-    "Reply to messages where mention_routing is addressed_to_current_agent. For messages where mention_routing is no_structured_mentions, follow this group's group_description on whether and how much to speak; if it says nothing about that, follow agent_behavior; if neither does, listen: output exactly the no-reply token. "
+    "Messages where mention_routing is addressed_to_current_agent are addressed to you and may be answered. For messages where mention_routing is no_structured_mentions, whether and how much to speak follows this group's group_description, or agent_behavior where the description is silent; agent_behavior can always rule a reply out, and if neither calls for one, listen: output exactly the no-reply token. Rules in group_description or agent_behavior about whom not to answer (for example, other agents) apply to every message, including ones that mention you. "
     'Visible text such as "@name", "you", "everyone", "both of you", or "guys" is not a structured mention and must not override mention_routing.'
 )
 GROUP_BATCH_MENTION_REPLY_GUIDANCE = (
     "At least one indexed group message in this group turn explicitly mentions the current agent. "
-    "Reply to the relevant indexed group messages where mention_routing is addressed_to_current_agent. For indexed group messages where mention_routing is no_structured_mentions, follow this group's group_description on whether to respond to them as well; if it says nothing about that, follow agent_behavior; if neither does, leave them unanswered. "
+    "Only the relevant indexed group messages where mention_routing is addressed_to_current_agent are addressed to you and may be answered. For indexed group messages where mention_routing is no_structured_mentions, whether to respond to them as well follows this group's group_description, or agent_behavior where the description is silent; agent_behavior can always rule a reply out, and if neither calls for one, leave them unanswered. Rules in group_description or agent_behavior about whom not to answer (for example, other agents) apply to every message, including ones that mention you. "
     "For indexed group messages where mention_routing is addressed_to_other, do not answer, acknowledge, summarize, react to, or help with them."
 )
 DIRECT_MESSAGE_REPLY_GUIDANCE = (
