@@ -376,6 +376,34 @@ session-level prompts.
 `clawchat_gateway.config` resolve the precedence (`chat_id` exact →
 `"*"` → top-level).
 
+### Owner-controlled per-group settings and batching
+
+The owner (or an orchestrator agent) can set three values per group on the
+server: `muted`, `reply_mode` (`"all"` / `"mention"`) and
+`batch_delay_seconds` (1–3600). The plugin reads them with
+`GET /v1/agents/me/group-settings` at startup, after every reconnect, and on
+every `agent.config.changed` `notify.signal`. The read returns only groups with
+a stored row; a group that is absent uses the server defaults (not muted,
+reply mode from the static `group_mode` above, 10 s delay). A row that omits
+`batch_delay_seconds` also gets 10 s. A backend row wins over the static
+`group_mode`.
+
+Group messages are gated twice:
+
+1. **On arrival**, after waiting (at most 5 s) for any in-flight settings read:
+   a muted group stops here (slash commands included), and in mention mode a
+   message that does not mention this agent (own id or `"all"`) stops here.
+   The message is still recorded.
+2. **When the batch flushes.** Non-mention messages are coalesced per group:
+   the batch runs after `batch_delay_seconds` of quiet, or after
+   `max(30 s, batch_delay_seconds)` at most; a message that mentions the agent
+   flushes it at once. Just before the batch reaches the model, the plugin
+   waits again for any in-flight settings read and re-checks: if the group is
+   now muted the batch is dropped, and if it is now mention-only the batch runs
+   only when at least one of its messages mentioned the agent. So muting the
+   agent, or switching the group to mention-only, also silences messages that
+   were already queued.
+
 ## Allowlist / home channel (read by Hermes platform registry)
 
 | Env var                              | `extra.*` key             | Default        | Notes |

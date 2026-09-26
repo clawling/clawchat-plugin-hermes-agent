@@ -18,7 +18,11 @@ from urllib.request import Request, urlopen
 
 from clawchat_gateway import __version__
 from clawchat_gateway.device_id import get_device_id
-from clawchat_gateway.group_settings import GroupSettings, GroupSettingsFetchResult
+from clawchat_gateway.group_settings import (
+    DEFAULT_BATCH_DELAY_SECONDS,
+    GroupSettings,
+    GroupSettingsFetchResult,
+)
 from clawchat_gateway.permissions import PermissionPolicy
 
 logger = logging.getLogger(__name__)
@@ -216,7 +220,9 @@ class ClawChatApiClient:
                         conversation_id=str(item["conversation_id"]),
                         muted=bool(item.get("muted", False)),
                         reply_mode=str(item.get("reply_mode", "all")),
-                        batch_delay_seconds=int(item.get("batch_delay_seconds", 0)),
+                        batch_delay_seconds=int(
+                            item.get("batch_delay_seconds", DEFAULT_BATCH_DELAY_SECONDS)
+                        ),
                         version=int(item.get("version", 0)),
                     )
                 )
