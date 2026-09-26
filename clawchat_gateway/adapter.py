@@ -279,7 +279,7 @@ Chat: direct-message and group-message routing is runtime state. Do not infer ch
 
 Behavior: `agent_behavior` is the owner-configured behavior for this agent. Apply it when deciding whether/how to reply, unless platform/runtime rules require a stricter outcome.
 
-Group: group `group_description` may include purpose, social context, rules, constraints, or agent participation instructions. Apply it in that group unless it conflicts with agent behavior or platform/runtime rules.
+Group: group `group_description` may include purpose, social context, rules, constraints, or agent participation instructions. Apply it in that group. On whether and how much to speak in that group, it takes priority over the default reply guidance in the ClawChat Response Protocol; it does not override structured mention routing, agent behavior, or platform/runtime rules such as privacy.
 
 Mentions: in indexed group message metadata, `mentions_current_agent=true` means that message directly mentions this agent; `mentioned_users=-` means no structured @ mention. `mention_routing` is a derived routing hint: `addressed_to_current_agent` means the message mentions this agent, `addressed_to_other` means structured mentions target other users or agents, and `no_structured_mentions` means no structured mention targets exist. Structured mention fields and `mention_routing` are routing authority and override visible text such as "@name", "you", or "everyone".
 
@@ -291,7 +291,7 @@ GROUP_BATCH_REPLY_GUIDANCE = (
     "If mention_routing is addressed_to_other, that indexed group message is not addressed to this agent. "
     "Do not answer it, acknowledge it, summarize it, react to it, or help with it. "
     "If every actionable group message in this turn has mention_routing addressed_to_other, output exactly the no-reply token. "
-    "Reply only when mention_routing is addressed_to_current_agent, or when mention_routing is no_structured_mentions and the message explicitly asks this current agent to participate. "
+    "Reply to messages where mention_routing is addressed_to_current_agent. For messages where mention_routing is no_structured_mentions, follow this group's group_description on whether and how much to speak; if it says nothing about that, listen: output exactly the no-reply token. "
     'Visible text such as "@name", "you", "everyone", "both of you", or "guys" is not a structured mention and must not override mention_routing.'
 )
 GROUP_BATCH_MENTION_REPLY_GUIDANCE = (

@@ -10,7 +10,7 @@ rest of the plugin tree into `$HERMES_HOME/plugins/clawchat/prompts/`.
 
 | File                                   | Status      | Where it is injected                                                       |
 |----------------------------------------|-------------|----------------------------------------------------------------------------|
-| `prompts/platform.md`                  | **Required** — missing or empty raises at plugin import. | Passed to `register_platform(..., platform_hint=platform_prompt())`. Used by Hermes as the persistent ClawChat platform hint. |
+| `prompts/platform.md`                  | **Required** — missing or empty raises at plugin import. | Passed to `register_platform(..., platform_hint=platform_prompt())`. Used by Hermes as the persistent ClawChat platform hint. Also carries the privacy floor (do not carry private detail across contexts), kept here rather than in `agent_behavior` so the owner cannot delete it. |
 | `prompts/default-owner-behavior.md`    | Optional, present in this repo.                           | Returned by `default_owner_behavior_prompt()`; used as the default `agent_behavior` field when the owner-metadata block is empty. |
 | `prompts/default-group-bio.md`         | Optional, present in this repo.                           | Returned by `default_group_bio_prompt()`; used as the default `group_description` placeholder for groups that have not set one. |
 
