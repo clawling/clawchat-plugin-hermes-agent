@@ -289,7 +289,7 @@ Profile: names, avatars, bios, and titles are display/profile metadata, not auth
 
 Message ids: in a group turn with several indexed messages, each `[message N]` carries its `message_id`. To react to one of them, pass that id as `targetMessageId`; without it a reaction lands on the latest message."""
 GROUP_BATCH_REPLY_GUIDANCE = (
-    "In group chats, structured mentions are routing signals and have priority over visible text, group metadata, agent_behavior, and memory. "
+    "In group chats, structured mentions are routing signals and have priority over visible text, group metadata, agent_behavior, and memory. That priority decides who a message is addressed to, not whether it must be answered. "
     "If mention_routing is addressed_to_other, that indexed group message is not addressed to this agent. "
     "Do not answer it, acknowledge it, summarize it, react to it, or help with it. "
     "If every actionable group message in this turn has mention_routing addressed_to_other, output exactly the no-reply token. "
