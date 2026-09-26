@@ -34,7 +34,7 @@ actually bootstrap:
   awaits `liveware_cli.wait_liveware_cli_ready()` (bounded, ~300s) so a
   first-ever boot does not race the background CLI download, resolve to
   `None`, and silently skip for the rest of the process lifetime.
-- `GET /v1/agents/me/apps` (via `list_apps`) must return no apps yet, i.e.
+- `GET /v1/agents/me/liveware` (via `list_apps`) must return no apps yet, i.e.
   this is a fresh agent that hasn't already registered anything.
 - Node.js must be on `PATH`: the supervisor spawns the literal `node`
   executable to run the sample server (`start_sample_server`). On a host

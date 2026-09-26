@@ -1076,18 +1076,140 @@ async def upload_avatar_image(file_path: str) -> dict[str, Any]:
         return _unknown_error(exc)
 
 
-async def register_app(name: str, app_id: str, url: str) -> dict[str, Any]:
+# Server-side cap on the WHOLE registration request (default configuration).
+LIVEWARE_REQUEST_MAX_BYTES = 25 * 1024 * 1024
+# Fixed reserve for the multipart envelope (boundaries and part headers). The
+# text fields' own UTF-8 bytes are subtracted on top of this, so an icon that
+# passes local validation also fits the server's request cap. Keep in sync
+# with the OpenClaw plugin.
+LIVEWARE_MULTIPART_OVERHEAD_BYTES = 64 * 1024
+LIVEWARE_SUBTITLE_MAX_CHARS = 200
+
+
+def _liveware_icon_max_bytes(text_field_bytes: int) -> int:
+    return LIVEWARE_REQUEST_MAX_BYTES - LIVEWARE_MULTIPART_OVERHEAD_BYTES - text_field_bytes
+
+
+def _liveware_text_field_bytes(*values: str | None) -> int:
+    return sum(len(v.encode("utf-8")) for v in values if v)
+
+
+def _normalize_liveware_subtitle(raw: Any) -> tuple[str | None, dict[str, Any] | None]:
+    """Normalise a subtitle the way it is sent: trimmed, one line, at most 200
+    characters. An omitted, empty or blank subtitle becomes ``None`` and is not
+    sent. The server then keeps the existing subtitle, because it only replaces
+    a subtitle when the new one is non-empty.
+    """
+    if raw is None:
+        return None, None
+    if not isinstance(raw, str):
+        return None, _validation_error("subtitle must be a string")
+    # Line breaks are checked on the raw value: strip() would hide a trailing
+    # "\n" and let a caller believe a multi-line value was accepted.
+    if "\r" in raw or "\n" in raw:
+        return None, _validation_error("subtitle must be one line (no line breaks)")
+    value = raw.strip()
+    if not value:
+        return None, None
+    if len(value) > LIVEWARE_SUBTITLE_MAX_CHARS:
+        return None, _validation_error("subtitle must be at most 200 characters")
+    return value, None
+
+
+def _sniff_liveware_icon_mime(head: bytes) -> str | None:
+    """Detect a liveware icon's type from its leading bytes.
+
+    Mirrors the server, which sniffs the content and ignores the declared
+    type and the file extension.
+    """
+    if head[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if head[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if len(head) >= 14 and head[:4] == b"RIFF" and head[8:14] == b"WEBPVP":
+        return "image/webp"
+    return None
+
+
+def _read_liveware_icon(
+    icon_path: str,
+    text_field_bytes: int = 0,
+) -> tuple[tuple[bytes, str, str] | None, dict[str, Any] | None]:
+    """Read and validate a local icon. Filesystem errors never raise; they come
+    back as the same structured validation error as any other bad icon."""
+    if not isinstance(icon_path, str) or not icon_path:
+        return None, _validation_error("iconPath must be an absolute local path")
+    path = Path(icon_path)
+    if not path.is_absolute():
+        return None, _validation_error(f"iconPath must be an absolute local path (got {icon_path!r})")
+    try:
+        if not path.exists():
+            return None, _validation_error(f"icon file does not exist: {path}")
+        if not path.is_file():
+            return None, _validation_error(f"icon is not a regular file: {path}")
+        size = path.stat().st_size
+    except OSError as exc:
+        return None, _validation_error(f"cannot stat {path}: {exc}")
+    max_bytes = _liveware_icon_max_bytes(text_field_bytes + len(path.name.encode("utf-8")))
+
+    def too_large(n: int) -> dict[str, Any]:
+        return _validation_error(
+            f"icon too large ({n} bytes; max {max_bytes} bytes for this request: "
+            "the 25MB request limit minus multipart overhead)"
+        )
+
+    if size > max_bytes:
+        return None, too_large(size)
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        return None, _validation_error(f"cannot read {path}: {exc}")
+    # The file may have grown between stat and read.
+    if len(data) > max_bytes:
+        return None, too_large(len(data))
+    mime = _sniff_liveware_icon_mime(data[:16])
+    if mime is None:
+        return None, _validation_error(
+            f"icon must be a PNG, JPEG or WebP image (checked from the file's bytes): {path}"
+        )
+    return (data, path.name, mime), None
+
+
+async def register_app(
+    name: str,
+    app_id: str,
+    url: str,
+    subtitle: str | None = None,
+    icon_path: str | None = None,
+) -> dict[str, Any]:
     if not isinstance(name, str) or not name.strip():
         return _validation_error("name is required")
     if not isinstance(app_id, str) or not app_id.strip():
         return _validation_error("app_id is required")
     if not isinstance(url, str) or not url.strip():
         return _validation_error("url is required")
+    subtitle, serr = _normalize_liveware_subtitle(subtitle)
+    if serr is not None:
+        return serr
+    name, app_id, url = name.strip(), app_id.strip(), url.strip()
+    icon = None
+    if icon_path:
+        icon, ierr = _read_liveware_icon(
+            icon_path, _liveware_text_field_bytes(name, app_id, url, subtitle)
+        )
+        if ierr is not None:
+            return ierr
     client, err = _build_client()
     if err is not None:
         return err
     try:
-        return await client.register_app(name=name.strip(), app_id=app_id.strip(), url=url.strip())
+        return await client.register_app(
+            name=name,
+            app_id=app_id,
+            url=url,
+            subtitle=subtitle,
+            icon=icon,
+        )
     except ClawChatApiError as exc:
         return _api_error(exc)
     except Exception as exc:  # noqa: BLE001
