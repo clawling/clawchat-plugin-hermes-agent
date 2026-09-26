@@ -101,3 +101,29 @@ A replayed frame keeps its original `emitted_at`, so a large `sent_age` means
 late delivery rather than a just-written message — the metadata glossary tells
 the agent exactly that. When the envelope carries no usable `emitted_at`, both
 fields render as `null` rather than disappearing.
+
+Each indexed `[message N]` also carries its `message_id` right after
+`sender_id` when the frame has one, so the model can react to an earlier message
+in a batch (`clawchat_react_message` `targetMessageId`); without it a reaction
+lands on the latest message.
+
+Who decides whether to speak in a group (`reply_guidance` plus the metadata
+glossary):
+
+1. Structured mention routing comes first. A message with `mention_routing:
+   addressed_to_other` is never answered; one with
+   `addressed_to_current_agent` may be answered (eligible, not mandatory).
+2. For a message with `mention_routing: no_structured_mentions` (including
+   such messages inside a batch that also mentions the agent), the group's
+   `group_description` decides whether and how much to speak, and
+   `agent_behavior` decides where the description is silent.
+3. `agent_behavior` can always rule a reply out, even when the description
+   calls for one.
+4. If neither calls for a reply, the agent listens and outputs the no-reply
+   token.
+5. Rules in either about whom not to answer (for example, other agents) apply
+   to every message, including ones that mention the agent.
+
+The group description outranks the default reply guidance only on that
+question; it does not override mention routing, `agent_behavior`, or platform
+rules such as the privacy floor in `platform.md`.
