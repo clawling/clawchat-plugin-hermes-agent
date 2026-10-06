@@ -56,6 +56,18 @@ IDs and profile suffixes are resolved per call. The `functools.lru_cache` moved
 off `get_device_id` onto `_host_device_id`, so any test fixture that used to
 call `get_device_id.cache_clear()` must now clear `_host_device_id` instead.
 
+The `pre_gateway_dispatch` self-echo hook resolves the bot's own user id per
+event profile. `gateway.config` on a multiplexed runner is the LAUNCH profile's
+config, so a named profile's turn takes its id from its own adapter in
+`gateway._profile_adapters[profile]` — the same token-resolved
+`_clawchat_config.user_id` the adapter's own self-echo check uses. A named
+profile with no registered ClawChat adapter gets no id, so the hook lets the
+event through and the adapter-side check decides. Only the launch profile (and
+hosts without multiplexing) read the primary adapter or the runner config.
+Reading the launch config for every turn used to log a "user_id mismatch"
+warning per inbound message on every non-launch profile.
+`tests/test_pre_dispatch_self_echo.py` pins this against the host double.
+
 ## Regression checks
 
 Run from this repository using a Hermes installation with multiplex support
@@ -91,11 +103,11 @@ scoped sends, missing secrets and the two env-fallback shapes that must survive,
 cross-context token rotation/logout, and device identity compatibility. They do
 not contact ClawChat or change existing profiles.
 
-This file is one of five exceptions to the repository's `tests/` ignore rule —
+This file is one of the few exceptions to the repository's `tests/` ignore rule —
 see `.gitignore` for the list and the reasoning. The device-id trio is tracked
 alongside it precisely because the cache move above broke all three with no CI
 signal at all. The REST of the suite is still untracked, so it remains true that
-a fresh clone cannot catch a regression outside those five: run the full local
+a fresh clone cannot catch a regression outside the tracked files: run the full local
 suite before merging anything that touches these modules.
 
 After deploying and restarting the gateway, verify each profile has its own

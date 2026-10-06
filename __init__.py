@@ -600,13 +600,51 @@ def _is_clawchat_platform(platform) -> bool:
     return _platform_value(platform) == "clawchat"
 
 
-def _resolve_clawchat_bot_user_id(gateway) -> str | None:
-    """Look up the ClawChat bot's own user_id from the loaded gateway config.
+def _clawchat_adapter_in(adapters) -> object | None:
+    if not isinstance(adapters, dict):
+        return None
+    for platform_key, adapter in adapters.items():
+        if _is_clawchat_platform(platform_key):
+            return adapter
+    return None
+
+
+def _adapter_bot_user_id(adapter) -> str | None:
+    # The adapter's own config is the one its self-echo check uses: token-
+    # resolved (``sub`` wins) and refreshed on reconnect / token rotation.
+    user_id = getattr(getattr(adapter, "_clawchat_config", None), "user_id", None)
+    return user_id if isinstance(user_id, str) and user_id else None
+
+
+def _resolve_clawchat_bot_user_id(gateway, source=None) -> str | None:
+    """Look up the ClawChat bot's own user_id for the profile ``source`` belongs to.
+
+    A multiplexed host keeps one adapter per profile in
+    ``gateway._profile_adapters[profile]``, while ``gateway.config`` is only the
+    LAUNCH profile's config. Reading that config for another profile's turn
+    judges self-echo against the wrong bot and, parsed inside that profile's
+    secret scope, logs a "user_id mismatch" on every message. So: a secondary
+    profile resolves from its own adapter, or returns None (the adapter's own
+    self-echo check still runs) — never from the launch config. Hosts without
+    multiplexing, and the launch profile, keep the config path below, preferring
+    the live primary adapter when the host exposes one.
 
     Re-resolved on every hook call rather than cached at register time —
     activation rewrites this value live and we don't want to keep a stale read
     from before activation.
     """
+    profile_adapters = getattr(gateway, "_profile_adapters", None)
+    profile = str(getattr(source, "profile", None) or "").strip()
+    if isinstance(profile_adapters, dict) and profile_adapters and profile:
+        if profile in profile_adapters:
+            return _adapter_bot_user_id(_clawchat_adapter_in(profile_adapters[profile]))
+        if profile not in ("default", getattr(gateway, "_primary_profile_name", None)):
+            return None
+    primary = _adapter_bot_user_id(
+        _clawchat_adapter_in(getattr(gateway, "adapters", None))
+    )
+    if primary:
+        return primary
     try:
         from gateway.config import Platform
     except Exception:
@@ -650,7 +688,7 @@ def _clawchat_pre_gateway_dispatch(*, event, gateway, session_store=None, **_):
     sender_id = getattr(source, "user_id", None)
     if not sender_id:
         return None
-    bot_user_id = _resolve_clawchat_bot_user_id(gateway)
+    bot_user_id = _resolve_clawchat_bot_user_id(gateway, source)
     if bot_user_id and sender_id == bot_user_id:
         logger.warning(
             "clawchat pre_gateway_dispatch skip: self-echo chat_id=%s user_id=%s",

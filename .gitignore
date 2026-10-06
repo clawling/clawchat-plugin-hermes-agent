@@ -36,6 +36,8 @@ tmp
 #   * device_id_scope / activate_device_id / activate_precheck — device-id
 #     derivation and its paired-device compatibility rules, which a caching
 #     change can silently break (it did: see 642be46).
+#   * pre_dispatch_self_echo — the self-echo hook resolves the bot id of the
+#     event's OWN profile under multiplexing, not the launch profile's.
 #   * restart_outcome — the post-activation restart pre-check, its cwd, and the
 #     captured outcome log; a regression here is silent by construction.
 tests/*
@@ -48,6 +50,7 @@ tests/*
 !tests/test_orchestration_tools.py
 !tests/test_orchestration_registration.py
 !tests/test_restart_outcome.py
+!tests/test_pre_dispatch_self_echo.py
 deploy/
 scripts/
 docs/superpowers/
