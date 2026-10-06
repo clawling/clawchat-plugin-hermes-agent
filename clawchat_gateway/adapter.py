@@ -18,6 +18,7 @@ from clawchat_gateway.no_reply import (
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
+from dataclasses import fields as dataclass_fields
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -370,6 +371,39 @@ def _slash_confirm_choice(text: str) -> str | None:
     return _SLASH_CONFIRM_COMMAND_CHOICES.get(command or "") or _SLASH_CONFIRM_TEXT_CHOICES.get(
         stripped.lstrip("!/").lower()
     )
+
+
+# Plain text Hermes routes to /approve or /deny while a dangerous-command
+# approval blocks the session (Hermes 0.18+, busy-session handler).
+_PLAINTEXT_APPROVAL_WORDS = frozenset(
+    {
+        "approve", "yes", "ok", "okay", "confirm", "y", "👍",
+        "deny", "no", "reject", "cancel", "n", "👎",
+        "always", "approve always", "always approve",
+        "session", "approve session", "session approve",
+    }
+)
+# Direct-chat phrases Hermes rewrites to /restart before dispatch (since 0.12).
+_PLAINTEXT_GATEWAY_RESTART_RES = (
+    re.compile(r"^(?:please\s+)?restart\s+(?:the\s+)?gateway[.!?\s]*$", re.IGNORECASE),
+    re.compile(r"^(?:please\s+)?restart\s+(?:the\s+)?hermes\s+gateway[.!?\s]*$", re.IGNORECASE),
+    re.compile(r"^(?:please\s+)?restart\s+hermes[.!?\s]*$", re.IGNORECASE),
+)
+
+
+def _host_supports_gateway_control() -> bool:
+    """Whether the host's MessageEvent has ``allow_gateway_control`` (Hermes
+    0.20.1+). False makes Hermes treat the event as conversation only: no
+    slash command, no confirm/approval/clarify reply, no plain-text restart."""
+    try:
+        if any(f.name == "allow_gateway_control" for f in dataclass_fields(MessageEvent)):
+            return True
+    except TypeError:
+        pass
+    try:
+        return "allow_gateway_control" in inspect.signature(MessageEvent).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 @dataclass(frozen=True)
@@ -748,6 +782,9 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._direct_chat_peers: dict[str, str] = {}
         # Direct chat -> the slash-confirm Hermes asked a NON-owner to answer.
         self._non_owner_slash_confirms: dict[str, _NonOwnerSlashConfirm] = {}
+        # Non-owner direct chat -> session key of the dangerous-command
+        # approval Hermes last asked there (old-host fallback only).
+        self._direct_exec_approval_sessions: dict[str, str] = {}
         # owner direct chat_id -> approval code -> route; see
         # _reserve_owner_approval_code.
         self._owner_approval_routes: dict[str, dict[str, _OwnerApprovalRoute]] = {}
@@ -2838,6 +2875,14 @@ class ClawChatAdapter(BasePlatformAdapter):
                 command_allowed = command_mode == "all" or (
                     command_mode == "owner" and inbound.sender_relation == "owner"
                 )
+                if (
+                    command_allowed
+                    and inbound.sender_relation != "owner"
+                    and _slash_confirm_choice(command_text) == "always"
+                ):
+                    # Even with commands open to everyone, "always" would
+                    # rewrite the owner's config.yaml.
+                    command_allowed = False
                 if not command_allowed:
                     logger.info(
                         "clawchat group command dropped chat_id=%s sender_id=%s mode=%s owner=%s text_head=%r",
@@ -2891,6 +2936,15 @@ class ClawChatAdapter(BasePlatformAdapter):
         if not self._direct_command_allowed(inbound):
             logger.info(
                 "clawchat direct command dropped chat_id=%s sender_id=%s reason=non_owner text_head=%r",
+                inbound.chat_id,
+                inbound.sender_id,
+                inbound.text[:80],
+            )
+            return
+        if not self._direct_text_allowed_on_old_host(inbound):
+            logger.info(
+                "clawchat direct message dropped chat_id=%s sender_id=%s "
+                "reason=non_owner_gateway_control text_head=%r",
                 inbound.chat_id,
                 inbound.sender_id,
                 inbound.text[:80],
@@ -2997,6 +3051,66 @@ class ClawChatAdapter(BasePlatformAdapter):
         # conversation is known to be the owner's. Anything else fails closed.
         owner_chat_id = self._owner_direct_chat_id()
         return not owner_chat_id or chat_id != owner_chat_id
+
+    def _direct_text_allowed_on_old_host(self, inbound: InboundMessage) -> bool:
+        """Fallback for hosts without ``allow_gateway_control``.
+
+        There Hermes may read a non-owner's plain text as gateway control, so
+        the forms that reach beyond the sender's own conversation are dropped:
+        an "always" confirm reply (rewrites the owner's config.yaml), a
+        plain-text restart phrase, and an approval word while a
+        dangerous-command approval blocks this chat's session.
+        """
+        if _host_supports_gateway_control():
+            return True
+        if self._sender_relation(inbound.sender_id) == "owner":
+            return True
+        text = (inbound.text or "").strip()
+        if _slash_confirm_choice(text) == "always":
+            return False
+        if any(pattern.match(text) for pattern in _PLAINTEXT_GATEWAY_RESTART_RES):
+            return False
+        if text.lower() in _PLAINTEXT_APPROVAL_WORDS and self._direct_chat_approval_blocking(
+            inbound.chat_id
+        ):
+            return False
+        return True
+
+    def _direct_chat_approval_blocking(self, chat_id: str) -> bool:
+        session_key = self._direct_exec_approval_sessions.get(chat_id)
+        if not session_key:
+            return False
+        try:
+            from tools.approval import has_blocking_approval
+
+            blocking = bool(has_blocking_approval(session_key))
+        except Exception:  # noqa: BLE001 — cannot tell: fail closed
+            logger.debug("clawchat approval state unavailable", exc_info=True)
+            return True
+        if not blocking:
+            self._direct_exec_approval_sessions.pop(chat_id, None)
+        return blocking
+
+    def _inbound_may_control_gateway(
+        self, inbound: InboundMessage, *, is_group_command: bool
+    ) -> bool:
+        """``allow_gateway_control`` for the event built from *inbound*.
+
+        True for the owner. For anyone else only a slash command the plugin
+        already let through (the direct-chat allow-list, or a group command
+        allowed by ``group_command_mode``). A group batch is the owner's only
+        when every message in it is.
+        """
+        if inbound.chat_type == "group":
+            if is_group_command:
+                return True
+            return all(
+                self._sender_relation(message.sender_id) == "owner"
+                for message in self._group_messages_for_metadata(inbound)
+            )
+        if self._sender_relation(inbound.sender_id) == "owner":
+            return True
+        return _slash_command_name(inbound.text) in NON_OWNER_DIRECT_SLASH_COMMANDS
 
     async def _answer_non_owner_slash_confirm(self, inbound: InboundMessage) -> bool:
         """Consume a reply to a confirm rendered by ``send_slash_confirm``.
@@ -3230,7 +3344,13 @@ class ClawChatAdapter(BasePlatformAdapter):
                     inbound.chat_id,
                     prior_context.count("\n"),
                 )
+        event_kwargs: dict[str, Any] = {}
+        if _host_supports_gateway_control():
+            event_kwargs["allow_gateway_control"] = self._inbound_may_control_gateway(
+                inbound, is_group_command=is_group_command
+            )
         event = MessageEvent(
+            **event_kwargs,
             text=event_text,
             message_type=MessageType.TEXT,
             source=source,
@@ -4075,6 +4195,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         # no route, so the owner's reply never reached the group session.
         # `**kwargs` keeps a future host flag from reopening that failure.
         chat_type = self._resolve_chat_type(chat_id, metadata, kwargs)
+        if chat_type != "group" and self._is_non_owner_direct_chat(chat_id, metadata, kwargs):
+            self._direct_exec_approval_sessions[chat_id] = str(session_key or "")
         target_chat_id = chat_id
         approval_code = ""
         fallback_text = _exec_approval_fallback_text(

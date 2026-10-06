@@ -544,3 +544,193 @@ async def test_group_confirm_keeps_the_host_text_fallback(adapter, host, sent):
 
     assert result.success is False
     assert sent == []
+
+
+# --- A non-owner's message never controls the gateway -----------------------
+#
+# Hermes reads some plain text as gateway control: "always" / "approve" /
+# "cancel" answer a pending slash-confirm, "yes" / "always" approve a blocking
+# dangerous-command approval while the agent is busy, and "restart gateway" in a
+# direct chat is rewritten to /restart. The allow-list above only sees slash
+# commands. On hosts whose MessageEvent has ``allow_gateway_control`` (Hermes
+# 0.20.1+), a non-owner's event carries False unless it is a command the plugin
+# already allowed, and Hermes keeps it conversational. On older hosts the plugin
+# drops the dangerous plain-text forms itself.
+
+import types as _types
+
+import clawchat_gateway.adapter as adapter_mod
+
+
+@pytest.fixture
+def events(adapter, monkeypatch) -> list:
+    """Run the real _handle_inbound and capture the MessageEvent Hermes gets."""
+    a, _ = adapter
+    captured: list = []
+
+    async def handle_message(event):
+        captured.append(event)
+
+    async def no_consent(_inbound):
+        return False
+
+    async def no_media(_inbound):
+        return []
+
+    async def no_metadata(_chat_id):
+        return None
+
+    monkeypatch.setattr(a, "_handle_inbound", ClawChatAdapter._handle_inbound.__get__(a))
+    monkeypatch.setattr(a, "handle_message", handle_message, raising=False)
+    monkeypatch.setattr(a, "build_source", lambda **kw: _types.SimpleNamespace(**kw), raising=False)
+    monkeypatch.setattr(a, "_maybe_consume_skill_update_consent", no_consent)
+    monkeypatch.setattr(a, "_download_inbound_media", no_media)
+    monkeypatch.setattr(a, "_ensure_group_participants_metadata", no_metadata)
+    return captured
+
+
+@pytest.fixture
+def new_host(monkeypatch):
+    monkeypatch.setattr(adapter_mod, "_host_supports_gateway_control", lambda: True)
+
+
+@pytest.fixture
+def old_host(monkeypatch):
+    monkeypatch.setattr(adapter_mod, "_host_supports_gateway_control", lambda: False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    ["hello", "always", "!always", "Always approve", "approve", "yes", "restart gateway", "/etc/hosts"],
+)
+async def test_non_owner_dm_text_cannot_control_the_gateway(adapter, events, new_host, body):
+    a, _ = adapter
+
+    await a._on_message(dm(STRANGER, body))
+
+    assert [e.text for e in events] == [body], "still delivered to the agent as chat"
+    assert events[0].allow_gateway_control is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", ["/new", "/compress", "/help"])
+async def test_non_owner_dm_allowed_command_keeps_gateway_control(adapter, events, new_host, body):
+    a, _ = adapter
+
+    await a._on_message(dm(STRANGER, body))
+
+    assert events[0].allow_gateway_control is True, "Hermes only runs a command it may treat as one"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", ["always", "/restart", "hello"])
+async def test_owner_dm_keeps_gateway_control(adapter, events, new_host, body):
+    a, _ = adapter
+
+    await a._on_message(dm(OWNER, body))
+
+    assert events[0].allow_gateway_control is True
+
+
+@pytest.mark.asyncio
+async def test_old_host_gets_no_unknown_field(adapter, events, old_host):
+    a, _ = adapter
+
+    await a._on_message(dm(STRANGER, "hello"))
+
+    assert not hasattr(events[0], "allow_gateway_control"), "older MessageEvent rejects the kwarg"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        "always", " Always ", "!always", "/always", "always approve", "/remember",
+        "restart gateway", "please restart the gateway!", "Restart Hermes",
+    ],
+)
+async def test_old_host_drops_non_owner_control_text(adapter, events, old_host, body):
+    a, _ = adapter
+
+    await a._on_message(dm(STRANGER, body))
+
+    assert events == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", ["always", "restart gateway"])
+async def test_old_host_owner_text_is_untouched(adapter, events, old_host, body):
+    a, _ = adapter
+
+    await a._on_message(dm(OWNER, body))
+
+    assert [e.text for e in events] == [body]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", ["yes", "OK", "y", "approve", "👍", "session", "approve always"])
+async def test_old_host_non_owner_cannot_approve_a_blocking_command(
+    adapter, events, old_host, host, monkeypatch, body
+):
+    a, _ = adapter
+    _, approval = host
+
+    async def sent_frame(_frame, **_kwargs):
+        return True
+
+    monkeypatch.setattr(a._connection, "send_frame", sent_frame)
+    await a._on_message(dm(STRANGER, "run the cleanup"))
+    events.clear()
+    # The agent hit a dangerous command in the friend's session; Hermes asks there.
+    await a.send_exec_approval(
+        chat_id=DIRECT, command="rm -rf /tmp/x", session_key="sk_friend",
+        metadata={"chat_type": "direct"},
+    )
+    approval.blocking.add("sk_friend")
+
+    await a._on_message(dm(STRANGER, body))
+    assert events == [], "Hermes would route this to /approve while the approval blocks"
+
+    approval.blocking.clear()
+    await a._on_message(dm(STRANGER, body))
+    assert [e.text for e in events] == [body], "with nothing blocking it is ordinary chat"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", ["/always", "/remember", "/ALWAYS"])
+async def test_non_owner_group_always_dropped_even_when_commands_are_open(adapter, events, body):
+    a, _ = adapter
+    a._clawchat_config = replace(a._clawchat_config, group_command_mode="all")
+    set_group(a, reply_mode="all")
+
+    await a._on_message(group(STRANGER, text(body)))
+    await a._on_message(group(STRANGER, mention(AGENT, "Helper"), text(" " + body)))
+
+    assert events == []
+
+
+@pytest.mark.asyncio
+async def test_owner_group_always_still_dispatches(adapter, events):
+    a, _ = adapter
+    set_group(a, reply_mode="all")
+
+    await a._on_message(group(OWNER, text("/always")))
+
+    assert [e.text for e in events] == ["/always"]
+
+
+@pytest.mark.asyncio
+async def test_group_gateway_control_follows_the_senders(adapter, events, new_host):
+    a, _ = adapter
+    a._clawchat_config = replace(a._clawchat_config, group_command_mode="all")
+    set_group(a, reply_mode="all")
+
+    await a._on_message(group(STRANGER, text("/new")))  # allowed by group_command_mode
+    await a._on_message(group(OWNER, text("/new")))
+    assert [e.allow_gateway_control for e in events] == [True, True]
+    events.clear()
+
+    await a._on_message(group(STRANGER, mention(AGENT, "Helper"), text(" always")))
+    await a._on_message(group(OWNER, mention(AGENT, "Helper"), text(" hi")))
+    assert [e.allow_gateway_control for e in events] == [False, True]

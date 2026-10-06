@@ -461,6 +461,23 @@ stay out of reach this way:
 
 The owner, and groups, keep Hermes' own prompt and reply handling.
 
+Hermes also reads some *plain text* as gateway control, which the slash-command
+allow-list never sees: `always` / `approve` / `cancel` answer a pending
+confirm, `yes` / `always` approve a blocking dangerous-command approval while
+the agent is busy, and `restart gateway` in a direct chat becomes `/restart`.
+On Hermes 0.20.1+ (whose `MessageEvent` has `allow_gateway_control`) the
+plugin sets that field to `false` on every non-owner event except a command it
+already let through (the allow-list above, or a group command allowed by
+`group_command_mode`); a group batch counts as the owner's only when every
+message in it is. Hermes then treats the text as conversation only, so it
+still reaches the agent but controls nothing. One side effect: a non-owner's
+answer to a Hermes `clarify` prompt arrives as a normal message instead of
+resolving the prompt. On older hosts the field is not passed (they reject
+it); instead the plugin drops a non-owner's `always`-type confirm reply, the
+plain-text restart phrases, and an approval word while a dangerous-command
+approval blocks that chat's session. In groups a non-owner's `/always` or
+`/remember` is dropped even when `group_command_mode` is `all`.
+
 ## Reconnect, heartbeat, ack
 
 | `extra.*` key                          | Default        |

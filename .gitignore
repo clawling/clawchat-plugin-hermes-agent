@@ -41,8 +41,10 @@ tmp
 #   * restart_outcome — the post-activation restart pre-check, its cwd, and the
 #     captured outcome log; a regression here is silent by construction.
 #   * command_gating — non-owners cannot run gateway/admin slash commands in a
-#     direct chat, and group commands are judged before the mention-only gate.
-#     A security invariant: a regression reopens remote /restart for anyone.
+#     direct chat, cannot control the gateway with plain text, may answer their
+#     own /new confirm but never with "always", and group commands are judged
+#     before the mention-only gate. A security invariant: a regression reopens
+#     remote /restart or a config rewrite for anyone.
 #   * register_platform_cron — cron_deliver_env_var reaches the host, with the
 #     graded TypeError fallback for older Hermes; failures only show up as
 #     cron jobs silently ending `blocked_config`.
