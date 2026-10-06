@@ -422,7 +422,9 @@ Group messages are gated twice:
 | `CLAWCHAT_HOME_CHANNEL_THREAD_ID`    | —                         | unset          | Optional thread id added to the home descriptor. |
 
 Activation sets `CLAWCHAT_HOME_CHANNEL` to the conversation id returned
-by `agents-connect` and `CLAWCHAT_HOME_CHANNEL_NAME` to `ClawChat`.
+by `agents-connect` and `CLAWCHAT_HOME_CHANNEL_NAME` to `ClawChat`. The plugin
+registers `CLAWCHAT_HOME_CHANNEL` as the platform's `cron_deliver_env_var`, which
+Hermes' cron pre-flight requires before it accepts `deliver=clawchat`.
 
 ### Slash commands in direct chats
 

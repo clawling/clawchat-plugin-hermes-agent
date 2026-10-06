@@ -126,9 +126,14 @@ rather than reading it as delivered.
 (`__init__` → `clawchat_gateway.standalone_send.standalone_send`). Hermes'
 `send_message` tool falls back to this hook when no live gateway adapter
 exists in the calling process — the `hermes send` CLI and `deliver=clawchat`
-cron jobs running outside the gateway process. On older Hermes builds whose
-`PlatformEntry` lacks the field, registration retries without it (out-of-process
-delivery then stays unavailable).
+cron jobs running outside the gateway process. It also passes
+`cron_deliver_env_var="CLAWCHAT_HOME_CHANNEL"`: Hermes 0.21+ pre-flights a cron
+job's `deliver=` target and only accepts a plugin platform that names its
+home-channel env var (without it, ClawChat cron jobs end `blocked_config`).
+Older `PlatformEntry` builds reject unknown fields with `TypeError`, so
+registration degrades one field at a time — both → without
+`cron_deliver_env_var` → without both — and a host that knows the sender but
+not the cron field keeps the sender.
 
 ClawChat has no REST send endpoint, so the standalone path opens an
 **ephemeral** `ClawChatConnection` (reusing credential loading, the challenge

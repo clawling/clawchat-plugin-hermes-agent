@@ -435,21 +435,41 @@ def _register_platform(ctx) -> bool:
         emoji="💬",
         platform_hint=platform_prompt(),
     )
-    try:
-        register_platform(
-            **register_kwargs,
-            standalone_sender_fn=_clawchat_standalone_send,
-        )
-    except TypeError:
-        # Older Hermes: PlatformEntry has no standalone_sender_fn field and the
-        # dataclass constructor raises TypeError on the unknown key. Register
-        # without it — out-of-process `hermes send` then keeps its live-adapter
-        # requirement, everything else works as before.
-        logger.warning(
-            "Hermes PlatformEntry does not support standalone_sender_fn; "
-            "out-of-process `hermes send`/cron delivery for ClawChat disabled."
-        )
-        register_platform(**register_kwargs)
+    # Optional PlatformEntry fields newer hosts understand, tried newest-first.
+    # An older host's dataclass constructor raises TypeError on an unknown key,
+    # so drop one generation at a time — a host that knows standalone_sender_fn
+    # but not cron_deliver_env_var must keep the sender.
+    #   * cron_deliver_env_var (Hermes 0.21+): cron pre-flights `deliver=clawchat`
+    #     and only accepts a plugin platform that names its home-channel env var;
+    #     without it every ClawChat cron job ends `blocked_config`. Activation
+    #     writes CLAWCHAT_HOME_CHANNEL.
+    #   * standalone_sender_fn: out-of-process `hermes send` / cron delivery
+    #     without a live adapter.
+    attempts = (
+        {
+            "standalone_sender_fn": _clawchat_standalone_send,
+            "cron_deliver_env_var": "CLAWCHAT_HOME_CHANNEL",
+        },
+        {"standalone_sender_fn": _clawchat_standalone_send},
+        {},
+    )
+    for index, optional in enumerate(attempts):
+        try:
+            register_platform(**register_kwargs, **optional)
+            break
+        except TypeError:
+            if index == len(attempts) - 1:
+                raise
+            if "cron_deliver_env_var" in optional:
+                logger.warning(
+                    "Hermes PlatformEntry does not support cron_deliver_env_var; "
+                    "cron jobs cannot target ClawChat on this Hermes version."
+                )
+            else:
+                logger.warning(
+                    "Hermes PlatformEntry does not support standalone_sender_fn; "
+                    "out-of-process `hermes send`/cron delivery for ClawChat disabled."
+                )
     _patch_send_message_target_parser()
     _patch_send_message_media_delivery()
     _patch_media_delivery_accept_all_exts()

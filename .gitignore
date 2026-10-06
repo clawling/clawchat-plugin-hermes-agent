@@ -43,6 +43,9 @@ tmp
 #   * command_gating — non-owners cannot run gateway/admin slash commands in a
 #     direct chat, and group commands are judged before the mention-only gate.
 #     A security invariant: a regression reopens remote /restart for anyone.
+#   * register_platform_cron — cron_deliver_env_var reaches the host, with the
+#     graded TypeError fallback for older Hermes; failures only show up as
+#     cron jobs silently ending `blocked_config`.
 tests/*
 !tests/conftest.py
 !tests/test_multiplex_isolation.py
@@ -55,6 +58,7 @@ tests/*
 !tests/test_restart_outcome.py
 !tests/test_pre_dispatch_self_echo.py
 !tests/test_command_gating.py
+!tests/test_register_platform_cron.py
 deploy/
 scripts/
 docs/superpowers/
