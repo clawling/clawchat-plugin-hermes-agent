@@ -36,7 +36,9 @@ npx -y @clawling/clawchat-plugin-install-cli@latest install --target hermes
 ```
 
 `update --target hermes` and `update --target hermes --force` are the
-companion commands for keeping a host current.
+companion commands for keeping a host current. The installer's `--force`
+only reinstalls a plugin that is already installed; it never gets past
+Hermes' security scan (see [the scan entry](#hermes-security-scan) below).
 
 ### B. Directly via Hermes' plugin CLI
 
@@ -44,6 +46,10 @@ companion commands for keeping a host current.
 hermes plugins install clawling/clawchat-plugin-hermes-agent
 hermes plugins enable clawchat
 ```
+
+Hermes 0.20.3 and newer scan the plugin before installing it and stop on a
+*caution* verdict for this plugin — expected; see
+[Hermes security scan](#hermes-security-scan).
 
 If Hermes is not on `PATH`, source the venv first (e.g.
 `source /opt/hermes/.venv/bin/activate`) or call the binary directly.
@@ -56,11 +62,18 @@ In containers the Hermes binary commonly lives at
 
 ```bash
 docker exec hermes sh -lc \
-  'HERMES_HOME=/opt/data /opt/hermes/.venv/bin/hermes plugins install clawling/clawchat-plugin-hermes-agent --force'
+  'HERMES_HOME=/opt/data /opt/hermes/.venv/bin/hermes plugins install clawling/clawchat-plugin-hermes-agent'
 
 docker exec hermes sh -lc \
   'HERMES_HOME=/opt/data /opt/hermes/.venv/bin/hermes plugins enable clawchat'
 ```
+
+`docker exec` without `-it` gives Hermes no terminal, so on Hermes 0.20.3+
+the scan's *caution* verdict ends the install with "Requires confirmation"
+instead of a prompt. Review it as described in
+[Hermes security scan](#hermes-security-scan); only the owner of the
+deployment decides to install past it (`docker exec -it` to answer the
+prompt, or add `--force` to the install command themselves).
 
 After install, the plugin source is at `$HERMES_HOME/plugins/clawchat/`.
 
@@ -184,7 +197,22 @@ For protocol-level checks (WebSocket handshake, ack flow), see
   the absolute path (`/opt/hermes/.venv/bin/hermes` in the default
   container layout).
 - **`Unknown plugin: clawchat` after install** — check
-  `hermes plugins list`; if missing, rerun `install` with `--force`.
+  `hermes plugins list`. Listed but not enabled (an install without a terminal
+  and without `--enable` lands that way): `hermes plugins enable clawchat`.
+  Not listed: the install did not land — rerun it and read its output; a
+  security-scan stop is the next entry, not a reason to add `--force`.
+- <a id="hermes-security-scan"></a>**Hermes security scan stops the install**
+  — Hermes 0.20.3+ scans every third-party plugin. For this plugin a
+  *caution* verdict is expected: a couple of dozen findings, all matches in
+  comments and docs, ending in `Decision: BLOCKED ... Use --force to
+  override.` In a terminal Hermes then waits at `Install anyway? ... [y/N]`;
+  without one it refuses. Check that the report's `Scan:` line names
+  `clawling/clawchat-plugin-hermes-agent` (anything else: do not install),
+  then it is the **owner's** decision: the owner answers `y`, or adds
+  `--force` themselves. An agent relays the verdict and waits — it never
+  answers the prompt or adds `--force` on its own, and an unattended
+  install stops and reports instead. A *dangerous* verdict is refused and
+  `--force` does not override it.
 - **Activation exits non-zero with `validation` / `auth`** — the
   activation code is single-use; request a fresh one. Surface stderr
   verbatim.
