@@ -125,7 +125,9 @@ lifecycle/provider/fallback/retry notices that would otherwise be sent to the
 ClawChat client, including empty-response and fallback-provider status text,
 `ℹ️ Context compression deferred …`, the background `💾 Self-improvement
 review: …` summary, and `⚠ Stream stalled mid tool-call (…); the action was not
-executed. …`. Hermes appends that last warning to the partial reply text, so it
+executed. …`, and the `⚠️ Gateway shutting down — …` / `⚠️ Gateway restarting —
+…` notice Hermes sends to every chat with a running agent when the gateway
+stops or restarts. Hermes appends the stream-stalled warning to the partial reply text, so it
 is also cut out of a message that carries a real reply around it. Prefixes are
 matched with and without the U+FE0F emoji variation selector (Hermes uses both
 `⚠` and `⚠️`). The list lives in `_HERMES_RUNTIME_STATUS_PREFIXES` /

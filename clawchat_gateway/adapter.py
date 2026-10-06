@@ -400,6 +400,11 @@ _HERMES_RUNTIME_STATUS_PREFIXES = (
     "The model returned no response after processing tool results.",
     "ℹ️ Context compression deferred",
     "⚠ Stream stalled mid tool-call ",
+    # Sent to every chat with a running agent when the gateway stops or
+    # restarts ("⚠️ Gateway {shutting down|restarting} — Your current task
+    # will be interrupted. …"); gateway lifecycle, not the agent's reply.
+    "⚠ Gateway shutting down — ",
+    "⚠ Gateway restarting — ",
 )
 # Hermes is inconsistent about the U+FE0F emoji variation selector ("⚠" vs
 # "⚠️", "ℹ" vs "ℹ️"); prefix matching ignores it on both sides.
