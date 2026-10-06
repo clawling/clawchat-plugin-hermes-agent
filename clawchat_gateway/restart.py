@@ -176,6 +176,23 @@ def _hermes_cmd(profile: str) -> str:
 
 def restart_next_steps(plan: RestartPlan) -> list[str]:
     """Operator guidance for a restart that was NOT scheduled."""
+    if plan.action == "no_gateway" and plan.profile != "default":
+        # Preferred: the default profile's multiplexer serves every profile. A gateway
+        # of the profile's own still works while multiplexing is off, so it stays as
+        # the fallback (the host refuses it once the multiplexer serves the profile).
+        cmd = _hermes_cmd(plan.profile)
+        return [
+            f"no Hermes gateway serves profile '{plan.profile}' yet, so there is "
+            "nothing to restart. Preferred: serve it from the default profile's "
+            "gateway - the owner's call, since it changes how every profile is served:",
+            "  set gateway.multiplex_profiles: true in the default profile's config.yaml",
+            f"  (if gateway.multiplex_profile_allowlist is set, add '{plan.profile}' to it)",
+            "  then restart the shared gateway: hermes -p default gateway restart",
+            "That restart also restarts every other profile it serves. Without "
+            "multiplexing, install and start a gateway for this profile instead:",
+            f"  {cmd} gateway install",
+            f"  {cmd} gateway start",
+        ]
     if plan.action == "no_gateway":
         cmd = _hermes_cmd(plan.profile)
         return [

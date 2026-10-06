@@ -159,14 +159,19 @@ Read-only and best-effort: only `extra.user_id` / `extra.base_url` are read
 registration. Identical ids under different `base_url`s are not reported —
 separate deployments mint ids independently.
 
-To run a **second agent on the same host**, give it its own Hermes profile:
+To run a **second agent on the same host**, give it its own Hermes profile and
+serve it from the default profile's gateway (`gateway.multiplex_profiles: true`
+in the default profile's `config.yaml` — the owner's call):
 
 ```bash
 hermes profile create <name>
 hermes -p <name> plugins install clawling/clawchat-plugin-hermes-agent --enable
 hermes -p <name> clawchat activate <CODE>
-hermes -p <name> gateway install && hermes -p <name> gateway start
+hermes -p default gateway restart   # picks up the new profile; restarts all served profiles
 ```
+
+Without multiplexing, give the profile a gateway of its own instead:
+`hermes -p <name> gateway install && hermes -p <name> gateway start`.
 
 Prefer a bare `hermes profile create` over `--clone` for a second ClawChat
 agent: cloning copies credentials that the new profile must not reuse.
@@ -372,7 +377,8 @@ restart that cannot work; it prints the next step instead:
 
 | Detected | What activation does |
 |---|---|
-| No gateway has run for this profile (neither `gateway.pid` nor `gateway_state.json` in `$HERMES_HOME`) | Prints `hermes -p <name> gateway install` then `hermes -p <name> gateway start` (no `-p` for the default profile). A bare `hermes gateway restart` with no service installed would instead start an unmanaged foreground gateway. |
+| No gateway has run for the default profile (neither `gateway.pid` nor `gateway_state.json` in `$HERMES_HOME`) | Prints `hermes gateway install` then `hermes gateway start`. A bare `hermes gateway restart` with no service installed would instead start an unmanaged foreground gateway. |
+| No gateway has run for a named profile, and no multiplexer serves it | Prints the preferred fix first — turn on `gateway.multiplex_profiles` in the default profile's `config.yaml` (adding the profile to `gateway.multiplex_profile_allowlist` if one is set) and run `hermes -p default gateway restart` — then, as the fallback without multiplexing, `hermes -p <name> gateway install` and `hermes -p <name> gateway start`. |
 | A named profile served by the default profile's multiplexing gateway (`gateway.multiplex_profiles` in the default profile's `config.yaml` or `GATEWAY_MULTIPLEX_PROFILES`, narrowed by `gateway.multiplex_profile_allowlist`) | Prints `hermes -p default gateway restart` and warns that it restarts every profile that gateway serves. Hermes refuses a per-profile restart there. |
 | Otherwise | Requests the restart; on the multiplexing default profile it notes that all served profiles restart. |
 

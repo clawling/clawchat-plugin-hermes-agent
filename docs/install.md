@@ -263,8 +263,11 @@ For protocol-level checks (WebSocket handshake, ack flow), see
   since that ends those sessions. Success is a `clawchat state -> ready` line
   in the Hermes log from after the activation.
 - **Activation printed `gateway install` / `gateway start` instead of
-  restarting** — this profile has never run a gateway; run the two printed
-  commands.
+  restarting** — this profile has never run a gateway. For a named profile the
+  output leads with the preferred fix: serve it from the default profile's
+  multiplexed gateway (owner's call), then `hermes -p default gateway restart`;
+  the per-profile `gateway install` / `gateway start` pair is the fallback for
+  hosts that don't multiplex. For the default profile, run the two commands.
 - **Activation printed `hermes -p default gateway restart`** — the profile is
   served by the default profile's multiplexing gateway, which refuses a
   per-profile restart. Restarting it restarts every profile it serves, so check
@@ -279,27 +282,34 @@ For protocol-level checks (WebSocket handshake, ack flow), see
 
 Each Hermes profile is an independent `HERMES_HOME`, so each profile is a
 separate ClawChat agent with its own account and its own database file under
-`$HERMES_HOME/clawchat/`. One gateway process per profile is the default and the
-better-tested shape:
+`$HERMES_HOME/clawchat/`. The preferred shape is ONE gateway, owned by the
+default profile, serving every profile (`gateway.multiplex_profiles: true` in the
+default profile's `config.yaml`; turning it on is the owner's call, since it
+changes how every profile is served). The plugin keys its stores, supervisors
+and senders by profile, so the accounts stay separate:
 
 ```bash
 hermes profile create coder
-# install + activate + run, scoped to the profile:
+# install + activate, scoped to the profile:
 npx -y @clawling/clawchat-plugin-install-cli@latest install \
   --target hermes --profile coder --activate <CONNECT_CODE>
-hermes -p coder gateway install && hermes -p coder gateway start
+# the multiplexer enumerates profiles only at start - restart it (all profiles restart):
+hermes -p default gateway restart
 ```
+
+If `gateway.multiplex_profile_allowlist` is set, the profile must be listed
+there. Read [multiplex-profile-isolation.md](multiplex-profile-isolation.md) for
+what is isolated and how to verify a deployment; multiplexing needs plugin
+`0.14.0-89` or newer.
 
 Repeat with a different profile name for each agent. The default profile keeps
 its database at `$HERMES_HOME/clawchat/clawchat.sqlite`; named profiles use
 `clawchat-<profile>.sqlite`.
 
-Serving several profiles from ONE gateway (`gateway.multiplex_profiles: true`)
-is supported as well: the plugin keys its stores, supervisors and senders by
-profile so the accounts stay separate. Prefer a gateway per profile unless you
-specifically need the single-process shape, and read
-[multiplex-profile-isolation.md](multiplex-profile-isolation.md) first — it
-lists what is isolated and how to verify a deployment.
+Without multiplexing, a gateway per profile also works: replace the restart
+above with `hermes -p coder gateway install && hermes -p coder gateway start`.
+Hermes refuses that per-profile gateway while a multiplexer already serves the
+profile, so pick one shape per host.
 
 > **Read the next section before you install or activate into a profile.**
 > Creating a profile does not switch you into it, and a mis-targeted activation
@@ -381,7 +391,8 @@ export HERMES_HOME="$HOME/.hermes/profiles/$PROFILE"   # default profile: "$HOME
 hermes -p "$PROFILE" plugins install clawling/clawchat-plugin-hermes-agent
 hermes -p "$PROFILE" plugins enable clawchat
 hermes -p "$PROFILE" clawchat activate <CODE>
-hermes -p "$PROFILE" gateway install && hermes -p "$PROFILE" gateway start
+hermes -p default gateway restart   # multiplexed host (preferred)
+# without multiplexing: hermes -p "$PROFILE" gateway install && hermes -p "$PROFILE" gateway start
 ```
 
 Same sequence on native Windows — only the home differs:
@@ -394,7 +405,8 @@ $env:HERMES_HOME = Join-Path $env:LOCALAPPDATA "hermes\profiles\$profileName"
 hermes -p $profileName plugins install clawling/clawchat-plugin-hermes-agent
 hermes -p $profileName plugins enable clawchat
 hermes -p $profileName clawchat activate <CODE>
-hermes -p $profileName gateway install; hermes -p $profileName gateway start
+hermes -p default gateway restart   # multiplexed host (preferred)
+# without multiplexing: hermes -p $profileName gateway install; hermes -p $profileName gateway start
 ```
 
 For the v0.12.0 compatibility script and any other bare-`python` entry point,

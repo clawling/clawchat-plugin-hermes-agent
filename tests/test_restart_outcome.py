@@ -3,8 +3,11 @@
 The restart used to be fire-and-forget (output discarded, result never checked)
 while the CLI printed "restart scheduled" regardless. These tests pin:
 
-* no gateway has run for the profile -> nothing is spawned and the operator is
-  told to install + start one;
+* no gateway has run for the default profile -> nothing is spawned and the
+  operator is told to install + start one;
+* no gateway has run for a named profile -> nothing is spawned and the operator
+  is pointed at the default profile's multiplexed gateway first, with a
+  separate per-profile gateway only as the fallback;
 * a named profile under a multiplexing default gateway -> nothing is spawned
   and the operator is told to restart the shared gateway;
 * a scheduled restart runs with cwd = HERMES_HOME (never the plugin folder) and
@@ -60,7 +63,7 @@ def _run_cli(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     return capsys.readouterr().out
 
 
-def test_no_gateway_prints_install_and_start_instead_of_restarting(
+def test_no_gateway_named_profile_points_at_multiplexing_not_own_gateway(
     profile_home: Path,
     fake_activate: None,
     forbid_spawn: None,
@@ -70,10 +73,33 @@ def test_no_gateway_prints_install_and_start_instead_of_restarting(
     out = _run_cli(monkeypatch, capsys)
 
     assert "activation complete for usr_test" in out
+    assert "gateway.multiplex_profiles: true" in out
+    assert "multiplex_profile_allowlist" in out
+    assert "hermes -p default gateway restart" in out
+    # A per-profile gateway stays available, but only as the fallback after multiplexing.
     assert "hermes -p coder gateway install" in out
-    assert "hermes -p coder gateway start" in out
+    assert out.index("multiplex_profiles") < out.index("hermes -p coder gateway install")
     assert "restart requested" not in out
     assert "scheduled" not in out
+
+
+def test_no_gateway_default_profile_prints_install_and_start(
+    tmp_path: Path,
+    fake_activate: None,
+    forbid_spawn: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "hermes-root"
+    root.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(root))
+    monkeypatch.delenv("GATEWAY_MULTIPLEX_PROFILES", raising=False)
+
+    out = _run_cli(monkeypatch, capsys)
+
+    assert "hermes gateway install" in out
+    assert "hermes gateway start" in out
+    assert "restart requested" not in out
 
 
 def test_multiplexed_named_profile_points_at_shared_gateway(
