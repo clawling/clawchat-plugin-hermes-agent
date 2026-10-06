@@ -398,7 +398,33 @@ _HERMES_RUNTIME_STATUS_PREFIXES = (
     "⚠️ Iteration budget exhausted ",
     "⚠️ The model returned no response after processing tool results.",
     "The model returned no response after processing tool results.",
+    "ℹ️ Context compression deferred",
+    "⚠ Stream stalled mid tool-call ",
 )
+# Hermes is inconsistent about the U+FE0F emoji variation selector ("⚠" vs
+# "⚠️", "ℹ" vs "ℹ️"); prefix matching ignores it on both sides.
+_EMOJI_VARIATION_SELECTOR = "\ufe0f"
+_HERMES_RUNTIME_STATUS_PREFIXES_NORMALIZED = tuple(
+    dict.fromkeys(
+        prefix.replace(_EMOJI_VARIATION_SELECTOR, "")
+        for prefix in _HERMES_RUNTIME_STATUS_PREFIXES
+    )
+)
+# Whole-message runtime notices that need more than a prefix. The
+# self-improvement summary is Hermes' background memory/skill review; Hermes'
+# own Discord adapter drops it with this same pattern.
+_HERMES_RUNTIME_STATUS_PATTERNS = (
+    re.compile(r"^\s*💾\s*Self-improvement review:\s+\S", re.IGNORECASE),
+)
+# Hermes appends this warning to the partial reply text when a stream dies
+# mid tool-call (``"\n\n⚠ Stream stalled mid tool-call (<tools>); the action
+# was not executed. Ask me to retry if you want to continue."``). A stitched
+# reply can continue after it, so it is cut wherever it sits.
+_HERMES_STREAM_STALLED_RE = re.compile(
+    r"[ \t]*⚠\ufe0f?[ \t]*Stream stalled mid tool-call \([^\n]*?\); the action was not "
+    r"executed\.(?:[ \t]*Ask me to retry if you want to continue\.)?[ \t]*"
+)
+_EXCESS_BLANK_LINES_RE = re.compile(r"\n{3,}")
 
 
 def _clawchat_platform():
@@ -5229,13 +5255,22 @@ class ClawChatAdapter(BasePlatformAdapter):
         # They are terminal advice, not the agent's words — cut them out of
         # every outbound path (send / edit / finalize all funnel through here).
         filtered = strip_hermes_session_status(filtered)
+        if _HERMES_STREAM_STALLED_RE.search(filtered) and not self._runtime_status_messages_enabled():
+            filtered = _HERMES_STREAM_STALLED_RE.sub("", filtered)
+            filtered = _EXCESS_BLANK_LINES_RE.sub("\n\n", filtered)
         return filtered.strip()
 
     def _should_suppress_runtime_status_message(self, content: str) -> bool:
         if self._runtime_status_messages_enabled():
             return False
         text = (content or "").strip()
-        if any(text.startswith(prefix) for prefix in _HERMES_RUNTIME_STATUS_PREFIXES):
+        normalized = text.replace(_EMOJI_VARIATION_SELECTOR, "")
+        if any(
+            normalized.startswith(prefix)
+            for prefix in _HERMES_RUNTIME_STATUS_PREFIXES_NORMALIZED
+        ):
+            return True
+        if any(pattern.search(text) for pattern in _HERMES_RUNTIME_STATUS_PATTERNS):
             return True
         return (
             text.startswith("⚠️ ")

@@ -122,7 +122,16 @@ runtime_status_messages = runtime_status_messages_for_visibility(output_visibili
 
 When `runtime_status_messages` is `false`, the adapter suppresses Hermes
 lifecycle/provider/fallback/retry notices that would otherwise be sent to the
-ClawChat client, including empty-response and fallback-provider status text.
+ClawChat client, including empty-response and fallback-provider status text,
+`ℹ️ Context compression deferred …`, the background `💾 Self-improvement
+review: …` summary, and `⚠ Stream stalled mid tool-call (…); the action was not
+executed. …`. Hermes appends that last warning to the partial reply text, so it
+is also cut out of a message that carries a real reply around it. Prefixes are
+matched with and without the U+FE0F emoji variation selector (Hermes uses both
+`⚠` and `⚠️`). The list lives in `_HERMES_RUNTIME_STATUS_PREFIXES` /
+`_HERMES_RUNTIME_STATUS_PATTERNS` in `clawchat_gateway/adapter.py`; Hermes
+sends these through the same `send()` as replies, without a "this is status"
+marker, so a new Hermes notice needs a new entry there.
 Required approval/action controls are still delivered in every preset.
 
 Independently of the preset, Hermes CLI session-status lines that lead a
