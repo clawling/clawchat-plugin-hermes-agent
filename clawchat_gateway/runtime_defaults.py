@@ -17,7 +17,7 @@ def configure_clawchat_allow_all() -> bool:
     """Allow ClawChat users by default without opening every gateway platform."""
     env_path = _env_file()
     env_path.parent.mkdir(parents=True, exist_ok=True)
-    lines = env_path.read_text().splitlines() if env_path.exists() else []
+    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
     changed = False
     found = False
 
@@ -34,5 +34,5 @@ def configure_clawchat_allow_all() -> bool:
         changed = True
 
     if changed:
-        env_path.write_text("\n".join(lines) + "\n")
+        env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return changed

@@ -23,7 +23,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.23" },
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=4" },
     { name = "pyyaml", specifier = ">=6,<7" },
-    { name = "websockets", specifier = ">=12,<16" },
+    { name = "websockets", specifier = ">=13,<16" },
 ]
 provides-extras = ["test"]
 

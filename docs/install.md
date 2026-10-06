@@ -8,7 +8,7 @@ This is the install and activation guide for Hermes operators.
 |-----------------|----------------------------------------------|
 | Hermes Agent    | `v0.12.0` or newer (uses `ctx.register_platform`) |
 | Python runtime  | `>=3.11` (per `pyproject.toml`)              |
-| Dependencies    | `websockets>=12,<16`, `PyYAML>=6,<7`         |
+| Dependencies    | `websockets>=13,<16`, `PyYAML>=6,<7`         |
 
 The plugin advertises itself as `clawchat` (`plugin.yaml: kind: platform`)
 and is loaded directly into `$HERMES_HOME/plugins/clawchat/`.
