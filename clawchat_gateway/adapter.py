@@ -337,6 +337,63 @@ HERMES_BUILTIN_SLASH_COMMANDS = {
 NON_OWNER_DIRECT_SLASH_COMMANDS = frozenset(
     {"new", "reset", "compress", "compact", "help", "whoami"}
 )
+# Replies Hermes accepts for a pending slash-confirm prompt (/new, /reset,
+# /undo, /reload-mcp …), mirrored from the host's gateway reply handler: the
+# command spelling (``event.get_command()``) wins over the free-text spelling
+# (text stripped of leading ``!``/``/``, lower-cased). Unchanged since Hermes
+# 0.12. "always" also persists ``approvals.destructive_slash_confirm: false``
+# in the owner's config.yaml, so a non-owner may never choose it.
+_SLASH_CONFIRM_COMMAND_CHOICES = {
+    "approve": "once", "yes": "once", "ok": "once", "confirm": "once",
+    "always": "always", "remember": "always",
+    "cancel": "cancel", "no": "cancel", "deny": "cancel", "nevermind": "cancel",
+}
+_SLASH_CONFIRM_TEXT_CHOICES = {
+    "approve": "once", "approve once": "once", "once": "once",
+    "always": "always", "always approve": "always",
+    "cancel": "cancel", "nevermind": "cancel", "no": "cancel",
+}
+# How long the plugin keeps a non-owner's confirm open; Hermes' own
+# slash_confirm.DEFAULT_TIMEOUT_SECONDS, after which its resolve() is a no-op.
+_SLASH_CONFIRM_TIMEOUT_SECONDS = 300.0
+
+
+def _slash_confirm_choice(text: str) -> str | None:
+    """``once`` / ``always`` / ``cancel`` when Hermes would read *text* as a
+    reply to a pending slash-confirm prompt, else ``None``."""
+    stripped = (text or "").strip()
+    command = None
+    if stripped.startswith("/"):
+        token = stripped.split(maxsplit=1)[0][1:].lower().split("@", 1)[0]
+        if "/" not in token:
+            command = token
+    return _SLASH_CONFIRM_COMMAND_CHOICES.get(command or "") or _SLASH_CONFIRM_TEXT_CHOICES.get(
+        stripped.lstrip("!/").lower()
+    )
+
+
+@dataclass(frozen=True)
+class _NonOwnerSlashConfirm:
+    session_key: str
+    confirm_id: str
+    title: str
+    created_at: float
+
+
+def _non_owner_slash_confirm_prompt(title: str, host_message: str) -> str:
+    """The confirm prompt for a non-owner: Hermes' explanation, without the
+    "Always Approve" option a non-owner may not choose."""
+    lines = [f"⚠️ Confirm {title}"]
+    paragraphs = [p.strip() for p in (host_message or "").split("\n\n") if p.strip()]
+    # Hermes' prompt is "⚠️ **Confirm /cmd**", the explanation, then the choices.
+    if len(paragraphs) >= 2 and "confirm" in paragraphs[0].lower():
+        detail = paragraphs[1]
+        if not detail.lower().startswith("choose"):
+            lines.append(detail)
+    lines.append("Reply /approve to go ahead, or /cancel to keep things as they are.")
+    return "\n\n".join(lines)
+
+
 HERMES_CONFIRM_SLASH_COMMANDS = {
     "approve",
     "deny",
@@ -686,6 +743,11 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._typing_started_at: dict[str, float] = {}
         self._typing_ttl_warned: set[str] = set()
         self._known_chat_types: dict[str, str] = {}
+        # Direct chat -> the user on the other side (the last sender seen), so
+        # a host callback that only carries chat_id can tell owner from friend.
+        self._direct_chat_peers: dict[str, str] = {}
+        # Direct chat -> the slash-confirm Hermes asked a NON-owner to answer.
+        self._non_owner_slash_confirms: dict[str, _NonOwnerSlashConfirm] = {}
         # owner direct chat_id -> approval code -> route; see
         # _reserve_owner_approval_code.
         self._owner_approval_routes: dict[str, dict[str, _OwnerApprovalRoute]] = {}
@@ -2700,6 +2762,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             len(inbound.media_urls),
         )
         self._known_chat_types[inbound.chat_id] = inbound.chat_type
+        if inbound.chat_type == "direct" and inbound.sender_id:
+            self._direct_chat_peers[inbound.chat_id] = inbound.sender_id
         if inbound.chat_type == "group":
             self._schedule_profile_sync(self._refresh_conversation_metadata(inbound.chat_id))
         elif inbound.sender_id != self._owner_user_id():
@@ -2822,6 +2886,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             return
         if await self._handle_owner_forwarded_approval(inbound):
             return
+        if await self._answer_non_owner_slash_confirm(inbound):
+            return
         if not self._direct_command_allowed(inbound):
             logger.info(
                 "clawchat direct command dropped chat_id=%s sender_id=%s reason=non_owner text_head=%r",
@@ -2870,6 +2936,130 @@ class ClawChatAdapter(BasePlatformAdapter):
         if self._sender_relation(inbound.sender_id) == "owner":
             return True
         return name in NON_OWNER_DIRECT_SLASH_COMMANDS
+
+    async def send_slash_confirm(
+        self,
+        chat_id: str,
+        title: str,
+        message: str,
+        session_key: str,
+        confirm_id: str,
+        metadata: Any = None,
+        **kwargs: Any,
+    ) -> SendResult:
+        """Hermes' hook for a slash-command confirmation (e.g. before ``/new``).
+
+        For the owner and for groups this returns "not supported", so Hermes
+        sends its own text prompt and handles ``/approve`` / ``/always`` /
+        ``/cancel`` exactly as before.
+
+        In a direct chat with anyone else the plugin renders the prompt itself
+        and later resolves it itself (``_answer_non_owner_slash_confirm``), the
+        way Hermes' button adapters do. That keeps two host behaviours away from
+        a non-owner: "always" (it writes the owner's config.yaml), and Hermes'
+        rule that ``/approve`` goes to a blocking dangerous-command approval in
+        the same session before the confirm.
+        """
+        if not self._is_non_owner_direct_chat(chat_id, metadata, kwargs):
+            return SendResult(success=False, error="Not supported")
+        pending = _NonOwnerSlashConfirm(
+            session_key=str(session_key or ""),
+            confirm_id=str(confirm_id or ""),
+            title=str(title or "").strip() or "this command",
+            created_at=time.monotonic(),
+        )
+        self._non_owner_slash_confirms[chat_id] = pending
+        result = await self.send(
+            chat_id,
+            _non_owner_slash_confirm_prompt(pending.title, message),
+            metadata={"chat_type": "direct"},
+        )
+        if not getattr(result, "success", False):
+            self._non_owner_slash_confirms.pop(chat_id, None)
+        logger.info(
+            "clawchat slash confirm rendered for non-owner chat_id=%s title=%s sent=%s",
+            chat_id,
+            pending.title,
+            bool(getattr(result, "success", False)),
+        )
+        return result
+
+    def _is_non_owner_direct_chat(
+        self, chat_id: str, metadata: Any, kwargs: dict[str, Any]
+    ) -> bool:
+        if self._resolve_chat_type(chat_id, metadata, kwargs) != "direct":
+            return False
+        owner_user_id = self._owner_user_id()
+        peer = self._direct_chat_peers.get(chat_id)
+        if peer:
+            return not owner_user_id or peer != owner_user_id
+        # No inbound seen for this chat in this process: only the activation
+        # conversation is known to be the owner's. Anything else fails closed.
+        owner_chat_id = self._owner_direct_chat_id()
+        return not owner_chat_id or chat_id != owner_chat_id
+
+    async def _answer_non_owner_slash_confirm(self, inbound: InboundMessage) -> bool:
+        """Consume a reply to a confirm rendered by ``send_slash_confirm``.
+
+        Only ``once`` and ``cancel`` are resolved, and only through
+        ``tools.slash_confirm`` for the exact ``(session_key, confirm_id)``
+        Hermes registered for this chat's own session — never through
+        ``tools.approval``, so no dangerous-command approval can be reached
+        from here. "always" is refused and the confirm stays open. Anything
+        that is not a confirm reply falls through to normal handling.
+        """
+        pending = self._non_owner_slash_confirms.get(inbound.chat_id)
+        if pending is None:
+            return False
+        if time.monotonic() - pending.created_at > _SLASH_CONFIRM_TIMEOUT_SECONDS:
+            self._non_owner_slash_confirms.pop(inbound.chat_id, None)
+            return False
+        choice = _slash_confirm_choice(inbound.text)
+        if choice is None:
+            return False
+        if choice == "always":
+            logger.info(
+                "clawchat slash confirm 'always' refused chat_id=%s sender_id=%s",
+                inbound.chat_id,
+                inbound.sender_id,
+            )
+            await self.send(
+                inbound.chat_id,
+                "Only the agent's owner can turn this confirmation off. "
+                f"Reply /approve to run {pending.title} this time, or /cancel.",
+                metadata={"chat_type": "direct"},
+            )
+            return True
+        self._non_owner_slash_confirms.pop(inbound.chat_id, None)
+        try:
+            from tools import slash_confirm as slash_confirm_mod
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat slash confirm resolver unavailable", exc_info=True)
+            return True
+        entry = slash_confirm_mod.get_pending(pending.session_key)
+        if not entry or str(entry.get("confirm_id")) != pending.confirm_id:
+            await self.send(
+                inbound.chat_id,
+                f"That confirmation has expired. Send {pending.title} again.",
+                metadata={"chat_type": "direct"},
+            )
+            return True
+        try:
+            result_text = await slash_confirm_mod.resolve(
+                pending.session_key, pending.confirm_id, choice
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("clawchat slash confirm resolve failed chat_id=%s", inbound.chat_id)
+            return True
+        logger.info(
+            "clawchat slash confirm resolved for non-owner chat_id=%s sender_id=%s choice=%s",
+            inbound.chat_id,
+            inbound.sender_id,
+            choice,
+        )
+        if isinstance(result_text, str) and result_text.strip():
+            await self.send(inbound.chat_id, result_text, metadata={"chat_type": "direct"})
+        return True
 
     def _effective_group_settings(self, chat_id: str) -> EffectiveSettings:
         """Live mute / reply-mode / batch delay for *chat_id*.

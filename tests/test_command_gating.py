@@ -287,3 +287,260 @@ async def test_mentioned_chat_is_not_mistaken_for_a_command(adapter):
 
     assert len(dispatched) == 1
     assert dispatched[0].text != "/new"
+
+
+# --- A non-owner answers the confirm for their own /new ---------------------
+#
+# Hermes 0.21 asks before /new (approvals.destructive_slash_confirm) and accepts
+# text replies: /approve, /always, /cancel plus aliases. A non-owner must be able
+# to finish /new in their own direct chat, but:
+#
+# * "always" rewrites the owner's global config.yaml
+#   (destructive_slash_confirm: false), so a non-owner may never choose it;
+# * Hermes' /approve also approves a pending dangerous-command execution, and
+#   when one is blocking in the session Hermes routes /approve there instead of
+#   to the confirm. So the plugin never hands a non-owner's approve to Hermes:
+#   it renders the prompt itself (send_slash_confirm, the hook button adapters
+#   use) and resolves exactly the (session_key, confirm_id) Hermes gave it, via
+#   tools.slash_confirm — the slash-confirm registry, not tools.approval.
+
+import sys
+import types
+
+HOST_PROMPT = (
+    "⚠️ **Confirm /new**\n\n"
+    "This starts a fresh session and discards the current conversation history.\n\n"
+    "Choose:\n"
+    "• **Approve Once** — proceed this time only\n"
+    "• **Always Approve** — proceed and silence this prompt permanently\n"
+    "• **Cancel** — keep current conversation\n\n"
+    "_Text fallback: reply `/approve`, `/always`, or `/cancel`._"
+)
+OWNER_DIRECT = "cnv_owner_direct"
+
+
+class FakeSlashConfirm:
+    def __init__(self) -> None:
+        self.pending: dict = {}
+        self.resolved: list = []
+
+    def get_pending(self, session_key):
+        entry = self.pending.get(session_key)
+        return dict(entry) if entry else None
+
+    async def resolve(self, session_key, confirm_id, choice, timeout=300):
+        self.resolved.append((session_key, confirm_id, choice))
+        entry = self.pending.pop(session_key, None)
+        if not entry or entry["confirm_id"] != confirm_id:
+            return None
+        return "🟡 /new cancelled. Conversation unchanged." if choice == "cancel" else "✨ Session reset!"
+
+
+class FakeApproval:
+    def __init__(self) -> None:
+        self.blocking: set = set()
+        self.resolved: list = []
+
+    def has_blocking_approval(self, session_key):
+        return session_key in self.blocking
+
+    def resolve_gateway_approval(self, session_key, choice, resolve_all=False):
+        self.resolved.append((session_key, choice))
+        return 1
+
+
+@pytest.fixture
+def host(monkeypatch):
+    slash_confirm = FakeSlashConfirm()
+    approval = FakeApproval()
+    tools_pkg = types.ModuleType("tools")
+    tools_pkg.slash_confirm = slash_confirm
+    tools_pkg.approval = approval
+    monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+    monkeypatch.setitem(sys.modules, "tools.slash_confirm", slash_confirm)
+    monkeypatch.setitem(sys.modules, "tools.approval", approval)
+    return slash_confirm, approval
+
+
+@pytest.fixture
+def sent(adapter, monkeypatch) -> list:
+    a, _dispatched = adapter
+    out: list = []
+
+    async def fake_send(chat_id, content="", reply_to=None, metadata=None, **_kwargs):
+        from gateway.platforms.base import SendResult
+
+        out.append((chat_id, content))
+        return SendResult(success=True, message_id=f"m{len(out)}")
+
+    monkeypatch.setattr(a, "send", fake_send)
+    monkeypatch.setattr(a, "_owner_direct_chat_id", lambda: OWNER_DIRECT)
+    return out
+
+
+async def _friend_runs_new(a, slash_confirm, *, session_key="sk_friend", confirm_id="7"):
+    await a._on_message(dm(STRANGER, "/new"))
+    slash_confirm.pending[session_key] = {"confirm_id": confirm_id, "command": "new"}
+    return await a.send_slash_confirm(
+        chat_id=DIRECT,
+        title="/new",
+        message=HOST_PROMPT,
+        session_key=session_key,
+        confirm_id=confirm_id,
+        metadata=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_non_owner_confirm_prompt_is_rendered_by_the_plugin_without_always(adapter, host, sent):
+    a, _ = adapter
+    slash_confirm, _ = host
+
+    result = await _friend_runs_new(a, slash_confirm)
+
+    assert result.success is True, "success tells Hermes not to send its own text fallback"
+    assert len(sent) == 1
+    chat_id, prompt = sent[0]
+    assert chat_id == DIRECT
+    assert "/approve" in prompt and "/cancel" in prompt
+    assert "always" not in prompt.lower()
+    assert "discards the current conversation history" in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reply,choice",
+    [
+        ("/approve", "once"),
+        ("/yes", "once"),
+        ("/ok", "once"),
+        ("/confirm", "once"),
+        ("approve", "once"),
+        ("Approve once", "once"),
+        ("once", "once"),
+        ("!approve", "once"),
+        ("/cancel", "cancel"),
+        ("/no", "cancel"),
+        ("/deny", "cancel"),
+        ("/nevermind", "cancel"),
+        ("cancel", "cancel"),
+        ("no", "cancel"),
+        ("nevermind", "cancel"),
+    ],
+)
+async def test_non_owner_answers_own_new_confirm(adapter, host, sent, reply, choice):
+    a, dispatched = adapter
+    slash_confirm, approval = host
+    await _friend_runs_new(a, slash_confirm)
+    dispatched.clear()
+
+    await a._on_message(dm(STRANGER, reply))
+
+    assert slash_confirm.resolved == [("sk_friend", "7", choice)]
+    assert dispatched == [], "the reply is consumed by the plugin, never handed to Hermes"
+    assert approval.resolved == []
+    assert sent[-1][0] == DIRECT
+    assert sent[-1][1] in {"✨ Session reset!", "🟡 /new cancelled. Conversation unchanged."}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reply", ["/always", "always", "!always", "/remember", "always approve", "/ALWAYS"]
+)
+async def test_non_owner_cannot_choose_always(adapter, host, sent, reply):
+    a, dispatched = adapter
+    slash_confirm, _ = host
+    await _friend_runs_new(a, slash_confirm)
+    dispatched.clear()
+
+    await a._on_message(dm(STRANGER, reply))
+
+    assert slash_confirm.resolved == []
+    assert dispatched == [], "'always' would rewrite the owner's config.yaml"
+    assert "/approve" in sent[-1][1] and "/cancel" in sent[-1][1]
+    # The confirm is still open: the friend can still approve it once.
+    await a._on_message(dm(STRANGER, "/approve"))
+    assert slash_confirm.resolved == [("sk_friend", "7", "once")]
+
+
+@pytest.mark.asyncio
+async def test_non_owner_approve_never_reaches_a_dangerous_command_approval(adapter, host, sent):
+    a, dispatched = adapter
+    slash_confirm, approval = host
+    await _friend_runs_new(a, slash_confirm)
+    # Hermes would route /approve to this blocking approval instead of the confirm.
+    approval.blocking.add("sk_friend")
+    dispatched.clear()
+
+    await a._on_message(dm(STRANGER, "/approve"))
+
+    assert approval.resolved == []
+    assert dispatched == []
+    assert slash_confirm.resolved == [("sk_friend", "7", "once")]
+
+
+@pytest.mark.asyncio
+async def test_non_owner_approve_without_a_plugin_confirm_is_still_dropped(adapter, host, sent):
+    a, dispatched = adapter
+    slash_confirm, approval = host
+
+    await a._on_message(dm(STRANGER, "/approve"))
+
+    assert dispatched == []
+    assert slash_confirm.resolved == [] and approval.resolved == []
+
+
+@pytest.mark.asyncio
+async def test_expired_confirm_is_not_resolved(adapter, host, sent):
+    a, dispatched = adapter
+    slash_confirm, _ = host
+    await _friend_runs_new(a, slash_confirm)
+    slash_confirm.pending.clear()  # timed out / superseded on the host side
+    dispatched.clear()
+
+    await a._on_message(dm(STRANGER, "/approve"))
+
+    assert slash_confirm.resolved == []
+    assert dispatched == []
+    assert "/new" in sent[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_confirm_is_answered_only_once(adapter, host, sent):
+    a, dispatched = adapter
+    slash_confirm, _ = host
+    await _friend_runs_new(a, slash_confirm)
+    await a._on_message(dm(STRANGER, "/approve"))
+    dispatched.clear()
+
+    await a._on_message(dm(STRANGER, "no"))
+
+    assert slash_confirm.resolved == [("sk_friend", "7", "once")]
+    assert [m.text for m in dispatched] == ["no"], "after the confirm, 'no' is just chat"
+
+
+@pytest.mark.asyncio
+async def test_owner_confirm_keeps_the_host_text_fallback(adapter, host, sent):
+    a, dispatched = adapter
+    await a._on_message(_frame(chat_id=OWNER_DIRECT, chat_type="direct", sender=OWNER, fragments=[text("/new")]))
+
+    result = await a.send_slash_confirm(
+        chat_id=OWNER_DIRECT, title="/new", message=HOST_PROMPT,
+        session_key="sk_owner", confirm_id="1", metadata=None,
+    )
+
+    assert result.success is False, "Hermes then sends its own prompt and handles /always for the owner"
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_group_confirm_keeps_the_host_text_fallback(adapter, host, sent):
+    a, _ = adapter
+
+    result = await a.send_slash_confirm(
+        chat_id=GROUP, title="/new", message=HOST_PROMPT,
+        session_key="sk_group", confirm_id="2", metadata={"chat_type": "group"},
+    )
+
+    assert result.success is False
+    assert sent == []

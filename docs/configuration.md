@@ -440,6 +440,27 @@ so a new Hermes command is owner-only until it is reviewed. If the owner id is
 not known yet, only the allow-listed commands pass. Group commands are governed
 by `group_command_mode` instead.
 
+Hermes asks before `/new` / `/reset` (`approvals.destructive_slash_confirm`,
+on by default) and takes text replies: approve, always or cancel, with
+aliases. A non-owner answers that prompt through the plugin, not through
+Hermes: for a direct chat with anyone but the owner the adapter implements
+Hermes' `send_slash_confirm` hook, shows a prompt with only `/approve` and
+`/cancel`, and resolves the reply itself via `tools.slash_confirm` for the
+exact session and confirm id Hermes registered for that chat. Accepted
+replies are Hermes' own spellings: `/approve` `/yes` `/ok` `/confirm`,
+`approve` `approve once` `once`; `/cancel` `/no` `/deny` `/nevermind`,
+`cancel` `no` `nevermind` (`!` works in place of `/`). Two host behaviours
+stay out of reach this way:
+
+- "always" (`/always`, `/remember`, `always`, `always approve`) persists
+  `destructive_slash_confirm: false` in the owner's config.yaml. A non-owner's
+  "always" is refused and the prompt stays open.
+- Hermes sends `/approve` to a blocking dangerous-command approval in the
+  same session ahead of the confirm. The plugin never forwards a non-owner's
+  confirm reply to Hermes, so it can only ever resolve the confirm.
+
+The owner, and groups, keep Hermes' own prompt and reply handling.
+
 ## Reconnect, heartbeat, ack
 
 | `extra.*` key                          | Default        |
