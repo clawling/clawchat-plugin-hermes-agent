@@ -147,6 +147,51 @@ def _merge_mentioned_users(*sources: list[dict[str, str]]) -> list[dict[str, str
     return list(merged.values())
 
 
+def split_leading_mentions(
+    text: str, envelope: dict[str, Any]
+) -> tuple[list[str], str] | None:
+    """Split off the @-mention fragments a message *opens* with.
+
+    ``text`` is the ``InboundMessage.text`` that :func:`parse_inbound_message`
+    rendered from ``envelope``, where a mention fragment becomes
+    ``@{display or id}``. Returns ``(mentioned ids in order, remaining text)``
+    when the message starts with at least one mention fragment (only
+    whitespace may sit between them), else ``None``. Mention *fragments* are
+    the source of truth: a display name may contain spaces, so the rendered
+    ``@name`` cannot be split off reliably by pattern alone.
+    """
+    payload = _as_dict(envelope.get("payload") or {}) if isinstance(envelope, dict) else None
+    message = _as_dict((payload or {}).get("message") or {})
+    if message is None:
+        return None
+    ids: list[str] = []
+    renders: list[str] = []
+    for fragment in _coerce_fragments(message):
+        if not isinstance(fragment, dict):
+            break
+        kind = _fragment_kind(fragment)
+        if kind == "mention":
+            mention_id = _mention_id(fragment)
+            display = _mention_display(fragment)
+            if mention_id:
+                ids.append(mention_id)
+            if display or mention_id:
+                renders.append(f"@{display or mention_id}")
+            continue
+        if kind in (None, "text") and not (_fragment_text(fragment) or "").strip():
+            continue
+        break
+    if not ids:
+        return None
+    rest = text
+    for render in renders:
+        rest = rest.lstrip()
+        if not rest.startswith(render):
+            return None
+        rest = rest[len(render):]
+    return ids, rest.strip()
+
+
 def parse_inbound_message(
     envelope: dict[str, Any], config: ClawChatConfig
 ) -> InboundMessage | None:

@@ -66,7 +66,11 @@ from clawchat_gateway.group_message_coalescer import (
     GroupMessageCoalescer,
     format_coalesced_group_text,
 )
-from clawchat_gateway.inbound import InboundMessage, parse_inbound_message
+from clawchat_gateway.inbound import (
+    InboundMessage,
+    parse_inbound_message,
+    split_leading_mentions,
+)
 from clawchat_gateway.hermes_home import hermes_home
 from clawchat_gateway.liveware_cli import resolve_liveware_path, wait_liveware_cli_ready
 from clawchat_gateway.liveware_sample import LivewareSampleDeps, LivewareSampleSupervisor
@@ -100,6 +104,7 @@ from clawchat_gateway.owner_language import resolve_owner_language_if_known
 from clawchat_gateway.profile import load_profile_config
 from clawchat_gateway.profile_sync import relation_for_sender
 from clawchat_gateway.protocol import (
+    MENTION_ALL_USER_ID,
     build_message_reaction_event,
     build_message_reply_event,
     build_message_send_event,
@@ -309,6 +314,8 @@ HERMES_BUILTIN_SLASH_COMMANDS = {
     "new",
     "reset",
     "clear",
+    "compress",
+    "compact",
     "help",
     "model",
     "status",
@@ -316,6 +323,20 @@ HERMES_BUILTIN_SLASH_COMMANDS = {
     "memory",
     "settings",
 }
+# Slash commands a NON-owner may run in their own direct chat with the agent.
+#
+# An allow-list, not a block-list, on purpose. Hermes' command table has ~100
+# entries and grows every release (/restart, /update, /config, /yolo, /cron,
+# /approve, /stop, /pause, /reload, ...), and other plugins and skills register
+# more; a block-list would silently go stale and open the next /restart. Every
+# entry here only touches the sender's own direct-chat session (or is
+# read-only), so it can reach neither the gateway nor anyone else's session.
+# This mirrors Hermes' own slash_access model (a {help, whoami} floor plus an
+# explicit user_allowed_commands list). Aliases are listed by name: /reset is
+# Hermes' alias of /new, /compact of /compress.
+NON_OWNER_DIRECT_SLASH_COMMANDS = frozenset(
+    {"new", "reset", "compress", "compact", "help", "whoami"}
+)
 HERMES_CONFIRM_SLASH_COMMANDS = {
     "approve",
     "deny",
@@ -2707,19 +2728,14 @@ class ClawChatAdapter(BasePlatformAdapter):
                     inbound.sender_id,
                 )
                 return
-            if _eff.reply_mode == "mention" and not inbound.was_mentioned:
-                logger.info(
-                    "clawchat group non-mention dropped chat_id=%s sender_id=%s reason=reply_mode_mention",
-                    inbound.chat_id,
-                    inbound.sender_id,
-                )
-                return
-        else:
-            _eff = None
-        if await self._handle_owner_forwarded_approval(inbound):
-            return
-        if inbound.chat_type == "group":
-            if _is_known_hermes_slash_command(inbound.text):
+            # agent-protocol.md §3.3: group commands (step 4) are judged BEFORE
+            # the reply-mode gate (step 5), so `/new` still works in a
+            # mention-only group. A leading `@agent` is stripped first, so
+            # `@agent /new` reaches Hermes as the bare `/new` it recognises.
+            command_text = self._group_command_text(inbound)
+            if command_text is not None:
+                if command_text != inbound.text:
+                    inbound = replace(inbound, text=command_text)
                 command_mode = effective_group_command_mode(
                     self._clawchat_config,
                     inbound.chat_id,
@@ -2746,6 +2762,13 @@ class ClawChatAdapter(BasePlatformAdapter):
                 )
                 await self._handle_inbound(inbound)
                 return
+            if _eff.reply_mode == "mention" and not inbound.was_mentioned:
+                logger.info(
+                    "clawchat group non-mention dropped chat_id=%s sender_id=%s reason=reply_mode_mention",
+                    inbound.chat_id,
+                    inbound.sender_id,
+                )
+                return
             self._group_message_coalescer.enqueue(
                 inbound,
                 idle_seconds_override=float(_eff.batch_delay_seconds) if _eff is not None else None,
@@ -2766,7 +2789,56 @@ class ClawChatAdapter(BasePlatformAdapter):
                 len(inbound.text),
             )
             return
+        if await self._handle_owner_forwarded_approval(inbound):
+            return
+        if not self._direct_command_allowed(inbound):
+            logger.info(
+                "clawchat direct command dropped chat_id=%s sender_id=%s reason=non_owner text_head=%r",
+                inbound.chat_id,
+                inbound.sender_id,
+                inbound.text[:80],
+            )
+            return
         await self._handle_inbound(inbound)
+
+    def _group_command_text(self, inbound: InboundMessage) -> str | None:
+        """The Hermes slash command a group message carries for THIS agent.
+
+        A bare ``/cmd`` is addressed to every agent in the room (unchanged
+        behaviour). ``@agent /cmd`` counts only when the leading mentions include
+        this agent or ``@所有人``; the mentions are stripped so the returned text
+        starts with the slash. ``@other /cmd`` is another agent's command.
+        Returns ``None`` for anything that is not a known command.
+        """
+        if _is_known_hermes_slash_command(inbound.text):
+            return inbound.text
+        split = split_leading_mentions(inbound.text, inbound.raw_message)
+        if split is None:
+            return None
+        mentioned_ids, rest = split
+        agent_user_id = self._clawchat_config.user_id
+        addressed = MENTION_ALL_USER_ID in mentioned_ids or (
+            bool(agent_user_id) and agent_user_id in mentioned_ids
+        )
+        if not addressed or not _is_known_hermes_slash_command(rest):
+            return None
+        return rest
+
+    def _direct_command_allowed(self, inbound: InboundMessage) -> bool:
+        """Whether a direct message may reach Hermes, judged on its slash command.
+
+        Plain text always may. The agent's owner may run any command. Anyone
+        else — the plugin defaults ``CLAWCHAT_ALLOW_ALL_USERS=true``, so that is
+        every friend — may only run ``NON_OWNER_DIRECT_SLASH_COMMANDS``; e.g.
+        ``/restart`` / ``/update`` would act on the owner's whole gateway. With
+        no known owner id this fails closed.
+        """
+        name = _slash_command_name(inbound.text)
+        if name is None:
+            return True
+        if self._sender_relation(inbound.sender_id) == "owner":
+            return True
+        return name in NON_OWNER_DIRECT_SLASH_COMMANDS
 
     def _effective_group_settings(self, chat_id: str) -> EffectiveSettings:
         """Live mute / reply-mode / batch delay for *chat_id*.
@@ -2916,12 +2988,13 @@ class ClawChatAdapter(BasePlatformAdapter):
         media_types = [item.mime for item in downloaded_media]
         # Prepend prior group context when the agent is @-mentioned.
         #
-        # A group slash command is dispatched through this same path and MUST
-        # carry a structured mention to clear the reply-mode gate, so it arrives
-        # here with was_mentioned=True. Prepending prior-context text in front of
-        # it would push the leading slash off the start of the turn, so Hermes
-        # would no longer recognize it as a command and would treat it as chat.
-        # Skip the injection for command turns so the slash stays at the start.
+        # A group slash command is dispatched through this same path (ahead of
+        # the reply-mode gate, with any leading @-mention already stripped), and
+        # an `@agent /cmd` one arrives with was_mentioned=True. Prepending
+        # prior-context text in front of it would push the leading slash off the
+        # start of the turn, so Hermes would no longer recognize it as a command
+        # and would treat it as chat. Skip the injection for command turns so
+        # the slash stays at the start.
         event_text = inbound.text
         if (
             inbound.chat_type == "group"

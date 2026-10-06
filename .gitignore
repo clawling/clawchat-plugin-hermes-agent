@@ -40,6 +40,9 @@ tmp
 #     event's OWN profile under multiplexing, not the launch profile's.
 #   * restart_outcome — the post-activation restart pre-check, its cwd, and the
 #     captured outcome log; a regression here is silent by construction.
+#   * command_gating — non-owners cannot run gateway/admin slash commands in a
+#     direct chat, and group commands are judged before the mention-only gate.
+#     A security invariant: a regression reopens remote /restart for anyone.
 tests/*
 !tests/conftest.py
 !tests/test_multiplex_isolation.py
@@ -51,6 +54,7 @@ tests/*
 !tests/test_orchestration_registration.py
 !tests/test_restart_outcome.py
 !tests/test_pre_dispatch_self_echo.py
+!tests/test_command_gating.py
 deploy/
 scripts/
 docs/superpowers/

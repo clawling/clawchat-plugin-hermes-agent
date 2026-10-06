@@ -390,10 +390,17 @@ reply mode from the static `group_mode` above, 10 s delay). A row that omits
 
 Group messages are gated twice:
 
-1. **On arrival**, after waiting (at most 5 s) for any in-flight settings read:
-   a muted group stops here (slash commands included), and in mention mode a
-   message that does not mention this agent (own id or `"all"`) stops here.
-   The message is still recorded.
+1. **On arrival**, after waiting (at most 5 s) for any in-flight settings read,
+   in this order (`agent-protocol.md` §3.3): a muted group stops here (slash
+   commands included); then a Hermes slash command is judged by
+   `group_command_mode` and, if allowed, dispatched straight to Hermes —
+   **before** the reply-mode gate, so `/new` and `/compress` work in a
+   mention-only group too; then, in mention mode, a message that does not
+   mention this agent (own id or `"all"`) stops here. The message is still
+   recorded. A command may open with @-mentions (`@agent /new`): the leading
+   mention fragments are stripped and Hermes receives the bare `/new`. It only
+   counts as this agent's command when those mentions include this agent or
+   `"all"` — `@other-agent /new` is the other agent's.
 2. **When the batch flushes.** Non-mention messages are coalesced per group:
    the batch runs after `batch_delay_seconds` of quiet, or after
    `max(30 s, batch_delay_seconds)` at most; a message that mentions the agent
@@ -409,13 +416,27 @@ Group messages are gated twice:
 | Env var                              | `extra.*` key             | Default        | Notes |
 |--------------------------------------|---------------------------|----------------|-------|
 | `CLAWCHAT_ALLOWED_USERS`             | —                         | unset          | Hermes-level user allowlist (passed through `register_platform(allowed_users_env=...)`). |
-| `CLAWCHAT_ALLOW_ALL_USERS`           | —                         | `"true"`       | `configure_clawchat_allow_all` writes this to `.env` on plugin load so ClawChat users are allowed by default. |
+| `CLAWCHAT_ALLOW_ALL_USERS`           | —                         | `"true"`       | `configure_clawchat_allow_all` writes this to `.env` on plugin load so ClawChat users are allowed by default. Slash commands in direct chats are still owner-gated by the plugin (below). |
 | `CLAWCHAT_HOME_CHANNEL`              | —                         | unset          | When set, enables the plugin's home-channel mode (`env_enablement_fn`). |
 | `CLAWCHAT_HOME_CHANNEL_NAME`         | —                         | `"ClawChat"`   | Display name passed to the home channel descriptor. |
 | `CLAWCHAT_HOME_CHANNEL_THREAD_ID`    | —                         | unset          | Optional thread id added to the home descriptor. |
 
 Activation sets `CLAWCHAT_HOME_CHANNEL` to the conversation id returned
 by `agents-connect` and `CLAWCHAT_HOME_CHANNEL_NAME` to `ClawChat`.
+
+### Slash commands in direct chats
+
+Because every ClawChat user is allowed by default, the plugin itself decides
+who may run a Hermes slash command in a direct chat. The agent's owner may run
+any. Anyone else may only run commands that touch nothing but their own direct
+session: `/new` (alias `/reset`), `/compress` (alias `/compact`), `/help`,
+`/whoami`. Every other command — `/restart`, `/update`, `/config`, `/yolo`,
+`/approve`, plugin commands such as `/clawchat-activate`, and any command a
+future Hermes adds — is dropped before it reaches Hermes. This is an
+allow-list (`NON_OWNER_DIRECT_SLASH_COMMANDS` in `clawchat_gateway/adapter.py`)
+so a new Hermes command is owner-only until it is reviewed. If the owner id is
+not known yet, only the allow-listed commands pass. Group commands are governed
+by `group_command_mode` instead.
 
 ## Reconnect, heartbeat, ack
 
