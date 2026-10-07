@@ -383,9 +383,15 @@ default. On upgrade each group starts a new shared session; the old
 per-speaker sessions stay in Hermes' session store (searchable, not
 continued), and the first turn of the new session is seeded with the group's
 recent messages (below). A `group_sessions_per_user: true` an operator wrote into an existing
-`config.yaml` (top level or under `groups`) is still honoured for the groups it
-covers, with one deprecation warning at startup; remove it to switch those
-groups to a shared session.
+`config.yaml` (under `platforms.clawchat.extra`, top level or under `groups`) is
+still honoured for the groups it covers, with one deprecation warning at
+startup; remove it to switch those groups to a shared session. The top-level key
+is read from `config.yaml` itself (`hermes_cli.config.read_raw_config`), not
+from the platform config Hermes hands the adapter: Hermes fills
+`group_sessions_per_user` into every platform's `extra` from its own
+host-wide setting, which defaults to `true`, so its presence there says nothing
+about the operator. Hermes' host-wide `group_sessions_per_user` does not apply to
+ClawChat groups.
 
 ### Group session seeding and queueing
 

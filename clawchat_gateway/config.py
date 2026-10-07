@@ -368,6 +368,30 @@ def _read_group_sessions_per_user(value: Any) -> bool:
     return False if parsed is None else parsed
 
 
+def operator_clawchat_extra() -> Optional[dict[str, Any]]:
+    """``platforms.clawchat.extra`` exactly as written in config.yaml, or None.
+
+    Needed where the runtime ``PlatformConfig.extra`` cannot tell an operator's
+    value from one the host filled in. Every supported Hermes (v0.12.0 through
+    v0.21.x) runs ``config.extra.setdefault("group_sessions_per_user",
+    self.config.group_sessions_per_user)`` before building an adapter, and that
+    host setting defaults to true, so the key is always in the runtime extra.
+    ``read_raw_config`` reads the served profile's config.yaml as-is (no
+    defaults merged); a multiplexing gateway builds each profile's adapter under
+    that profile's home override. None when the host config cannot be read.
+    """
+    try:
+        from hermes_cli.config import read_raw_config
+
+        raw = read_raw_config() or {}
+    except Exception:  # noqa: BLE001 - standalone use, or an unreadable config
+        return None
+    platforms = raw.get("platforms") if isinstance(raw, dict) else None
+    block = platforms.get("clawchat") if isinstance(platforms, dict) else None
+    extra = block.get("extra") if isinstance(block, dict) else None
+    return extra if isinstance(extra, dict) else {}
+
+
 _GROUP_SESSIONS_PER_USER_WARNED = False
 
 
@@ -523,7 +547,17 @@ class ClawChatConfig:
     sediment_on_reset: bool = True
 
     @classmethod
-    def from_platform_config(cls, platform_config: Any) -> "ClawChatConfig":
+    def from_platform_config(
+        cls, platform_config: Any, operator_extra: Optional[dict[str, Any]] = None
+    ) -> "ClawChatConfig":
+        """Build from the host's platform config.
+
+        ``operator_extra`` is ``platforms.clawchat.extra`` as written in
+        config.yaml (see ``operator_clawchat_extra``). The top-level
+        ``group_sessions_per_user`` is read only from it, never from the runtime
+        extra, where the host always fills it in; without it, groups share one
+        session (per-group overrides under ``groups`` still apply).
+        """
         extra = getattr(platform_config, "extra", None) or {}
         media_roots_env = _get_env("CLAWCHAT_MEDIA_LOCAL_ROOTS")
         media_local_roots = (
@@ -568,7 +602,7 @@ class ClawChatConfig:
                 or _get_config_value(extra, "group_command_mode", "owner")
             ),
             group_sessions_per_user=_read_group_sessions_per_user(
-                _get_config_value(extra, "group_sessions_per_user", False)
+                _get_config_value(operator_extra or {}, "group_sessions_per_user", False)
             ),
             groups=_read_groups(_get_config_value(extra, "groups", {})),
             reconnect_initial_delay_ms=_get_config_value(

@@ -65,8 +65,10 @@ tmp
 #     description both say facts about a person / group / the owner go to
 #     their ClawChat note, not to Hermes' MEMORY.md.
 #   * group_shared_session — a group is one Hermes session for every speaker
-#     by default; an explicit legacy per-speaker setting is honoured with a
-#     one-time warning; direct chats keep one session per conversation.
+#     by default, even though Hermes fills group_sessions_per_user=true into
+#     every platform's runtime extra; only a per-speaker setting written in
+#     config.yaml is honoured, with a one-time warning; direct chats keep one
+#     session per conversation.
 #   * group_session_seed / group_turn_queue — a group's new shared session is
 #     seeded once with recent group messages, later mentions only add what the
 #     session has not seen, and a batch that arrives while the group's turn is

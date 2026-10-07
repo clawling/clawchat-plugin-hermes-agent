@@ -56,6 +56,7 @@ from clawchat_gateway.config import (
     effective_group_command_mode,
     effective_group_mode,
     effective_group_sessions_per_user,
+    operator_clawchat_extra,
     warn_if_group_sessions_per_user_set,
 )
 from clawchat_gateway.connection import (
@@ -802,7 +803,9 @@ class ClawChatAdapter(BasePlatformAdapter):
 
     def __init__(self, platform_config: Any) -> None:
         super().__init__(platform_config, _clawchat_platform())
-        self._clawchat_config = ClawChatConfig.from_platform_config(platform_config)
+        self._clawchat_config = ClawChatConfig.from_platform_config(
+            platform_config, operator_extra=operator_clawchat_extra()
+        )
         warn_if_group_sessions_per_user_set(self._clawchat_config)
         self._memory_root = (
             Path(self._clawchat_config.memory_root)
