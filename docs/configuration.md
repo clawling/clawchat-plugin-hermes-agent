@@ -471,6 +471,70 @@ when the adapter starts, so a change needs a gateway restart.
 | `note-cap-turn` | `4000` | 1000–16000 | Characters of all notes shown in one turn together. |
 | `rebuild-recent-messages` | `20` | 5–100 | Recent group messages that seed a group's new shared session. |
 | `rebuild-recent-chars` | `4000` | 1000–32000 | Character budget of that seed. |
+| `session-cap-tokens` | `150000` | 50000–1000000 | Context size at which a conversation's session is compressed; filled into Hermes' `compression.threshold_tokens` when that is missing (below). |
+| `sediment-margin-tokens` | `10000` | 2000–50000 | How far below the cap a turn has to reach for a sediment turn to run before compression. |
+| `sediment-on-compact` | `on` | `on` / `off` | Run a sediment turn before compression. |
+| `sediment-on-reset` | `on` | `on` / `off` | Run a sediment turn before `/new` / `/reset`. |
+
+Keys of the shared set that the Hermes plugin does **not** read, and why:
+
+| Key | Why not here |
+|-----|--------------|
+| `idle-reset-dm`, `idle-reset-group`, `daily-reset` | Resetting a Hermes session by time is the host's job. Hermes up to 0.21.0 does it itself (`session_reset`, by default daily at 04:00 or after 24 h idle, with no plugin hook before it); Hermes 0.21.1 dropped time-based resets entirely, and a session is then bounded by compression at `session-cap-tokens`. A plugin-driven reset would have to go through the host's confirm-guarded `/new`. |
+| `delta-budget-chars` | A group session receives every batch itself; the only catch-up is the mention context above, capped at 10 messages. |
+| `archive-muted-groups` | The plugin's message ledger records muted groups' messages anyway. |
+| `digest-every-messages` | Applies to channels without a host session; every Hermes conversation has one. |
+
+### Sediment turns
+
+Compression and `/new` drop what a conversation established from the agent's
+working context. Hermes itself no longer saves anything at those moments: its
+pre-compression / pre-reset memory flush was removed upstream before v0.12.0
+in favour of the periodic background memory review, which the plugin turns off
+(`memory.nudge_interval: 0`, see [Hermes built-in memory](#hermes-built-in-memory))
+because it can only write the single-user `USER.md` / `MEMORY.md`. So the
+plugin runs its own **sediment turn** in the conversation's session just before
+either happens:
+
+- **Before `/new` / `/reset`** sent from ClawChat (`sediment-on-reset`): the
+  sediment turn runs and finishes first, then the command goes to Hermes (whose
+  confirmation prompt, if enabled, follows). Skipped when the session is busy —
+  `/new` must stay an immediate way out of a stuck turn — and when nothing was
+  said since the last reset.
+- **Before compression** (`sediment-on-compact`): after a turn whose last model
+  request used at least `session-cap-tokens − sediment-margin-tokens` tokens of
+  context, a sediment turn runs as soon as the conversation is idle, once per
+  Hermes session id. The request size comes from Hermes' `post_api_request`
+  plugin hook. So that compression happens right after, at the cap, plugin load
+  and activation fill `compression.threshold_tokens` with `session-cap-tokens`
+  when the key is missing. The key is global, so it applies to the host's other
+  platforms too; set it yourself to keep a different value — the plugin then
+  times the sediment turn against yours.
+
+  Hermes compresses at the lower of `compression.threshold_tokens` (read by
+  Hermes 0.20.1 and later) and its ratio threshold `compression.threshold`
+  (default 0.5 of the model's context window; 0.20.1 and later raise it to 0.75
+  for windows under 512 K). The sediment turn comes before compression only
+  when the ratio threshold is not the lower one: with the defaults, a window of
+  at least 200 K tokens on 0.20.1+, or at least 300 K on older hosts. With a
+  smaller window compression comes first and that stretch is not sedimented
+  (facts the agent wrote to notes during the conversation are of course kept).
+
+A sediment turn is a synthetic message in the same session telling the agent to
+read and then append to only this conversation's notes: in a direct chat the
+peer's `users/<id>.md` (or `owner.md` for the owner); in a group the group's
+`groups/<id>.md`, `users/<id>.md` of up to 10 recent speakers, and `owner.md`
+only for facts about the owner said in the group. It is told not to use Hermes'
+`memory` tool, not to send messages, and to answer with the no-reply token.
+Whatever it does send to that chat — text, edits, media, typing — is dropped
+until Hermes reports the turn finished (`on_processing_complete`); other chats
+are unaffected. A group's next batch waits for it like for any group turn. The
+sediment message and its answer stay in the session's history.
+
+With `display.busy_input_mode: interrupt` (not the ClawChat default), a direct
+message sent during a sediment turn can be folded into that turn by newer
+Hermes versions and its answer dropped with it; the default `queue` runs it
+afterwards.
 
 See [`./reference/prompt-injection.md`](./reference/prompt-injection.md) for
 where the notes appear and how they are cut.
@@ -768,6 +832,8 @@ display:
 memory:
   user_profile_enabled: false
   nudge_interval: 0
+compression:
+  threshold_tokens: 150000
 ```
 
 `$HERMES_HOME/.env` after activation contains at least:

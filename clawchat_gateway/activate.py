@@ -442,6 +442,29 @@ def _ensure_clawchat_memory_defaults(
     return changed
 
 
+def _ensure_clawchat_compression_cap(config: dict[str, Any]) -> bool:
+    """Fill ``compression.threshold_tokens`` from the plugin's session cap.
+
+    Hermes compresses a session at the lower of its ratio threshold and this
+    absolute count (the key exists since Hermes v0.20.1; older hosts ignore
+    it). The ClawChat sediment turn runs ``sediment-margin-tokens`` before
+    that point. Fill-only: an operator's own value is kept. The key is global
+    — it also applies to the host's other platforms.
+    """
+    from clawchat_gateway.config import SESSION_INT_KEYS, _read_clamped_int
+
+    compression = config.get("compression")
+    if isinstance(compression, dict) and "threshold_tokens" in compression:
+        return False
+    platforms = config.get("platforms") if isinstance(config.get("platforms"), dict) else {}
+    clawchat = platforms.get("clawchat") if isinstance(platforms.get("clawchat"), dict) else {}
+    extra = clawchat.get("extra") if isinstance(clawchat.get("extra"), dict) else {}
+    _field, default, minimum, maximum = SESSION_INT_KEYS["session-cap-tokens"]
+    cap = _read_clamped_int(extra.get("session-cap-tokens", default), default, minimum, maximum)
+    _config_section(config, "compression")["threshold_tokens"] = cap
+    return True
+
+
 def _hint_user_md_migration(config: dict[str, Any]) -> None:
     """Log once at load when USER.md still holds entries Hermes no longer uses."""
     memory = config.get("memory") if isinstance(config.get("memory"), dict) else {}
@@ -476,6 +499,7 @@ def ensure_clawchat_host_defaults_on_load() -> None:
         if not isinstance(config, dict):
             return
         changed = _ensure_clawchat_memory_defaults(config, overwrite=False)
+        changed = _ensure_clawchat_compression_cap(config) or changed
         if changed:
             _write_config(config_path, config)
             logger.info("clawchat: filled missing ClawChat host defaults in config.yaml")
@@ -545,6 +569,7 @@ def persist_activation(
     _ensure_clawchat_agent_defaults(config)
     _ensure_clawchat_display_defaults(config)
     _ensure_clawchat_memory_defaults(config)
+    _ensure_clawchat_compression_cap(config)
     env_values = {
         "CLAWCHAT_TOKEN": access_token,
         "CLAWCHAT_REFRESH_TOKEN": refresh_token or None,

@@ -426,6 +426,13 @@ SESSION_INT_KEYS: dict[str, tuple[str, int, int, int]] = {
     "note-cap-turn": ("note_cap_turn", 4000, 1000, 16000),
     "rebuild-recent-messages": ("rebuild_recent_messages", 20, 5, 100),
     "rebuild-recent-chars": ("rebuild_recent_chars", 4000, 1000, 32000),
+    "session-cap-tokens": ("session_cap_tokens", 150000, 50000, 1000000),
+    "sediment-margin-tokens": ("sediment_margin_tokens", 10000, 2000, 50000),
+}
+#   extra key -> (ClawChatConfig field, factory); values on/off (or true/false).
+SESSION_BOOL_KEYS: dict[str, tuple[str, bool]] = {
+    "sediment-on-compact": ("sediment_on_compact", True),
+    "sediment-on-reset": ("sediment_on_reset", True),
 }
 
 
@@ -445,6 +452,9 @@ def _read_session_keys(extra: dict[str, Any]) -> dict[str, Any]:
         values[field_name] = _read_clamped_int(
             _get_config_value(extra, key, default), default, minimum, maximum
         )
+    for key, (field_name, default) in SESSION_BOOL_KEYS.items():
+        parsed = _read_optional_bool(_get_config_value(extra, key, default))
+        values[field_name] = default if parsed is None else parsed
     return values
 
 
@@ -507,6 +517,10 @@ class ClawChatConfig:
     note_cap_turn: int = 4000
     rebuild_recent_messages: int = 20
     rebuild_recent_chars: int = 4000
+    session_cap_tokens: int = 150000
+    sediment_margin_tokens: int = 10000
+    sediment_on_compact: bool = True
+    sediment_on_reset: bool = True
 
     @classmethod
     def from_platform_config(cls, platform_config: Any) -> "ClawChatConfig":

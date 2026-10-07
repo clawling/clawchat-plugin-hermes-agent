@@ -72,6 +72,10 @@ tmp
 #     session has not seen, and a batch that arrives while the group's turn is
 #     running waits and goes out as the next batch instead of reaching
 #     Hermes' version-dependent busy handling.
+#   * session_sediment — before /new and before compression a silent turn
+#     saves the conversation's facts into only that conversation's ClawChat
+#     notes; its output never reaches the chat, and /new is never delayed for
+#     a busy session.
 #   * inbound_dispatch_lanes — inbound messages are handled off the WS read
 #     loop, per chat and in order. A handler that awaits a send's ack inside
 #     the read loop can never get it: the read loop stalls for the ack timeout,
@@ -98,6 +102,7 @@ tests/*
 !tests/test_group_shared_session.py
 !tests/test_group_session_seed.py
 !tests/test_group_turn_queue.py
+!tests/test_session_sediment.py
 deploy/
 scripts/
 docs/superpowers/

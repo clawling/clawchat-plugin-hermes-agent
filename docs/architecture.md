@@ -30,6 +30,7 @@ These names refer to different layers and are not interchangeable:
 | `ctx.register_command("clawchat-activate", ...)`             | `__init__._register_commands` | Adds the `/clawchat-activate <CODE>` slash command for in-session activation.        |
 | `ctx.register_command("clawchat-output", ...)`               | `__init__._register_commands` | Adds the `/clawchat-output minimal\|normal\|full` slash command ([`./output-visibility.md`](./output-visibility.md)). |
 | `ctx.register_hook("pre_api_request", ...)`                  | `__init__._register_llm_context_debug_hooks` | Installs the LLM-context debug observer (inert unless `CLAWCHAT_LLM_CONTEXT_DEBUG` is set). |
+| `ctx.register_hook("post_api_request", ...)`                 | `__init__._register_session_usage_hook` | Records the prompt size of each ClawChat conversation's latest model request (`clawchat_gateway.sediment`), which times the sediment turn before compression. |
 | `ctx.register_hook("pre_gateway_dispatch", ...)`             | `__init__._clawchat_pre_gateway_dispatch` | Drops frames whose sender matches the bot's own ClawChat `user_id` (self-echo). |
 
 `adapter_factory`, `setup_fn`, `check_fn`, `validate_config`, and
@@ -208,6 +209,23 @@ next batch while that group's turn is running — tracked from the plugin's own
 dispatch (`ClawChatAdapter._group_dispatching`) and then from the host base
 adapter's `_active_sessions` guard — and flushes it as one batch once the
 session is free. See [`./configuration.md`](./configuration.md#group-session-seeding-and-queueing).
+
+### Sediment turns before reset and compression
+
+Hermes v0.12.0+ has no memory flush at compression or reset (upstream removed
+`AIAgent.flush_memories` and the gateway's `_flush_memories_for_session`);
+the hooks left at those moments do not fit: `on_session_reset` /
+`on_session_finalize` fire after the session is gone, and
+`MemoryProvider.on_pre_compress` only reaches the single external memory
+provider an operator selects with `memory.provider`. The adapter therefore runs
+its own no-reply turn in the conversation's session first
+(`ClawChatAdapter._run_sediment_turn`): before a `/new` / `/reset` from
+ClawChat, and after a turn whose request size (from the `post_api_request`
+hook) nears the compression cap. Outbound frames to that chat are dropped until
+the base adapter's `on_processing_complete` reports that very event finished
+(the host's session guard stays up across queued turns, so the event identity,
+not the guard, ends the suppression). See
+[`./configuration.md`](./configuration.md#sediment-turns).
 
 ### Group exec approvals forwarded to the owner
 

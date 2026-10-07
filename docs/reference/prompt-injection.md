@@ -116,6 +116,15 @@ naming the `clawchat_memory_read` call that shows the rest; when the notes
 together exceed `note-cap-turn`, short ones stay whole and the longest are cut
 to a common ceiling (`clawchat_gateway/note_injection.py`).
 
+Two kinds of turn put plugin-written text into the **user message** (so it
+stays in the session): the first turn of a group's shared session starts with
+the group's recent messages, and an @-mention later adds group messages the
+session has not seen (see
+[`../configuration.md`](../configuration.md#group-session-seeding-and-queueing));
+and a sediment turn before `/new` or compression is a whole synthetic user
+message naming the only notes it may write (see
+[`../configuration.md`](../configuration.md#sediment-turns)).
+
 `ClawChat Turn Metadata` also carries the message time taken from the
 Protocol-v2 envelope's `emitted_at`: `sent_at` (local timezone, ISO-8601 with an
 explicit UTC offset, second precision) and `sent_age` (`3s` / `4m` / `5h` /

@@ -569,6 +569,12 @@ def events(adapter, monkeypatch) -> list:
     captured: list = []
 
     async def handle_message(event):
+        inner = (getattr(event, "raw_message", None) or {}).get("clawchat_raw") or {}
+        if isinstance(inner, dict) and inner.get("clawchat_sediment"):
+            # The silent note-saving turn the plugin runs before /new; these
+            # tests are about the command's own event.
+            await a.on_processing_complete(event, None)
+            return
         captured.append(event)
 
     async def no_consent(_inbound):

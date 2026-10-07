@@ -125,6 +125,7 @@ from clawchat_gateway.greeting import (
 )
 from clawchat_gateway.hermes_session_status import strip_hermes_session_status
 from clawchat_gateway.note_injection import cap_note, fit_turn_budget
+from clawchat_gateway import sediment as session_sediment
 from clawchat_gateway.permission_result import handle_permission_result
 from clawchat_gateway.permissions import PermissionCache
 from clawchat_gateway import skill_update
@@ -184,6 +185,13 @@ GROUP_SEED_HEADER = (
     "[ClawChat group messages from before this session, oldest first. "
     "Context only; the new messages follow.]"
 )
+# How long a reset waits for its sediment turn, and how long a compaction
+# sediment waits for the conversation to go idle, before giving up.
+SEDIMENT_TURN_TIMEOUT_SECONDS = 300.0
+SEDIMENT_IDLE_WAIT_SECONDS = 600.0
+SEDIMENT_POLL_SECONDS = 0.25
+SEDIMENT_GROUP_SPEAKERS_MAX = 10
+RESET_SLASH_COMMANDS = frozenset({"new", "reset"})
 GROUP_UNSEEN_HEADER = (
     "[ClawChat group messages you have not seen yet, oldest first. "
     "Context only; the new messages follow.]"
@@ -773,6 +781,20 @@ def build_skill_update_ack(applied_targets: list[str], removed_ids: list[str]) -
     return "✅ " + ";".join(parts)
 
 
+def _read_host_compression_cap() -> int | None:
+    """``compression.threshold_tokens`` from the host config, if set."""
+    try:
+        from hermes_cli.config import read_raw_config
+
+        compression = (read_raw_config() or {}).get("compression")
+        value = compression.get("threshold_tokens") if isinstance(compression, dict) else None
+    except Exception:  # noqa: BLE001 - absent or unreadable host config
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return None
+    return int(value)
+
+
 class ClawChatAdapter(BasePlatformAdapter):
     SUPPORTS_MESSAGE_EDITING = True
     REQUIRES_EDIT_FINALIZE = True
@@ -870,6 +892,17 @@ class ClawChatAdapter(BasePlatformAdapter):
         # _group_context_for_turn. In-memory: after a restart a mention may
         # repeat up to MENTION_CONTEXT_N messages the session already has.
         self._delivered_group_message_ids: dict[str, OrderedDict[str, None]] = {}
+        # Sediment turns (see clawchat_gateway.sediment): chats whose outbound
+        # text is dropped while their sediment turn runs; per chat the running
+        # turn's id and completion event; Hermes session ids already sedimented
+        # before compression; chats reset by /new with no turn since; and the
+        # background tasks waiting to run a compaction sediment.
+        self._sediment_chats: set[str] = set()
+        self._sediment_done: dict[str, tuple[str, asyncio.Event]] = {}
+        self._sedimented_session_ids: OrderedDict[str, None] = OrderedDict()
+        self._reset_clean_chats: set[str] = set()
+        self._sediment_tasks: set[asyncio.Task[None]] = set()
+        self._host_compression_cap = _read_host_compression_cap()
         # Groups whose batch the plugin is handing to Hermes right now; with the
         # host's own active-session guard this tells the coalescer to hold the
         # next batch until the running group turn is over.
@@ -963,6 +996,10 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
 
     async def disconnect(self) -> None:
+        for task in list(self._sediment_tasks):
+            task.cancel()
+        if self._sediment_tasks:
+            await asyncio.gather(*self._sediment_tasks, return_exceptions=True)
         await self._cancel_activation_bootstrap_tasks()
         await self._cancel_conversation_refresh_tasks()
         await self._cancel_profile_sync_tasks()
@@ -977,6 +1014,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         return {"name": chat_id, "type": "direct", "chat_id": chat_id}
 
     async def send_typing(self, chat_id: str, metadata: Any = None) -> None:
+        if chat_id in self._sediment_chats:
+            return
         if self._is_chat_dead(chat_id):
             logger.debug(
                 "clawchat typing active skipped chat_id=%s reason=conversation_dissolved",
@@ -3473,11 +3512,26 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
 
     async def _handle_inbound(self, inbound: InboundMessage) -> None:
+        is_sediment_turn = (
+            isinstance(inbound.raw_message, dict)
+            and bool(inbound.raw_message.get("clawchat_sediment"))
+        )
         # Pending skill-update consent gate: an owner's direct affirm/deny reply
         # is consumed here (applies/cancels the update) and never reaches the LLM.
         # Ambiguous replies fall through to normal handling, keeping pending.
-        if await self._maybe_consume_skill_update_consent(inbound):
+        if not is_sediment_turn and await self._maybe_consume_skill_update_consent(inbound):
             return
+        reset_command = (
+            not is_sediment_turn
+            and _slash_command_name(inbound.text) in RESET_SLASH_COMMANDS
+        )
+        if reset_command and self._should_sediment_before_reset(inbound):
+            await self._run_sediment_turn(
+                chat_id=inbound.chat_id,
+                chat_type=inbound.chat_type,
+                sender_id=inbound.sender_id,
+                reason="reset",
+            )
         if inbound.chat_type == "group":
             await self._ensure_group_participants_metadata(inbound.chat_id)
         # Capture command-ness from the ORIGINAL inbound text before any batch
@@ -3599,10 +3653,211 @@ class ClawChatAdapter(BasePlatformAdapter):
             reply_to_message_id,
         )
         await self.handle_message(event)
+        if reset_command:
+            self._reset_clean_chats.add(inbound.chat_id)
+            session_sediment.forget_usage(inbound.chat_id)
+        elif not is_synthetic and not _slash_command_name(inbound.text):
+            self._reset_clean_chats.discard(inbound.chat_id)
         logger.info(
             "clawchat dispatch accepted by hermes chat_id=%s user_id=%s",
             inbound.chat_id,
             inbound.sender_id,
+        )
+
+    # --- sediment turns (clawchat_gateway.sediment) --------------------------
+
+    def _should_sediment_before_reset(self, inbound: InboundMessage) -> bool:
+        if not self._clawchat_config.sediment_on_reset:
+            return False
+        chat_id = inbound.chat_id
+        if not chat_id or chat_id in self._reset_clean_chats or chat_id in self._sediment_chats:
+            return False
+        # A busy session gets /new at once: it is how a stuck turn is escaped.
+        if chat_id in self._group_dispatching or self._chat_session_active(chat_id):
+            logger.info("clawchat sediment before reset skipped chat_id=%s reason=busy", chat_id)
+            return False
+        return True
+
+    def _sediment_targets(
+        self, chat_id: str, chat_type: str, *, sender_id: str
+    ) -> list[tuple[str, str, str]]:
+        """The only notes a sediment turn for this conversation may write."""
+        if chat_type != "group":
+            owner_id = self._owner_user_id()
+            if owner_id and sender_id == owner_id:
+                return [("owner", "owner", "your owner")]
+            if not sender_id:
+                return []
+            return [("user", sender_id, "the person in this direct chat")]
+        targets: list[tuple[str, str, str]] = [("group", chat_id, "this group")]
+        seen = {self._clawchat_config.user_id, "system", ""}
+        reader = getattr(self._store, "list_recent_group_transcript", None)
+        rows = reader("default", chat_id, 200) if callable(reader) else []
+        for row in reversed(rows):  # most recent speakers first
+            speaker = str(row.get("sender_id") or "")
+            if row.get("direction") != "inbound" or speaker in seen:
+                continue
+            seen.add(speaker)
+            name = str(row.get("sender_name") or speaker)
+            targets.append(("user", speaker, f"{self._escape_prompt_field(name)}, who spoke here"))
+            if len(targets) > SEDIMENT_GROUP_SPEAKERS_MAX:
+                break
+        targets.append(("owner", "owner", "your owner — only facts about them said in this group"))
+        return targets
+
+    async def _run_sediment_turn(
+        self, *, chat_id: str, chat_type: str, sender_id: str, reason: str
+    ) -> bool:
+        """Run one silent sediment turn in this chat's session and wait for it."""
+        targets = self._sediment_targets(chat_id, chat_type, sender_id=sender_id)
+        if not targets or chat_id in self._sediment_chats:
+            return False
+        is_group = chat_type == "group"
+        shared_group = is_group and not effective_group_sessions_per_user(
+            self._clawchat_config, chat_id
+        )
+        turn_id = secrets.token_hex(16)
+        done = asyncio.Event()
+        inbound = InboundMessage(
+            chat_id=chat_id,
+            chat_type=chat_type,
+            # A shared group session is keyed without the sender; a direct (or
+            # legacy per-speaker group) session needs the real one.
+            sender_id="" if shared_group else sender_id,
+            sender_name="",
+            text=session_sediment.build_sediment_prompt(reason=reason, targets=targets),
+            raw_message={
+                "synthetic": True,
+                "clawchat_sediment": reason,
+                "sediment_id": turn_id,
+                "conversation_id": chat_id,
+            },
+        )
+        self._sediment_chats.add(chat_id)
+        self._sediment_done[chat_id] = (turn_id, done)
+        logger.info(
+            "clawchat sediment turn start chat_id=%s reason=%s notes=%d",
+            chat_id,
+            reason,
+            len(targets),
+        )
+        try:
+            if is_group:
+                self._group_dispatching.add(chat_id)
+            try:
+                await self._handle_inbound(inbound)
+            finally:
+                if is_group:
+                    self._group_dispatching.discard(chat_id)
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + SEDIMENT_TURN_TIMEOUT_SECONDS
+            idle_since: float | None = None
+            while not done.is_set():
+                now = loop.time()
+                if now >= deadline:
+                    logger.warning("clawchat sediment turn timed out chat_id=%s", chat_id)
+                    break
+                # The host never took the turn (or finished without telling us).
+                if self._chat_session_active(chat_id):
+                    idle_since = None
+                elif idle_since is None:
+                    idle_since = now
+                elif now - idle_since >= 1.0:
+                    break
+                try:
+                    await asyncio.wait_for(done.wait(), timeout=SEDIMENT_POLL_SECONDS)
+                except asyncio.TimeoutError:
+                    pass
+            return done.is_set()
+        except Exception:  # noqa: BLE001 - a failed sediment never blocks the chat
+            logger.warning("clawchat sediment turn failed chat_id=%s", chat_id, exc_info=True)
+            return False
+        finally:
+            self._sediment_chats.discard(chat_id)
+            if self._sediment_done.get(chat_id, ("", None))[0] == turn_id:
+                self._sediment_done.pop(chat_id, None)
+            logger.info("clawchat sediment turn end chat_id=%s reason=%s", chat_id, reason)
+
+    def _compact_sediment_threshold(self) -> int:
+        config = self._clawchat_config
+        cap = self._host_compression_cap or config.session_cap_tokens
+        return max(1, cap - config.sediment_margin_tokens)
+
+    async def on_processing_complete(self, event: Any, outcome: Any) -> None:
+        parent = getattr(super(), "on_processing_complete", None)
+        if callable(parent):
+            try:
+                await parent(event, outcome)
+            except Exception:  # noqa: BLE001
+                logger.debug("clawchat base on_processing_complete failed", exc_info=True)
+        try:
+            self._after_host_turn(event)
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat post-turn maintenance failed", exc_info=True)
+
+    def _after_host_turn(self, event: Any) -> None:
+        raw = getattr(event, "raw_message", None)
+        inner = raw.get("clawchat_raw") if isinstance(raw, dict) else None
+        source = getattr(event, "source", None)
+        chat_id = str(getattr(source, "chat_id", "") or "")
+        if isinstance(inner, dict) and inner.get("clawchat_sediment"):
+            pending = self._sediment_done.get(str(inner.get("conversation_id") or chat_id))
+            if pending is not None and pending[0] == inner.get("sediment_id"):
+                pending[1].set()
+            return
+        if chat_id and not _slash_command_name(str(getattr(event, "text", "") or "")):
+            self._maybe_schedule_compact_sediment(chat_id, event)
+
+    def _maybe_schedule_compact_sediment(self, chat_id: str, event: Any) -> None:
+        if not self._clawchat_config.sediment_on_compact:
+            return
+        usage = session_sediment.latest_usage(chat_id)
+        if usage is None:
+            return
+        session_id, prompt_tokens = usage
+        if prompt_tokens < self._compact_sediment_threshold():
+            return
+        if session_id in self._sedimented_session_ids:
+            return
+        self._sedimented_session_ids[session_id] = None
+        while len(self._sedimented_session_ids) > 2048:
+            self._sedimented_session_ids.popitem(last=False)
+        raw = getattr(event, "raw_message", None)
+        chat_type = raw.get("clawchat_chat_type") if isinstance(raw, dict) else None
+        chat_type = chat_type or self._known_chat_types.get(chat_id)
+        if chat_type != "group":
+            chat_type = "direct"
+        sender_id = self._direct_chat_peers.get(chat_id) or str(
+            getattr(getattr(event, "source", None), "user_id", "") or ""
+        )
+        logger.info(
+            "clawchat sediment before compaction scheduled chat_id=%s prompt_tokens=%d threshold=%d",
+            chat_id,
+            prompt_tokens,
+            self._compact_sediment_threshold(),
+        )
+        task = asyncio.ensure_future(
+            self._compact_sediment_when_idle(chat_id, chat_type, sender_id)
+        )
+        self._sediment_tasks.add(task)
+        task.add_done_callback(self._sediment_tasks.discard)
+
+    async def _compact_sediment_when_idle(
+        self, chat_id: str, chat_type: str, sender_id: str
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + SEDIMENT_IDLE_WAIT_SECONDS
+        while (
+            self._chat_session_active(chat_id)
+            or chat_id in self._group_dispatching
+            or chat_id in self._sediment_chats
+        ):
+            if loop.time() >= deadline:
+                logger.info("clawchat sediment before compaction skipped chat_id=%s reason=busy", chat_id)
+                return
+            await asyncio.sleep(SEDIMENT_POLL_SECONDS)
+        await self._run_sediment_turn(
+            chat_id=chat_id, chat_type=chat_type, sender_id=sender_id, reason="compact"
         )
 
     def _session_user_id_for_inbound(self, inbound: InboundMessage) -> str:
@@ -4633,6 +4888,13 @@ class ClawChatAdapter(BasePlatformAdapter):
         metadata: Any = None,
         **kwargs: Any,
     ) -> SendResult:
+        if chat_id in self._sediment_chats:
+            logger.info(
+                "clawchat sediment turn output dropped chat_id=%s text_len=%d",
+                chat_id,
+                len(content or ""),
+            )
+            return SendResult(success=True)
         chat_type = self._resolve_chat_type(chat_id, metadata, kwargs)
         is_group = chat_type == "group"
         if self._consume_terminal_send(chat_id, phase="send"):
@@ -4837,6 +5099,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         finalize: bool = False,
         **kwargs: Any,
     ) -> SendResult:
+        if chat_id in self._sediment_chats:
+            return SendResult(success=True, message_id=message_id)
         run = self._resolve_active_run(chat_id=chat_id, message_id=message_id)
         if self._consume_terminal_send(chat_id, phase="edit_message"):
             if run is not None:

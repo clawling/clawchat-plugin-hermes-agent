@@ -785,6 +785,20 @@ def _register_llm_context_debug_hooks(ctx) -> None:
     register_hook("pre_api_request", _clawchat_pre_api_request)
 
 
+def _register_session_usage_hook(ctx) -> None:
+    """Track each ClawChat conversation's request size for the sediment turn
+    that runs before Hermes compresses it (clawchat_gateway.sediment)."""
+    register_hook = getattr(ctx, "register_hook", None)
+    if not callable(register_hook):
+        return
+    try:
+        from clawchat_gateway.sediment import clawchat_post_api_request
+
+        register_hook("post_api_request", clawchat_post_api_request)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ClawChat session usage hook skipped: %s", exc)
+
+
 def _start_liveware_cli_download() -> None:
     """Best-effort: download the liveware CLI on a daemon thread at load time."""
     try:
@@ -807,4 +821,5 @@ def register(ctx) -> None:
     _register_cli_commands(ctx)
     _register_commands(ctx)
     _register_llm_context_debug_hooks(ctx)
+    _register_session_usage_hook(ctx)
     ctx.register_hook("pre_gateway_dispatch", _clawchat_pre_gateway_dispatch)
