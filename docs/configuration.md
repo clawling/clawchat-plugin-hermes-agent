@@ -67,7 +67,7 @@ re-pair is required.
 | Env var                                              | `extra.*` key   | Default                              | Notes |
 |------------------------------------------------------|-----------------|--------------------------------------|-------|
 | `CLAWCHAT_BASE_URL`                                  | `base_url`      | `https://app.clawling.com`           | REST API base. Trailing slashes are stripped. |
-| `CLAWCHAT_WEBSOCKET_URL` (or `CLAWCHAT_WS_URL`)      | `websocket_url` | `wss://app.clawling.com/ws`          | Derived from `base_url` when activation runs (`activate._derive_websocket_url`). |
+| `CLAWCHAT_WEBSOCKET_URL` (or `CLAWCHAT_WS_URL`)      | `websocket_url` | `wss://app.clawling.com/ws`          | Activation records the env value when set, else derives one from `base_url` (`activate._derive_websocket_url`). |
 | `CLAWCHAT_DEVICE_ID`                                 | —               | derived (see below)                  | **Stable device id for this agent.** When set, it is used verbatim (only sanitized to the allowed `[A-Za-z0-9_.:-]` charset and `hermes-` prefixed if not already). **Strongly recommended to set in any containerized / Kubernetes deployment** — see the durability note below. |
 
 ### Device id durability (deployment requirement)

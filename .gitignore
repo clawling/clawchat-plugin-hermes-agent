@@ -97,6 +97,9 @@ tmp
 #   * text_mentions — "@name" typed in a group reply becomes a mention
 #     fragment plus context.mentions, with the reference client's rules (e-mail
 #     guard, longest match, ties link nobody, never self or "all").
+#   * activation_websocket_url — activation records the installer's
+#     CLAWCHAT_WEBSOCKET_URL as extra.websocket_url and derives one from the
+#     base URL only when none is set.
 #   * silence_markers — a bare NO_REPLY / [SILENT] / HEARTBEAT_OK reply is
 #     suppressed, but only as the whole reply; prose that mentions one is
 #     sent. Mirrors the OpenClaw plugin's rule-B cases.
@@ -139,6 +142,7 @@ tests/*
 !tests/test_text_mentions.py
 !tests/test_reply_streaming.py
 !tests/test_silence_markers.py
+!tests/test_activation_websocket_url.py
 deploy/
 scripts/
 docs/superpowers/

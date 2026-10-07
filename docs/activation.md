@@ -287,8 +287,10 @@ Hermes restart. If Hermes has not registered the plugin platform at all, normal
 plugin reload or Gateway restart is still required before this waiting state can
 run.
 
-The WebSocket URL is derived from `base_url` during activation and written to
-`platforms.clawchat.extra.websocket_url`.
+Activation writes the WebSocket URL to `platforms.clawchat.extra.websocket_url`:
+the explicit `CLAWCHAT_WEBSOCKET_URL` (or `CLAWCHAT_WS_URL`) when set — the
+installer writes it next to `CLAWCHAT_BASE_URL`, and the runtime prefers it too —
+otherwise one derived from `base_url` (`activate._derive_websocket_url`).
 
 ## Automatic Token Refresh & Auto-Logout
 

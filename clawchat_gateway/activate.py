@@ -552,7 +552,14 @@ def persist_activation(
     clawchat["enabled"] = True
     extra = clawchat.setdefault("extra", {})
     extra["base_url"] = base_url.rstrip("/")
-    extra["websocket_url"] = _derive_websocket_url(extra["base_url"])
+    # The installer writes the deployment's WebSocket URL next to its base URL,
+    # and the runtime already prefers it (config.py); record that one rather
+    # than a URL derived from the base URL that the runtime would ignore.
+    extra["websocket_url"] = (
+        _get_env("CLAWCHAT_WEBSOCKET_URL")
+        or _get_env("CLAWCHAT_WS_URL")
+        or _derive_websocket_url(extra["base_url"])
+    )
     extra.pop("token", None)
     extra.pop("refresh_token", None)
     extra["user_id"] = user_id
