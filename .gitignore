@@ -120,6 +120,8 @@ tmp
 #     the turn just mentioned is delivered, not swallowed by the mention's
 #     terminal marker, which still drops the real follow-up reply;
 #     [[as_document]] survives as a file fragment.
+#   * friend_greeting_nickname — the greeting to a new friend refreshes their
+#     profile first (bounded) and carries their nickname as sender_name.
 #   * inbound_dispatch_lanes — inbound messages are handled off the WS read
 #     loop, per chat and in order. A handler that awaits a send's ack inside
 #     the read loop can never get it: the read loop stalls for the ack timeout,
@@ -159,6 +161,7 @@ tests/*
 !tests/test_liveware_account.py
 !tests/test_moment_images.py
 !tests/test_cross_chat_file_send.py
+!tests/test_friend_greeting_nickname.py
 deploy/
 scripts/
 docs/superpowers/

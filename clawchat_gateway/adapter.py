@@ -262,6 +262,9 @@ TERMINAL_CHAT_CODES: frozenset[str] = frozenset({"chat_not_found", "not_member"}
 # byte-identical parity fixture. Changing it means changing both repos and the
 # fixture together.
 DEAD_CHAT_REJECTION_TTL_SECONDS: float = 600.0
+# The friend greeting refreshes the new friend's profile first so the turn
+# knows their nickname; this bounds that lookup, after which it greets anyway.
+FRIEND_GREETING_PROFILE_TIMEOUT_SECONDS = 5.0
 INBOUND_RATE_WINDOW_SECONDS = 30.0
 INBOUND_RATE_WARN_THRESHOLD = 5
 # Max time a group message waits for the first per-group settings refresh to land
@@ -1634,6 +1637,21 @@ class ClawChatAdapter(BasePlatformAdapter):
                 "clawchat friend greeting skipped friend=%s reason=no_conversation_id", friend_user_id
             )
             return
+        # A brand-new friend has never written, so nothing has cached their
+        # profile yet (inbound messages are what trigger the refresh) and the
+        # greeting would address their usr_ id. Refresh once, bounded; a slow
+        # or failed lookup greets without the name rather than not at all.
+        try:
+            await asyncio.wait_for(
+                self._refresh_user_profile(friend_user_id),
+                timeout=FRIEND_GREETING_PROFILE_TIMEOUT_SECONDS,
+            )
+        except Exception:  # noqa: BLE001 — includes TimeoutError; best-effort
+            logger.info(
+                "clawchat friend greeting profile refresh failed friend=%s",
+                friend_user_id,
+                exc_info=True,
+            )
         logger.info(
             "clawchat friend greeting dispatch friend=%s chat_id=%s", friend_user_id, chat_id
         )
@@ -1664,6 +1682,9 @@ class ClawChatAdapter(BasePlatformAdapter):
                 "friend_user_id": friend_user_id,
             },
         )
+        sender_name = self._resolve_sender_name(inbound)
+        if sender_name and sender_name != friend_user_id:
+            inbound = replace(inbound, sender_name=sender_name)
         await self._handle_inbound(inbound)
 
     def _spawn_skill_update_check(self) -> None:

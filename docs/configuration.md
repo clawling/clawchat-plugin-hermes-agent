@@ -190,7 +190,12 @@ not the owner, the adapter resolves the new direct conversation through
 `usr_…` id; the server created the conversation inside the accept transaction)
 and runs one synthetic turn in it with the prompt from
 `$HERMES_HOME/clawchat/friend-greeting.md`, falling back to the built-in
-`greeting.FRIEND_GREETING_PROMPT`. Both directions count — someone adding the
+`greeting.FRIEND_GREETING_PROMPT`. Before that turn the adapter refreshes the
+friend's profile (`_refresh_user_profile`, bounded by
+`FRIEND_GREETING_PROFILE_TIMEOUT_SECONDS` = 5 s) and puts their nickname in the
+turn's `sender_name`: a brand-new friend has never written, so nothing has
+cached their profile yet and the turn would otherwise name their `usr_…` id. A
+slow or failed lookup greets without the name. Both directions count — someone adding the
 agent (auto-accepted by the `friend.accept` policy) and the agent's own request
 being accepted. The owner's `friend.added` is skipped (the activation bootstrap
 greets the owner). Dedupe is persisted in the message ledger keyed on the
