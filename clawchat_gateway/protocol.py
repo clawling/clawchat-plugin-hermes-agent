@@ -180,8 +180,9 @@ def build_message_reply_event(
     reply_preview: dict[str, Any] | None = None,
     include_message_id: bool = False,
     message_mode: str = MESSAGE_MODE_NORMAL,
+    context_mentions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    context: dict[str, Any] = {"mentions": [], "reply": None}
+    context: dict[str, Any] = {"mentions": context_mentions or [], "reply": None}
     if reply_to_message_id:
         context["reply"] = {
             "reply_to_msg_id": reply_to_message_id,

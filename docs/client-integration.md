@@ -1919,6 +1919,19 @@ type Fragment =
 > whole array may be `null`. Do not reuse one parser for both without the
 > tolerance rules in §7.1.
 
+**Typed "@name" in a group reply (hermes adapter).** Before an ordinary
+(`"normal"`) group message goes out, the adapter turns each "@<member name>" in
+its text fragments into a `mention` fragment (`display` = the member's name,
+without the `@`) and lists the same users once each, in order, in
+`context.mentions`. It uses the group's cached participants and their cached
+names, and the reference client's rules (`clawchat_gateway/mention_autolink.py`):
+an `@` right after an e-mail local-part character (`[A-Za-z0-9._%+-]`) never
+starts a mention, the longest matching name wins, two different members tied at
+that length link nobody, an ASCII name must not run on into further ASCII
+letters or digits, and the agent itself and the `all` sentinel are never linked.
+Anything not recognised stays plain text. Direct chats and `"thinking"` messages
+are never linked.
+
 ### 10.3 Units
 
 | Field | Unit |

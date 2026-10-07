@@ -93,6 +93,7 @@ from clawchat_gateway.media_runtime import (
     normalize_outbound_media_reference,
     upload_outbound_media,
 )
+from clawchat_gateway.mention_autolink import autolink_mentions, has_mention_candidate, mentions_in
 from clawchat_gateway.mention_message import (
     TERMINAL_REPLY_INSTRUCTION,
     build_context_mentions,
@@ -5285,6 +5286,9 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
             return SendResult(success=True, message_id=message_id)
 
+        fragments, context_mentions = self._link_text_mentions(
+            chat_id, chat_type, fragments, message_mode
+        )
         frame = build_message_reply_event(
             chat_id=chat_id,
             chat_type=chat_type,
@@ -5294,6 +5298,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             reply_preview=self._reply_preview_for(reply_to),
             include_message_id=True,
             message_mode=message_mode,
+            context_mentions=context_mentions,
         )
         claimed = self._claim_outbound_message(
             event_type="message.reply",
@@ -5532,14 +5537,21 @@ class ClawChatAdapter(BasePlatformAdapter):
                 run.message_id,
             )
             return SendResult(success=True, message_id=run.message_id)
+        final_fragments, context_mentions = self._link_text_mentions(
+            run.chat_id,
+            run.chat_type,
+            await self._build_fragments(final_content, run.metadata, run.kwargs),
+            MESSAGE_MODE_NORMAL,
+        )
         frame = build_message_reply_event(
             chat_id=run.chat_id,
             chat_type=run.chat_type,
             message_id=run.message_id,
-            fragments=await self._build_fragments(final_content, run.metadata, run.kwargs),
+            fragments=final_fragments,
             reply_to_message_id=run.reply_to_message_id,
             reply_preview=self._reply_preview_for(run.reply_to_message_id),
             include_message_id=True,
+            context_mentions=context_mentions,
         )
         claimed = self._claim_outbound_message(
             event_type="message.reply",
@@ -5600,6 +5612,71 @@ class ClawChatAdapter(BasePlatformAdapter):
             run.message_id,
         )
         return SendResult(success=True, message_id=run.message_id)
+
+    def _group_mention_roster(self, chat_id: str) -> list[tuple[str, str]]:
+        """``(user_id, name)`` for the group's cached participants.
+
+        Same names the turn's participants section shows: the agent owner's
+        from ``owner.md``, the group owner's from the group's metadata, anyone
+        else's from ``users/<id>.md``. A member with no known name is left out.
+        """
+        group_metadata = self._read_memory_metadata("group", chat_id)
+        participant_ids = [
+            value.strip()
+            for value in group_metadata.get("participant_ids", "").split(",")
+            if value.strip()
+        ]
+        if not participant_ids:
+            return []
+        owner_metadata = self._read_memory_metadata("owner", "owner")
+        agent_owner_id = owner_metadata.get("agent_owner_id") or self._owner_user_id()
+        roster: list[tuple[str, str]] = []
+        for user_id in participant_ids:
+            if user_id == self._clawchat_config.user_id:
+                continue
+            names = [self._read_memory_metadata("user", user_id).get("nickname", "")]
+            if agent_owner_id and user_id == agent_owner_id:
+                names.append(owner_metadata.get("agent_owner_nickname", ""))
+            if user_id == group_metadata.get("group_owner_id"):
+                names.append(group_metadata.get("group_owner_nickname", ""))
+            for name in dict.fromkeys(n.strip() for n in names):
+                if name and name != user_id:
+                    roster.append((user_id, name))
+        return roster
+
+    def _link_text_mentions(
+        self,
+        chat_id: str,
+        chat_type: str,
+        fragments: list[dict[str, Any]],
+        message_mode: str,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+        """Turn "@<member name>" in a group reply's text into mention fragments.
+
+        Returns the fragments and the matching ``context.mentions``. Only an
+        ordinary group message is linked; text fragments are split, anything
+        else (media, interaction cards) passes through untouched.
+        """
+        if chat_type != "group" or message_mode != MESSAGE_MODE_NORMAL:
+            return fragments, []
+        if not any(
+            fragment.get("kind") == "text" and has_mention_candidate(str(fragment.get("text") or ""))
+            for fragment in fragments
+        ):
+            return fragments, []
+        roster = self._group_mention_roster(chat_id)
+        if not roster:
+            return fragments, []
+        linked: list[dict[str, Any]] = []
+        for fragment in fragments:
+            if fragment.get("kind") == "text" and fragment.get("text"):
+                linked.extend(autolink_mentions(str(fragment["text"]), roster, self._clawchat_config.user_id))
+            else:
+                linked.append(fragment)
+        mentions = mentions_in(linked)
+        if mentions:
+            logger.info("clawchat text mentions linked chat_id=%s count=%d", chat_id, len(mentions))
+        return linked, mentions
 
     @staticmethod
     def _split_reasoning_prefix(text: str) -> tuple[str | None, str]:
