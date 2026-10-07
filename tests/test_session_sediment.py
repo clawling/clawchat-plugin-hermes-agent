@@ -111,6 +111,18 @@ def test_prompt_for_a_friend_dm_allows_only_their_note():
     assert NO_REPLY_TOKEN in text
 
 
+def test_prompt_skips_what_participants_asked_not_to_remember():
+    # A sediment turn reads back the whole conversation; "don't save this" /
+    # "forget that" said earlier must win over "keep what will still matter".
+    text = sediment.build_sediment_prompt(
+        reason="compact", targets=[("group", GROUP, "this group")]
+    )
+    lowered = text.lower()
+    assert "asked you not to remember" in lowered
+    assert "forget" in lowered
+    assert "skip" in lowered
+
+
 def test_group_targets_cover_group_speakers_and_owner(adapter):
     adapter._store.insert_message(
         platform="hermes", account_id="default", kind="message", direction="inbound",

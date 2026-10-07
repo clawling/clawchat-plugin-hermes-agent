@@ -53,6 +53,8 @@ def build_sediment_prompt(*, reason: str, targets: list[tuple[str, str, str]]) -
         "- Go back over this conversation and pick out facts that will still matter next "
         "month — about the people in it, about the group (rules, plans, decisions), about "
         "your owner. Skip small talk and anything already in the notes.",
+        "- Skip anything someone in this conversation asked you not to remember, not to save "
+        "or to forget, even if it looks worth keeping; that request wins.",
         "- For each note below, call clawchat_memory_read first, then clawchat_memory_write "
         "with mode=append for what is new. If nothing is new, write nothing.",
         "- These are the only notes you may write:",
