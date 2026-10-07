@@ -74,6 +74,37 @@ legitimate path (it is how "send to <agent nickname>" works) and must not be
 short-circuited: the directory is what turns a nickname into the `cnv_…` the
 patch then accepts.
 
+## `send_message` media delivery patch
+
+`__init__._patch_send_message_media_delivery` wraps Hermes'
+`tools.send_message_tool._send_to_platform`. For `platform="clawchat"` with
+`MEDIA:` attachments it delivers through the live adapter
+(`_send_clawchat_media_via_live_adapter`, an immediate media send) or, with no
+gateway in this process, the standalone sender. This is how the agent sends a
+file into **another** conversation, e.g. into a group while talking to its
+owner in a direct chat: `send_message(target="clawchat:cnv_<group>",
+message="caption MEDIA:/abs/path")`. `clawchat_mention_message` stays text
+only: a mention plus a file is two sends (the mention, then `send_message`),
+which keeps one media path, with the host's own `MEDIA:` path checks and the
+plugin's credential denylist, for every chat.
+
+Hermes' `[[as_document]]` arrives as `force_document`; it is passed to the
+adapter (`_clawchat_force_document`) and the standalone sender, and
+`send_document` sets it too, so an image goes out as a `file` fragment
+instead of inline (`media_runtime.upload_outbound_media(force_document=True)`).
+
+**Terminal-send marker.** `clawchat_mention_message` marks the chat it posted
+into (`terminal_send.mark_terminal_clawchat_send`) so the turn's normal
+follow-up reply there is dropped: the mention already was the reply.
+`ClawChatAdapter.send` consumes that marker only for a follow-up reply. An
+explicit send is delivered and leaves the marker in place: a media send
+(`_clawchat_immediate_media_send`), a call from Hermes' `send_message`
+(detected on the call stack, and by the `terminal_send.explicit_tool_send()`
+context the patch sets around every ClawChat send — a context variable,
+because the host may run the adapter call on the gateway loop, where the
+stack no longer shows the tool). Before this, "mention the group, then send it
+the file" returned success and dropped the file.
+
 ## Outbound chat_id validity gate
 
 `ClawChatConnection.send_frame` drops any frame whose `chat_id` is present but

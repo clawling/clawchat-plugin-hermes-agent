@@ -116,6 +116,10 @@ tmp
 #   * moment_images — clawchat_create_moment passes http(s) image URLs,
 #     uploads an existing absolute local image file and publishes its URL, and
 #     rejects anything else without creating a moment.
+#   * cross_chat_file_send — a file sent with send_message (MEDIA:) into a chat
+#     the turn just mentioned is delivered, not swallowed by the mention's
+#     terminal marker, which still drops the real follow-up reply;
+#     [[as_document]] survives as a file fragment.
 #   * inbound_dispatch_lanes — inbound messages are handled off the WS read
 #     loop, per chat and in order. A handler that awaits a send's ack inside
 #     the read loop can never get it: the read loop stalls for the ack timeout,
@@ -154,6 +158,7 @@ tests/*
 !tests/test_agent_files.py
 !tests/test_liveware_account.py
 !tests/test_moment_images.py
+!tests/test_cross_chat_file_send.py
 deploy/
 scripts/
 docs/superpowers/

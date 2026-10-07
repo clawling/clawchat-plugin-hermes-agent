@@ -314,7 +314,13 @@ async def upload_outbound_media(
     media_local_roots: Sequence[str],
     upload_file=None,
     media_base_url: str = "",
+    force_document: bool = False,
 ) -> list[dict[str, object]]:
+    """Upload each reference; one fragment per successful upload.
+
+    ``force_document`` (Hermes' ``[[as_document]]``) sends every file as a
+    ``file`` fragment, so an image arrives as a download, not inline.
+    """
     if not urls:
         return []
 
@@ -341,7 +347,9 @@ async def upload_outbound_media(
             )
             fragments.append(
                 {
-                    "kind": infer_media_kind_from_mime(uploaded.mime),
+                    "kind": (
+                        "file" if force_document else infer_media_kind_from_mime(uploaded.mime)
+                    ),
                     "url": uploaded.url,
                     "mime": uploaded.mime,
                     "size": uploaded.size,

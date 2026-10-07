@@ -249,8 +249,9 @@ async def _send_clawchat_media_via_live_adapter(
     *,
     thread_id=None,
     media_files=None,
+    force_document=False,
 ):
-    from clawchat_gateway.terminal_send import get_clawchat_sender
+    from clawchat_gateway.terminal_send import explicit_tool_send, get_clawchat_sender
 
     adapter = get_clawchat_sender()
     if adapter is None:
@@ -263,19 +264,22 @@ async def _send_clawchat_media_via_live_adapter(
             message,
             thread_id=thread_id,
             media_files=media_files,
+            force_document=force_document,
         )
 
     metadata = {"_clawchat_immediate_media_send": True}
     if thread_id:
         metadata["thread_id"] = thread_id
     try:
-        result = await adapter.send(
-            chat_id=chat_id,
-            content=message,
-            metadata=metadata,
-            media_files=media_files or [],
-            _clawchat_media_files_validated=True,
-        )
+        with explicit_tool_send():
+            result = await adapter.send(
+                chat_id=chat_id,
+                content=message,
+                metadata=metadata,
+                media_files=media_files or [],
+                _clawchat_media_files_validated=True,
+                _clawchat_force_document=bool(force_document),
+            )
     except Exception as exc:
         return {"error": f"Plugin platform send failed: {exc}"}
     if result.success:
@@ -309,6 +313,7 @@ def _patch_send_message_media_delivery() -> None:
         thread_id=None,
         media_files=None,
         force_document=False,
+        **kwargs,
     ):
         platform_name = getattr(platform, "value", str(platform))
         if platform_name == "clawchat" and media_files:
@@ -319,7 +324,24 @@ def _patch_send_message_media_delivery() -> None:
                 message,
                 thread_id=thread_id,
                 media_files=media_files,
+                force_document=force_document,
             )
+        if platform_name == "clawchat":
+            # A send_message call is an explicit send, never the turn's
+            # follow-up reply: keep a mention's terminal marker from eating it.
+            from clawchat_gateway.terminal_send import explicit_tool_send
+
+            with explicit_tool_send():
+                return await original(
+                    platform,
+                    pconfig,
+                    chat_id,
+                    message,
+                    thread_id=thread_id,
+                    media_files=media_files,
+                    force_document=force_document,
+                    **kwargs,
+                )
         return await original(
             platform,
             pconfig,
@@ -328,6 +350,7 @@ def _patch_send_message_media_delivery() -> None:
             thread_id=thread_id,
             media_files=media_files,
             force_document=force_document,
+            **kwargs,
         )
 
     _send_to_platform_with_clawchat_media._clawchat_media_patch = True

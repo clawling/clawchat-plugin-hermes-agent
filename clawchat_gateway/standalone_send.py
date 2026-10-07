@@ -69,13 +69,14 @@ async def standalone_send(
     """Send one message over an ephemeral ClawChat connection.
 
     Returns ``{"success": True, "message_id": ...}`` or ``{"error": str}``
-    per the standalone_sender_fn contract. ``thread_id`` and
-    ``force_document`` are accepted for signature parity only — ClawChat has
-    no thread or document primitive. ``media_files`` are uploaded over REST
-    (``/media/upload`` needs only the bearer token, no live adapter) and
-    attached to the same ``message.send`` frame.
+    per the standalone_sender_fn contract. ``thread_id`` is accepted for
+    signature parity only — ClawChat has no thread primitive.
+    ``media_files`` are uploaded over REST (``/media/upload`` needs only the
+    bearer token, no live adapter) and attached to the same ``message.send``
+    frame; ``force_document`` (``[[as_document]]``) sends them as ``file``
+    fragments.
     """
-    del thread_id, force_document
+    del thread_id
     target = str(chat_id or "").strip()
     if not target:
         return {"error": "ClawChat standalone send requires a chat_id."}
@@ -116,6 +117,7 @@ async def standalone_send(
                 token=cfg.token,
                 media_local_roots=cfg.media_local_roots,
                 media_base_url=cfg.media_base_url,
+                force_document=bool(force_document),
             )
             if not media_fragments:
                 return {

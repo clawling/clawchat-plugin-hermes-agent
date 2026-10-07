@@ -146,6 +146,7 @@ from clawchat_gateway.storage import (
 from clawchat_gateway.terminal_send import (
     clear_clawchat_mention_sender,
     consume_terminal_clawchat_send,
+    is_explicit_tool_send,
     mark_terminal_clawchat_send,
     set_clawchat_mention_sender,
 )
@@ -290,6 +291,8 @@ DEBUG_EVENT_TEXT_END = "----- END CLAWCHAT DEBUG EVENT TEXT -----"
 DEBUG_HERMES_OUTPUT_BEGIN = "----- BEGIN CLAWCHAT DEBUG HERMES OUTPUT -----"
 DEBUG_HERMES_OUTPUT_END = "----- END CLAWCHAT DEBUG HERMES OUTPUT -----"
 IMMEDIATE_MEDIA_SEND_METADATA_KEY = "_clawchat_immediate_media_send"
+# Hermes' `[[as_document]]`: deliver every attachment as a `file` fragment.
+FORCE_DOCUMENT_METADATA_KEY = "_clawchat_force_document"
 # Fragment kinds that represent an uploaded attachment (as opposed to text /
 # mention / interaction fragments). Used to detect when an outbound send
 # requested media but the upload was dropped, so the failure is surfaced to
@@ -5204,7 +5207,17 @@ class ClawChatAdapter(BasePlatformAdapter):
             return SendResult(success=True)
         chat_type = self._resolve_chat_type(chat_id, metadata, kwargs)
         is_group = chat_type == "group"
-        if self._consume_terminal_send(chat_id, phase="send"):
+        # The terminal-send marker (set by clawchat_mention_message) stands for
+        # "this chat already got the turn's reply", so it suppresses the turn's
+        # follow-up reply. An explicit send is not that reply: a file, or a
+        # send_message call, into the chat just mentioned must be delivered,
+        # and the marker kept for the real follow-up.
+        is_explicit_send = (
+            is_explicit_tool_send()
+            or self._is_immediate_media_send(metadata, kwargs)
+            or self._is_send_message_tool_call()
+        )
+        if not is_explicit_send and self._consume_terminal_send(chat_id, phase="send"):
             return SendResult(success=True)
         if self._should_suppress_runtime_status_message(content or ""):
             logger.info("clawchat runtime status message suppressed chat_id=%s", chat_id)
@@ -6114,12 +6127,14 @@ class ClawChatAdapter(BasePlatformAdapter):
             failure_notice = f"⚠️ Couldn't deliver the file attachment ({file_name})."
         else:
             failure_notice = "⚠️ Couldn't deliver the file attachment."
+        # Hermes routes an image here only for ``[[as_document]]``: send it as
+        # a file fragment, not inline.
         return await self._deliver_media_attachment(
             chat_id=chat_id,
             media_path=file_path,
             caption=caption,
             reply_to=reply_to,
-            metadata=metadata,
+            metadata={**dict(metadata or {}), FORCE_DOCUMENT_METADATA_KEY: True},
             failure_notice=failure_notice,
         )
 
@@ -7186,6 +7201,10 @@ class ClawChatAdapter(BasePlatformAdapter):
             }
             media_local_roots = tuple(sorted(local_roots)) or media_local_roots
 
+        force_document = any(
+            isinstance(carrier, dict) and carrier.get(FORCE_DOCUMENT_METADATA_KEY) is True
+            for carrier in (metadata, kwargs)
+        )
         return await upload_outbound_media(
             media_urls,
             base_url=self._clawchat_config.base_url,
@@ -7193,6 +7212,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             token=self._clawchat_config.token,
             media_local_roots=media_local_roots,
             media_base_url=self._clawchat_config.media_base_url,
+            force_document=force_document,
         )
 
     def _infer_media_kind(

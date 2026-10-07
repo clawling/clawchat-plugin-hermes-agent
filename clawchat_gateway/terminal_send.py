@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import time
 import uuid
@@ -47,6 +48,30 @@ _terminal_send_scope: contextvars.ContextVar[str | None] = contextvars.ContextVa
     default=None,
 )
 _terminal_sends: dict[tuple[str, str, str], TerminalClawChatSendRecord] = {}
+
+# Set while Hermes' send_message tool delivers to ClawChat (see the plugin's
+# send_message patch). Such a send is an explicit action, never the turn's
+# follow-up reply, so a terminal-send marker must not swallow it. A context
+# variable, not a flag on the call: the host may run the actual adapter.send on
+# the gateway loop (run_coroutine_threadsafe), which copies the caller's
+# context but not its call stack.
+_explicit_tool_send: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "clawchat_explicit_tool_send",
+    default=False,
+)
+
+
+@contextlib.contextmanager
+def explicit_tool_send():
+    token = _explicit_tool_send.set(True)
+    try:
+        yield
+    finally:
+        _explicit_tool_send.reset(token)
+
+
+def is_explicit_tool_send() -> bool:
+    return _explicit_tool_send.get()
 
 
 def _current_terminal_send_scope(*, create: bool = False) -> str | None:
