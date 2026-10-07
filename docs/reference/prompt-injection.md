@@ -71,17 +71,16 @@ message metadata, or other ClawChat data that can change within a session.
 
 Session-level ClawChat context is valid only when the Hermes session is strictly
 bound to the intended conversation. Direct messages are bound by the direct
-conversation `chat_id`. Group messages are bound by `chat_id`, with the official
-Hermes-compatible `group_sessions_per_user` setting determining whether the
-session is per participant or shared by the whole group:
-
-- `group_sessions_per_user=true`: group sessions include the participant id.
-  Session-level context must not assume it represents the whole group.
-- `group_sessions_per_user=false`: group sessions are shared by the group
-  conversation. Session-level context may describe stable group-level semantics,
-  but current sender facts and mutable group/user metadata still belong in
-  `MessageEvent.channel_prompt`, while current message text stays in the
-  user-message body.
+conversation `chat_id`. Group messages are bound by `chat_id` and the session is
+shared by the whole group (see
+[`../configuration.md`](../configuration.md#one-session-per-group)).
+Session-level context may describe stable group-level semantics, but current
+sender facts and mutable group/user metadata still belong in
+`MessageEvent.channel_prompt`, while current message text stays in the
+user-message body. (A legacy config that still sets
+`group_sessions_per_user: true` keeps a per-speaker session for the groups it
+covers; session-level context must not assume such a session represents the
+whole group.)
 
 Keep message-scoped or metadata-scoped context in `MessageEvent.channel_prompt`
 unless Hermes adds an explicit session prompt invalidation API for platform

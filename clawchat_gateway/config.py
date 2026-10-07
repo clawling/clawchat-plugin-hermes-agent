@@ -361,8 +361,36 @@ def _read_optional_bool(value: Any) -> Optional[bool]:
 
 
 def _read_group_sessions_per_user(value: Any) -> bool:
+    # One Hermes session per group is the default. ``true`` (one session per
+    # group *speaker*) is no longer offered, but an existing config that sets
+    # it explicitly keeps working; see warn_if_group_sessions_per_user_set.
     parsed = _read_optional_bool(value)
-    return True if parsed is None else parsed
+    return False if parsed is None else parsed
+
+
+_GROUP_SESSIONS_PER_USER_WARNED = False
+
+
+def warn_if_group_sessions_per_user_set(config: "ClawChatConfig") -> None:
+    """Log once per process when a config still opts into per-speaker groups."""
+    global _GROUP_SESSIONS_PER_USER_WARNED
+    if _GROUP_SESSIONS_PER_USER_WARNED:
+        return
+    scopes = ["platforms.clawchat.extra"] if config.group_sessions_per_user else []
+    scopes += [
+        f"groups[{chat_id!r}]"
+        for chat_id, group in config.groups.items()
+        if group.get("group_sessions_per_user") is True
+    ]
+    if not scopes:
+        return
+    _GROUP_SESSIONS_PER_USER_WARNED = True
+    logger.warning(
+        "clawchat: group_sessions_per_user=true is deprecated (set in %s). It is still "
+        "honoured, so those groups keep one Hermes session per speaker; remove the key to "
+        "give each group one shared session, the default.",
+        ", ".join(scopes),
+    )
 
 
 def _read_positive_float(value: Any, default: float) -> float:
@@ -454,7 +482,7 @@ class ClawChatConfig:
     memory_root: str = ""
     group_mode: str = "all"
     group_command_mode: str = "owner"
-    group_sessions_per_user: bool = True
+    group_sessions_per_user: bool = False
     groups: dict[str, dict[str, Any]] = field(default_factory=dict)
     reconnect_initial_delay_ms: int = 500
     reconnect_max_delay_ms: int = 15000
@@ -522,7 +550,7 @@ class ClawChatConfig:
                 or _get_config_value(extra, "group_command_mode", "owner")
             ),
             group_sessions_per_user=_read_group_sessions_per_user(
-                _get_config_value(extra, "group_sessions_per_user", True)
+                _get_config_value(extra, "group_sessions_per_user", False)
             ),
             groups=_read_groups(_get_config_value(extra, "groups", {})),
             reconnect_initial_delay_ms=_get_config_value(

@@ -64,6 +64,9 @@ tmp
 #   * memory_routing_text — the platform hint and the clawchat_memory_write
 #     description both say facts about a person / group / the owner go to
 #     their ClawChat note, not to Hermes' MEMORY.md.
+#   * group_shared_session — a group is one Hermes session for every speaker
+#     by default; an explicit legacy per-speaker setting is honoured with a
+#     one-time warning; direct chats keep one session per conversation.
 #   * inbound_dispatch_lanes — inbound messages are handled off the WS read
 #     loop, per chat and in order. A handler that awaits a send's ack inside
 #     the read loop can never get it: the read loop stalls for the ack timeout,
@@ -87,6 +90,7 @@ tests/*
 !tests/test_memory_append_dedupe.py
 !tests/test_note_injection.py
 !tests/test_memory_routing_text.py
+!tests/test_group_shared_session.py
 deploy/
 scripts/
 docs/superpowers/

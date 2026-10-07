@@ -352,13 +352,10 @@ after activation, a later activation writes the ClawChat defaults again.
 |----------------------------------------|--------------------------|-----------|------------------------|
 | `CLAWCHAT_GROUP_MODE`                  | `group_mode`             | `"all"`   | `"all"`, `"mention"`   |
 | `CLAWCHAT_GROUP_COMMAND_MODE`          | `group_command_mode`     | `"owner"` | `"owner"`, `"all"`, `"off"` |
-| —                                      | `group_sessions_per_user` | `true`    | Hermes-compatible group session isolation flag |
 | —                                      | `groups.<chat_id>.group_mode`         | inherits `group_mode`         | per-group override          |
 | —                                      | `groups.<chat_id>.group_command_mode` | inherits `group_command_mode` | per-group override          |
-| —                                      | `groups.<chat_id>.group_sessions_per_user` | inherits `group_sessions_per_user` | per-group override |
 | —                                      | `groups["*"].group_mode`              | inherits `group_mode`         | wildcard group default      |
 | —                                      | `groups["*"].group_command_mode`      | inherits `group_command_mode` | wildcard group default      |
-| —                                      | `groups["*"].group_sessions_per_user` | inherits `group_sessions_per_user` | wildcard group default |
 
 `group_mode=all` makes every inbound group message eligible for a reply;
 `group_mode=mention` requires a structured `@` mention. Mentions are read from
@@ -366,15 +363,28 @@ the union of the `mention` fragments and the `context.mentions` list, and the
 reserved id `"all"` is the **`@everyone` sentinel** — it is not a real `usr_…`
 id and the server never expands it per member, so a message carrying it counts
 as mentioning this agent (see `docs/client-integration.md` §10.2).
-`group_sessions_per_user=true` keeps Hermes' default group behavior: each
-participant in a group gets an isolated session. `group_sessions_per_user=false`
-makes the group share one session across participants. In shared group sessions,
-sender-specific facts still belong in the current message context, not
-session-level prompts.
-`effective_group_mode` / `effective_group_command_mode` /
-`effective_group_sessions_per_user` in
+`effective_group_mode` / `effective_group_command_mode` in
 `clawchat_gateway.config` resolve the precedence (`chat_id` exact →
 `"*"` → top-level).
+
+### One session per group
+
+Each group is **one Hermes session**, shared by everyone who speaks in it —
+what one member said is in the same context another member talks to. Every
+group message reaches Hermes with the same stand-in user id
+(`adapter.GROUP_SHARED_SESSION_USER_ID`), so the host's session key is
+`<group chat_id>` plus that constant whatever Hermes' own per-user setting is;
+the real speaker of each message is in the turn's transcript lines and in
+`ClawChat Group Message Metadata`. Direct chats are unchanged: one session per
+conversation.
+
+Releases up to 0.14.0-100 split a group into one session per speaker by
+default. On upgrade each group starts a new shared session; the old
+per-speaker sessions stay in Hermes' session store (searchable, not
+continued). A `group_sessions_per_user: true` an operator wrote into an existing
+`config.yaml` (top level or under `groups`) is still honoured for the groups it
+covers, with one deprecation warning at startup; remove it to switch those
+groups to a shared session.
 
 ### Owner-controlled per-group settings and batching
 
