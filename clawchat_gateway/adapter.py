@@ -108,7 +108,10 @@ from clawchat_gateway.profile import load_profile_config
 from clawchat_gateway.profile_sync import relation_for_sender
 from clawchat_gateway.protocol import (
     MENTION_ALL_USER_ID,
+    MESSAGE_MODE_NORMAL,
+    MESSAGE_MODE_THINKING,
     build_message_reaction_event,
+    is_normal_message_mode,
     build_message_reply_event,
     build_message_send_event,
     build_typing_update_event,
@@ -600,6 +603,41 @@ _HERMES_STREAM_STALLED_RE = re.compile(
     r"executed\.(?:[ \t]*Ask me to retry if you want to continue\.)?[ \t]*"
 )
 _EXCESS_BLANK_LINES_RE = re.compile(r"\n{3,}")
+# Host (Hermes gateway) coroutines whose sends are process messages, not the
+# agent's reply: the tool-progress sender (tool lines, "💬" reasoning lines,
+# hints), operational notices, and the long-running heartbeat. Hermes sends
+# them through the same ``send`` as replies with no marker, so the adapter
+# reads its caller — and only trusts a frame from a file under ``gateway/``.
+# Older hosts nest the same senders inside ``_run_agent`` under the names
+# ``send_progress_messages`` / ``_notify_long_running``.
+_HOST_PROCESS_SENDERS = frozenset(
+    {
+        "send_progress_messages",
+        "_deliver_platform_notice",
+        "_run_agent_notify_long_running",
+        "_notify_long_running",
+    }
+)
+# The reasoning block Hermes puts in front of a final reply when
+# display.show_reasoning is on (``gateway/run_turn.py``, code style). Inner
+# ``` are escaped by the host, so the first fence closes the block.
+_HERMES_REASONING_PREFIX_RE = re.compile(
+    r"\A(💭 \*\*Reasoning:\*\*\n```\n.*?\n```)[ \t]*\n+", re.DOTALL
+)
+
+
+def _markdown_code_span(text: str) -> str:
+    """``text`` as one markdown inline code span (CommonMark backtick rules).
+
+    The fence is one backtick longer than the longest backtick run inside, and
+    a space pads a span that starts or ends with a backtick.
+    """
+    if not text:
+        return ""
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * (longest + 1)
+    pad = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{fence}{pad}{text}{pad}{fence}"
 
 
 def _clawchat_platform():
@@ -823,6 +861,10 @@ def _read_host_compression_cap() -> int | None:
 
 class ClawChatAdapter(BasePlatformAdapter):
     SUPPORTS_MESSAGE_EDITING = True
+    # ClawChat renders markdown: Hermes then shows a terminal tool call as a
+    # fenced code block instead of quoting the raw command, whose ``*`` would
+    # otherwise be read as emphasis. Hosts without the attribute ignore it.
+    supports_code_blocks = True
     REQUIRES_EDIT_FINALIZE = True
     # Hermes splits a reply longer than this into several messages. The hub's
     # real limit is bytes: it refuses a message whose marshaled envelope exceeds
@@ -2918,6 +2960,17 @@ class ClawChatAdapter(BasePlatformAdapter):
                     frame.get("chat_id"),
                 )
             return
+        _payload = frame.get("payload")
+        if isinstance(_payload, dict) and not is_normal_message_mode(_payload.get("message_mode")):
+            # §7.5: a non-normal mode ("thinking": another agent's tool
+            # progress, notices, reasoning) is producer-internal content, not a
+            # turn addressed to us. Never conversational input.
+            inbound_trace.info(
+                "inbound dropped reason=non_normal_message_mode chat_id=%s mode=%r",
+                frame.get("chat_id"),
+                _payload.get("message_mode"),
+            )
+            return
         inbound = parse_inbound_message(frame, self._clawchat_config)
         if inbound is None:
             logger.warning(
@@ -5004,6 +5057,49 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
             return False
 
+    def format_tool_preview(self, preview: Any) -> str:
+        """Render a tool-call preview as inline code (Hermes ``format_tool_preview``).
+
+        Hermes calls this hook (with a ``ToolPreview``) only on hosts that have
+        it; older hosts never do and quote the raw preview instead. A plain
+        string is accepted too, so a host that passes one still gets code.
+        """
+        text = getattr(preview, "text", preview)
+        return _markdown_code_span(text if isinstance(text, str) else str(text or ""))
+
+    def _host_process_sender(self) -> str | None:
+        """Name of the host sender this call came from, if it is a process one."""
+        frame = inspect.currentframe()
+        try:
+            frame = frame.f_back if frame is not None else None
+            while frame is not None:
+                name = frame.f_code.co_name
+                if name in _HOST_PROCESS_SENDERS:
+                    filename = frame.f_code.co_filename.replace("\\", "/")
+                    if "/gateway/" in filename:
+                        return name
+                frame = frame.f_back
+        finally:
+            del frame
+        return None
+
+    def _is_runtime_status_text(self, content: str) -> bool:
+        """Whether the text is one of the Hermes runtime notices in the table."""
+        text = (content or "").strip()
+        normalized = text.replace(_EMOJI_VARIATION_SELECTOR, "")
+        if any(
+            normalized.startswith(prefix)
+            for prefix in _HERMES_RUNTIME_STATUS_PREFIXES_NORMALIZED
+        ):
+            return True
+        if any(pattern.search(text) for pattern in _HERMES_RUNTIME_STATUS_PATTERNS):
+            return True
+        return (
+            text.startswith("⚠️ ")
+            and " stream " in text
+            and "— reconnecting, retry " in text
+        )
+
     async def send_or_update_status(
         self,
         chat_id: str,
@@ -5019,7 +5115,9 @@ class ClawChatAdapter(BasePlatformAdapter):
                 len(content or ""),
             )
             return SendResult(success=True)
-        return await self.send(chat_id, content, metadata=metadata)
+        return await self.send(
+            chat_id, content, metadata=metadata, _clawchat_message_mode=MESSAGE_MODE_THINKING
+        )
 
     async def send(
         self,
@@ -5029,6 +5127,11 @@ class ClawChatAdapter(BasePlatformAdapter):
         metadata: Any = None,
         **kwargs: Any,
     ) -> SendResult:
+        # Read the caller first: the host frames are only on the stack until
+        # the first await.
+        message_mode = kwargs.pop("_clawchat_message_mode", None) or (
+            MESSAGE_MODE_THINKING if self._host_process_sender() else MESSAGE_MODE_NORMAL
+        )
         if chat_id in self._sediment_chats:
             logger.info(
                 "clawchat sediment turn output dropped chat_id=%s text_len=%d",
@@ -5043,6 +5146,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         if self._should_suppress_runtime_status_message(content or ""):
             logger.info("clawchat runtime status message suppressed chat_id=%s", chat_id)
             return SendResult(success=True)
+        if self._is_runtime_status_text(content or ""):
+            message_mode = MESSAGE_MODE_THINKING
         if is_group:
             owner_fragment = self._build_interaction_fragment(
                 content or "",
@@ -5060,6 +5165,12 @@ class ClawChatAdapter(BasePlatformAdapter):
             content or "",
         )
         is_send_message_tool_call = self._is_send_message_tool_call()
+        if message_mode == MESSAGE_MODE_NORMAL and not self._is_stream_intermediate_output(content or ""):
+            reasoning, visible_content = self._split_reasoning_prefix(visible_content)
+            if reasoning:
+                await self._send_reasoning(chat_id, reasoning, reply_to, metadata)
+                if not visible_content and not self._has_outbound_media(metadata, kwargs):
+                    return SendResult(success=True)
         is_immediate_media_send = self._is_immediate_media_send(metadata, kwargs)
         is_stream_intermediate = self._is_stream_intermediate_output(content or "")
         if (
@@ -5182,6 +5293,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             reply_to_message_id=reply_to,
             reply_preview=self._reply_preview_for(reply_to),
             include_message_id=True,
+            message_mode=message_mode,
         )
         claimed = self._claim_outbound_message(
             event_type="message.reply",
@@ -5221,14 +5333,16 @@ class ClawChatAdapter(BasePlatformAdapter):
                 message_id,
             )
             return SendResult(success=False, error=error, message_id=message_id)
-        self._note_visible_send(chat_id)
+        if message_mode == MESSAGE_MODE_NORMAL:
+            self._note_visible_send(chat_id)
         if not has_media:
             self._record_emit(chat_id, visible_content)
         logger.info(
-            "clawchat send complete reply queued chat_id=%s message_id=%s fragments=%d",
+            "clawchat send complete reply queued chat_id=%s message_id=%s fragments=%d mode=%s",
             chat_id,
             message_id,
             len(fragments),
+            message_mode,
         )
         return SendResult(success=True, message_id=message_id)
 
@@ -5364,6 +5478,9 @@ class ClawChatAdapter(BasePlatformAdapter):
             logger.info("clawchat silent response final suppressed chat_id=%s message_id=%s", chat_id, run.message_id)
             return SendResult(success=True, message_id=run.message_id)
         final_content = visible_final_text if visible_final_text else run.last_text
+        reasoning, final_content = self._split_reasoning_prefix(final_content)
+        if reasoning:
+            await self._send_reasoning(run.chat_id, reasoning, run.reply_to_message_id, run.metadata)
         # Single throat for the final text (mirrors outbound.ts's
         # sendOpenclawClawlingText): the token suppresses the whole reply unless
         # media is riding along, in which case only the token is cut out. The
@@ -5483,6 +5600,27 @@ class ClawChatAdapter(BasePlatformAdapter):
             run.message_id,
         )
         return SendResult(success=True, message_id=run.message_id)
+
+    @staticmethod
+    def _split_reasoning_prefix(text: str) -> tuple[str | None, str]:
+        """Split the host's ``💭 Reasoning`` block off the front of a reply."""
+        match = _HERMES_REASONING_PREFIX_RE.match(text or "")
+        if match is None:
+            return None, text
+        return match.group(1), text[match.end():].strip()
+
+    async def _send_reasoning(
+        self, chat_id: str, reasoning: str, reply_to: str | None, metadata: Any
+    ) -> None:
+        """Send a reply's reasoning block as its own process message, first."""
+        thread = {k: v for k, v in metadata.items() if k != "media_urls"} if isinstance(metadata, dict) else None
+        await self.send(
+            chat_id,
+            reasoning,
+            reply_to=reply_to,
+            metadata=thread,
+            _clawchat_message_mode=MESSAGE_MODE_THINKING,
+        )
 
     def _duplicate_emit_key(self, chat_id: str, visible_content: str) -> tuple[str, str] | None:
         text = (visible_content or "").strip()
@@ -6321,20 +6459,7 @@ class ClawChatAdapter(BasePlatformAdapter):
     def _should_suppress_runtime_status_message(self, content: str) -> bool:
         if self._runtime_status_messages_enabled():
             return False
-        text = (content or "").strip()
-        normalized = text.replace(_EMOJI_VARIATION_SELECTOR, "")
-        if any(
-            normalized.startswith(prefix)
-            for prefix in _HERMES_RUNTIME_STATUS_PREFIXES_NORMALIZED
-        ):
-            return True
-        if any(pattern.search(text) for pattern in _HERMES_RUNTIME_STATUS_PATTERNS):
-            return True
-        return (
-            text.startswith("⚠️ ")
-            and " stream " in text
-            and "— reconnecting, retry " in text
-        )
+        return self._is_runtime_status_text(content)
 
     def _runtime_status_messages_enabled(self) -> bool:
         try:

@@ -812,6 +812,15 @@ display it with mode-specific styling. Whichever you choose, do not error on an
 unrecognised mode. A client that ingests non-normal modes as user turns will feed
 an agent its own scratchpad.
 
+**What the hermes adapter does.** It sends its process messages — tool progress,
+the reasoning block Hermes puts in front of a reply, status updates, heartbeats and
+operational notices — as `"thinking"`, each as its own message; the reply itself
+and anything the agent sends on purpose stay `"normal"`. On receipt it drops any
+`message.send` / `message.reply` whose `message_mode` is a string other than `""`
+or `"normal"` before it becomes conversational input (a missing or non-string
+value counts as normal). Its own `"thinking"` messages are also left out of the
+group history it gives the model.
+
 ### 7.6 `payload.message_id` rules
 
 - **Uplink**: optional, but any client that can retransmit an unacknowledged send

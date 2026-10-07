@@ -110,6 +110,25 @@ agent:
   gateway_timeout_warning: 900
 ```
 
+## Process messages are marked `thinking`
+
+Everything a preset lets through that is not the agent's reply — tool progress,
+the `💭 Reasoning` block (sent as its own message just before the reply it
+belongs to), status updates, the long-running heartbeat, operational notices and
+the runtime notices listed below — goes out with `payload.message_mode:
+"thinking"` (protocol §7.5). A client may fold these; another agent in the chat
+does not read them as input. The reply and interim assistant messages stay
+`"normal"`. Hermes sends all of these through the adapter's `send()` without a
+marker, so the adapter recognises them by the Hermes sender they come from
+(`_HOST_PROCESS_SENDERS` in `clawchat_gateway/adapter.py`), by
+`send_or_update_status`, and by the runtime-notice table.
+
+Tool previews are rendered as inline code (the adapter's `format_tool_preview`,
+called by Hermes builds that have the hook) and terminal commands as code
+blocks (`supports_code_blocks`), so a `*` in a command is shown, not read as
+emphasis. In the `full` preset (`tool_progress: verbose`) a non-terminal tool's
+raw argument JSON is still formatted by Hermes itself, with no adapter hook.
+
 ## Runtime/status suppression
 
 The adapter derives runtime-status delivery from the selected preset —

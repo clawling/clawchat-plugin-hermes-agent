@@ -311,6 +311,48 @@ class LivewareSampleRow:
     updated_at: int
 
 
+
+# Conversation rows for history context: real messages only (message.send /
+# message.reply), and only ordinary ones — a stored frame whose
+# payload.message_mode is a non-empty string other than "normal" (the agent's
+# own tool progress, notices, reasoning; docs/client-integration.md §7.5) is
+# not part of the conversation.
+_CONVERSATION_ROWS_SQL = """
+    SELECT {columns}
+    FROM clawchat_messages
+    WHERE account_id = ? AND chat_id = ?
+      AND event_type IN ('message.send', 'message.reply')
+      {mode_filter}
+    ORDER BY created_at DESC, rowid DESC
+    LIMIT ?
+"""
+_NORMAL_MODE_FILTER_SQL = """
+      AND NOT COALESCE(
+        json_valid(raw_json)
+        AND json_type(raw_json, '$.payload.message_mode') = 'text'
+        AND trim(json_extract(raw_json, '$.payload.message_mode')) NOT IN ('', 'normal'),
+        0
+      )
+"""
+
+
+def _select_conversation_rows(
+    conn: sqlite3.Connection, columns: str, account_id: str, chat_id: str, limit: int
+) -> list[tuple]:
+    params = (account_id, chat_id, limit)
+    try:
+        return conn.execute(
+            _CONVERSATION_ROWS_SQL.format(columns=columns, mode_filter=_NORMAL_MODE_FILTER_SQL),
+            params,
+        ).fetchall()
+    except sqlite3.OperationalError:
+        # An SQLite built without the JSON functions: keep the history,
+        # unfiltered, rather than lose it.
+        return conn.execute(
+            _CONVERSATION_ROWS_SQL.format(columns=columns, mode_filter=""), params
+        ).fetchall()
+
+
 class ClawChatStore:
     def __init__(self, db_path: Path | str | None = None) -> None:
         self.db_path = Path(db_path) if db_path is not None else default_db_path()
@@ -1208,7 +1250,9 @@ class ClawChatStore:
         ``message.error`` / internal records (issue #2 item 4). Those persist in
         ``clawchat_messages`` for audit/dedup but must NOT be prepended into the
         @-mention prior-context prompt as if they were group history. (Mirrors the
-        sibling OpenClaw query filtering to real message kinds.)
+        sibling OpenClaw query filtering to real message kinds.) Process messages
+        (``payload.message_mode`` other than normal, e.g. the agent's own tool
+        progress) are left out the same way.
         """
         self.initialize()
         if self._disabled:
@@ -1216,17 +1260,9 @@ class ClawChatStore:
         try:
             conn = sqlite3.connect(self.db_path)
             try:
-                rows = conn.execute(
-                    """
-                    SELECT message_id, text, created_at
-                    FROM clawchat_messages
-                    WHERE account_id = ? AND chat_id = ?
-                      AND event_type IN ('message.send', 'message.reply')
-                    ORDER BY created_at DESC, rowid DESC
-                    LIMIT ?
-                    """,
-                    (account_id, chat_id, limit),
-                ).fetchall()
+                rows = _select_conversation_rows(
+                    conn, "message_id, text, created_at", account_id, chat_id, limit
+                )
             finally:
                 conn.close()
         except Exception:  # noqa: BLE001
@@ -1264,17 +1300,13 @@ class ClawChatStore:
         try:
             conn = sqlite3.connect(self.db_path)
             try:
-                rows = conn.execute(
-                    """
-                    SELECT message_id, text, created_at, direction, raw_json
-                    FROM clawchat_messages
-                    WHERE account_id = ? AND chat_id = ?
-                      AND event_type IN ('message.send', 'message.reply')
-                    ORDER BY created_at DESC, rowid DESC
-                    LIMIT ?
-                    """,
-                    (account_id, chat_id, limit),
-                ).fetchall()
+                rows = _select_conversation_rows(
+                    conn,
+                    "message_id, text, created_at, direction, raw_json",
+                    account_id,
+                    chat_id,
+                    limit,
+                )
             finally:
                 conn.close()
         except Exception:  # noqa: BLE001

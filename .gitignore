@@ -90,6 +90,10 @@ tmp
 #     turn and graceful shutdown; a sediment turn sends no typing.
 #   * message_length — a long reply is one message (32000 chars), and a
 #     full-length one still fits the hub's per-message byte cap.
+#   * thinking_mode — tool progress, reasoning, status and notices go out as
+#     message_mode "thinking", the reply as "normal"; another agent's
+#     non-normal message is never conversational input; tool previews and
+#     terminal commands are rendered as code.
 #   * inbound_dispatch_lanes — inbound messages are handled off the WS read
 #     loop, per chat and in order. A handler that awaits a send's ack inside
 #     the read loop can never get it: the read loop stalls for the ack timeout,
@@ -120,6 +124,7 @@ tests/*
 !tests/test_session_sediment.py
 !tests/test_typing_cadence.py
 !tests/test_message_length.py
+!tests/test_thinking_mode.py
 deploy/
 scripts/
 docs/superpowers/

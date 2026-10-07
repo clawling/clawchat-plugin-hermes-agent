@@ -16,6 +16,25 @@ _ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 # element. See ``docs/client-integration.md`` §10.2.
 MENTION_ALL_USER_ID = "all"
 
+# ``payload.message_mode`` values (docs/client-integration.md §7.5). ``normal``
+# is a turn addressed to the reader; ``thinking`` marks producer-internal
+# content — tool progress, runtime notices, reasoning — which an agent reading
+# the chat skips and a human-facing client may fold.
+MESSAGE_MODE_NORMAL = "normal"
+MESSAGE_MODE_THINKING = "thinking"
+
+
+def is_normal_message_mode(value: Any) -> bool:
+    """Whether a received ``payload.message_mode`` is an ordinary message.
+
+    ``""`` and ``"normal"`` are the same (the hub does not default the field);
+    a missing or non-string value is read as normal too, so an odd producer
+    is never silently dropped.
+    """
+    if not isinstance(value, str):
+        return True
+    return value.strip() in {"", MESSAGE_MODE_NORMAL}
+
 
 def new_frame_id(prefix: str = "req") -> str:
     return f"{prefix}-{uuid.uuid4()}"
@@ -160,6 +179,7 @@ def build_message_reply_event(
     reply_to_message_id: str | None = None,
     reply_preview: dict[str, Any] | None = None,
     include_message_id: bool = False,
+    message_mode: str = MESSAGE_MODE_NORMAL,
 ) -> dict[str, Any]:
     context: dict[str, Any] = {"mentions": [], "reply": None}
     if reply_to_message_id:
@@ -168,7 +188,7 @@ def build_message_reply_event(
             "reply_preview": reply_preview,
         }
     payload: dict[str, Any] = {
-        "message_mode": "normal",
+        "message_mode": message_mode,
         "message": {
             "body": {"fragments": fragments},
             "context": context,
@@ -194,6 +214,7 @@ def build_message_send_event(
     reply_to_message_id: str | None = None,
     reply_preview: dict[str, Any] | None = None,
     include_message_id: bool = False,
+    message_mode: str = MESSAGE_MODE_NORMAL,
 ) -> dict[str, Any]:
     context: dict[str, Any] = {"mentions": context_mentions or [], "reply": None}
     if reply_to_message_id:
@@ -202,7 +223,7 @@ def build_message_send_event(
             "reply_preview": reply_preview,
         }
     payload: dict[str, Any] = {
-        "message_mode": "normal",
+        "message_mode": message_mode,
         "message": {
             "body": {"fragments": fragments},
             "context": context,
