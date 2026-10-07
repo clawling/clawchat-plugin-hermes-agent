@@ -185,6 +185,21 @@ the `friend_greeting` config flag, conversation id resolved via
 the message ledger — see `docs/configuration.md`), and `permission_result`
 receipts. Each runs on a tracked task set cancelled in `disconnect()`.
 
+### Inbound dispatch is off the read loop
+
+The connection's read loop is the only reader of `message.ack`, and
+handling an inbound message can send a reply and wait for its ack: the
+plugin's own confirm replies, and every command Hermes dispatches inline
+while a session is busy (an approval `yes`, `/new`, `/stop`, a clarify
+answer). So the read loop never awaits the adapter's `on_message`.
+`message.send` / `message.reply` / `message.recall` frames are handed to a
+**per-chat lane** (`ClawChatConnection._dispatch_to_lane`): one worker
+task per `chat_id` handles that chat's frames strictly in arrival order,
+one at a time, while acks and other chats keep flowing. A handler that
+raises costs that frame only. Lanes survive a reconnect (a chat's order
+holds across it) and are cancelled by `ClawChatConnection.stop()`, which
+spares the lane that called it.
+
 ### Group exec approvals forwarded to the owner
 
 When a dangerous command needs approval inside a **group**, Hermes calls

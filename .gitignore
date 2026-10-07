@@ -52,6 +52,10 @@ tmp
 #     (`hermes plugins install`, plugins.scan_on_install). One CRITICAL finding
 #     anywhere, tests included, is a hard block --force cannot override. Needs a
 #     Hermes source checkout and skips itself without one.
+#   * inbound_dispatch_lanes — inbound messages are handled off the WS read
+#     loop, per chat and in order. A handler that awaits a send's ack inside
+#     the read loop can never get it: the read loop stalls for the ack timeout,
+#     the connection is rebuilt, and frames for every chat are lost meanwhile.
 tests/*
 !tests/conftest.py
 !tests/test_multiplex_isolation.py
@@ -66,6 +70,7 @@ tests/*
 !tests/test_command_gating.py
 !tests/test_register_platform_cron.py
 !tests/test_install_scan.py
+!tests/test_inbound_dispatch_lanes.py
 deploy/
 scripts/
 docs/superpowers/

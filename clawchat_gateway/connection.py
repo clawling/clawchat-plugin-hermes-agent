@@ -228,6 +228,14 @@ class _QueuedFrame:
 
 
 @dataclass
+class _InboundLane:
+    """One chat's inbound frames, handled in arrival order by one worker task."""
+
+    frames: deque[dict[str, Any]]
+    task: asyncio.Task[None] | None = None
+
+
+@dataclass
 class _PendingAck:
     event_name: str
     trace_id: str
@@ -391,6 +399,10 @@ class ClawChatConnection:
         self._send_queue: deque[_QueuedFrame] = deque()
         self._flushing_send_queue = False
         self._pending_acks: dict[str, _PendingAck] = {}
+        # Inbound message frames are handled OFF the read loop, one lane per
+        # chat_id (see ``_dispatch_to_lane``). Lanes outlive a reconnect so a
+        # chat's order holds across it; ``stop()`` cancels them.
+        self._inbound_lanes: dict[str, _InboundLane] = {}
         self._stable_ready_handle: asyncio.TimerHandle | None = None
         self._stable_ready_reset_done = False
         self._activation_wait_logged = False
@@ -624,8 +636,16 @@ class ClawChatConnection:
             except Exception:  # noqa: BLE001
                 logger.warning("clawchat auth-logout notification failed", exc_info=True)
 
-    @_in_connection_context
     async def stop(self) -> None:
+        await self._stop_in_context()
+        # Last, and in the CALLER's task (the profile-context wrapper runs the
+        # body above in a child task): a handler on an inbound lane may stop the
+        # connection itself, and only here can that lane be recognised and
+        # spared instead of cancelled while it awaits its own stop().
+        await self._cancel_inbound_lanes()
+
+    @_in_connection_context
+    async def _stop_in_context(self) -> None:
         self._stopping = True
         self._cancel_stable_ready_reset()
         await self._set_state(ConnectionState.CLOSED)
@@ -1507,7 +1527,8 @@ class ClawChatConnection:
         if self._state == ConnectionState.READY and ftype in (None, "event") and frame.get("event") == "replay.done":
             # §11.5 terminal control frame: device replay drained, live begins.
             # Fires on every reconnect (even zero-backlog). Replayed messages are
-            # processed inline, so this is a logged boundary marker, not a gate.
+            # handed to their chat lanes like live ones, so this is a logged
+            # boundary marker, not a gate.
             logger.info(
                 format_ws_log(
                     event="inbound_control",
@@ -1593,16 +1614,10 @@ class ClawChatConnection:
                     ],
                 )
             )
-            # Guarded, unlike the `message.send` dispatch below. An exception
-            # out of `_read_loop` kills the read task, which triggers a
-            # reconnect — and if the frame is replayed the whole cycle repeats
-            # forever. `on_notify_signal` above is wrapped for exactly this
-            # reason; a purge that raises must cost one message, not the
-            # connection.
-            try:
-                await self._on_message(frame)
-            except Exception:  # noqa: BLE001
-                logger.exception("message.recall handling raised")
+            # Same lane as the chat's messages, so a recall is never handled
+            # before the message it takes back. The lane guards exceptions: a
+            # purge that raises must cost one frame, not the connection.
+            self._dispatch_to_lane(frame)
             return
         if self._state == ConnectionState.READY and ftype in (None, "event") and frame.get("event") in {"message.send", "message.reply"}:
             sender = frame.get("sender") if isinstance(frame.get("sender"), dict) else {}
@@ -1643,7 +1658,7 @@ class ClawChatConnection:
                 body_keys,
                 body_len,
             )
-            await self._on_message(frame)
+            self._dispatch_to_lane(frame)
             return
         if self._state == ConnectionState.READY and ftype in (None, "event") and frame.get("event") == "message.ack":
             logger.info(
@@ -1706,6 +1721,67 @@ class ClawChatConnection:
             ftype,
             self._state.value,
         )
+
+    def _dispatch_to_lane(self, frame: dict[str, Any]) -> None:
+        """Hand an inbound message frame to its chat's lane; never awaits it.
+
+        The read loop is the only reader of ``message.ack``. Handling a message
+        can send a reply and WAIT for its ack — the plugin's own replies to a
+        non-owner's confirm, and every command Hermes dispatches inline (an
+        approval ``yes``, a group ``/new``). Awaited here, that ack could never
+        be read: the send timed out, the read loop died, the connection was
+        rebuilt and frames that arrived meanwhile were lost. So each chat gets
+        a worker task: frames of one chat are still handled strictly in order,
+        one at a time, while acks and other chats keep flowing.
+        """
+        chat_id = str(frame.get("chat_id") or "")
+        lane = self._inbound_lanes.get(chat_id)
+        if lane is None:
+            lane = _InboundLane(frames=deque())
+            self._inbound_lanes[chat_id] = lane
+        lane.frames.append(frame)
+        if lane.task is None:
+            lane.task = asyncio.create_task(
+                self._drain_inbound_lane(chat_id, lane), name="clawchat-inbound"
+            )
+
+    async def _drain_inbound_lane(self, chat_id: str, lane: _InboundLane) -> None:
+        try:
+            while lane.frames:
+                frame = lane.frames.popleft()
+                try:
+                    await self._on_message(frame)
+                except Exception:  # noqa: BLE001
+                    # One bad frame must not stop this chat's later frames.
+                    logger.exception(
+                        "clawchat inbound handling raised event=%s chat_id=%s trace_id=%s",
+                        frame.get("event"),
+                        chat_id,
+                        frame.get("trace_id") or frame.get("id"),
+                    )
+        finally:
+            lane.task = None
+            if not lane.frames and self._inbound_lanes.get(chat_id) is lane:
+                del self._inbound_lanes[chat_id]
+
+    async def _cancel_inbound_lanes(self) -> None:
+        """Cancel every lane worker and drop queued frames (shutdown only).
+
+        The caller's own task is spared: a handler may stop the connection
+        itself (e.g. a ``/restart`` dispatched inline) and must not cancel
+        itself halfway through.
+        """
+        current = asyncio.current_task()
+        lanes = list(self._inbound_lanes.values())
+        self._inbound_lanes.clear()
+        tasks = []
+        for lane in lanes:
+            lane.frames.clear()
+            if lane.task is not None and lane.task is not current and not lane.task.done():
+                lane.task.cancel()
+                tasks.append(lane.task)
+        if tasks:
+            await asyncio.wait(tasks, timeout=_WS_CLOSE_TIMEOUT_SECONDS)
 
     async def _handle_challenge(self, frame: dict[str, Any]) -> None:
         nonce = extract_nonce(frame)
