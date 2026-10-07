@@ -401,7 +401,13 @@ starts with the group's recent history from the plugin's own message ledger:
 the last `rebuild-recent-messages` messages (factory 20) within
 `rebuild-recent-chars` characters (factory 4000, newest kept first), oldest
 first, each line `Name (usr_…): text` or `you: text` for the agent's own
-replies, under a header saying it is context only
+replies, under a header saying it is context only. The name is the sender's
+`nick_name`; when the hub sends the user id there, it comes from the agent's
+cached profiles like in live batches (`owner.md` for the agent owner, the
+group's metadata for the group owner, `users/<id>.md` for anyone else), and the
+line shows the bare id only when no name is known. Slash commands (`/new`,
+`@agent /approve`, …) are left out of the seed and of the catch-up below: they
+steer the gateway and are not part of the conversation
 (`ClawChatAdapter._group_context_for_turn`). It goes into the turn's user
 message, so it stays in the session. It happens once per group: the
 `group_shared_sessions` table in plugin SQLite records groups whose shared

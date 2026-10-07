@@ -1251,8 +1251,13 @@ class ClawChatStore:
 
         Like ``list_recent_group_messages`` (same filter, same index) but each
         row also carries ``direction`` and, for inbound rows, ``sender_id`` /
-        ``sender_name`` taken from the stored frame. Empty list on any error.
+        ``sender_name`` taken from the stored frame, plus ``text_after_mentions``:
+        the text with the @-mentions it opens with removed (the text itself when
+        it opens with none), so a caller can tell ``@agent /new`` is a command.
+        Empty list on any error.
         """
+        from clawchat_gateway.inbound import split_leading_mentions
+
         self.initialize()
         if self._disabled or limit <= 0:
             return []
@@ -1281,6 +1286,7 @@ class ClawChatStore:
         result: list[dict] = []
         for message_id, text, created_at, direction, raw_json in reversed(rows):
             sender_id = sender_name = ""
+            text_after_mentions = str(text or "")
             if direction == "inbound" and raw_json:
                 try:
                     raw = json.loads(raw_json)
@@ -1290,6 +1296,13 @@ class ClawChatStore:
                 if isinstance(sender, dict):
                     sender_id = str(sender.get("id") or "")
                     sender_name = str(sender.get("nick_name") or "")
+                if isinstance(raw, dict):
+                    try:
+                        split = split_leading_mentions(text_after_mentions, raw)
+                    except Exception:  # noqa: BLE001 - malformed stored frame
+                        split = None
+                    if split is not None:
+                        text_after_mentions = split[1]
             result.append(
                 {
                     "message_id": message_id,
@@ -1298,6 +1311,7 @@ class ClawChatStore:
                     "direction": direction,
                     "sender_id": sender_id,
                     "sender_name": sender_name,
+                    "text_after_mentions": text_after_mentions,
                 }
             )
         return result

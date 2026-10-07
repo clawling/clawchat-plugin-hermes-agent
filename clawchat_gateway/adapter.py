@@ -3473,12 +3473,56 @@ class ClawChatAdapter(BasePlatformAdapter):
             delivered.popitem(last=False)
 
     @staticmethod
-    def _format_group_history_line(row: Mapping[str, Any]) -> str:
+    def _is_group_history_command(row: Mapping[str, Any]) -> bool:
+        """A stored group message that is a slash command (``/new``, ``@agent /approve``).
+
+        Commands steer the gateway; they are not part of the conversation, so
+        seed and catch-up history leave them out.
+        """
+        text = str(row.get("text_after_mentions") or row.get("text") or "")
+        return _slash_command_name(text) is not None
+
+    def _group_history_rows(self, rows: list[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+        return [row for row in rows if not self._is_group_history_command(row)]
+
+    def _group_member_name(self, user_id: str, chat_id: str, cache: dict[str, str]) -> str:
+        """Display name for a group member from the agent's cached profiles, else ''.
+
+        Same sources as the participants section: the agent owner's name from
+        ``owner.md``, the group owner's from the group's metadata, anyone else's
+        from ``users/<id>.md``.
+        """
+        if user_id in cache:
+            return cache[user_id]
+        name = ""
+        if user_id == self._owner_user_id():
+            name = self._read_memory_metadata("owner", "owner").get("agent_owner_nickname", "")
+        if not name:
+            group_metadata = self._read_memory_metadata("group", chat_id)
+            if user_id and group_metadata.get("group_owner_id") == user_id:
+                name = group_metadata.get("group_owner_nickname", "")
+        if not name:
+            name = self._read_memory_metadata("user", user_id).get("nickname", "")
+        name = name.strip()
+        cache[user_id] = "" if name == user_id else name
+        return cache[user_id]
+
+    def _format_group_history_line(
+        self,
+        row: Mapping[str, Any],
+        chat_id: str = "",
+        names: dict[str, str] | None = None,
+    ) -> str:
         text = str(row.get("text") or "").strip() or "(empty message)"
         if row.get("direction") == "outbound":
             return f"you: {text}"
         sender_id = str(row.get("sender_id") or "")
-        name = str(row.get("sender_name") or "") or sender_id or "someone"
+        name = str(row.get("sender_name") or "")
+        if sender_id and (not name or name == sender_id):
+            # The hub often sends the user id as nick_name; live batches show the
+            # cached profile name instead, and so does the history.
+            name = self._group_member_name(sender_id, chat_id, {} if names is None else names)
+        name = name or sender_id or "someone"
         label = f"{name} ({sender_id})" if sender_id and name != sender_id else name
         return f"{label}: {text}"
 
@@ -3488,12 +3532,14 @@ class ClawChatAdapter(BasePlatformAdapter):
             "default", chat_id, config.rebuild_recent_messages + len(batch_ids)
         )
         rows = [row for row in rows if row.get("message_id") not in batch_ids]
-        rows = rows[-config.rebuild_recent_messages :]
+        delivered_ids = [row.get("message_id") for row in rows]
+        rows = self._group_history_rows(rows)[-config.rebuild_recent_messages :]
         budget = config.rebuild_recent_chars
+        names: dict[str, str] = {}
         kept: list[str] = []
         used = 0
         for row in reversed(rows):  # newest first, so the budget keeps the latest
-            line = self._format_group_history_line(row)
+            line = self._format_group_history_line(row, chat_id, names)
             cost = len(line) + (1 if kept else 0)
             if used + cost > budget:
                 if not kept:
@@ -3501,9 +3547,11 @@ class ClawChatAdapter(BasePlatformAdapter):
                 break
             kept.append(line)
             used += cost
+        # Commands left out of the seed count as seen: a later catch-up must not
+        # bring them back.
+        self._remember_delivered_group_ids(chat_id, delivered_ids)
         if not kept:
             return None
-        self._remember_delivered_group_ids(chat_id, (row.get("message_id") for row in rows))
         return "\n".join([GROUP_SEED_HEADER, *reversed(kept)])
 
     def _build_group_unseen_text(self, chat_id: str, batch_ids: set[str]) -> str | None:
@@ -3517,12 +3565,21 @@ class ClawChatAdapter(BasePlatformAdapter):
             if row.get("direction") != "outbound"
             and row.get("message_id") not in batch_ids
             and row.get("message_id") not in delivered
-        ][-MENTION_CONTEXT_N:]
+        ]
+        self._remember_delivered_group_ids(
+            chat_id,
+            (row.get("message_id") for row in unseen if self._is_group_history_command(row)),
+        )
+        unseen = self._group_history_rows(unseen)[-MENTION_CONTEXT_N:]
         if not unseen:
             return None
         self._remember_delivered_group_ids(chat_id, (row.get("message_id") for row in unseen))
+        names: dict[str, str] = {}
         return "\n".join(
-            [GROUP_UNSEEN_HEADER, *(self._format_group_history_line(row) for row in unseen)]
+            [
+                GROUP_UNSEEN_HEADER,
+                *(self._format_group_history_line(row, chat_id, names) for row in unseen),
+            ]
         )
 
     async def _handle_inbound(self, inbound: InboundMessage) -> None:

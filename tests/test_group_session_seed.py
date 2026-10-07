@@ -152,3 +152,118 @@ def test_rebuild_keys_read_from_plugin_config():
     assert cfg.rebuild_recent_chars == 2000
     default = ClawChatConfig.from_platform_config(type("E", (), {"extra": {}})())
     assert (default.rebuild_recent_messages, default.rebuild_recent_chars) == (20, 4000)
+
+
+# --- speaker names ------------------------------------------------------------
+#
+# The hub often sends ``sender.nick_name`` equal to the user id. Live batches
+# resolve the name from the agent's cached profile metadata; the seed and
+# catch-up lines must do the same instead of printing a bare ``usr_…``.
+
+
+def _profile(a, target_type, target_id, **metadata):
+    from clawchat_gateway.clawchat_memory import write_clawchat_metadata
+
+    write_clawchat_metadata(a._memory_root, target_type, target_id, metadata)
+
+
+@pytest.fixture
+def named_adapter(adapter, tmp_path):
+    adapter._memory_root = tmp_path / "memories"
+    return adapter
+
+
+def test_seed_line_uses_the_cached_profile_name_when_the_hub_sends_the_id(named_adapter):
+    a = named_adapter
+    _profile(a, "user", "usr_ada", nickname="Ada")
+    record(a, "k1", "hello from Ada", sender="usr_ada", name="usr_ada")
+    record(a, "k2", "no profile cached", sender="usr_zed", name="usr_zed")
+    seed = a._group_context_for_turn(batch("k3"))
+    assert "Ada (usr_ada): hello from Ada" in seed
+    assert "usr_zed: no profile cached" in seed  # nothing better known
+
+
+def test_seed_line_names_the_agent_owner_and_the_group_owner(named_adapter):
+    a = named_adapter
+    _profile(a, "owner", "owner", agent_owner_nickname="Olive")
+    _profile(a, "group", GROUP, group_owner_id="usr_gina", group_owner_nickname="Gina")
+    record(a, "o1", "owner speaking", sender="usr_owner", name="usr_owner")
+    record(a, "o2", "group owner speaking", sender="usr_gina", name="usr_gina")
+    seed = a._group_context_for_turn(batch("o3"))
+    assert "Olive (usr_owner): owner speaking" in seed
+    assert "Gina (usr_gina): group owner speaking" in seed
+
+
+def test_catch_up_line_uses_the_cached_profile_name(named_adapter):
+    a = named_adapter
+    _profile(a, "user", "usr_cy", nickname="Cy")
+    record(a, "s1", "seeded")
+    a._group_context_for_turn(batch("b0"))
+    record(a, "u1", "held back", sender="usr_cy", name="usr_cy")
+    context = a._group_context_for_turn(batch("q1", mentioned=True))
+    assert "Cy (usr_cy): held back" in context
+
+
+def test_a_real_nick_name_from_the_hub_still_wins(named_adapter):
+    a = named_adapter
+    _profile(a, "user", "usr_ada", nickname="Old Name")
+    record(a, "r1", "hi", sender="usr_ada", name="Ada Now")
+    seed = a._group_context_for_turn(batch("r2"))
+    assert "Ada Now (usr_ada): hi" in seed
+
+
+# --- slash commands -----------------------------------------------------------
+#
+# Commands are instructions to the gateway, not conversation: after /new the
+# catch-up must not tell the session about /new, /approve or /cancel.
+
+
+def _command_frame(message_id, mention_id=None, display=None, command="/new"):
+    fragments = []
+    if mention_id:
+        fragments.append({"kind": "mention", "user_id": mention_id, "display": display})
+    fragments.append({"kind": "text", "text": command})
+    return {
+        "chat_id": GROUP,
+        "sender": {"id": "usr_ada", "nick_name": "Ada"},
+        "payload": {"message_id": message_id, "message": {"body": {"fragments": fragments}}},
+    }
+
+
+def record_raw(a, message_id, text, frame):
+    _clock[0] += 1000
+    a._store.insert_message(
+        platform="hermes", account_id="default", kind="message", direction="inbound",
+        event_type="message.send", chat_id=GROUP, message_id=message_id, text=text,
+        raw=frame, created_at=_clock[0],
+    )
+
+
+def test_seed_leaves_out_slash_commands(adapter):
+    record(adapter, "c1", "real talk")
+    record(adapter, "c2", "/new")
+    record(adapter, "c3", "/approve session")
+    record(adapter, "c4", "  /cancel")
+    record(adapter, "c5", "/usr/local/bin is on the path")  # a path, not a command
+    seed = adapter._group_context_for_turn(batch("c6"))
+    assert "real talk" in seed
+    assert "/new" not in seed and "/approve" not in seed and "/cancel" not in seed
+    assert "/usr/local/bin is on the path" in seed
+
+
+def test_catch_up_leaves_out_slash_commands_even_after_a_mention(adapter):
+    record(adapter, "s1", "seeded")
+    adapter._group_context_for_turn(batch("b0"))
+    record(adapter, "u1", "/new")
+    record_raw(adapter, "u2", "@Agent /approve", _command_frame("u2", "usr_agent", "Agent", "/approve"))
+    record(adapter, "u3", "an ordinary message")
+    context = adapter._group_context_for_turn(batch("q1", mentioned=True))
+    assert "an ordinary message" in context
+    assert "/new" not in context and "/approve" not in context
+
+
+def test_only_commands_unseen_means_no_catch_up(adapter):
+    record(adapter, "s1", "seeded")
+    adapter._group_context_for_turn(batch("b0"))
+    record(adapter, "u1", "/new")
+    assert adapter._group_context_for_turn(batch("q1", mentioned=True)) is None
