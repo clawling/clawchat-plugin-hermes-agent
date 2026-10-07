@@ -186,7 +186,7 @@ only the first ~60 characters of a description.
 
 | Tool                                | What it does                                                                 |
 |-------------------------------------|------------------------------------------------------------------------------|
-| `clawchat_liveware_login`           | Log in to liveware using the agent's ClawChat account; the plugin resolves the token internally. Call before any liveware app/tunnel commands. |
+| `clawchat_liveware_login`           | Log in to liveware using the agent's ClawChat account; the plugin resolves the token internally and logs in as `--account <agent id, lowercased>`. Call before any liveware app/tunnel commands. Returns `{ok, account, instructions}`: the agent must add `--account <account>` to every `liveware` command it runs, because the CLI's login store (`~/.clawling/liveware.json`) is shared by every agent on the host and a command without it runs as the first one that logged in. |
 | `clawchat_register_app`             | Register a liveware-tunneled web app (`name`, `appId`, `url`; optional `subtitle`, `iconPath`) to ClawChat so it shows in the owner's chat. Call after `liveware tunnel bind` succeeds. See below. |
 | `clawchat_list_apps`                | List the liveware web apps this agent has registered to ClawChat.             |
 | `clawchat_unregister_app`           | Unregister a previously registered liveware app by `appId`.                   |

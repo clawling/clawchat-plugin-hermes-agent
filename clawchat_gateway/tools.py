@@ -16,7 +16,11 @@ from typing import Any
 from clawchat_gateway.api_client import ClawChatApiClient, ClawChatApiError
 from clawchat_gateway.device_id import get_device_id, resolve_paired_device_id
 from clawchat_gateway.gate_outcome import map_gate_outcome
-from clawchat_gateway.liveware_cli import resolve_liveware_path
+from clawchat_gateway.liveware_cli import (
+    liveware_account_args,
+    liveware_account_name,
+    resolve_liveware_path,
+)
 from clawchat_gateway.clawchat_memory import (
     delete_clawchat_memory_file,
     edit_clawchat_memory_body,
@@ -1303,8 +1307,9 @@ async def liveware_login() -> dict[str, Any]:
     """Log in to liveware using the agent's ClawChat account token.
 
     The plugin resolves the token from the profile config and passes it to
-    the liveware CLI as --access-token. Call this before liveware app/tunnel
-    commands that require an authenticated session.
+    the liveware CLI as --access-token, plus ``--account <agent id>`` so the
+    login lands on THIS agent's account in the host-wide CLI store. The result
+    names that account; every later ``liveware`` command must carry it too.
 
     Security note: liveware's documented interface is --access-token, so the
     token is in child argv briefly; env/stdin preferred if liveware supported
@@ -1317,6 +1322,7 @@ async def liveware_login() -> dict[str, Any]:
         return _config_error(str(exc))
 
     token = cfg.token
+    account = liveware_account_name(getattr(cfg, "agent_id", ""))
 
     liveware_path = resolve_liveware_path()
     if liveware_path is None:
@@ -1327,6 +1333,7 @@ async def liveware_login() -> dict[str, Any]:
         "login",
         "--access-token",
         token,
+        *liveware_account_args(account),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -1340,7 +1347,22 @@ async def liveware_login() -> dict[str, Any]:
         return _validation_error("liveware login timed out")
 
     if proc.returncode == 0:
-        return {"ok": True}
+        if not account:
+            return {"ok": True}
+        # The CLI's login store is shared by every agent on this host and a
+        # command without --account runs as whichever agent logged in FIRST,
+        # so the agent's own terminal commands must name the account too.
+        return {
+            "ok": True,
+            "account": account,
+            "instructions": (
+                f"Your liveware account is {account}. Add --account {account} to "
+                "EVERY liveware command you run (app create/list/inspect/access/"
+                "delete, tunnel bind, agent, status, install/start/stop/restart), "
+                f"e.g. `liveware app create demo --account {account}`. Without it "
+                "the command can run as another agent on this machine."
+            ),
+        }
 
     # Non-zero exit: scrub the token from all output before returning.
     stderr_text = err.decode(errors="replace").replace(token, "***")

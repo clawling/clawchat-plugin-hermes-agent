@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from . import skill_update as _skill_update
+from .liveware_cli import liveware_account_args, liveware_account_name
 from .owner_language import resolve_owner_language
 from .skill_update import DEFAULT_SKILLS_REF, OFFICIAL_SKILLS_BASE, Fetcher
 
@@ -545,7 +546,8 @@ async def start_sample_server(*, app_dir, port: int, spawn: SpawnFn | None = Non
 
 async def tunnel_bind(*, liveware_path, app_id, port: int,
                       exec: "ExecFn | None" = None,
-                      timeout: float = _CLI_TIMEOUT) -> str:
+                      timeout: float = _CLI_TIMEOUT,
+                      account: "str | None" = None) -> str:
     """One-shot upstream registration (CLI v0.0.11+): `tunnel bind` writes the
     app→local-upstream mapping to the control plane, prints the binding table
     and exits 0. The data plane is carried by the persistent `liveware agent`
@@ -553,6 +555,7 @@ async def tunnel_bind(*, liveware_path, app_id, port: int,
     exec = exec or asyncio.create_subprocess_exec
     proc = await _maybe_await(exec(
         liveware_path, "tunnel", "bind", app_id, f"http://127.0.0.1:{port}",
+        *liveware_account_args(account),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     ))
     out, err = await _communicate(proc, timeout, "liveware tunnel bind")
@@ -583,14 +586,15 @@ def parse_agent_ready(output: str) -> str | None:
 
 async def start_tunnel_agent(*, liveware_path,
                              spawn: SpawnFn | None = None,
-                             timeout: float = _TUNNEL_START_TIMEOUT):
+                             timeout: float = _TUNNEL_START_TIMEOUT,
+                             account: "str | None" = None):
     """Spawn the persistent `liveware agent` data-plane daemon (CLI v0.0.11+;
     replaces the long-lived `tunnel bind` / sibling tunnel-agent binary). It
     authenticates from the token saved by `liveware login` and serves every
     app bound via `tunnel bind` for that account."""
     spawn = spawn or asyncio.create_subprocess_exec
     proc = await _maybe_await(spawn(
-        liveware_path, "agent",
+        liveware_path, "agent", *liveware_account_args(account),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     ))
     await _read_until(proc, parse_agent_ready, timeout, "liveware agent start")
@@ -620,10 +624,12 @@ def _scrub(text: str, token: str) -> str:
 
 
 async def liveware_login(*, liveware_path, token: str, exec: ExecFn | None = None,
-                         timeout: float = _CLI_TIMEOUT) -> None:
+                         timeout: float = _CLI_TIMEOUT,
+                         account: "str | None" = None) -> None:
     exec = exec or asyncio.create_subprocess_exec
     proc = await _maybe_await(exec(
         liveware_path, "login", "--access-token", token,
+        *liveware_account_args(account),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     ))
     out, err = await _communicate(proc, timeout, "liveware login")
@@ -636,6 +642,7 @@ async def liveware_login(*, liveware_path, token: str, exec: ExecFn | None = Non
 async def liveware_agent_is_running(
     *, liveware_path, exec: ExecFn | None = None,
     log: "logging.Logger | None" = None, timeout: float = _CLI_TIMEOUT,
+    account: "str | None" = None,
 ) -> bool:
     """`liveware status` -> True only if it positively confirms a running agent.
 
@@ -663,7 +670,7 @@ async def liveware_agent_is_running(
     logger = log or logging.getLogger("clawchat.liveware_sample")
     try:
         proc = await _maybe_await(exec(
-            liveware_path, "status",
+            liveware_path, "status", *liveware_account_args(account),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         ))
         out, err = await _communicate(proc, timeout, "liveware status")
@@ -686,6 +693,7 @@ async def liveware_agent_is_running(
 async def liveware_app_find_by_name(
     *, liveware_path, name: str, exec: ExecFn | None = None,
     log: "logging.Logger | None" = None, timeout: float = _CLI_TIMEOUT,
+    account: "str | None" = None,
 ) -> str | None:
     """`liveware app list` -> the id of an existing app with this name, or None.
 
@@ -701,7 +709,7 @@ async def liveware_app_find_by_name(
     logger = log or logging.getLogger("clawchat.liveware_sample")
     try:
         proc = await _maybe_await(exec(
-            liveware_path, "app", "list",
+            liveware_path, "app", "list", *liveware_account_args(account),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         ))
         out, err = await _communicate(proc, timeout, "liveware app list")
@@ -720,10 +728,11 @@ async def liveware_app_find_by_name(
 
 
 async def liveware_app_create(*, liveware_path, name: str, exec: ExecFn | None = None,
-                              timeout: float = _CLI_TIMEOUT) -> str:
+                              timeout: float = _CLI_TIMEOUT,
+                              account: "str | None" = None) -> str:
     exec = exec or asyncio.create_subprocess_exec
     proc = await _maybe_await(exec(
-        liveware_path, "app", "create", name,
+        liveware_path, "app", "create", name, *liveware_account_args(account),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     ))
     out, err = await _communicate(proc, timeout, "liveware app create")
@@ -844,6 +853,11 @@ class LivewareSampleDeps:
     # intro can be retried for ~10 minutes, by which time a locale that was
     # absent at construction may have landed.
     resolve_owner_locale: "Callable[[], str | None] | None" = None
+    # This agent's id (`agt_…`), read at every CLI call: names the liveware CLI
+    # account (`--account`, see liveware_cli.liveware_account_name) so the
+    # sample's app, tunnel and agent daemon belong to THIS agent, not to
+    # whichever agent on the host logged in to the CLI first.
+    resolve_liveware_account: "Callable[[], str | None] | None" = None
     fetch: Fetcher = _skill_update._default_fetch
     ref: str = DEFAULT_SKILLS_REF
     spawn: "SpawnFn | None" = None
@@ -1012,6 +1026,10 @@ class LivewareSampleSupervisor:
         self._tunnel = None
         self._watched.clear()
 
+    def _account(self) -> "str | None":
+        resolve = self._d.resolve_liveware_account
+        return liveware_account_name(resolve() if resolve else None)
+
     def _bail_if_stale(self, gen: int) -> bool:
         """Abort the current bootstrap/relaunch step if we were stopped, or if
         the generation has moved on for a reason unrelated to THIS flow's own
@@ -1090,7 +1108,8 @@ class LivewareSampleSupervisor:
             self._spawn_task(server_drain)
             if self._bail_if_stale(gen):
                 return
-            await liveware_login(liveware_path=path, token=token, exec=d.exec)
+            await liveware_login(liveware_path=path, token=token, exec=d.exec,
+                                 account=self._account())
             if self._bail_if_stale(gen):
                 return
             # Reuse an app we already own before minting another one. `app
@@ -1101,7 +1120,7 @@ class LivewareSampleSupervisor:
             # unreadable list falls through to `app create`.
             app_id = await liveware_app_find_by_name(
                 liveware_path=path, name=LIVEWARE_SAMPLE_APP_NAME, exec=d.exec,
-                log=self._log)
+                log=self._log, account=self._account())
             if self._bail_if_stale(gen):
                 return
             if app_id:
@@ -1109,7 +1128,8 @@ class LivewareSampleSupervisor:
                     "liveware-sample reusing existing liveware app %s", app_id)
             else:
                 app_id = await liveware_app_create(
-                    liveware_path=path, name=LIVEWARE_SAMPLE_APP_NAME, exec=d.exec)
+                    liveware_path=path, name=LIVEWARE_SAMPLE_APP_NAME, exec=d.exec,
+                    account=self._account())
             # Persist the app id BEFORE the steps that can still fail - and with
             # NO bail point between `app create` and this write, which is the
             # whole point. Without this row a failure anywhere below left no row
@@ -1123,7 +1143,8 @@ class LivewareSampleSupervisor:
             if self._bail_if_stale(gen):
                 return
             public_url = await tunnel_bind(
-                liveware_path=path, app_id=app_id, port=port, exec=d.exec)
+                liveware_path=path, app_id=app_id, port=port, exec=d.exec,
+                account=self._account())
             if self._bail_if_stale(gen):
                 return
             if await self._ensure_tunnel_agent(path=path, deps=d, gen=gen):
@@ -1207,7 +1228,8 @@ class LivewareSampleSupervisor:
             token = d.resolve_token()
             if token:
                 try:
-                    await liveware_login(liveware_path=path, token=token, exec=d.exec)
+                    await liveware_login(liveware_path=path, token=token, exec=d.exec,
+                                 account=self._account())
                 except Exception as exc:  # noqa: BLE001
                     # Catch Exception, never BaseException: a CancelledError from
                     # stop() must keep propagating so children aren't orphaned.
@@ -1226,7 +1248,8 @@ class LivewareSampleSupervisor:
             app_id = row.app_id
             if row.status == "pending":
                 found = await liveware_app_find_by_name(
-                    liveware_path=path, name=row.app_name, exec=d.exec, log=self._log)
+                    liveware_path=path, name=row.app_name, exec=d.exec, log=self._log,
+                    account=self._account())
                 if found and found != app_id:
                     self._log.warning(
                         "liveware-sample pending app id %s not listed; adopting %s",
@@ -1235,7 +1258,8 @@ class LivewareSampleSupervisor:
                 if self._bail_if_stale(gen):
                     return
             public_url = await tunnel_bind(
-                liveware_path=path, app_id=app_id, port=port, exec=d.exec)
+                liveware_path=path, app_id=app_id, port=port, exec=d.exec,
+                account=self._account())
             if self._bail_if_stale(gen):
                 return
             if await self._ensure_tunnel_agent(
@@ -1274,13 +1298,14 @@ class LivewareSampleSupervisor:
         path; see _relaunch.
         """
         if may_reuse and await liveware_agent_is_running(
-                liveware_path=path, exec=deps.exec, log=self._log):
+                liveware_path=path, exec=deps.exec, log=self._log,
+                account=self._account()):
             self._log.info(
                 "liveware-sample adopting an already-running liveware agent; "
                 "this launch owns no tunnel child to watch")
             return False
         self._tunnel, agent_drain = await start_tunnel_agent(
-            liveware_path=path, spawn=deps.spawn)
+            liveware_path=path, spawn=deps.spawn, account=self._account())
         self._spawn_task(agent_drain)
         return self._bail_if_stale(gen)
 

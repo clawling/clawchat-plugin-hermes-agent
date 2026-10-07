@@ -62,7 +62,9 @@ and an `x-device-id` header. The WebSocket uses `websockets.asyncio.client`.
 | POST | `/v1/agents/plugin-report` | `report_plugin` (unauthenticated fallback) |
 
 Both plugin-report calls accept optional fields, read from
-`~/clawchat/onboarding.json` written by the agent: `wiki_report_id`,
+`$HERMES_HOME/clawchat/onboarding.json` written by the agent (the default
+profile also falls back to `~/clawchat/onboarding.json`; see
+[`../configuration.md`](../configuration.md#the-agents-own-files)): `wiki_report_id`,
 `capability_tier`, `capability_ceiling`, `capabilities`
 `{headless,mcp,permission_hook,session_line}`.
 

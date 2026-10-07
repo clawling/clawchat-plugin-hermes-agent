@@ -3,6 +3,12 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from clawchat_gateway.agent_files import (
+    FRIEND_GREETING_FILE,
+    GREETING_FILE,
+    agent_files_dir,
+    read_agent_file,
+)
 from clawchat_gateway.owner_language import language_display_name
 
 logger = logging.getLogger("clawchat_gateway.greeting")
@@ -39,24 +45,41 @@ FRIEND_GREETING_PROMPT = (
     "for personal information."
 )
 
-# Cross-plugin, user-editable overrides live under ~/clawchat/.
-_GREETING_FILE_RELPARTS = ("clawchat", "greeting.md")
-_FRIEND_GREETING_FILE_RELPARTS = ("clawchat", "friend-greeting.md")
+# User-editable overrides, one set per agent: ``$HERMES_HOME/clawchat/``
+# (see ``agent_files``; the default profile also falls back to ``~/clawchat/``).
+_GREETING_FILE_RELPARTS = ("clawchat", GREETING_FILE)
+_FRIEND_GREETING_FILE_RELPARTS = ("clawchat", FRIEND_GREETING_FILE)
+
+
+def _read_override(relparts: tuple[str, ...], home_dir: Path | None) -> tuple[str | None, str]:
+    """``(content or None if absent, path label for logs)``.
+
+    ``home_dir`` (tests) pins the old single-directory lookup
+    ``<home_dir>/clawchat/<file>``; otherwise the agent's own files directory is
+    used, with the default profile's legacy fallback.
+    """
+    if home_dir is not None:
+        path = home_dir.joinpath(*relparts)
+        try:
+            return path.read_text(encoding="utf-8"), str(path)
+        except FileNotFoundError:
+            return None, str(path)
+    name = relparts[-1]
+    return read_agent_file(name), str(agent_files_dir() / name)
 
 
 def _load_prompt_with_override(
     relparts: tuple[str, ...], default: str, home_dir: Path | None
 ) -> str:
-    base = home_dir if home_dir is not None else Path.home()
-    greeting_path = base.joinpath(*relparts)
+    label = relparts[-1]
     try:
-        content = greeting_path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return default
-    except (OSError, UnicodeDecodeError) as exc:
+        content, label = _read_override(relparts, home_dir)
+    except (OSError, UnicodeDecodeError, RuntimeError) as exc:
         logger.warning(
-            "clawchat: failed to read greeting override %s: %s", greeting_path, exc
+            "clawchat: failed to read greeting override %s: %s", label, exc
         )
+        return default
+    if content is None:
         return default
     stripped = content.strip()
     return stripped or default
@@ -87,14 +110,15 @@ def load_activation_bootstrap_prompt(
 ) -> str:
     """Return the first-load greeting prompt, in the owner's language.
 
-    If ``~/clawchat/greeting.md`` exists and is non-empty after stripping, its
+    If ``$HERMES_HOME/clawchat/greeting.md`` exists and is non-empty after
+    stripping (the default profile also falls back to ``~/clawchat/``), its
     content replaces the built-in prompt **body**. The language instruction is
     appended either way *when the language is known*: the override says what to
     say, not which language to say it in. When ``language`` is ``None`` no line
     is appended at all — see :func:`_with_language_line`. A missing file, an
     empty file, or any read error falls back to
     :data:`ACTIVATION_BOOTSTRAP_PROMPT`. ``home_dir`` is injectable for tests
-    and defaults to the real home directory.
+    and pins a single ``<home_dir>/clawchat/`` lookup.
     """
     base = _load_prompt_with_override(
         _GREETING_FILE_RELPARTS, ACTIVATION_BOOTSTRAP_PROMPT, home_dir
@@ -108,7 +132,7 @@ def load_friend_greeting_prompt(
     """Return the first-message prompt for a newly added non-owner friend.
 
     Same override contract as :func:`load_activation_bootstrap_prompt` — the
-    file is ``~/clawchat/friend-greeting.md``, the fallback is
+    file is ``$HERMES_HOME/clawchat/friend-greeting.md``, the fallback is
     :data:`FRIEND_GREETING_PROMPT`, and the override replaces the prompt
     **body** only: the language instruction is appended when known, since the
     override says what to say, not which language to say it in. A ``None``

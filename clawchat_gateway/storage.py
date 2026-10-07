@@ -231,10 +231,12 @@ def is_default_profile() -> bool:
 
     Hermes runs one gateway process per profile, but some ClawChat features own
     *host-global* singletons that co-located profiles cannot share — notably the
-    Liveware Sample demo, which binds a fixed TCP port and authenticates the
-    external ``liveware`` CLI against ``$HOME/.clawling`` (``$HOME`` is shared
-    across profiles, not per-``HERMES_HOME``). Such features gate on this so only
-    the primary agent owns the shared resource; named profiles skip it.
+    Liveware Sample demo, which binds a fixed TCP port. (Its ``liveware`` CLI
+    login store under ``$HOME/.clawling`` is host-wide as well, but each call
+    names the agent's own ``--account``.) Such features gate on this so only
+    the primary agent owns the shared resource; named profiles skip it. Also
+    decides whether the legacy ``~/clawchat/`` agent files are still read
+    (``agent_files``): only the default profile may fall back to them.
     """
     return _active_profile_name() == "default"
 

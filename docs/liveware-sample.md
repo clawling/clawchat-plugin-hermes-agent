@@ -15,9 +15,8 @@ Source: `clawchat_gateway/liveware_sample.py` (`LivewareSampleSupervisor` /
 
 The supervisor is created and `start()`ed once per adapter instance, the
 first time the platform reaches `ConnectionState.READY` — **but only for the
-Hermes default profile.** Liveware owns *host-global* singletons (a fixed TCP
-port and the shared `$HOME/.clawling` CLI login, keyed off `$HOME` rather than
-`HERMES_HOME`) that co-located profiles cannot share, so
+Hermes default profile.** The sample binds a fixed TCP port that co-located
+profiles cannot share, so
 `_schedule_liveware_sample` gates on `storage.is_default_profile()` and returns
 immediately for any named profile (`hermes -p <name>`); only the primary/"main"
 agent boots liveware. Past that gate, `start()` itself decides whether to
@@ -87,7 +86,14 @@ own. Only a genuine **opt-out** returns without scheduling anything:
    sample page uses that id to render a one-tap `clawchat://u/{id}?chat=1`
    back-to-chat deep link; with no id (older/relaunched-without-id cases) the
    page falls back to its plain-text guidance instead of the link.
-6. `liveware login` with the resolved token, then **reuse-or-create** the app:
+6. `liveware login` with the resolved token, then **reuse-or-create** the app.
+   Every CLI call in this flow (`login`, `app list`, `app create`,
+   `tunnel bind`, `status`, `agent`) ends with `--account <agent id,
+   lowercased>` (`deps.resolve_liveware_account`,
+   `liveware_cli.liveware_account_name`): the CLI keeps all logins in one
+   host-wide `~/.clawling/liveware.json` keyed by account, and a call without
+   `--account` runs as the first agent on the host that logged in.
+   Reuse-or-create:
    `liveware app list` is parsed for an existing app already named
    `Liveware Sample` (`liveware_app_find_by_name` → `find_app_id_by_name`) and
    its id is reused; only if nothing is found does `liveware app create` run.
@@ -352,6 +358,11 @@ the exact JSON shapes — this doc does not duplicate them.
   this case; if the warning `relaunch re-login failed; continuing with cached
   CLI credentials` appears, the token itself is also bad — re-check the
   ClawChat access token before blaming the tunnel.
+- **Apps or tunnels recorded under another agent on the same host**: a plugin
+  older than `0.14.0-103` ran every CLI command without `--account`, i.e. as the
+  CLI's default account, which is whichever agent logged in first. Since then
+  every call names this agent's account; `liveware app list --account <id>`
+  shows what each agent owns.
 - **Row stuck at `status="pending"`**: `app create` succeeded but registration
   with ClawChat never did. This is a normal, recoverable state — the next
   `_relaunch` (reconnect, crash-restart, or next boot) re-binds and registers the

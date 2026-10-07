@@ -121,7 +121,7 @@ def build_plugin_report_payload(
     """Pure builder for the plugin-report wire body (snake_case keys).
 
     ``onboarding`` carries the already-validated agent-written facts from
-    ``~/clawchat/onboarding.json`` (see ``clawchat_gateway.onboarding_report``);
+    ``$HERMES_HOME/clawchat/onboarding.json`` (see ``clawchat_gateway.onboarding_report``);
     only the four contract keys are ever merged in.
     """
     payload = {

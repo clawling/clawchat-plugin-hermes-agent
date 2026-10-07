@@ -189,7 +189,7 @@ not the owner, the adapter resolves the new direct conversation through
 `POST /v1/conversations/direct` (the signal only carries the counterparty
 `usr_…` id; the server created the conversation inside the accept transaction)
 and runs one synthetic turn in it with the prompt from
-`~/clawchat/friend-greeting.md`, falling back to the built-in
+`$HERMES_HOME/clawchat/friend-greeting.md`, falling back to the built-in
 `greeting.FRIEND_GREETING_PROMPT`. Both directions count — someone adding the
 agent (auto-accepted by the `friend.accept` policy) and the agent's own request
 being accepted. The owner's `friend.added` is skipped (the activation bootstrap
@@ -200,7 +200,8 @@ twice; a failed conversation lookup is logged and dropped. The default is
 (`adapter._schedule_friend_greeting` / `adapter._dispatch_friend_greeting`).
 This flag is independent of `awareness_note`.
 
-Both `~/clawchat/greeting.md` and `~/clawchat/friend-greeting.md` are
+Both `greeting.md` and `friend-greeting.md` (see
+[the agent's own files](#the-agents-own-files) for where they live) are
 **partial** overrides, not full replacements: whichever body they supply (or
 the built-in fallback, if the file is absent/empty/unreadable) gets a trailing
 `Reply in <Language>.` instruction appended — the override says what to say,
@@ -221,6 +222,28 @@ The friend-greeting turn uses the **owner's** resolved language even though its
 recipient is the new friend, not the owner: friends are usually in the same
 language circle, and the backend only exposes `locale` on the owner profile
 endpoint, so no third-party locale is obtainable.
+
+### The agent's own files
+
+`greeting.md`, `friend-greeting.md` and `onboarding.json` belong to one agent,
+and every Hermes profile is a separate agent, so they live in the profile:
+**`$HERMES_HOME/clawchat/`** (`clawchat_gateway.agent_files`, resolved through
+`hermes_home()`, which follows a multiplexing gateway's per-profile home).
+They used to be read from `~/clawchat/`, which every profile on the host shares,
+so one agent's greeting and onboarding facts (capability tier, wiki report id)
+became every agent's.
+
+| Profile | Read order |
+|---|---|
+| default | `$HERMES_HOME/clawchat/<file>`, then the legacy `~/clawchat/<file>` |
+| named (`hermes -p <name>`) or a custom `HERMES_HOME` | `$HERMES_HOME/clawchat/<file>` only |
+
+Only a missing file falls back; a present but empty `greeting.md` /
+`friend-greeting.md` is a reset to the built-in prompt even when a legacy file
+exists. The agent is told the absolute directory in every turn in its owner's
+direct chat (a `## ClawChat Agent Files` section with `agent_files_dir`), so it
+never has to build the path from `~`: Hermes may run the agent's shell with a
+different `HOME` (in a container it is `$HERMES_HOME/home`).
 
 `liveware_sample` controls the Liveware Sample demo-app auto-boot on first
 activation. The default is `true`; set it to `false` explicitly to disable

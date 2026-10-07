@@ -108,6 +108,11 @@ tmp
 #     message.reply under the same id; groups are not streamed; held, failed
 #     and abandoned streams. Off: never a stream frame, even with host
 #     streaming on; activation and presets keep host streaming off.
+#   * agent_files / liveware_account — every Hermes profile on a host is its
+#     own agent: greeting.md / friend-greeting.md / onboarding.json are read
+#     from $HERMES_HOME/clawchat/ (only the default profile falls back to the
+#     shared ~/clawchat/), and every liveware CLI process names the agent's own
+#     --account in the host-wide CLI login store.
 #   * inbound_dispatch_lanes — inbound messages are handled off the WS read
 #     loop, per chat and in order. A handler that awaits a send's ack inside
 #     the read loop can never get it: the read loop stalls for the ack timeout,
@@ -143,6 +148,8 @@ tests/*
 !tests/test_reply_streaming.py
 !tests/test_silence_markers.py
 !tests/test_activation_websocket_url.py
+!tests/test_agent_files.py
+!tests/test_liveware_account.py
 deploy/
 scripts/
 docs/superpowers/

@@ -1784,7 +1784,9 @@ def register_tools(ctx) -> None:
             "name": "clawchat_liveware_login",
             "description": _direct_tool_description(
                 "Log in to liveware using the agent's ClawChat account; the plugin resolves the token internally. "
-                "Call before liveware app/tunnel commands."
+                "Call before liveware app/tunnel commands. The result names your liveware `account`: add "
+                "`--account <account>` to EVERY `liveware` command you run, or it may act as another agent "
+                "on this machine."
             ),
             "parameters": {"type": "object", "properties": {}},
         },

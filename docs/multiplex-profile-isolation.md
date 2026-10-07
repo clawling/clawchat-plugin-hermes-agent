@@ -50,6 +50,24 @@ place: `liveware_cli` (a host-level binary cache downloaded once per process)
 and `profile_collision` (it needs the native/root home precisely to notice that
 two profiles share one identity).
 
+Two kinds of per-agent state live OUTSIDE `$HERMES_HOME` by nature and are
+isolated another way:
+
+- **The agent's own files** (`greeting.md`, `friend-greeting.md`,
+  `onboarding.json`) moved from the shared `~/clawchat/` into
+  `$HERMES_HOME/clawchat/` (`clawchat_gateway.agent_files`). Only the default
+  profile still falls back to `~/clawchat/`; a named profile never reads it,
+  since there it is another agent's. See
+  [configuration.md](configuration.md#the-agents-own-files).
+- **The liveware CLI login** stays in the host-wide `~/.clawling/liveware.json`
+  (the CLI has no per-home config and Hermes strips `*_TOKEN` variables, so no
+  env injection either). The store is keyed by account (the token's `aid`,
+  lowercased), so every CLI process the plugin starts appends
+  `--account <agent id, lowercased>`, and `clawchat_liveware_login` returns that
+  account name and tells the agent to add `--account` to every `liveware`
+  command it runs itself. Without it a command runs as the CLI's default account
+  — the first agent on the host that logged in.
+
 Device identity keeps the current paired-device compatibility rules and named
 profile suffix. Only the host fingerprint is globally cached; explicit device
 IDs and profile suffixes are resolved per call. The `functools.lru_cache` moved

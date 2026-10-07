@@ -302,6 +302,16 @@ there. Read [multiplex-profile-isolation.md](multiplex-profile-isolation.md) for
 what is isolated and how to verify a deployment; multiplexing needs plugin
 `0.14.0-89` or newer.
 
+Before `0.14.0-89`, a multiplexing gateway kept ONE connection supervisor per
+process (keyed by the account id `default`, which every profile shares), so
+starting the second profile's ClawChat connection stopped the first one's
+(`supervisor_superseded ... reason=replaced by fresh connection` in the log):
+binding the second agent took the first one offline. Upgrade first.
+
+Each profile also has its own greeting overrides and onboarding facts in
+`$HERMES_HOME/clawchat/`, and its own liveware CLI account (`--account <agent
+id>`); see [multiplex-profile-isolation.md](multiplex-profile-isolation.md).
+
 Repeat with a different profile name for each agent. The default profile keeps
 its database at `$HERMES_HOME/clawchat/clawchat.sqlite`; named profiles use
 `clawchat-<profile>.sqlite`.

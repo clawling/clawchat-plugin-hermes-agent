@@ -45,6 +45,27 @@ def liveware_dir() -> Path:
     return _hermes_home() / "clawchat" / "liveware"
 
 
+def liveware_account_name(agent_id: str | None) -> str | None:
+    """The liveware CLI account that belongs to this ClawChat agent.
+
+    The CLI keeps every login in one host-wide file (``~/.clawling/liveware.json``,
+    under the OS home, not ``$HERMES_HOME``) keyed by account, and ``login``
+    names the account after the token's ``aid`` claim, lowercased. Two Hermes
+    profiles on one host are two agents sharing that file, and a command
+    without ``--account`` runs as the DEFAULT account, i.e. whichever agent
+    logged in first. So every CLI call names this agent's account explicitly.
+    ``None`` when the agent id is unknown: the call then falls back to the
+    CLI's default account, the pre-isolation behaviour.
+    """
+    value = (agent_id or "").strip().lower()
+    return value or None
+
+
+def liveware_account_args(account: str | None) -> list[str]:
+    """``["--account", account]`` — appended to every ``liveware`` argv — or ``[]``."""
+    return ["--account", account] if account else []
+
+
 def liveware_binary_name(system: str | None = None) -> str:
     """Local filename for the downloaded binary; Windows needs a .exe suffix."""
     sys_name = (system or platform.system()).lower()

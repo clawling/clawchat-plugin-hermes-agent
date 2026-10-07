@@ -1,7 +1,8 @@
 """Agent-written onboarding facts relayed on the plugin-report call.
 
 After following the connection wiki the agent may write
-``~/clawchat/onboarding.json`` (same directory as ``greeting.md``) with the id
+``$HERMES_HOME/clawchat/onboarding.json`` (same directory as ``greeting.md``;
+the default profile also falls back to ``~/clawchat/``) with the id
 of the field report it filed there and its self-assessed capability tier. The
 plugin validates and relays; it never files a wiki report itself, and no
 ClawChat id ever flows the other way.
@@ -13,6 +14,8 @@ import json
 import re
 from pathlib import Path
 from typing import Any
+
+from clawchat_gateway.agent_files import ONBOARDING_FILE, read_agent_file
 
 _REPORT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _CAP_KEYS = ("headless", "mcp", "permission_hook", "session_line")
@@ -38,8 +41,13 @@ def read_onboarding_report(home_dir: Path | None = None) -> dict[str, Any] | Non
     # no valid fields — this must be safe to call unconditionally from a
     # best-effort report path.
     try:
-        base = home_dir if home_dir is not None else Path.home()
-        raw = json.loads((base / "clawchat" / "onboarding.json").read_text(encoding="utf-8"))
+        if home_dir is not None:
+            text = (home_dir / "clawchat" / ONBOARDING_FILE).read_text(encoding="utf-8")
+        else:
+            text = read_agent_file(ONBOARDING_FILE)
+        if text is None:
+            return None
+        raw = json.loads(text)
     except Exception:  # noqa: BLE001 — absent or unreadable == nothing to relay
         return None
     if not isinstance(raw, dict):

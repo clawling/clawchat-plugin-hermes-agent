@@ -103,6 +103,7 @@ from clawchat_gateway.mention_message import (
     normalize_mention_targets,
     validate_mention_payload,
 )
+from clawchat_gateway.agent_files import agent_files_dir
 from clawchat_gateway.onboarding_report import read_onboarding_report
 from clawchat_gateway.owner_language import resolve_owner_language_if_known
 from clawchat_gateway.profile import load_profile_config
@@ -2629,10 +2630,11 @@ class ClawChatAdapter(BasePlatformAdapter):
         rather than replaced; a later ``READY`` only asks it to
         ``start_if_idle()``.
         """
-        # Liveware owns host-global singletons (a fixed TCP port and the shared
-        # ``$HOME/.clawling`` CLI login) that co-located profiles cannot share,
-        # so only the primary/"main" agent — the Hermes default profile — boots
-        # it. Named profiles skip liveware entirely to avoid port/login clashes.
+        # The sample binds a fixed TCP port that co-located profiles cannot
+        # share, so only the primary/"main" agent — the Hermes default profile —
+        # boots it. (The CLI login store under ``$HOME/.clawling`` is shared too,
+        # but every CLI call names this agent's ``--account``, so it is not the
+        # reason any more.)
         if not is_default_profile():
             return
         if self._store is None:
@@ -2679,6 +2681,13 @@ class ClawChatAdapter(BasePlatformAdapter):
                 token = ""
             return token or self._clawchat_config.token or ""
 
+        def _resolve_agent_id() -> str:
+            try:
+                agent_id = load_profile_config().agent_id
+            except Exception:  # noqa: BLE001 — fall back to the live config
+                agent_id = ""
+            return agent_id or self._clawchat_config.agent_id or ""
+
         deps = LivewareSampleDeps(
             platform=CLAWCHAT_PLUGIN_PLATFORM,
             account_id="default",
@@ -2687,6 +2696,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             sample_root=sample_root,
             resolve_token=_resolve_token,
             resolve_liveware_path=resolve_liveware_path,
+            resolve_liveware_account=_resolve_agent_id,
             resolve_agent_user_id=lambda: (self._clawchat_config.user_id or None),
             wait_cli_ready=wait_liveware_cli_ready,
             resolve_owner_locale=self._owner_locale,
@@ -4128,6 +4138,14 @@ class ClawChatAdapter(BasePlatformAdapter):
                     agent_profile_section,
                 )
             )
+        if inbound.chat_type != "group" and inbound.sender_id == self._owner_user_id():
+            parts.append(
+                self._channel_prompt_part(
+                    "agent-files",
+                    "metadata",
+                    self._format_agent_files_section(),
+                )
+            )
         for index, section in enumerate(
             self._format_owner_metadata_sections(owner_metadata)
         ):
@@ -4312,6 +4330,26 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
         fields = self._format_fields(tuple(profile.items()))
         return f"## ClawChat Agent Profile\n{fields}" if fields else None
+
+    def _format_agent_files_section(self) -> str | None:
+        """The absolute directory of this agent's own files (owner DM only).
+
+        ``greeting.md``, ``friend-greeting.md`` and ``onboarding.json`` are per
+        profile (``agent_files``). The agent must not build the path from
+        ``~``: Hermes may run its shell with a different ``HOME`` (a container
+        sets it to ``$HERMES_HOME/home``), and ``~/clawchat`` is shared by
+        every profile on the host. Shown only to the owner: it is a local path.
+        """
+        try:
+            directory = str(agent_files_dir())
+        except Exception:  # noqa: BLE001 — never fail a turn over a path
+            return None
+        return (
+            "## ClawChat Agent Files\n"
+            f"- agent_files_dir: {directory}\n"
+            f"- greeting.md, friend-greeting.md and onboarding.json for THIS agent "
+            "live in agent_files_dir. Use that absolute path; never ~/clawchat."
+        )
 
     def _format_turn_metadata_section(
         self,
