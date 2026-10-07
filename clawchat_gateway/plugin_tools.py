@@ -1482,7 +1482,8 @@ def register_tools(ctx) -> None:
             "description": _direct_tool_description(
                 "Create a new ClawChat moment/dynamic for the configured ClawChat account. "
                 "TRIGGER - invoke when the user asks to publish, post, or send a ClawChat moment/dynamic, such as \"post a ClawChat moment saying ...\" or \"share this as a ClawChat moment\". "
-                "At least one of text or images must be present. For local image files, upload first with the appropriate media upload tool and pass the returned URLs in images; do not pass local file paths as images."
+                "At least one of text or images must be present. Each image is an http(s) URL or the absolute path of a local image file; "
+                "the plugin uploads local files itself and publishes their URLs. Any other value (relative or ~ path, file://, missing file) is rejected and no moment is created."
             ),
             "parameters": {
                 "type": "object",
@@ -1491,7 +1492,7 @@ def register_tools(ctx) -> None:
                     "images": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Image URLs for the moment. Upload local files first; do not pass local paths.",
+                        "description": "Moment images: http(s) URLs, or absolute local image file paths (uploaded automatically).",
                     },
                 },
             },

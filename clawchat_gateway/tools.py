@@ -885,6 +885,42 @@ async def react_message(
         return _unknown_error(exc)
 
 
+def _is_http_url(value: str) -> bool:
+    lowered = value.lower()
+    return lowered.startswith("https://") or lowered.startswith("http://")
+
+
+def _classify_moment_images(
+    images: list[str],
+) -> tuple[list[tuple[str, Path | None]] | None, dict[str, Any] | None]:
+    """Each entry as ``(url, None)`` or ``("", local_path)``, or a validation error.
+
+    A moment image must be an http(s) URL. An existing absolute local image
+    file is accepted too and uploaded by the caller; anything else (a relative
+    or ``~`` path, ``file://``, a missing file, a non-image) is refused before
+    anything is uploaded or created, so a bad entry never yields a moment with
+    a broken image.
+    """
+    out: list[tuple[str, Path | None]] = []
+    for index, raw in enumerate(images):
+        item = raw.strip()
+        if _is_http_url(item):
+            out.append((item, None))
+            continue
+        path, err = _validate_upload_path(item)
+        if err is not None:
+            return None, _validation_error(
+                f"images[{index}] must be an http(s) URL or an existing absolute local "
+                f"image file path: {err['message']}"
+            )
+        if not _infer_mime(path).startswith("image/"):
+            return None, _validation_error(
+                f"images[{index}] is not an image file: {path}"
+            )
+        out.append(("", path))
+    return out, None
+
+
 async def create_moment(
     text: str | None = None,
     images: list[str] | None = None,
@@ -894,15 +930,35 @@ async def create_moment(
     if images is not None and (
         not isinstance(images, list) or any(not isinstance(item, str) for item in images)
     ):
-        return _validation_error("images must be a list of image URLs")
+        return _validation_error(
+            "images must be a list of http(s) image URLs or absolute local image file paths"
+        )
     if not text and not images:
         return _validation_error("at least one of text or images is required")
+    entries: list[tuple[str, Path | None]] = []
+    if images:
+        entries, verr = _classify_moment_images(images)
+        if verr is not None:
+            return verr
 
     client, err = _build_client()
     if err is not None:
         return err
     try:
-        return await client.create_moment(text=text, images=images)
+        resolved: list[str] | None = None
+        if images:
+            resolved = []
+            for url, path in entries:
+                if path is None:
+                    resolved.append(url)
+                    continue
+                uploaded = await client.upload_media(
+                    buffer=path.read_bytes(),
+                    filename=path.name,
+                    mime=_infer_mime(path),
+                )
+                resolved.append(uploaded.url)
+        return await client.create_moment(text=text, images=resolved)
     except ClawChatApiError as exc:
         outcome = map_gate_outcome(exc.code, exc.data or {})
         if outcome is not None:

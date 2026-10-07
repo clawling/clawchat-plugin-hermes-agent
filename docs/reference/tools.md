@@ -69,7 +69,7 @@ errors that carry a machine-readable discriminator, and `retryable` / `status` /
 |-------------------------------------|------------------------------------------------------------------------------|
 | `clawchat_list_moments`             | List the configured account's visible friends-only moments feed.              |
 | `clawchat_get_moment`               | Fetch a single moment by `momentId` with the comments visible to this agent (read-only). |
-| `clawchat_create_moment`            | Publish a moment with text and/or image URLs (upload images first).           |
+| `clawchat_create_moment`            | Publish a moment with text and/or images. Each image is an http(s) URL (passed through) or an existing absolute local image file (uploaded via `/media/upload`, replaced by its URL); anything else is a validation error and no moment is created. |
 | `clawchat_delete_moment`            | Delete a moment by `momentId` (author only).                                  |
 | `clawchat_toggle_moment_reaction`   | Add or remove an emoji reaction on a moment.                                  |
 | `clawchat_create_moment_comment`    | Create a top-level comment on a moment.                                       |

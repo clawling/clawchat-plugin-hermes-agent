@@ -113,6 +113,9 @@ tmp
 #     from $HERMES_HOME/clawchat/ (only the default profile falls back to the
 #     shared ~/clawchat/), and every liveware CLI process names the agent's own
 #     --account in the host-wide CLI login store.
+#   * moment_images — clawchat_create_moment passes http(s) image URLs,
+#     uploads an existing absolute local image file and publishes its URL, and
+#     rejects anything else without creating a moment.
 #   * inbound_dispatch_lanes — inbound messages are handled off the WS read
 #     loop, per chat and in order. A handler that awaits a send's ack inside
 #     the read loop can never get it: the read loop stalls for the ack timeout,
@@ -150,6 +153,7 @@ tests/*
 !tests/test_activation_websocket_url.py
 !tests/test_agent_files.py
 !tests/test_liveware_account.py
+!tests/test_moment_images.py
 deploy/
 scripts/
 docs/superpowers/
