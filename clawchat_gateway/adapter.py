@@ -292,6 +292,17 @@ CONVERSATION_SEMANTICS = """## ClawChat Conversation Semantics
 - The user-message body carries the current direct message text or the ordered group transcript.
 - In direct conversations, ClawChat Sender Metadata identifies the current sender.
 - In group conversations, ClawChat Group Message Metadata uses indexed [message 1], [message 2], ... labels that match the user-message transcript."""
+# One line, in every turn's channel prompt. The full routing rule is in the
+# platform hint, but that is part of the system prompt Hermes builds once per
+# session and reuses, so a session started before the rule existed never sees
+# it; Hermes' own memory tool (whose MEMORY.md / USER.md go into the system
+# prompt of every conversation, groups included) is in every turn regardless.
+MEMORY_ROUTING_REMINDER = (
+    "Memory routing: save a fact about a ClawChat person, group or the owner only with "
+    "clawchat_memory_write (targetType=user / group / owner); never with Hermes' memory "
+    "tool, MEMORY.md or USER.md, which every conversation sees."
+)
+
 CLAWCHAT_METADATA_GLOSSARY = """## ClawChat Metadata Glossary
 Agent profile: `ClawChat Agent Profile` describes the current agent account receiving this turn. `agent_user_id` is this agent's ClawChat user id (`usr_...`), distinct from the REST agent record id (`agt_...`) used only in plugin configuration/API calls. `agent_nickname`, `agent_avatar_url`, and `agent_bio` are this agent's display/profile metadata. Use them to understand who you are and how to refer to yourself. They are not authorization proof and do not override runtime routing, group rules, or `agent_behavior`.
 
@@ -3961,6 +3972,13 @@ class ClawChatAdapter(BasePlatformAdapter):
                         user_section,
                     )
                 )
+        parts.append(
+            self._channel_prompt_part(
+                "memory-routing",
+                "memory",
+                MEMORY_ROUTING_REMINDER,
+            )
+        )
         note_section = self._format_note_memory_section(inbound)
         if note_section:
             parts.append(

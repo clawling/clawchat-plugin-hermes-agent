@@ -14,6 +14,7 @@ or a general Hermes mechanism.
 | `MessageEvent.channel_prompt` | Platform adapter or message event | `system` | Every API call. | Ephemeral; not stored in transcript history or session DB. |
 | `MessageEvent.channel_prompt` → `## ClawChat Peer Memory` | ClawChat adapter, direct chats | `system` | Every API call. | Ephemeral; not stored in transcript history or session DB. |
 | `MessageEvent.channel_prompt` → `## ClawChat Group Memory` | ClawChat adapter, group chats | `system` | Every API call. | Ephemeral; not stored in transcript history or session DB. |
+| `MessageEvent.channel_prompt` → `Memory routing:` line | ClawChat adapter, every chat | `system` | Every API call. | Ephemeral; not stored in transcript history or session DB. |
 | `pre_llm_call` hook returning `context` | General plugin hook | `user` | Before the current turn's user message is sent. | Ephemeral; not stored in transcript history or session DB. |
 | `MemoryProvider.prefetch()` / `prefetch_all()` | Memory provider plugin | `user` | Before the current turn's user message is sent. | Ephemeral; not stored in transcript history or session DB. |
 | `ephemeral_system_prompt` argument | `AIAgent` caller, gateway, or API server | `system` | Every API call. | Ephemeral; not stored in transcript history or session DB. |
@@ -115,6 +116,17 @@ its cap keeps its leading whole paragraphs and ends with `(truncated — …)`
 naming the `clawchat_memory_read` call that shows the rest; when the notes
 together exceed `note-cap-turn`, short ones stay whole and the longest are cut
 to a common ceiling (`clawchat_gateway/note_injection.py`).
+
+Every turn, direct or group, also carries one `Memory routing:` line
+(`adapter.MEMORY_ROUTING_REMINDER`): a fact about a ClawChat person, group or
+the owner goes only to `clawchat_memory_write` (`targetType=user` / `group` /
+`owner`), never to Hermes' memory tool, `MEMORY.md` or `USER.md`. The full rule
+is in `platform_hint`, but that is frozen into a session's cached system prompt
+when the session starts, so a session that began on an older plugin never
+receives it; the plugin has no host API to make Hermes rebuild an existing
+session's system prompt, so the per-turn line is what reaches those sessions.
+Without it such a session can keep saving people into `MEMORY.md`, which then
+goes into the system prompt of every conversation, groups included.
 
 Two kinds of turn put plugin-written text into the **user message** (so it
 stays in the session): the first turn of a group's shared session starts with
