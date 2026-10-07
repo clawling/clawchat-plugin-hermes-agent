@@ -3773,10 +3773,12 @@ class ClawChatAdapter(BasePlatformAdapter):
         reply_to_message_id, reply_to_text = self._extract_reply_fields(
             inbound.reply_preview
         )
+        chat_name, user_name = self._session_names(inbound)
         source = self.build_source(
             chat_id=inbound.chat_id,
             user_id=self._session_user_id_for_inbound(inbound),
-            chat_name=inbound.chat_id,
+            chat_name=chat_name,
+            user_name=user_name,
             chat_type=self._map_source_chat_type(inbound.chat_type),
         )
         downloaded_media = await self._download_inbound_media(inbound)
@@ -4117,6 +4119,29 @@ class ClawChatAdapter(BasePlatformAdapter):
             # GROUP_SHARED_SESSION_USER_ID definition for the full rationale.
             return GROUP_SHARED_SESSION_USER_ID
         return inbound.sender_id
+
+    def _session_names(self, inbound: InboundMessage) -> tuple[str, str | None]:
+        """``(chat_name, user_name)`` for the Hermes session source.
+
+        Hermes shows ``chat_name`` in its session list and resolves "send to
+        <name>" through it (channel directory), so a bare ``cnv_`` id helps no
+        one. A direct chat is named after the peer; a group after its title.
+        A group shares one session among all speakers, so its ``user_name``
+        stays empty unless the operator configured per-speaker group sessions:
+        the current speaker is not the session's user. Cached metadata only,
+        no network; the conversation id remains the fallback.
+        """
+        if inbound.chat_type == "group":
+            title = (self._read_memory_metadata("group", inbound.chat_id).get("group_title") or "").strip()
+            user_name: str | None = None
+            if effective_group_sessions_per_user(self._clawchat_config, inbound.chat_id):
+                speaker = self._resolve_sender_name(inbound)
+                user_name = speaker if speaker and speaker != inbound.sender_id else None
+            return title or inbound.chat_id, user_name
+        peer = self._resolve_sender_name(inbound)
+        if peer and peer != inbound.sender_id:
+            return peer, peer
+        return inbound.chat_id, None
 
     async def _ensure_group_participants_metadata(self, group_id: str) -> None:
         if not group_id:

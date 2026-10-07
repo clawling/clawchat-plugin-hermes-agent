@@ -456,6 +456,16 @@ host-wide setting, which defaults to `true`, so its presence there says nothing
 about the operator. Hermes' host-wide `group_sessions_per_user` does not apply to
 ClawChat groups.
 
+**Session names.** The session source the adapter builds
+(`ClawChatAdapter._session_names`) names a group session after the group's
+title (`group_title` in the group's metadata) and leaves `user_name` empty,
+since the current speaker is not the shared session's user; a per-speaker
+group session (above) also gets the speaker's nickname. A direct chat's
+`chat_name` and `user_name` are the peer's nickname (the owner's in the owner's
+chat). Hermes shows `chat_name` in its session list and resolves "send to
+<name>" through it. With nothing cached yet, `chat_name` is the conversation
+id, as before.
+
 ### Group session seeding and queueing
 
 **Seeding.** The first turn of a group's shared session — the first group turn
