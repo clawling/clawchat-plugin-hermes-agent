@@ -2882,8 +2882,9 @@ class ClawChatAdapter(BasePlatformAdapter):
         Why: hermes-agent has been observed to enter an interrupt-loop where
         it treats its own outbound chunks as new user input. This emits one
         log line per inbound frame with the fields needed to confirm/refute
-        that hypothesis (sender_id vs bot user_id, message_id, text head),
-        and warns when the per-chat rate exceeds a sane threshold.
+        that hypothesis (sender_id vs bot user_id, message_id, text head).
+        The per-chat rate warning is :meth:`_note_inbound_rate`, counted only
+        after the self-echo drop and the message-id dedupe.
 
         Returns ``True`` when the frame is a self-echo (``sender.id`` equals
         this agent's own user id). The caller MUST drop such frames before
@@ -2942,6 +2943,16 @@ class ClawChatAdapter(BasePlatformAdapter):
             text_head,
         )
 
+        return is_self_echo
+
+    def _note_inbound_rate(self, chat_id: str) -> None:
+        """Warn when one chat delivers too many NEW messages in a short window.
+
+        Called only for a message that passed the self-echo drop and the
+        message-id dedupe: replays and redeliveries in a busy group are not a
+        loop, and counting them made the warning fire constantly. Our own
+        echoes are already dropped, so they cannot loop either.
+        """
         now = time.monotonic()
         window = self._inbound_window.setdefault(chat_id, deque())
         window.append(now)
@@ -2956,8 +2967,6 @@ class ClawChatAdapter(BasePlatformAdapter):
                 len(window),
                 INBOUND_RATE_WINDOW_SECONDS,
             )
-
-        return is_self_echo
 
     async def _on_message(self, frame: dict[str, Any]) -> None:
         # ANY inbound frame naming this chat is authoritative proof the server
@@ -3039,14 +3048,6 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
             return
         if self._is_chat_dead(inbound.chat_id):
-            # _trace_inbound_frame() (called unconditionally above, before this
-            # chat is known to be dead) recreates an _inbound_window entry via
-            # setdefault() on every frame. Without this pop, a replayed frame
-            # for an already-evicted chat would silently resurrect the entry
-            # _evict_chat_state() just dropped, and could even trip the
-            # inbound-rate-spike warning for a conversation that no longer
-            # exists.
-            self._inbound_window.pop(inbound.chat_id, None)
             logger.debug(
                 "clawchat inbound dropped chat_id=%s reason=conversation_dissolved",
                 inbound.chat_id,
@@ -3103,6 +3104,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                     claimed,
                 )
                 return
+            self._note_inbound_rate(inbound.chat_id)
             self._remember_reply_preview(
                 message_id=protocol_message_id, inbound=inbound
             )

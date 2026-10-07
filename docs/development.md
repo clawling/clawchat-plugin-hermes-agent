@@ -90,6 +90,13 @@ The runtime hook
 when it drops a self-echo frame — useful for confirming the plugin is
 loaded.
 
+`clawchat_gateway.inbound_trace` logs one line per inbound frame and warns
+`inbound rate spike ... (possible self-echo / interrupt loop)` when one chat
+delivers 5 new messages within 30 s. Only messages that passed the self-echo
+drop and the message-id dedupe count, so replays and redeliveries in a busy
+group do not trip it; a warning means that many distinct messages really
+reached the agent.
+
 ## Consulting Hermes host source
 
 When a question crosses into Hermes host behavior — plugin SDK contract,

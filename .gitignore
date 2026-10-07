@@ -129,6 +129,8 @@ tmp
 #     the agent; approved = done, do not call again; only approved_retry asks
 #     for one more call; refusals never retry; unknown outcomes are not
 #     refusals; window-settled receipts make no turn.
+#   * inbound_rate_warning — the rate-spike warning counts only messages that
+#     passed the self-echo drop and the message-id dedupe.
 #   * inbound_dispatch_lanes — inbound messages are handled off the WS read
 #     loop, per chat and in order. A handler that awaits a send's ack inside
 #     the read loop can never get it: the read loop stalls for the ack timeout,
@@ -171,6 +173,7 @@ tests/*
 !tests/test_friend_greeting_nickname.py
 !tests/test_session_names.py
 !tests/test_permission_result_receipt.py
+!tests/test_inbound_rate_warning.py
 deploy/
 scripts/
 docs/superpowers/
