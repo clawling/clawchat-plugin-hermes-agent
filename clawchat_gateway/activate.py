@@ -59,6 +59,19 @@ CLAWCHAT_AGENT_DEFAULTS = {
     "gateway_timeout_warning": 0,
 }
 
+# Hermes' built-in memory is single-user: its USER.md target and USER PROFILE
+# block describe "the person you are talking to", and its background review
+# keeps writing that person into USER.md / MEMORY.md. A ClawChat agent talks to
+# many people, whose facts belong in the plugin's per-person and per-group notes
+# (users/<id>.md, groups/<id>.md, owner.md). memory_enabled is left alone:
+# MEMORY.md stays the agent's global notebook for facts unrelated to who it is
+# talking to. nudge_interval only switches off the memory half of the
+# background review; the skill half has its own interval.
+CLAWCHAT_MEMORY_DEFAULTS = {
+    "user_profile_enabled": False,
+    "nudge_interval": 0,
+}
+
 CLAWCHAT_DISPLAY_DEFAULTS = {
     "tool_progress": "off",
     "show_reasoning": False,
@@ -397,6 +410,80 @@ def _ensure_clawchat_agent_defaults(config: dict[str, Any]) -> None:
         agent[key] = value
 
 
+def _config_section(config: dict[str, Any], name: str) -> dict[str, Any]:
+    section = config.setdefault(name, {})
+    if not isinstance(section, dict):
+        section = {}
+        config[name] = section
+    return section
+
+
+def _ensure_clawchat_memory_defaults(
+    config: dict[str, Any], *, overwrite: bool = True
+) -> bool:
+    """Apply ``CLAWCHAT_MEMORY_DEFAULTS``; return True when anything changed.
+
+    Activation overwrites (like the agent / global display defaults); plugin
+    load only fills keys that are missing so an operator's own value survives.
+    """
+    memory = config.get("memory")
+    if not overwrite and isinstance(memory, dict) and all(
+        key in memory for key in CLAWCHAT_MEMORY_DEFAULTS
+    ):
+        return False
+    memory = _config_section(config, "memory")
+    changed = False
+    for key, value in CLAWCHAT_MEMORY_DEFAULTS.items():
+        if not overwrite and key in memory:
+            continue
+        if key not in memory or memory[key] != value:
+            changed = True
+        memory[key] = value
+    return changed
+
+
+def _hint_user_md_migration(config: dict[str, Any]) -> None:
+    """Log once at load when USER.md still holds entries Hermes no longer uses."""
+    memory = config.get("memory") if isinstance(config.get("memory"), dict) else {}
+    if memory.get("user_profile_enabled") is not False:
+        return
+    try:
+        from clawchat_gateway.hermes_home import hermes_home
+
+        user_md = hermes_home() / "memories" / "USER.md"
+        content = user_md.read_text(encoding="utf-8") if user_md.is_file() else ""
+    except Exception:  # noqa: BLE001 - a hint, never a failure
+        return
+    if not content.strip():
+        return
+    logger.info(
+        "clawchat: USER.md still holds %d chars, but memory.user_profile_enabled is "
+        "false so Hermes no longer reads it. Move facts about a specific person into "
+        "ClawChat notes (users/<usr_id>.md, or owner.md for the owner) and global facts "
+        "into MEMORY.md; the file itself is left untouched.",
+        len(content),
+    )
+
+
+def ensure_clawchat_host_defaults_on_load() -> None:
+    """Fill missing ClawChat host defaults in ``config.yaml`` at plugin load.
+
+    Idempotent, fill-only (an operator's value is never replaced) and
+    fail-open: a failure is logged and never breaks plugin registration.
+    """
+    try:
+        config_path, config = _load_config()
+        if not isinstance(config, dict):
+            return
+        changed = _ensure_clawchat_memory_defaults(config, overwrite=False)
+        if changed:
+            _write_config(config_path, config)
+            logger.info("clawchat: filled missing ClawChat host defaults in config.yaml")
+        _hint_user_md_migration(config)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("clawchat: could not ensure host defaults at load: %s", exc)
+
+
 def _read_optional_bool(value: Any) -> bool | None:
     if isinstance(value, bool):
         return value
@@ -457,6 +544,7 @@ def persist_activation(
     _ensure_output_visibility_defaults(extra)
     _ensure_clawchat_agent_defaults(config)
     _ensure_clawchat_display_defaults(config)
+    _ensure_clawchat_memory_defaults(config)
     env_values = {
         "CLAWCHAT_TOKEN": access_token,
         "CLAWCHAT_REFRESH_TOKEN": refresh_token or None,

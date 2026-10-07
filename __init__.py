@@ -403,10 +403,26 @@ def _warn_on_shared_identity() -> None:
         logger.debug("ClawChat identity-collision check skipped: %s", exc)
 
 
+def _ensure_host_defaults() -> None:
+    """Fill missing ClawChat host defaults (memory routing) in config.yaml.
+
+    Fill-only and idempotent, so an existing install picks up new defaults on
+    its next start without an operator's own values being replaced. Never lets
+    a failure break registration.
+    """
+    try:
+        from clawchat_gateway import activate
+
+        activate.ensure_clawchat_host_defaults_on_load()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ClawChat host defaults skipped: %s", exc)
+
+
 def _register_platform(ctx) -> bool:
     from clawchat_gateway.plugin_prompts import platform_prompt
 
     _migrate_legacy_config_tokens()
+    _ensure_host_defaults()
     _warn_on_shared_identity()
 
     register_platform = getattr(ctx, "register_platform", None)

@@ -52,6 +52,10 @@ tmp
 #     (`hermes plugins install`, plugins.scan_on_install). One CRITICAL finding
 #     anywhere, tests included, is a hard block --force cannot override. Needs a
 #     Hermes source checkout and skips itself without one.
+#   * memory_defaults — activation writes, and plugin load fills in, the host
+#     memory keys that stop Hermes' single-user memory (USER.md, background
+#     review) from collecting every ClawChat sender; load never overwrites an
+#     operator's value.
 #   * inbound_dispatch_lanes — inbound messages are handled off the WS read
 #     loop, per chat and in order. A handler that awaits a send's ack inside
 #     the read loop can never get it: the read loop stalls for the ack timeout,
@@ -71,6 +75,7 @@ tests/*
 !tests/test_register_platform_cron.py
 !tests/test_install_scan.py
 !tests/test_inbound_dispatch_lanes.py
+!tests/test_memory_defaults.py
 deploy/
 scripts/
 docs/superpowers/

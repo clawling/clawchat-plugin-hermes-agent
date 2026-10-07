@@ -642,6 +642,37 @@ its WAL sidecars); no re-pairing is needed.
 `$HERMES_HOME/memories`. It is not user-configurable through
 `platforms.clawchat.extra`.
 
+The plugin keeps its social notes there: `owner.md` (the owner),
+`users/<usr_id>.md` (one person) and `groups/<cnv_id>.md` (one group), each a
+metadata block the plugin maintains plus a body the agent writes with the
+`clawchat_memory_*` tools.
+
+### Hermes built-in memory
+
+Hermes' own memory is built for one user per agent: its `memory` tool has a
+`user` target meaning "the person you are talking to", the system prompt carries
+a `USER PROFILE` block, and a background review periodically saves "the user's"
+details into `USER.md` / `MEMORY.md`. A ClawChat agent talks to many people, so
+the plugin turns the single-user parts off in the host `config.yaml`:
+
+```yaml
+memory:
+  user_profile_enabled: false   # no USER.md target / USER PROFILE block
+  nudge_interval: 0             # no background memory review (skill review unaffected)
+```
+
+`memory_enabled` is left as is: `MEMORY.md` remains the agent's global notebook
+for facts that do not depend on who it is talking to. Facts about one person or
+one group go into the ClawChat notes above.
+
+Activation writes both keys (overwriting, like the `agent.*` defaults). Plugin
+load (`activate.ensure_clawchat_host_defaults_on_load`, called from
+`__init__._register_platform`) fills them in only when they are missing, so an
+existing install picks them up on its next start while a value an operator set
+by hand is kept. Hermes has read both keys since v0.12.0. Existing `USER.md`
+content is not moved or deleted; when the file still has content the plugin
+logs one line at load suggesting where to move it.
+
 ## Worked example — `config.yaml` after activation
 
 ```yaml
@@ -670,6 +701,9 @@ display:
       long_running_notifications: false
       busy_ack_detail: false
       cleanup_progress: false
+memory:
+  user_profile_enabled: false
+  nudge_interval: 0
 ```
 
 `$HERMES_HOME/.env` after activation contains at least:
