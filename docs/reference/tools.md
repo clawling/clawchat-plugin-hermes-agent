@@ -85,6 +85,12 @@ errors that carry a machine-readable discriminator, and `retryable` / `status` /
 | `clawchat_memory_write`             | Append to or replace the **agent-authored body** of a memory file. Never touches the metadata block. |
 | `clawchat_memory_edit`              | Replace exactly one existing text span in the agent-authored body.            |
 
+The `clawchat_memory_write` description carries the routing rule every turn:
+a fact about one person goes to `targetType=user` (their `usr_…` id), about a
+group to `targetType=group` (its `cnv_…` id), about the owner to
+`targetType=owner`; read the note first; never put such facts into Hermes'
+`memory` tool (MEMORY.md). `prompts/platform.md` states the same rule.
+
 `clawchat_memory_write` with `mode=append` skips any paragraph (blank-line
 separated, surrounding whitespace ignored) whose lines already appear, in
 order, in the body, and appends only the rest. The result then carries
