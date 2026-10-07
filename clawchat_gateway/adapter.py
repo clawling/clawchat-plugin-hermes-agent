@@ -824,7 +824,13 @@ def _read_host_compression_cap() -> int | None:
 class ClawChatAdapter(BasePlatformAdapter):
     SUPPORTS_MESSAGE_EDITING = True
     REQUIRES_EDIT_FINALIZE = True
-    MAX_MESSAGE_LENGTH = 4000
+    # Hermes splits a reply longer than this into several messages. The hub's
+    # real limit is bytes: it refuses a message whose marshaled envelope exceeds
+    # its per-message produce cap (1 000 000 bytes by default; §14.3
+    # message_too_large). 32000 characters stays under a quarter of that even
+    # when every character costs 6 bytes on the hub's side (a JSON escape), so
+    # a long answer arrives as one message instead of a run of 4000-char ones.
+    MAX_MESSAGE_LENGTH = 32000
 
     def __init__(self, platform_config: Any) -> None:
         super().__init__(platform_config, _clawchat_platform())

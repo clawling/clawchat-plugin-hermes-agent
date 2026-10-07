@@ -88,6 +88,8 @@ tmp
 #   * typing_cadence — every host typing refresh (2 s) reaches the wire, so
 #     the receiver's indicator window never lapses mid-reply; false follows the
 #     turn and graceful shutdown; a sediment turn sends no typing.
+#   * message_length — a long reply is one message (32000 chars), and a
+#     full-length one still fits the hub's per-message byte cap.
 #   * inbound_dispatch_lanes — inbound messages are handled off the WS read
 #     loop, per chat and in order. A handler that awaits a send's ack inside
 #     the read loop can never get it: the read loop stalls for the ack timeout,
@@ -117,6 +119,7 @@ tests/*
 !tests/test_group_turn_queue.py
 !tests/test_session_sediment.py
 !tests/test_typing_cadence.py
+!tests/test_message_length.py
 deploy/
 scripts/
 docs/superpowers/

@@ -2497,6 +2497,11 @@ client value is dropped:
 | Read deadline | ≈ **70 s** with no `Pong` control frame | Server closes the socket (§14.1). |
 | Unacked v2 window | **4096** frames | Immediate kick (§11.7). |
 
+The limit is bytes, not characters. The hermes adapter tells its host to split
+a reply only past **32000 characters** (`ClawChatAdapter.MAX_MESSAGE_LENGTH`),
+which keeps a full-length message under a quarter of the default produce cap
+even if every character is re-encoded as a 6-byte JSON escape.
+
 A server MAY disconnect a client that accumulates undelivered backlog or stops
 acknowledging reliable downlinks. Clients MUST implement backoff on reconnect and
 MUST NOT hot-loop after any close.
