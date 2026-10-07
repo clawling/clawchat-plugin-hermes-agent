@@ -240,6 +240,69 @@ def build_message_send_event(
     )
 
 
+def build_stream_created_event(
+    *, chat_id: str, message_id: str, message_mode: str = MESSAGE_MODE_NORMAL
+) -> dict[str, Any]:
+    """``message.created`` (§8.1): opens a stream for ``message_id``."""
+    return _message_envelope(
+        "message.created",
+        chat_id=chat_id,
+        chat_type="",
+        payload={"message_id": message_id, "message_mode": message_mode},
+    )
+
+
+def _streaming_state(status: str, sequence: int, completed_at: int | None) -> dict[str, Any]:
+    return {
+        "status": status,
+        "sequence": sequence,
+        "mutation_policy": "append_text_only",
+        "started_at": None,
+        "completed_at": completed_at,
+    }
+
+
+def build_stream_add_event(
+    *, chat_id: str, message_id: str, sequence: int, text: str, delta: str
+) -> dict[str, Any]:
+    """``message.add`` (§8.2): the cumulative ``text`` plus the new ``delta``."""
+    now = current_time_ms()
+    return _message_envelope(
+        "message.add",
+        chat_id=chat_id,
+        chat_type="",
+        payload={
+            "message_id": message_id,
+            "sequence": sequence,
+            "mutation": {"type": "append", "target_fragment_index": 0},
+            "fragments": [{"kind": "text", "text": text, "delta": delta}],
+            "streaming": _streaming_state("streaming", sequence, None),
+            "added_at": now,
+        },
+        emitted_at=now,
+    )
+
+
+def build_stream_end_event(
+    *, chat_id: str, message_id: str, sequence: int, text: str, failed: bool = False
+) -> dict[str, Any]:
+    """``message.done`` (§8.3) with the final text, or ``message.failed``."""
+    now = current_time_ms()
+    status = "failed" if failed else "done"
+    return _message_envelope(
+        "message.failed" if failed else "message.done",
+        chat_id=chat_id,
+        chat_type="",
+        payload={
+            "message_id": message_id,
+            "fragments": [{"kind": "text", "text": text}],
+            "streaming": _streaming_state(status, max(sequence, 0), now),
+            "completed_at": now,
+        },
+        emitted_at=now,
+    )
+
+
 def build_message_reaction_event(
     *,
     chat_id: str,

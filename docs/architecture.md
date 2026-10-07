@@ -210,6 +210,19 @@ dispatch (`ClawChatAdapter._group_dispatching`) and then from the host base
 adapter's `_active_sessions` guard — and flushes it as one batch once the
 session is free. See [`./configuration.md`](./configuration.md#group-session-seeding-and-queueing).
 
+### Reply streaming (direct chats)
+
+With `display.platforms.clawchat.streaming: true` Hermes sends a reply's first
+chunk with a cursor and then edits it with the cumulative text, finalizing at
+the end (twice, because the adapter sets `REQUIRES_EDIT_FINALIZE`). In a direct
+chat the adapter relays each step as a Protocol-v2 stream —
+`message.created`, `message.add` (cumulative `text` plus `delta`), and at the
+finalizing edit `message.done` followed by the acked `message.reply` under the
+same `message_id` — so the conversation keeps one message. Group replies are
+buffered and sent whole, as before. The holds, the `message.failed` cases and
+the post-turn sweep of unfinished replies are described in
+[`./client-integration.md`](./client-integration.md) §8.0.
+
 ### Sediment turns before reset and compression
 
 Hermes v0.12.0+ has no memory flush at compression or reset (upstream removed

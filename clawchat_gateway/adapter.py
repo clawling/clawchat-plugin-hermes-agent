@@ -115,6 +115,9 @@ from clawchat_gateway.protocol import (
     is_normal_message_mode,
     build_message_reply_event,
     build_message_send_event,
+    build_stream_add_event,
+    build_stream_created_event,
+    build_stream_end_event,
     build_typing_update_event,
     new_frame_id,
     new_message_id,
@@ -216,6 +219,14 @@ SEDIMENT_UNSEEN_HEADER = (
 # to 4 s. It only collapses back-to-back calls (Hermes re-sends typing 0.3 s
 # after each tool-progress edit).
 TYPING_REFRESH_SECONDS = 1.5
+# How long after a turn ends (stop_typing) a reply the host started but never
+# finalized — ``/stop`` and ``/new`` drop it mid-way, and so does a bubble
+# Hermes leaves behind for a mid-turn commentary — is sent with the text it had.
+# Far longer than the host's own wait for its final edits (5 s).
+STREAM_ABANDON_GRACE_SECONDS = 30.0
+# Session-status chrome Hermes may put at the start of a reply; while a stream
+# starts with one of these the line may still be stripped, so it is held back.
+_STREAM_HOLD_PREFIXES = ("◐", "◆")
 # Bounded FIFO of conversations known to be dissolved. Uplinks for these are
 # suppressed so a leaked upstream typing keepalive cannot hammer a dead chat.
 DEAD_CHATS_MAX = 512
@@ -811,6 +822,13 @@ class _ActiveRun:
     reply_to_message_id: str | None = None
     metadata: Any = None
     kwargs: dict[str, Any] = field(default_factory=dict)
+    # Streaming (§8), direct chats only: whether message.created went out, the
+    # text streamed so far, the last message.add sequence, and whether the
+    # stream was given up (the reply then goes out whole).
+    stream_open: bool = False
+    streamed_text: str = ""
+    stream_sequence: int = -1
+    stream_failed: bool = False
 
 
 def check_clawchat_requirements(platform_config: Any) -> bool:
@@ -979,6 +997,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._sedimented_session_ids: OrderedDict[str, None] = OrderedDict()
         self._reset_clean_chats: set[str] = set()
         self._sediment_tasks: set[asyncio.Task[None]] = set()
+        # Delayed closers of streams the host left open (see stop_typing).
+        self._stream_sweep_tasks: set[asyncio.Task[None]] = set()
         self._host_compression_cap = _read_host_compression_cap()
         # Groups whose batch the plugin is handing to Hermes right now; with the
         # host's own active-session guard this tells the coalescer to hold the
@@ -1073,6 +1093,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
 
     async def disconnect(self) -> None:
+        for task in list(self._stream_sweeps()):
+            task.cancel()
         for task in list(self._sediment_tasks):
             task.cancel()
         if self._sediment_tasks:
@@ -1130,6 +1152,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         logger.info("clawchat typing active sent chat_id=%s chat_type=%s", chat_id, chat_type)
 
     async def stop_typing(self, chat_id: str, metadata: Any = None) -> None:
+        self._schedule_stream_sweep(chat_id)
         if chat_id in self._sediment_chats and not self._typing_is_lit(chat_id):
             # A sediment turn never lights the indicator, so it has nothing to
             # clear — but an indicator a reply left lit is still cleared.
@@ -5276,6 +5299,8 @@ class ClawChatAdapter(BasePlatformAdapter):
                 message_id,
                 fragment_count,
             )
+            if not has_media:
+                await self._stream_update(run, visible_content)
             return SendResult(success=True, message_id=message_id)
 
         if not has_media and self._is_duplicate_recent_emit(chat_id, visible_content):
@@ -5364,8 +5389,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         run = self._resolve_active_run(chat_id=chat_id, message_id=message_id)
         if self._consume_terminal_send(chat_id, phase="edit_message"):
             if run is not None:
-                self._discard_run(run)
-                self._remember_completed_run(run.message_id)
+                await self._retire_run(run)
             return SendResult(success=True, message_id=message_id)
         if run is None:
             if message_id and message_id in self._completed_run_ids:
@@ -5387,8 +5411,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             content or "",
         )
         if self._is_noop_response_text(visible_content):
-            self._discard_run(run)
-            self._remember_completed_run(run.message_id)
+            await self._retire_run(run)
             logger.info(
                 "clawchat silent response edit suppressed chat_id=%s message_id=%s",
                 chat_id,
@@ -5397,8 +5420,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             return SendResult(success=True, message_id=run.message_id)
         if not run.last_text and self._is_no_reply_token_prefix(visible_content):
             if finalize:
-                self._discard_run(run)
-                self._remember_completed_run(run.message_id)
+                await self._retire_run(run)
                 logger.info(
                     "clawchat silent response edit prefix suppressed chat_id=%s message_id=%s",
                     chat_id,
@@ -5415,6 +5437,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         if visible_content != run.last_text:
             run.last_text = visible_content
 
+        if not finalize:
+            await self._stream_update(run, visible_content)
         if finalize:
             result = await self.on_run_complete(
                 chat_id=chat_id,
@@ -5441,8 +5465,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
         if self._consume_terminal_send(chat_id, phase="on_run_complete"):
             if run is not None:
-                self._discard_run(run)
-                self._remember_completed_run(run.message_id)
+                await self._retire_run(run)
                 return SendResult(success=True, message_id=run.message_id)
             return SendResult(success=True, message_id=message_id)
         if run is None:
@@ -5478,8 +5501,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._is_noop_response_text(visible_final_text)
             or self._is_no_reply_token_prefix(visible_final_text)
         ):
-            self._discard_run(run)
-            self._remember_completed_run(run.message_id)
+            await self._retire_run(run)
             logger.info("clawchat silent response final suppressed chat_id=%s message_id=%s", chat_id, run.message_id)
             return SendResult(success=True, message_id=run.message_id)
         final_content = visible_final_text if visible_final_text else run.last_text
@@ -5494,8 +5516,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         # appears in the final text would otherwise reach the user verbatim.
         if self._is_noop_response_text(final_content):
             if not self._has_outbound_media(run.metadata, run.kwargs):
-                self._discard_run(run)
-                self._remember_completed_run(run.message_id)
+                await self._retire_run(run)
                 logger.info(
                     "clawchat silent response final suppressed chat_id=%s message_id=%s",
                     chat_id,
@@ -5507,8 +5528,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             # Nothing visible survived filtering (e.g. the run was only Hermes
             # session-status lines, W-9) and no media rides along: never emit
             # an empty bubble.
-            self._discard_run(run)
-            self._remember_completed_run(run.message_id)
+            await self._retire_run(run)
             logger.info(
                 "clawchat empty response final suppressed chat_id=%s message_id=%s",
                 chat_id,
@@ -5518,8 +5538,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         if not self._has_outbound_media(run.metadata, run.kwargs) and self._should_suppress_runtime_status_message(
             final_content
         ):
-            self._discard_run(run)
-            self._remember_completed_run(run.message_id)
+            await self._retire_run(run)
             logger.info(
                 "clawchat runtime status final suppressed chat_id=%s message_id=%s",
                 chat_id,
@@ -5529,8 +5548,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         if not self._has_outbound_media(run.metadata, run.kwargs) and self._is_duplicate_recent_emit(
             run.chat_id, final_content
         ):
-            self._discard_run(run)
-            self._remember_completed_run(run.message_id)
+            await self._retire_run(run)
             logger.info(
                 "clawchat duplicate response suppressed chat_id=%s message_id=%s",
                 run.chat_id,
@@ -5562,8 +5580,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             raw=frame,
         )
         if claimed is False:
-            self._discard_run(run)
-            self._remember_completed_run(run.message_id)
+            await self._retire_run(run)
             return SendResult(success=True, message_id=run.message_id)
         if claimed is None:
             return SendResult(
@@ -5571,6 +5588,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 error="clawchat outbound message claim failed",
                 message_id=run.message_id,
             )
+        await self._stream_finish(run, final_content)
         sent = await self._connection.send_frame(frame, wait_for_ack=True)
         if not sent:
             error = "clawchat complete reply dropped"
@@ -5604,14 +5622,145 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._note_visible_send(run.chat_id)
         if not self._has_outbound_media(run.metadata, run.kwargs):
             self._record_emit(run.chat_id, final_content)
-        self._discard_run(run)
-        self._remember_completed_run(run.message_id)
+        await self._retire_run(run)
         logger.info(
             "clawchat complete reply finalized chat_id=%s message_id=%s",
             chat_id,
             run.message_id,
         )
         return SendResult(success=True, message_id=run.message_id)
+
+    # --- reply streaming (§8), direct chats only -------------------------------
+
+    def _should_stream(self, run: _ActiveRun) -> bool:
+        # Groups are not streamed: the hub's merged copy of a stream carries no
+        # mentions (they are only added to the final reply) and another agent
+        # in the group would read that copy first, under the same message id.
+        return (
+            run.chat_type == "direct"
+            and not run.stream_failed
+            and run.chat_id not in self._sediment_chats
+            and not self._has_outbound_media(run.metadata, run.kwargs)
+        )
+
+    async def _send_stream_frame(self, frame: dict[str, Any]) -> bool:
+        # Streaming frames are never acked (§8.5); only the final reply is.
+        return await self._connection.send_frame(frame)
+
+    async def _stream_update(self, run: _ActiveRun, text: str) -> None:
+        """Stream the reply text Hermes has written so far (cumulative)."""
+        if not self._should_stream(run) or not text or text == run.streamed_text:
+            return
+        if (
+            self._is_noop_response_text(text)
+            or self._is_no_reply_token_prefix(text)
+            or text.startswith(_STREAM_HOLD_PREFIXES)
+            or self._is_runtime_status_text(text)
+            or self._build_interaction_fragment(text, run.metadata, run.kwargs) is not None
+        ):
+            # Might still turn into a no-reply token, a session-status line
+            # that gets stripped, or a runtime notice, or will be sent as an
+            # approval card: hold it back.
+            return
+        if run.stream_open and not text.startswith(run.streamed_text):
+            # The text no longer extends what was streamed (a filter rewrote
+            # it). §8.2: fail the stream; the reply goes out whole at the end.
+            await self._stream_fail(run)
+            return
+        if not run.stream_open:
+            await self._send_stream_frame(
+                build_stream_created_event(chat_id=run.chat_id, message_id=run.message_id)
+            )
+            run.stream_open = True
+            logger.info("clawchat stream opened chat_id=%s message_id=%s", run.chat_id, run.message_id)
+        run.stream_sequence += 1
+        await self._send_stream_frame(
+            build_stream_add_event(
+                chat_id=run.chat_id,
+                message_id=run.message_id,
+                sequence=run.stream_sequence,
+                text=text,
+                delta=text[len(run.streamed_text):],
+            )
+        )
+        run.streamed_text = text
+
+    async def _stream_fail(self, run: _ActiveRun) -> None:
+        if run.stream_open:
+            await self._send_stream_frame(
+                build_stream_end_event(
+                    chat_id=run.chat_id,
+                    message_id=run.message_id,
+                    sequence=run.stream_sequence,
+                    text=run.streamed_text,
+                    failed=True,
+                )
+            )
+            logger.info("clawchat stream failed chat_id=%s message_id=%s", run.chat_id, run.message_id)
+        run.stream_open = False
+        run.stream_failed = True
+
+    async def _stream_finish(self, run: _ActiveRun, final_text: str) -> None:
+        """Close an open stream with ``message.done`` before its final reply."""
+        if not run.stream_open:
+            return
+        await self._send_stream_frame(
+            build_stream_end_event(
+                chat_id=run.chat_id,
+                message_id=run.message_id,
+                sequence=run.stream_sequence,
+                text=final_text,
+            )
+        )
+        run.stream_open = False
+        logger.info("clawchat stream done chat_id=%s message_id=%s", run.chat_id, run.message_id)
+
+    async def _retire_run(self, run: _ActiveRun) -> None:
+        """Drop a run that will send no (further) reply; fail its open stream."""
+        if run.stream_open:
+            await self._stream_fail(run)
+        self._discard_run(run)
+        self._remember_completed_run(run.message_id)
+
+    def _stream_sweeps(self) -> set[asyncio.Task[None]]:
+        tasks = getattr(self, "_stream_sweep_tasks", None)
+        if tasks is None:
+            tasks = self._stream_sweep_tasks = set()
+        return tasks
+
+    def _schedule_stream_sweep(self, chat_id: str) -> None:
+        """After a turn, send the replies of this chat the host left unfinished.
+
+        Only runs that exist now are swept, so a later turn's reply is never
+        touched.
+        """
+        open_ids = [
+            message_id
+            for message_id, run in self._active_runs_by_id.items()
+            if run.chat_id == chat_id and (run.stream_open or run.last_text)
+        ]
+        if not open_ids:
+            return
+        task = asyncio.ensure_future(self._sweep_abandoned_streams(chat_id, open_ids))
+        self._stream_sweeps().add(task)
+        task.add_done_callback(self._stream_sweeps().discard)
+
+    async def _sweep_abandoned_streams(self, chat_id: str, message_ids: list[str]) -> None:
+        await asyncio.sleep(STREAM_ABANDON_GRACE_SECONDS)
+        for message_id in message_ids:
+            run = self._active_runs_by_id.get(message_id)
+            if run is None:
+                continue
+            logger.info("clawchat reply left unfinished; sending chat_id=%s message_id=%s", chat_id, message_id)
+            try:
+                await self.on_run_complete(chat_id=chat_id, final_text=run.last_text, message_id=message_id)
+            except Exception:  # noqa: BLE001 - best effort; the hub evicts it in time
+                logger.warning("clawchat stream close failed chat_id=%s", chat_id, exc_info=True)
+
+    async def _drain_stream_sweeps(self) -> None:
+        tasks = list(self._stream_sweeps())
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def _group_mention_roster(self, chat_id: str) -> list[tuple[str, str]]:
         """``(user_id, name)`` for the group's cached participants.
@@ -5821,8 +5970,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 message_id,
             )
             return
-        self._discard_run(run)
-        self._remember_completed_run(run.message_id)
+        await self._retire_run(run)
         if run.chat_type == "group":
             self._record_message(
                 kind="error",

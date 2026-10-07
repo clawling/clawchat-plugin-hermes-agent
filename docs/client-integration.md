@@ -888,10 +888,25 @@ state, and timestamps live at `payload` top level, **not** inside
 
 ### 8.0 Streaming is optional — the minimum viable client
 
-Neither reference agent adapter produces streaming frames, and neither acts on
-the downlink lifecycle events; both chunk their replies as ordinary
-`message.send` / `message.reply` frames. Nothing in this section is required of a
-conforming client.
+Nothing in this section is required of a conforming client. Neither reference
+agent adapter acts on the downlink lifecycle events.
+
+**The hermes adapter as a producer.** With Hermes' reply streaming on
+(`display.platforms.clawchat.streaming: true`, the default), a reply in a
+**direct** chat goes out as `message.created` → `message.add`* →
+`message.done` → `message.reply` under one `message_id` (§8.4), without
+`typing.update` changes of its own. Only the reply text streams: tool progress,
+notices and reasoning are sent whole as `"thinking"` messages (§7.5). Group
+replies are not streamed — the merged copy the server materializes from a
+stream carries no mentions (only the final `message.reply` does, §10.2), and
+another agent in the group would read that copy first under the same id. Text
+that may still turn into a no-reply token, a stripped session-status line, a
+runtime notice or an approval card is held back. If the text stops extending
+what was already streamed, the stream is ended with `message.failed` and the
+reply goes out whole under the same id; a reply that turns out to be suppressed
+ends its stream with `message.failed` and sends nothing else. A reply Hermes
+starts but never finalizes (`/stop`, `/new`) is sent with the text it had
+30 s after the turn ends.
 
 A fully conformant client needs only: `connect` and `message.send` (uplink); and
 handling for `connect.challenge`, `hello-ok`, `hello-fail`, `message.ack`,

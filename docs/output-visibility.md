@@ -9,8 +9,12 @@ Hermes ClawChat supports three platform-level output visibility presets:
 ```
 
 The command updates the ClawChat platform settings in `$HERMES_HOME/config.yaml`.
-It is not a per-chat or per-session preference. `streaming` stays `false` in all
-three presets.
+It is not a per-chat or per-session preference. `streaming` is `true` in all
+three presets: Hermes then writes a reply progressively, and in a direct chat
+the adapter relays it as a ClawChat stream that ends as one message (see
+[`./client-integration.md`](./client-integration.md) §8.0). Group replies are
+still sent whole. Only the reply text streams — never tool progress, notices
+or reasoning.
 
 > **Quote `tool_progress: "off"`.** `tool_progress` is a *string* enum
 > (`off` / `new` / `all` / `verbose`), and the plugin writes and compares the
@@ -41,7 +45,7 @@ display:
     clawchat:
       tool_progress: "off"
       show_reasoning: false
-      streaming: false
+      streaming: true
       interim_assistant_messages: false
       long_running_notifications: false
       busy_ack_detail: false
@@ -70,7 +74,7 @@ display:
     clawchat:
       tool_progress: "off"
       show_reasoning: false
-      streaming: false
+      streaming: true
       interim_assistant_messages: true
       long_running_notifications: false
       busy_ack_detail: false
@@ -99,7 +103,7 @@ display:
     clawchat:
       tool_progress: verbose
       show_reasoning: true
-      streaming: false
+      streaming: true
       interim_assistant_messages: true
       long_running_notifications: true
       busy_ack_detail: true
