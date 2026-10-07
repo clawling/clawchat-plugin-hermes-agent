@@ -1154,7 +1154,9 @@ holds no per-chat typing state, and applies no expiry of its own. A producer tha
 sets `is_typing: true` **MUST** send a matching `is_typing: false` when it stops —
 including on error and on graceful shutdown — and **SHOULD** re-send `true`
 periodically while a turn is still running (the reference mobile client refreshes
-at most once per **3 s**; the hermes adapter throttles repeats to one per **10 s**).
+at most once per **3 s**; the hermes adapter passes on every refresh its host
+makes — Hermes refreshes every **2 s** — and only collapses repeats closer than
+**1.5 s**, then sends `false` when the turn ends and on graceful shutdown).
 Receivers **MUST** apply their own local expiry so a crashed or disconnected
 producer cannot pin the indicator: the reference mobile client clears a peer's
 indicator **6 s** after the last `true`. Choose a receiver window that is at least

@@ -85,6 +85,9 @@ tmp
 #     notes; its output never reaches the chat, and /new is never delayed for
 #     a busy session. In a shared group it also carries the group messages the
 #     session has not seen, so a "don't remember that" is in front of it.
+#   * typing_cadence — every host typing refresh (2 s) reaches the wire, so
+#     the receiver's indicator window never lapses mid-reply; false follows the
+#     turn and graceful shutdown; a sediment turn sends no typing.
 #   * inbound_dispatch_lanes — inbound messages are handled off the WS read
 #     loop, per chat and in order. A handler that awaits a send's ack inside
 #     the read loop can never get it: the read loop stalls for the ack timeout,
@@ -113,6 +116,7 @@ tests/*
 !tests/test_group_session_seed.py
 !tests/test_group_turn_queue.py
 !tests/test_session_sediment.py
+!tests/test_typing_cadence.py
 deploy/
 scripts/
 docs/superpowers/

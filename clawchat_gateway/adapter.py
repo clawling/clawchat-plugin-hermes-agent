@@ -203,7 +203,15 @@ SEDIMENT_UNSEEN_HEADER = (
     "[ClawChat group messages this conversation has had since you last saw it, "
     "oldest first. They are part of the conversation to go over below.]"
 )
-TYPING_REFRESH_SECONDS = 10.0
+# Minimum gap between two ``typing.update{is_typing:true}`` frames for one chat.
+# A receiver lights the indicator for a few seconds after each ``true`` (the
+# reference client: 6 s) and the contract asks producers to refresh at least
+# every 3 s (docs/client-integration.md §9.1). Hermes' ``_keep_typing`` calls
+# ``send_typing`` every 2 s, so this must stay BELOW 2 s: anything at or above
+# the host interval drops every other refresh and stretches the real interval
+# to 4 s. It only collapses back-to-back calls (Hermes re-sends typing 0.3 s
+# after each tool-progress edit).
+TYPING_REFRESH_SECONDS = 1.5
 # Bounded FIFO of conversations known to be dissolved. Uplinks for these are
 # suppressed so a leaked upstream typing keepalive cannot hammer a dead chat.
 DEAD_CHATS_MAX = 512
@@ -1026,6 +1034,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         await self._cancel_skill_update_tasks()
         await self._cancel_friend_greeting_tasks()
         await self._stop_liveware_sample()
+        await self._clear_lit_typing()
         await self._connection.stop()
         await self._group_message_coalescer.cancel()
         clear_clawchat_mention_sender(self)
@@ -1072,6 +1081,10 @@ class ClawChatAdapter(BasePlatformAdapter):
         logger.info("clawchat typing active sent chat_id=%s chat_type=%s", chat_id, chat_type)
 
     async def stop_typing(self, chat_id: str, metadata: Any = None) -> None:
+        if chat_id in self._sediment_chats and not self._typing_is_lit(chat_id):
+            # A sediment turn never lights the indicator, so it has nothing to
+            # clear — but an indicator a reply left lit is still cleared.
+            return
         if self._is_chat_dead(chat_id):
             logger.debug(
                 "clawchat typing inactive skipped chat_id=%s reason=conversation_dissolved",
@@ -1093,6 +1106,23 @@ class ClawChatAdapter(BasePlatformAdapter):
             queue_when_unready=False,
         )
         logger.info("clawchat typing inactive sent chat_id=%s chat_type=%s", chat_id, chat_type)
+
+    def _typing_is_lit(self, chat_id: str) -> bool:
+        current = self._typing_state.get(chat_id)
+        return bool(current and current[0])
+
+    async def _clear_lit_typing(self) -> None:
+        """Send ``is_typing:false`` for every chat whose indicator we left lit.
+
+        On graceful shutdown the host's own typing tasks may stop after the
+        socket is gone, so a lit indicator would otherwise be left to the
+        receiver's local expiry (§9.1: a producer MUST clear it on shutdown).
+        """
+        for chat_id in [c for c in list(self._typing_state) if self._typing_is_lit(c)]:
+            try:
+                await self.stop_typing(chat_id)
+            except Exception:  # noqa: BLE001 - best-effort on the way out
+                logger.debug("clawchat typing clear on shutdown failed chat_id=%s", chat_id)
 
     def _is_chat_dead(self, chat_id: str) -> bool:
         return bool(chat_id) and chat_id in self._dead_chats

@@ -679,6 +679,16 @@ See `docs/client-integration.md` §3.6.
 |----------------------------------------|----------------|
 | `typing_max_continuous_seconds`        | `900.0`        |
 
+While a reply is in progress Hermes refreshes the typing indicator every 2 s,
+and the adapter sends each refresh as `typing.update{is_typing:true}`; only
+calls closer together than 1.5 s (`TYPING_REFRESH_SECONDS`) are collapsed. A
+receiver keeps the indicator lit for a few seconds after each `true` (the
+reference client: 6 s), so this keeps it lit without gaps. `is_typing:false`
+goes out when the turn ends and, for any indicator still lit, on graceful
+shutdown. A sediment turn sends no typing at all. The cadence is not
+configurable: the throttle must stay below the host's 2 s refresh, or every
+other refresh is dropped.
+
 `typing_max_continuous_seconds` stops emitting the typing indicator after this
 many seconds of continuous typing on one conversation — a safety net against a
 leaked upstream keepalive that never sends a matching `stop_typing`. Tripping
