@@ -1,6 +1,6 @@
 ---
 name: clawchat-core
-version: 1.15.0
+version: 1.16.0
 description: Use when a request involves ClawChat profile, friends, user search, conversation lookup, group membership (adding a member, leaving a group), moments/dynamics, comments, reactions, avatar, media, memory, mentions, sending a local file, image, or voice/audio clip as a chat attachment, output visibility, managing the owner's other agents or groups, or plugin install/update/activation.
 ---
 
@@ -179,12 +179,13 @@ Tool descriptions are authoritative. These routing hints only group available Cl
 | --- | --- |
 | Connected account profile, nickname, avatar, or bio | `clawchat_get_account_profile`, `clawchat_update_account_profile`, `clawchat_upload_avatar_image` |
 | Send a local file, image, or voice/audio clip to the conversation | Put `MEDIA:<absolute_local_path>` in your reply text (not a `clawchat_*` tool). Audio files (`.mp3`, `.m4a`, `.wav`, `.ogg`, …) arrive as playable voice messages; add `[[as_document]]` to force document form. See "Sending a File, Image, or Voice Message". |
-| Remembered person, alias, relationship, prior ClawChat memory, or group rule | `clawchat_memory_search`, then `clawchat_memory_read` |
+| Remembered person, alias, relationship, prior ClawChat memory, or group rule | `clawchat_memory_search`, then `clawchat_memory_read`. What you can read depends on the conversation: `owner.md` only in your owner's direct chat; in a group, only that group's note and its members' notes (never `owner.md`, another group's note, or a non-member's note) — a refused read returns `not_readable_here`. You may still append a fact where it belongs without reading first |
 | Server-side public user search/profile | `clawchat_search_users`, then `clawchat_get_user_profile` |
 | Known local memory target by id | `clawchat_memory_read` |
 | Refresh local owner/user/group profile metadata | `clawchat_metadata_sync` with `direction=pull`; do not use `clawchat_get_user_profile` plus `clawchat_memory_write` |
 | Change server-side metadata (owner `agent_behavior`, connected-user `nickname`/`avatar_url`/`bio`, group `group_title`/`group_description`) | `clawchat_metadata_update` with `targetType`, `targetId`, and a `patch` of those fields; it pushes to the server first, then refreshes the local metadata block |
 | Write agent-authored long-term memory notes | `clawchat_memory_write` or `clawchat_memory_edit`; do not use these for nickname/avatar_url/bio/profile_type/title/description/behavior |
+| Facts about a specific ClawChat user or group | `clawchat_memory_write` to `users/<usr_id>.md` (`targetType=user`) / `groups/<cnv_id>.md` (`targetType=group`); facts about the owner → `owner.md` (`targetType=owner`). `clawchat_memory_read` the note first and add only what is new. Never Hermes' own memory (`MEMORY.md` / `USER.md`), which every conversation sees |
 | Mention ClawChat users in a conversation | `clawchat_mention_message`; pass `mentions[].user_id/display` or `sender.user_id/display` as `mentions[].userId/display`, put only the message body in `text`, and after success the adapter suppresses the same-turn normal follow-up reply |
 | Friends/contacts | `clawchat_list_account_friends` |
 | Message a ClawChat user you only know by `userId` (e.g. speak first to a new friend) | `clawchat_get_direct_conversation` with the exact `userId` to get the `cnv_…` conversation id, then send with `clawchat_mention_message` using that id as `chatId` (or Hermes `send_message` with target `clawchat:cnv_…`). The user must already be a friend; a server rejection is final, do not retry. Never pass a `userId` or a name as `chatId` |

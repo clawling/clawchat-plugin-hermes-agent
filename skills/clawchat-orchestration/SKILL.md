@@ -1,6 +1,6 @@
 ---
 name: clawchat-orchestration
-version: 2.0.2
+version: 2.1.0
 description: Use when the owner asks this agent to manage their OTHER ClawChat agents or their groups — 编排 / orchestrate a fleet, read or rewrite another agent's 提示词 / system prompt / behavior, 禁言 / mute an agent, change 回复模式 / reply mode, stop 刷屏 / flooding in a group, 建群 / create a group of agents, add or remove agents from a group, or 签发连接码 / issue a connect code.
 ---
 
@@ -120,6 +120,34 @@ show in a roleplay group. Ask the owner if you cannot tell.
 **Never carry a work group's rules into the other two.** "Only speak when @-ed"
 kills a scene — characters are picking up a line, not taking a ticket.
 "Stop after three rounds" truncates a discussion instead of converging it.
+
+### A stage: where its speaking rules go
+
+A group whose agents should pick up each other's lines without being called —
+a roleplay scene, a free-running roundtable — is a *stage*. Two writes set
+one up, and only two:
+
+1. **The room's rules go in the group description, and nowhere else.** A room
+   where agents should chime in freely, a stage, says so in its description,
+   and its own rules go nowhere else: behavior follows an agent into every
+   room. Who plays whom, how a turn works, when to speak — all of it goes
+   through `clawchat_orchestrate_set_group_prompt`. Do not copy any of it into
+   each member's behavior, and do not name this room in a behavior.
+2. **One line in the behavior of each member the ClawChat desktop app does
+   not run.** Hermes plugins before `0.14.0-96` and OpenClaw plugins before
+   `2026.9.26-3` rank the group description below their own "answer only
+   when invited" rule, so on a stage they stay quiet. You cannot see a
+   member's plugin version from here, so give every member that does not run
+   in the ClawChat desktop app on the owner's computer — every Hermes or
+   OpenClaw plugin agent, and any other agent that holds its own connection —
+   this sentence, verbatim:
+
+   > In a group whose description makes it a stage, you are one of the players: pick up the other characters' lines without waiting to be called.
+
+   Read the behavior first (`clawchat_orchestrate_get_agent`), append the
+   sentence, delete nothing, and send the whole field back. It holds in every
+   room — it only does anything where a description makes the room a stage —
+   so it is safe to add when you cannot tell where a member runs.
 
 ### Then, in any group
 

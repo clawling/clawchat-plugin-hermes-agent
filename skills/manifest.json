@@ -27,24 +27,24 @@
         "bytes": 4184
       },
       "clawchat-liveware-sample": {
-        "version": "2.0.0",
+        "version": "2.0.1",
         "path": "openclaw/clawchat-liveware-sample/SKILL.md",
-        "sha256": "edafa5f802907c97c32af63feb5b62dcbb41c064649912c710808d27187aaa57",
-        "bytes": 13938
+        "sha256": "9b789fdd8e867af73dd0b851134b4287298f08e2fde87e3138f3d5b841aed0c5",
+        "bytes": 13943
       },
       "clawchat-orchestration": {
-        "version": "2.0.2",
+        "version": "2.1.0",
         "path": "shared/clawchat-orchestration/SKILL.md",
-        "sha256": "e32f29c5f41a7621732625a58a9f3d6fe365d7dde9bdcd892f9623e7fc180414",
-        "bytes": 9477
+        "sha256": "501b757b1c4718b85f1a5dd2fc3a7f30a5849eebd57e6acb78ae50390d6d0722",
+        "bytes": 11155
       }
     },
     "hermes": {
       "clawchat-core": {
-        "version": "1.15.0",
+        "version": "1.16.0",
         "path": "hermes/clawchat-core/SKILL.md",
-        "sha256": "0d203321c4f5a8d3f85fa3e7de15803891c68c27d3862d47553d3de86fbee363",
-        "bytes": 23959
+        "sha256": "091f3e36632629d6783e06e6321ccdce98f9a17baf131f2f55c7700adb9335d5",
+        "bytes": 24659
       },
       "clawchat-liveware": {
         "version": "1.2.3",
@@ -65,16 +65,16 @@
         "bytes": 4184
       },
       "clawchat-liveware-sample": {
-        "version": "2.0.0",
+        "version": "2.0.1",
         "path": "hermes/clawchat-liveware-sample/SKILL.md",
-        "sha256": "8278db2646d1553e41f4cf061c710b5363c3f41fa9ae32d8b1021fa2175b9a41",
-        "bytes": 13838
+        "sha256": "93d489ee7ee7607bc9a61defd16e06b1ee3c93d09a1115fa809ef06879e57cc4",
+        "bytes": 13843
       },
       "clawchat-orchestration": {
-        "version": "2.0.2",
+        "version": "2.1.0",
         "path": "shared/clawchat-orchestration/SKILL.md",
-        "sha256": "e32f29c5f41a7621732625a58a9f3d6fe365d7dde9bdcd892f9623e7fc180414",
-        "bytes": 9477
+        "sha256": "501b757b1c4718b85f1a5dd2fc3a7f30a5849eebd57e6acb78ae50390d6d0722",
+        "bytes": 11155
       }
     }
   },
