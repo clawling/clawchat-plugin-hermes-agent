@@ -73,6 +73,16 @@ class OrchestrationRegistrationTest(unittest.TestCase):
             props = set(self.ctx.tools[name]["schema"]["parameters"]["properties"])
             self.assertEqual(props & forbidden, set(), name)
 
+    def test_stage_guidance_says_where_room_rules_go(self):
+        # The stage sentence is quoted verbatim by the app's orchestrator texts
+        # and the OpenClaw plugin; an edited copy would teach a different line.
+        stage_line = ("In a group whose description makes it a stage, you are one of the "
+                      "players: pick up the other characters' lines without waiting to be called.")
+        behavior = self.ctx.tools["clawchat_orchestrate_set_agent_behavior"]["schema"]["description"]
+        group = self.ctx.tools["clawchat_orchestrate_set_group_prompt"]["schema"]["description"]
+        self.assertIn(f'"{stage_line}"', behavior)
+        self.assertIn("its own rules go nowhere else", group)
+
 
 class _KeySpyDict(dict):
     """A dict that records every key looked up via `.get()`.

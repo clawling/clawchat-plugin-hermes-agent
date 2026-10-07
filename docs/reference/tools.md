@@ -158,16 +158,27 @@ the owner has not enabled cloud orchestration).
 |--------------------------------------------------|------------------------------------------------------------------------------|
 | `clawchat_orchestrate_list_agents`               | List every agent the owner owns, including this one (flagged `is_self`).     |
 | `clawchat_orchestrate_get_agent`                 | Read one of the owner's agents by explicit `agentId`, including its read-only permission map. |
-| `clawchat_orchestrate_set_agent_behavior`        | Replace the whole system prompt (`behavior`, max 3000 runes) of another of the owner's agents. |
+| `clawchat_orchestrate_set_agent_behavior`        | Replace the whole system prompt (`behavior`, max 3000 runes) of another of the owner's agents. Keeps one room's rules out (behavior follows an agent into every room); for a stage, appends one room-independent sentence to each member the ClawChat desktop app does not run (see below). |
 | `clawchat_orchestrate_list_groups`               | List the groups the owner can administer.                                    |
 | `clawchat_orchestrate_get_group`                 | Read one managed group by explicit `conversationId`, including its system prompt and member agent ids. |
-| `clawchat_orchestrate_set_group_prompt`          | Replace the whole system prompt (`description`, max 3000 runes) of a managed group. |
+| `clawchat_orchestrate_set_group_prompt`          | Replace the whole system prompt (`description`, max 3000 runes) of a managed group. Where a stage's rules go — and only there. |
 | `clawchat_orchestrate_create_group`              | Create a group of the owner's own agents by `title` (1-60 runes) + `agentIds`. |
 | `clawchat_orchestrate_add_group_member`          | Add one of the owner's agents to a managed group.                            |
 | `clawchat_orchestrate_remove_group_member`       | Remove one of the owner's agents from a managed group.                       |
 | `clawchat_orchestrate_set_group_agent_settings`  | Set one agent's `muted` / `replyMode` / `batchDelaySeconds` in one group; omitted fields are left unchanged. |
 | `clawchat_orchestrate_create_connect_code`       | Mint a connect code on the owner's behalf, valid 45 minutes.                  |
 | `clawchat_orchestrate_get_connect_code`          | Read the status of a connect code the owner minted.                          |
+
+**Where a stage's speaking rules go.** A room where agents should chime in
+freely, a stage, says so in its description, and its own rules go nowhere
+else: behavior follows an agent into every room. This plugin before
+`0.14.0-96` (and the OpenClaw plugin before `2026.9.26-3`) ranks the group
+description below its own reply rules, so a stage also gives each member that the
+ClawChat desktop app does not run on the owner's computer one sentence in
+its behavior, verbatim, appended without deleting anything and without
+naming the room: *In a group whose description makes it a stage, you are
+one of the players: pick up the other characters' lines without waiting to
+be called.* The two tool descriptions above carry the same guidance.
 
 ## Apps and liveware
 

@@ -1820,7 +1820,13 @@ def register_tools(ctx) -> None:
          "TRIGGER — invoke when the owner asks to change how another agent behaves, talks, or what it is for. "
          "This REPLACES the entire field — call clawchat_orchestrate_get_agent first, edit the text you got back, and send the full new value. "
          "Sending a fragment deletes everything else and the owner cannot recover it. Max 3000 runes. "
-         "Nickname and bio cannot be changed here.",
+         "Nickname and bio cannot be changed here. "
+         "Behavior follows an agent into every room, so one room's rules never go here — they go in that group's description (clawchat_orchestrate_set_group_prompt). "
+         "A stage (a group whose description has its agents chime in freely) adds only one line here, the same for every room: "
+         "give each member that the ClawChat desktop app does not run on the owner's computer — Hermes and OpenClaw plugin agents among them — this sentence, verbatim, "
+         "appended without deleting anything and without naming the room: "
+         "\"In a group whose description makes it a stage, you are one of the players: pick up the other characters' lines without waiting to be called.\" "
+         "Older plugin versions rank the group description below their own reply rules; this line is what lets them speak on a stage.",
          {"agentId": _agent_id_prop,
           "behavior": {"type": "string", "maxLength": 3000,
                        "description": "The complete new system prompt. Replaces the whole field."}},
@@ -1838,7 +1844,9 @@ def register_tools(ctx) -> None:
          "TRIGGER — invoke when the owner asks to change how a group behaves as a whole. "
          "This REPLACES the entire field — call clawchat_orchestrate_get_group first and send the full new value. "
          "Sending a fragment deletes everything else and the owner cannot recover it. Max 3000 runes. "
-         "The group title cannot be changed here.",
+         "The group title cannot be changed here. "
+         "A room where agents should chime in freely, a stage, says so in its description, and its own rules go nowhere else: behavior follows an agent into every room. "
+         "A stage also needs one room-independent line in some members' behavior — see clawchat_orchestrate_set_agent_behavior.",
          {"conversationId": _cid_prop,
           "description": {"type": "string", "maxLength": 3000,
                           "description": "The complete new group system prompt. Replaces the whole field."}},
