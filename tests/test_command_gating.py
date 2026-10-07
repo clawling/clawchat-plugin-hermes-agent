@@ -684,7 +684,7 @@ async def test_old_host_non_owner_cannot_approve_a_blocking_command(
     events.clear()
     # The agent hit a dangerous command in the friend's session; Hermes asks there.
     await a.send_exec_approval(
-        chat_id=DIRECT, command="rm -rf /tmp/x", session_key="sk_friend",
+        chat_id=DIRECT, command="run-cleanup --everything", session_key="sk_friend",
         metadata={"chat_type": "direct"},
     )
     approval.blocking.add("sk_friend")

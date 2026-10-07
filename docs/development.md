@@ -107,6 +107,25 @@ update `clawchat_gateway/protocol.py` (outbound builders) and
 `clawchat_gateway/inbound.py` (parsing). Mirror the same change in
 `clawchat-plugin-openclaw/src/` — the two plugins are peers.
 
+## Hermes install scanner
+
+`hermes plugins install` clones this repository and runs Hermes' own
+security scanner (`tools/plugin_guard.py`, enabled by
+`plugins.scan_on_install`, on by default) over **every file in the clone**
+— docs, skills and tracked tests included. An external plugin is
+`community` trust, so a `dangerous` verdict blocks the install and
+`--force` does not override it; a single CRITICAL finding is enough.
+`caution` (HIGH/MEDIUM findings) only asks the user to confirm.
+
+So never put a literal that the scanner rates critical into any tracked
+file, even as test data — a destructive shell command (recursive delete of
+a root path), reading a secrets file, a reverse shell, and similar. Use a
+harmless placeholder such as `run-cleanup --everything` instead.
+`tests/test_install_scan.py` runs the real scanner over a copy of the
+tracked files and fails on any critical finding; it needs a Hermes source
+checkout (`$HERMES_SOURCE_DIR`, `tmp/hermes` or `tmp/hermes-agent`) and
+skips without one, so run it with one present before a release.
+
 ## Excluded from this checkout
 
 `.gitignore` excludes runtime-only Python artefacts plus several

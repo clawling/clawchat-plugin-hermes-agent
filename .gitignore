@@ -48,6 +48,10 @@ tmp
 #   * register_platform_cron — cron_deliver_env_var reaches the host, with the
 #     graded TypeError fallback for older Hermes; failures only show up as
 #     cron jobs silently ending `blocked_config`.
+#   * install_scan — the tracked tree passes Hermes' own install-time scanner
+#     (`hermes plugins install`, plugins.scan_on_install). One CRITICAL finding
+#     anywhere, tests included, is a hard block --force cannot override. Needs a
+#     Hermes source checkout and skips itself without one.
 tests/*
 !tests/conftest.py
 !tests/test_multiplex_isolation.py
@@ -61,6 +65,7 @@ tests/*
 !tests/test_pre_dispatch_self_echo.py
 !tests/test_command_gating.py
 !tests/test_register_platform_cron.py
+!tests/test_install_scan.py
 deploy/
 scripts/
 docs/superpowers/
