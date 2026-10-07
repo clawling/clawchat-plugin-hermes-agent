@@ -75,9 +75,7 @@ CLAWCHAT_MEMORY_DEFAULTS = {
 CLAWCHAT_DISPLAY_DEFAULTS = {
     "tool_progress": "off",
     "show_reasoning": False,
-    # Hermes then streams a reply (send + edits), which the adapter relays as a
-    # ClawChat stream in direct chats (docs/client-integration.md §8).
-    "streaming": True,
+    "streaming": False,
     "interim_assistant_messages": True,
     "long_running_notifications": False,
     "busy_ack_detail": False,
@@ -490,42 +488,10 @@ def _hint_user_md_migration(config: dict[str, Any]) -> None:
     )
 
 
-REPLY_STREAMING_MARKER = "reply_streaming_enabled"
-
-
-def _enable_reply_streaming_once(config: dict[str, Any]) -> bool:
-    """Turn ``display.platforms.clawchat.streaming`` on once for an activated install.
-
-    Releases before reply streaming wrote ``streaming: false`` at activation
-    and in every ``/clawchat-output`` preset, so an existing install would never
-    stream. This is the one load-time step that replaces a value: it flips that
-    ``false`` to ``true`` exactly once and records
-    ``platforms.clawchat.extra.reply_streaming_enabled``, so an operator who sets
-    it back to ``false`` afterwards keeps it. Returns True when it changed
-    anything.
-    """
-    platforms = config.get("platforms")
-    clawchat = platforms.get("clawchat") if isinstance(platforms, dict) else None
-    extra = clawchat.get("extra") if isinstance(clawchat, dict) else None
-    if not isinstance(extra, dict) or extra.get(REPLY_STREAMING_MARKER) is True:
-        return False
-    display = config.get("display")
-    display_platforms = display.get("platforms") if isinstance(display, dict) else None
-    clawchat_display = (
-        display_platforms.get("clawchat") if isinstance(display_platforms, dict) else None
-    )
-    if isinstance(clawchat_display, dict) and clawchat_display.get("streaming") is False:
-        clawchat_display["streaming"] = True
-        logger.info("clawchat: turned on reply streaming (display.platforms.clawchat.streaming)")
-    extra[REPLY_STREAMING_MARKER] = True
-    return True
-
-
 def ensure_clawchat_host_defaults_on_load() -> None:
     """Fill missing ClawChat host defaults in ``config.yaml`` at plugin load.
 
-    Idempotent, fill-only (an operator's value is never replaced — except the
-    one-time reply-streaming switch, see ``_enable_reply_streaming_once``) and
+    Idempotent, fill-only (an operator's value is never replaced) and
     fail-open: a failure is logged and never breaks plugin registration.
     """
     try:
@@ -534,7 +500,6 @@ def ensure_clawchat_host_defaults_on_load() -> None:
             return
         changed = _ensure_clawchat_memory_defaults(config, overwrite=False)
         changed = _ensure_clawchat_compression_cap(config) or changed
-        changed = _enable_reply_streaming_once(config) or changed
         if changed:
             _write_config(config_path, config)
             logger.info("clawchat: filled missing ClawChat host defaults in config.yaml")

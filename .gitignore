@@ -97,9 +97,11 @@ tmp
 #   * text_mentions — "@name" typed in a group reply becomes a mention
 #     fragment plus context.mentions, with the reference client's rules (e-mail
 #     guard, longest match, ties link nobody, never self or "all").
-#   * reply_streaming — a direct-chat reply streams (created/add/done) and ends
-#     as one message.reply under the same id; groups are not streamed; held,
-#     failed and abandoned streams; host streaming switched on once at load.
+#   * reply_streaming — opt-in (extra.stream_replies, default off): a
+#     direct-chat reply streams (created/add/done) and ends as one
+#     message.reply under the same id; groups are not streamed; held, failed
+#     and abandoned streams. Off: never a stream frame, even with host
+#     streaming on; activation and presets keep host streaming off.
 #   * inbound_dispatch_lanes — inbound messages are handled off the WS read
 #     loop, per chat and in order. A handler that awaits a send's ack inside
 #     the read loop can never get it: the read loop stalls for the ack timeout,

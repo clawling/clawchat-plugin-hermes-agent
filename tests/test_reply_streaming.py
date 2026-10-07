@@ -1,6 +1,14 @@
-"""A direct-chat reply streams as it is written, and ends as one message.
+"""Opt-in: a direct-chat reply streams as it is written, and ends as one message.
 
-With host streaming on, Hermes sends a reply's first chunk with a cursor and
+Streaming is experimental and off by default (``extra.stream_replies``), because
+not every ClawChat client renders §8 streams yet. While it is off the adapter
+never sends a streaming frame, even when an operator turned Hermes' own
+``display.platforms.clawchat.streaming`` on: the host's send-then-edit drafts
+are buffered and the reply goes out once as a plain ``message.reply``, and a
+reply the host never finalizes is dropped, as before reply streaming existed.
+Activation and every ``/clawchat-output`` preset write host streaming ``false``.
+
+With the opt-in and host streaming on, Hermes sends a reply's first chunk with a cursor and
 then edits it with the cumulative text, finalizing at the end. The adapter used
 to buffer all of that and send only the final message. Now, in a direct chat,
 it streams per docs/client-integration.md §8: ``message.created``, then one
@@ -17,9 +25,9 @@ from 0), then ``message.done`` and a ``message.reply`` that reuses the stream's
   reply turns out to be suppressed is closed with ``message.failed``; one whose
   text stops extending what was streamed is failed and the reply goes out
   whole under the same id.
-* A reply the host never finalizes (``/stop``, ``/new``, a bubble left behind
-  for a mid-turn commentary) is sent with the text it had once the turn is
-  over — streamed or not.
+* With the opt-in on, a reply the host never finalizes (``/stop``, ``/new``, a
+  bubble left behind for a mid-turn commentary) is sent with the text it had
+  once the turn is over — streamed or not.
 """
 
 from __future__ import annotations
@@ -39,11 +47,13 @@ CURSOR = " ▉"
 STREAM_EVENTS = {"message.created", "message.add", "message.done", "message.failed"}
 
 
-@pytest.fixture
-def adapter(monkeypatch, tmp_path):
+def _make_adapter(monkeypatch, tmp_path, *, stream_replies):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     a = ClawChatAdapter({})
-    a._clawchat_config = replace(a._clawchat_config, user_id=AGENT, owner_user_id=OWNER)
+    assert a._clawchat_config.stream_replies is False  # the default
+    a._clawchat_config = replace(
+        a._clawchat_config, user_id=AGENT, owner_user_id=OWNER, stream_replies=stream_replies
+    )
     a.frames = []
     a.acked = []
 
@@ -56,6 +66,18 @@ def adapter(monkeypatch, tmp_path):
     a._known_chat_types[DM] = "direct"
     a._known_chat_types[GROUP] = "group"
     return a
+
+
+@pytest.fixture
+def adapter(monkeypatch, tmp_path):
+    """Streaming opted in (``extra.stream_replies: true``)."""
+    return _make_adapter(monkeypatch, tmp_path, stream_replies=True)
+
+
+@pytest.fixture
+def plain_adapter(monkeypatch, tmp_path):
+    """The default: streaming not opted in."""
+    return _make_adapter(monkeypatch, tmp_path, stream_replies=False)
 
 
 def _events(frames):
@@ -216,16 +238,82 @@ async def test_reasoning_split_off_a_streamed_reply_goes_first(adapter):
     ]
 
 
-# --- host streaming switch ----------------------------------------------------
-#
-# Hermes only drives the send-then-edit stream when
-# display.platforms.clawchat.streaming is on. Activation and every
-# /clawchat-output preset now write true; plugin load turns the false that
-# earlier releases wrote into true once (marker extra.reply_streaming_enabled),
-# so an operator who sets it back to false afterwards keeps false.
+# --- streaming off (the default) ---------------------------------------------
+
+
+async def test_without_the_opt_in_a_host_stream_goes_out_as_one_reply(plain_adapter):
+    # Hermes streaming was turned on by hand: it sends a cursor draft and edits.
+    message_id = await _stream(plain_adapter, DM, "Hello", "Hello, wor", final="Hello, world")
+    assert _events(plain_adapter.frames) == ["message.reply"]
+    assert not STREAM_EVENTS & set(_events(plain_adapter.frames))
+    reply = plain_adapter.frames[0]["payload"]
+    assert reply["message_id"] == message_id
+    assert reply["message_mode"] == "normal"
+    assert reply["message"]["body"]["fragments"] == [{"kind": "text", "text": "Hello, world"}]
+    assert plain_adapter.acked == [True]
+
+
+async def test_without_the_opt_in_a_suppressed_reply_sends_nothing(plain_adapter):
+    await _stream(plain_adapter, DM, "Let me think", final="NO_REPLY")
+    assert plain_adapter.frames == []
+
+
+async def test_without_the_opt_in_a_rewritten_reply_still_arrives_once(plain_adapter):
+    await _stream(plain_adapter, DM, "Hello", "Goodbye", final="Goodbye all")
+    assert _events(plain_adapter.frames) == ["message.reply"]
+
+
+async def test_with_host_streaming_off_a_reply_is_one_message(plain_adapter):
+    # Host streaming off: Hermes sends the finished reply once, no cursor, no edits.
+    await plain_adapter.send(DM, "Hello, world", reply_to="msg-in")
+    assert _events(plain_adapter.frames) == ["message.reply"]
+
+
+async def test_without_the_opt_in_an_unfinished_reply_is_not_sent_after_the_turn(
+    plain_adapter, monkeypatch
+):
+    # /stop or /new: Hermes abandons the draft rather than deliver stale text,
+    # and the owner never saw any of it.
+    monkeypatch.setattr(adapter_mod, "STREAM_ABANDON_GRACE_SECONDS", 0.0)
+    await _stream(plain_adapter, DM, "Partial ans", "Partial answer")
+    await _stream(plain_adapter, GROUP, "Partial ans", "Partial answer")
+    await plain_adapter.stop_typing(DM)
+    await plain_adapter.stop_typing(GROUP)
+    await plain_adapter._drain_stream_sweeps()
+    assert [e for e in _events(plain_adapter.frames) if e != "typing.update"] == []
+
+
+# --- configuration --------------------------------------------------------------
 
 from clawchat_gateway import activate  # noqa: E402
+from clawchat_gateway.config import ClawChatConfig  # noqa: E402
 from clawchat_gateway.output_visibility import DISPLAY_PRESETS  # noqa: E402
+
+
+class _PlatformConfig:
+    def __init__(self, extra):
+        self.extra = extra
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [
+        ({}, False),
+        ({"stream_replies": False}, False),
+        ({"stream_replies": "off"}, False),
+        ({"stream_replies": "false"}, False),
+        ({"stream_replies": True}, True),
+        ({"stream_replies": "on"}, True),
+    ],
+)
+def test_stream_replies_is_an_explicit_opt_in(extra, expected):
+    config = ClawChatConfig.from_platform_config(_PlatformConfig(extra))
+    assert config.stream_replies is expected
+
+
+def test_activation_and_every_output_preset_keep_host_streaming_off():
+    assert all(preset["streaming"] is False for preset in DISPLAY_PRESETS.values())
+    assert activate.CLAWCHAT_DISPLAY_DEFAULTS["streaming"] is False
 
 
 @pytest.fixture
@@ -245,41 +333,16 @@ def fake_config(monkeypatch, tmp_path):
     return state
 
 
-def test_every_output_preset_and_activation_turn_host_streaming_on():
-    assert all(preset["streaming"] is True for preset in DISPLAY_PRESETS.values())
-    assert activate.CLAWCHAT_DISPLAY_DEFAULTS["streaming"] is True
-
-
-def _installed(streaming, **extra):
-    return {
-        "platforms": {"clawchat": {"extra": dict(extra)}},
+@pytest.mark.parametrize("streaming", [False, True])
+def test_load_never_changes_host_streaming(fake_config, streaming):
+    fake_config["config"] = {
+        "platforms": {"clawchat": {"extra": {"user_id": AGENT}}},
         "display": {"platforms": {"clawchat": {"streaming": streaming}}},
         "memory": {"user_profile_enabled": False, "nudge_interval": 0},
         "compression": {"threshold_tokens": 150000},
     }
-
-
-def test_load_turns_the_old_false_on_once(fake_config):
-    fake_config["config"] = _installed(False)
     activate.ensure_clawchat_host_defaults_on_load()
     config = fake_config["config"]
-    assert config["display"]["platforms"]["clawchat"]["streaming"] is True
-    assert config["platforms"]["clawchat"]["extra"]["reply_streaming_enabled"] is True
-    assert fake_config["writes"] == 1
-
-    # The operator turns it off again: later loads keep their choice.
-    config["display"]["platforms"]["clawchat"]["streaming"] = False
-    activate.ensure_clawchat_host_defaults_on_load()
-    assert fake_config["config"]["display"]["platforms"]["clawchat"]["streaming"] is False
-    assert fake_config["writes"] == 1
-
-
-def test_load_leaves_an_unactivated_config_alone(fake_config):
-    fake_config["config"] = {
-        "display": {"platforms": {"clawchat": {"streaming": False}}},
-        "memory": {"user_profile_enabled": False, "nudge_interval": 0},
-        "compression": {"threshold_tokens": 150000},
-    }
-    activate.ensure_clawchat_host_defaults_on_load()
-    assert fake_config["config"]["display"]["platforms"]["clawchat"]["streaming"] is False
+    assert config["display"]["platforms"]["clawchat"]["streaming"] is streaming
+    assert config["platforms"]["clawchat"]["extra"] == {"user_id": AGENT}
     assert fake_config["writes"] == 0

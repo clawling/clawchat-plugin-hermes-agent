@@ -10,7 +10,7 @@ DISPLAY_PRESETS: dict[str, dict[str, Any]] = {
     "minimal": {
         "tool_progress": "off",
         "show_reasoning": False,
-        "streaming": True,
+        "streaming": False,
         "interim_assistant_messages": False,
         "long_running_notifications": False,
         "busy_ack_detail": False,
@@ -19,7 +19,7 @@ DISPLAY_PRESETS: dict[str, dict[str, Any]] = {
     "normal": {
         "tool_progress": "off",
         "show_reasoning": False,
-        "streaming": True,
+        "streaming": False,
         "interim_assistant_messages": True,
         "long_running_notifications": False,
         "busy_ack_detail": False,
@@ -28,7 +28,7 @@ DISPLAY_PRESETS: dict[str, dict[str, Any]] = {
     "full": {
         "tool_progress": "verbose",
         "show_reasoning": True,
-        "streaming": True,
+        "streaming": False,
         "interim_assistant_messages": True,
         "long_running_notifications": True,
         "busy_ack_detail": True,

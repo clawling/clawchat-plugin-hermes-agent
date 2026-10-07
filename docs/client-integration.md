@@ -888,12 +888,17 @@ state, and timestamps live at `payload` top level, **not** inside
 
 ### 8.0 Streaming is optional — the minimum viable client
 
-Nothing in this section is required of a conforming client. Neither reference
-agent adapter acts on the downlink lifecycle events.
+By default neither reference agent adapter produces streaming frames, and
+neither acts on the downlink lifecycle events; both send their replies as
+ordinary `message.send` / `message.reply` frames. Nothing in this section is
+required of a conforming client.
 
-**The hermes adapter as a producer.** With Hermes' reply streaming on
-(`display.platforms.clawchat.streaming: true`, the default), a reply in a
-**direct** chat goes out as `message.created` → `message.add`* →
+**The hermes adapter as a producer (experimental, opt-in).** Only with
+`platforms.clawchat.extra.stream_replies: true` (default `false`; see
+[`./configuration.md`](./configuration.md#reply-streaming-experimental)) **and**
+Hermes' own reply streaming on (`display.platforms.clawchat.streaming: true`,
+which activation and the output presets leave `false`) does a reply in a
+**direct** chat go out as `message.created` → `message.add`* →
 `message.done` → `message.reply` under one `message_id` (§8.4), without
 `typing.update` changes of its own. Only the reply text streams: tool progress,
 notices and reasoning are sent whole as `"thinking"` messages (§7.5). Group
@@ -906,7 +911,11 @@ what was already streamed, the stream is ended with `message.failed` and the
 reply goes out whole under the same id; a reply that turns out to be suppressed
 ends its stream with `message.failed` and sends nothing else. A reply Hermes
 starts but never finalizes (`/stop`, `/new`) is sent with the text it had
-30 s after the turn ends.
+30 s after the turn ends. Without `stream_replies` the adapter never sends a
+§8 frame, even if Hermes streaming is on: the host's draft and its edits are
+buffered and the reply goes out once as a plain `message.reply`, and a reply
+Hermes never finalizes is dropped. Only enable it when your clients render §8
+streaming.
 
 A fully conformant client needs only: `connect` and `message.send` (uplink); and
 handling for `connect.challenge`, `hello-ok`, `hello-fail`, `message.ack`,

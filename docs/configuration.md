@@ -158,6 +158,7 @@ refresh survive a reschedule instead of silently logging the agent out.
 | —                                      | `awareness_note`               | `false`        |
 | —                                      | `friend_greeting`              | `true`         |
 | —                                      | `liveware_sample`              | `true`         |
+| —                                      | `stream_replies`               | `false`        |
 
 `output_visibility` is the ClawChat visibility preset controlled by
 `/clawchat-output minimal|normal|full`. `runtime_status_messages` controls
@@ -227,6 +228,40 @@ auto-boot for an agent. See
 [`./liveware-sample.md`](./liveware-sample.md) for the full trigger
 conditions, lifecycle, and troubleshooting.
 
+### Reply streaming (experimental)
+
+`stream_replies` (default `false`) is **experimental: only enable it when every
+ClawChat client your agent talks to renders Protocol-v2 §8 streaming**
+(`message.created` / `message.add` / `message.done` / `message.failed`, see
+[`./client-integration.md`](./client-integration.md) §8.0). It is the Hermes
+counterpart of the OpenClaw plugin's `streamReplies`.
+
+Streaming needs both switches:
+
+| `extra.stream_replies` | `display.platforms.clawchat.streaming` | What the owner sees |
+|------------------------|----------------------------------------|---------------------|
+| `false` (default) | `false` (default) | Hermes sends each reply once, finished; the adapter sends it as one `message.reply`. |
+| `false` | `true` | Hermes sends a first chunk and edits it; the adapter buffers those drafts and still sends one `message.reply` at the end. No streaming frame is ever sent. A reply Hermes never finalizes (`/stop`, `/new`) is dropped. |
+| `true` | `false` | Same as the default: Hermes produces no drafts to stream. |
+| `true` | `true` | A direct-chat reply streams and ends as one message; group replies are sent whole. |
+
+Activation and every `/clawchat-output` preset write
+`display.platforms.clawchat.streaming: false`, and plugin load never changes
+it. Set both keys yourself, then restart the gateway:
+
+```yaml
+platforms:
+  clawchat:
+    extra:
+      stream_replies: true
+display:
+  platforms:
+    clawchat:
+      streaming: true
+```
+
+A later `/clawchat-output` writes `streaming: false` again.
+
 ## Hermes display settings for ClawChat
 
 Hermes display settings are read from `$HERMES_HOME/config.yaml`, not from
@@ -258,7 +293,7 @@ display:
     clawchat:
       tool_progress: "off"
       show_reasoning: false
-      streaming: true
+      streaming: false
       interim_assistant_messages: true
       long_running_notifications: false
       busy_ack_detail: false
@@ -294,7 +329,7 @@ Use these verified Hermes display keys when tuning ClawChat behavior:
 | `tool_preview_length` | yes | no | `display.tool_preview_length: 0` | Controls maximum tool-call preview length. | Tool progress displays a long shell command. | `0` means no preview length limit; it does not hide previews. |
 | `tool_progress` | yes | yes | `display.platforms.clawchat.tool_progress: "off"` | Controls tool progress messages. Valid values: `off`, `new`, `all`, `verbose`. | The agent runs `rg`, reads files, or executes commands. | `off` hides ClawChat tool progress messages and leaves only final assistant replies. |
 | `show_reasoning` | yes | yes | `display.platforms.clawchat.show_reasoning: false` | Controls whether model reasoning/thinking is shown in replies. | The model produces reasoning for a complex question. | `false` hides reasoning in ClawChat replies. |
-| `streaming` | yes | yes | `display.platforms.clawchat.streaming: true` | Controls whether Hermes writes a reply progressively (first chunk, then edits). | The agent writes a long reply in a direct chat. | `true` shows the reply as it is written and ends as one message; group replies are still sent whole. `false` sends every reply whole. |
+| `streaming` | yes | yes | `display.platforms.clawchat.streaming: false` | Controls whether Hermes writes a reply progressively (first chunk, then edits). | The agent writes a long reply. | `false` sends every reply whole. ClawChat only streams with `extra.stream_replies: true` as well; see [Reply streaming (experimental)](#reply-streaming-experimental). |
 | `interim_assistant_messages` | yes | yes | `display.platforms.clawchat.interim_assistant_messages: true` | Controls natural mid-turn assistant messages sent separately from final replies. | The model says "I will inspect the config first" during a turn. | `true` allows that separate interim ClawChat message in the `normal` and `full` presets. |
 | `long_running_notifications` | no | yes | `display.platforms.clawchat.long_running_notifications: false` plus `agent.gateway_notify_interval: 0` | Controls long-running "still working" heartbeat messages. | A task runs for several minutes. | `agent.gateway_notify_interval: 0` disables gateway heartbeat messages such as "Still working...". |
 | `busy_ack_detail` | no | yes | `display.platforms.clawchat.busy_ack_detail: false` | Controls whether busy acknowledgments and long-running heartbeats include detailed runtime state. | The agent is busy and receives another message. | `false` keeps busy/heartbeat messages terse when those messages are enabled. |
@@ -321,7 +356,7 @@ display:
     clawchat:
       tool_progress: "off"
       show_reasoning: false
-      streaming: true
+      streaming: false
       interim_assistant_messages: true
       long_running_notifications: false
       busy_ack_detail: false
@@ -329,15 +364,8 @@ display:
 ```
 
 `interim_assistant_messages` is explicitly `true` in the ClawChat override
-block because activation defaults to the `normal` output visibility preset, and
-`streaming` is `true` so replies in direct chats stream. The remaining ClawChat
-platform display settings are `off` or `false`.
-
-Releases before reply streaming wrote `streaming: false` here. On its first
-load, the plugin turns that `false` into `true` once for an activated install
-and records `platforms.clawchat.extra.reply_streaming_enabled: true`; that is
-the only load-time step that replaces an existing value. Set `streaming: false`
-again afterwards and it stays `false`.
+block because activation defaults to the `normal` output visibility preset. The
+remaining ClawChat platform display settings are `off` or `false`.
 On Hermes versions that do not yet implement every key, unknown keys remain
 visible in `config.yaml` for future compatibility and operator editing.
 
@@ -864,7 +892,7 @@ display:
     clawchat:
       tool_progress: "off"
       show_reasoning: false
-      streaming: true
+      streaming: false
       interim_assistant_messages: true
       long_running_notifications: false
       busy_ack_detail: false

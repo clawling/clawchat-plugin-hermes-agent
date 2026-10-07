@@ -531,6 +531,8 @@ class ClawChatConfig:
     media_local_roots: tuple[str, ...] = field(default_factory=tuple)
     media_download_dir: str = "/tmp/clawchat-media"
     enable_rich_interactions: bool = False
+    # Experimental: relay host reply streaming as Protocol-v2 §8 frames.
+    stream_replies: bool = False
     runtime_status_messages: bool = False
     awareness_note: bool = False
     friend_greeting: bool = True
@@ -638,6 +640,10 @@ class ClawChatConfig:
                     False,
                 )
             ),
+            stream_replies=_read_optional_bool(
+                _get_config_value(extra, "stream_replies", False)
+            )
+            is True,
             awareness_note=bool(
                 _get_config_value(
                     extra,

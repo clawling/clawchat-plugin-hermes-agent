@@ -219,10 +219,11 @@ SEDIMENT_UNSEEN_HEADER = (
 # to 4 s. It only collapses back-to-back calls (Hermes re-sends typing 0.3 s
 # after each tool-progress edit).
 TYPING_REFRESH_SECONDS = 1.5
-# How long after a turn ends (stop_typing) a reply the host started but never
-# finalized — ``/stop`` and ``/new`` drop it mid-way, and so does a bubble
-# Hermes leaves behind for a mid-turn commentary — is sent with the text it had.
-# Far longer than the host's own wait for its final edits (5 s).
+# With ``stream_replies`` on: how long after a turn ends (stop_typing) a reply
+# the host started but never finalized — ``/stop`` and ``/new`` drop it mid-way,
+# and so does a bubble Hermes leaves behind for a mid-turn commentary — is sent
+# with the text it had. Far longer than the host's own wait for its final edits
+# (5 s). Without the opt-in such a reply is dropped, as Hermes intends.
 STREAM_ABANDON_GRACE_SECONDS = 30.0
 # Session-status chrome Hermes may put at the start of a reply; while a stream
 # starts with one of these the line may still be stripped, so it is held back.
@@ -5630,14 +5631,21 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
         return SendResult(success=True, message_id=run.message_id)
 
-    # --- reply streaming (§8), direct chats only -------------------------------
+    # --- reply streaming (§8), opt-in, direct chats only ----------------------
+
+    def _stream_replies_enabled(self) -> bool:
+        # Experimental and off by default: not every client renders §8 streams.
+        # Without it the host's drafts are buffered and the reply goes out
+        # once, whatever display.platforms.clawchat.streaming says.
+        return self._clawchat_config.stream_replies is True
 
     def _should_stream(self, run: _ActiveRun) -> bool:
         # Groups are not streamed: the hub's merged copy of a stream carries no
         # mentions (they are only added to the final reply) and another agent
         # in the group would read that copy first, under the same message id.
         return (
-            run.chat_type == "direct"
+            self._stream_replies_enabled()
+            and run.chat_type == "direct"
             and not run.stream_failed
             and run.chat_id not in self._sediment_chats
             and not self._has_outbound_media(run.metadata, run.kwargs)
@@ -5732,8 +5740,13 @@ class ClawChatAdapter(BasePlatformAdapter):
         """After a turn, send the replies of this chat the host left unfinished.
 
         Only runs that exist now are swept, so a later turn's reply is never
-        touched.
+        touched. Only with ``stream_replies`` on: without it the owner has seen
+        none of an unfinished reply, and Hermes abandons it on ``/stop`` and
+        ``/new`` on purpose (``GatewayStreamConsumer.run``), so it is dropped
+        as before reply streaming existed.
         """
+        if not self._stream_replies_enabled():
+            return
         open_ids = [
             message_id
             for message_id, run in self._active_runs_by_id.items()

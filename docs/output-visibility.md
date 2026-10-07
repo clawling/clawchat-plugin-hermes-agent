@@ -9,12 +9,12 @@ Hermes ClawChat supports three platform-level output visibility presets:
 ```
 
 The command updates the ClawChat platform settings in `$HERMES_HOME/config.yaml`.
-It is not a per-chat or per-session preference. `streaming` is `true` in all
-three presets: Hermes then writes a reply progressively, and in a direct chat
-the adapter relays it as a ClawChat stream that ends as one message (see
-[`./client-integration.md`](./client-integration.md) §8.0). Group replies are
-still sent whole. Only the reply text streams — never tool progress, notices
-or reasoning.
+It is not a per-chat or per-session preference. `streaming` stays `false` in all
+three presets, so choosing a preset also turns Hermes reply streaming off again.
+ClawChat reply streaming is a separate, experimental opt-in
+(`extra.stream_replies`, default `false`) that needs host `streaming: true` as
+well; see
+[`./configuration.md`](./configuration.md#reply-streaming-experimental).
 
 > **Quote `tool_progress: "off"`.** `tool_progress` is a *string* enum
 > (`off` / `new` / `all` / `verbose`), and the plugin writes and compares the
@@ -45,7 +45,7 @@ display:
     clawchat:
       tool_progress: "off"
       show_reasoning: false
-      streaming: true
+      streaming: false
       interim_assistant_messages: false
       long_running_notifications: false
       busy_ack_detail: false
@@ -74,7 +74,7 @@ display:
     clawchat:
       tool_progress: "off"
       show_reasoning: false
-      streaming: true
+      streaming: false
       interim_assistant_messages: true
       long_running_notifications: false
       busy_ack_detail: false
@@ -103,7 +103,7 @@ display:
     clawchat:
       tool_progress: verbose
       show_reasoning: true
-      streaming: true
+      streaming: false
       interim_assistant_messages: true
       long_running_notifications: true
       busy_ack_detail: true
@@ -113,25 +113,6 @@ agent:
   gateway_notify_interval: 180
   gateway_timeout_warning: 900
 ```
-
-## Process messages are marked `thinking`
-
-Everything a preset lets through that is not the agent's reply — tool progress,
-the `💭 Reasoning` block (sent as its own message just before the reply it
-belongs to), status updates, the long-running heartbeat, operational notices and
-the runtime notices listed below — goes out with `payload.message_mode:
-"thinking"` (protocol §7.5). A client may fold these; another agent in the chat
-does not read them as input. The reply and interim assistant messages stay
-`"normal"`. Hermes sends all of these through the adapter's `send()` without a
-marker, so the adapter recognises them by the Hermes sender they come from
-(`_HOST_PROCESS_SENDERS` in `clawchat_gateway/adapter.py`), by
-`send_or_update_status`, and by the runtime-notice table.
-
-Tool previews are rendered as inline code (the adapter's `format_tool_preview`,
-called by Hermes builds that have the hook) and terminal commands as code
-blocks (`supports_code_blocks`), so a `*` in a command is shown, not read as
-emphasis. In the `full` preset (`tool_progress: verbose`) a non-terminal tool's
-raw argument JSON is still formatted by Hermes itself, with no adapter hook.
 
 ## Runtime/status suppression
 
