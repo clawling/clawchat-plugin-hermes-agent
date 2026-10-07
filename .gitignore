@@ -97,6 +97,9 @@ tmp
 #   * text_mentions — "@name" typed in a group reply becomes a mention
 #     fragment plus context.mentions, with the reference client's rules (e-mail
 #     guard, longest match, ties link nobody, never self or "all").
+#   * silence_markers — a bare NO_REPLY / [SILENT] / HEARTBEAT_OK reply is
+#     suppressed, but only as the whole reply; prose that mentions one is
+#     sent. Mirrors the OpenClaw plugin's rule-B cases.
 #   * reply_streaming — opt-in (extra.stream_replies, default off): a
 #     direct-chat reply streams (created/add/done) and ends as one
 #     message.reply under the same id; groups are not streamed; held, failed
@@ -135,6 +138,7 @@ tests/*
 !tests/test_thinking_mode.py
 !tests/test_text_mentions.py
 !tests/test_reply_streaming.py
+!tests/test_silence_markers.py
 deploy/
 scripts/
 docs/superpowers/

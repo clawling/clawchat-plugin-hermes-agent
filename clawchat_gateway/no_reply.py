@@ -9,11 +9,13 @@ backticks, ``*``) are tolerated for free and must not be written into the
 pattern itself.
 
 RULE B — bare runtime silence markers (``NO_REPLY`` / ``[SILENT]`` /
-``SILENT`` / ``NO REPLY``), matched as a WHOLE STRING ONLY.  The host runtime
-defines these itself, and the canonicalization below is a line-for-line port of
-its own silence filter so the two never drift.  They are ordinary English words
-— substring-matching them would swallow prose such as "there is no reply from
-the server".
+``SILENT`` / ``NO REPLY`` / ``HEARTBEAT_OK``), matched as a WHOLE STRING ONLY.
+The host runtime defines the first four itself, and the canonicalization below
+is a line-for-line port of its own silence filter so the two never drift;
+``HEARTBEAT_OK`` is the OpenClaw host's heartbeat ack, which some of its
+versions let through as a reply, carried here for parity.  They are ordinary
+words — substring-matching them would swallow prose such as "there is no reply
+from the server".
 
 This module MUST stay a literal mirror of the OpenClaw plugin's equivalent
 module.  When one side changes, change the other in the same breath.
@@ -49,7 +51,7 @@ _STRIP_RE = re.compile(
 # Rule B — host bare markers, whole-string exact
 # ---------------------------------------------------------------------------
 
-_HOST_MARKERS = frozenset({"[SILENT]", "SILENT", "NO_REPLY", "NO REPLY"})
+_HOST_MARKERS = frozenset({"[SILENT]", "SILENT", "NO_REPLY", "NO REPLY", "HEARTBEAT_OK"})
 _HOST_MARKER_MAX_LEN = 64
 
 
