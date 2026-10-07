@@ -200,6 +200,15 @@ raises costs that frame only. Lanes survive a reconnect (a chat's order
 holds across it) and are cancelled by `ClawChatConnection.stop()`, which
 spares the lane that called it.
 
+### Group turns run one at a time
+
+A group is one shared Hermes session, so the group coalescer
+(`group_message_coalescer.GroupMessageCoalescer`, `is_busy=`) holds a group's
+next batch while that group's turn is running — tracked from the plugin's own
+dispatch (`ClawChatAdapter._group_dispatching`) and then from the host base
+adapter's `_active_sessions` guard — and flushes it as one batch once the
+session is free. See [`./configuration.md`](./configuration.md#group-session-seeding-and-queueing).
+
 ### Group exec approvals forwarded to the owner
 
 When a dangerous command needs approval inside a **group**, Hermes calls

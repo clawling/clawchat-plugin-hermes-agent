@@ -381,10 +381,44 @@ conversation.
 Releases up to 0.14.0-100 split a group into one session per speaker by
 default. On upgrade each group starts a new shared session; the old
 per-speaker sessions stay in Hermes' session store (searchable, not
-continued). A `group_sessions_per_user: true` an operator wrote into an existing
+continued), and the first turn of the new session is seeded with the group's
+recent messages (below). A `group_sessions_per_user: true` an operator wrote into an existing
 `config.yaml` (top level or under `groups`) is still honoured for the groups it
 covers, with one deprecation warning at startup; remove it to switch those
 groups to a shared session.
+
+### Group session seeding and queueing
+
+**Seeding.** The first turn of a group's shared session — the first group turn
+after upgrading from per-speaker sessions, or the first turn ever in a group —
+starts with the group's recent history from the plugin's own message ledger:
+the last `rebuild-recent-messages` messages (factory 20) within
+`rebuild-recent-chars` characters (factory 4000, newest kept first), oldest
+first, each line `Name (usr_…): text` or `you: text` for the agent's own
+replies, under a header saying it is context only
+(`ClawChatAdapter._group_context_for_turn`). It goes into the turn's user
+message, so it stays in the session. It happens once per group: the
+`group_shared_sessions` table in plugin SQLite records groups whose shared
+session was started. A later `/new` starts an empty session that is not
+re-seeded (the agent's notes still come with every turn).
+
+After that, an @-mention adds only the group messages the session has not been
+given — for example messages a mention-only group held back — at most 10, never
+the agent's own replies. The adapter remembers delivered message ids in memory,
+so the first mention after a restart may repeat up to 10 messages. Slash
+commands and synthetic turns get no history. A legacy per-speaker group keeps
+the older behaviour: the 10 messages before an @-mention, without speakers.
+
+**Queueing.** A group's turns run one at a time. While a group's turn is
+running — from the moment the plugin hands a batch to Hermes until Hermes'
+session guard for that group is released — the group's next batch is not sent:
+the coalescer keeps adding to it, and as soon as the session is free everything
+that arrived goes out as one batch, in order, with its own metadata. The
+plugin does this itself instead of relying on Hermes' busy handling, which
+depends on `display.busy_input_mode` and on the host version (an interrupt, a
+merge under the first queued message's metadata, or on old hosts an overwrite
+of the queued slot). Slash commands are not batched, so `/stop` and `/new` still
+reach a busy group at once.
 
 ### Owner-controlled per-group settings and batching
 
@@ -435,6 +469,8 @@ when the adapter starts, so a change needs a gateway restart.
 | `note-cap-user` | `1500` | 300–6000 | Characters of one person's note (`users/<id>.md`, or `owner.md` in the owner's direct chat) shown in a turn. |
 | `note-cap-group` | `2000` | 300–8000 | Characters of the group's note (`groups/<id>.md`) shown in a group turn. |
 | `note-cap-turn` | `4000` | 1000–16000 | Characters of all notes shown in one turn together. |
+| `rebuild-recent-messages` | `20` | 5–100 | Recent group messages that seed a group's new shared session. |
+| `rebuild-recent-chars` | `4000` | 1000–32000 | Character budget of that seed. |
 
 See [`./reference/prompt-injection.md`](./reference/prompt-injection.md) for
 where the notes appear and how they are cut.

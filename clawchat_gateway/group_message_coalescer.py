@@ -47,15 +47,23 @@ class GroupMessageCoalescer:
         dispatch: Callable[[InboundMessage], Awaitable[None]],
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         log: logging.Logger = logger,
+        is_busy: Callable[[str], bool] | None = None,
+        busy_poll_seconds: float = 0.5,
     ) -> None:
         self._idle_seconds = idle_seconds
         self._max_wait_seconds = max_wait_seconds
         self._dispatch = dispatch
         self._sleep = sleep
         self._log = log
+        # A chat whose previous turn is still running is not flushed: its
+        # batch keeps collecting and goes out as one batch once the chat is
+        # free (polled; asyncio.sleep, not the injectable timer sleep).
+        self._is_busy = is_busy
+        self._busy_poll_seconds = busy_poll_seconds
         self._pending: dict[str, list[InboundMessage]] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._max_wait_tasks: dict[str, asyncio.Task[None]] = {}
+        self._busy_waiters: dict[str, asyncio.Task[None]] = {}
 
     def enqueue(self, message: InboundMessage, *, idle_seconds_override: float | None = None) -> None:
         batch = self._pending.setdefault(message.chat_id, [])
@@ -90,7 +98,11 @@ class GroupMessageCoalescer:
         )
 
     async def cancel(self) -> None:
-        tasks = list(self._tasks.values()) + list(self._max_wait_tasks.values())
+        tasks = (
+            list(self._tasks.values())
+            + list(self._max_wait_tasks.values())
+            + list(self._busy_waiters.values())
+        )
         for task in tasks:
             task.cancel()
         if tasks:
@@ -104,6 +116,7 @@ class GroupMessageCoalescer:
         self._pending.clear()
         self._tasks.clear()
         self._max_wait_tasks.clear()
+        self._busy_waiters.clear()
 
     async def flush_now(self, chat_id: str) -> None:
         task = self._tasks.pop(chat_id, None)
@@ -153,7 +166,52 @@ class GroupMessageCoalescer:
             if self._max_wait_tasks.get(chat_id) is task:
                 self._max_wait_tasks.pop(chat_id, None)
 
+    def _chat_busy(self, chat_id: str) -> bool:
+        if self._is_busy is None:
+            return False
+        try:
+            return bool(self._is_busy(chat_id))
+        except Exception:  # noqa: BLE001 - never wedge a chat on a probe error
+            self._log.warning("clawchat group busy check failed chat_id=%s", chat_id, exc_info=True)
+            return False
+
+    def _hold_until_idle(self, chat_id: str) -> None:
+        if chat_id in self._busy_waiters:
+            return
+        self._log.info(
+            "clawchat group batch held chat_id=%s count=%d reason=turn_in_flight",
+            chat_id,
+            len(self._pending.get(chat_id, [])),
+        )
+        self._busy_waiters[chat_id] = asyncio.create_task(
+            self._flush_when_idle(chat_id),
+            name=f"clawchat-group-coalesce-busy-{chat_id}",
+        )
+
+    async def _flush_when_idle(self, chat_id: str) -> None:
+        task = asyncio.current_task()
+        try:
+            while self._chat_busy(chat_id):
+                await asyncio.sleep(self._busy_poll_seconds)
+            if self._busy_waiters.get(chat_id) is task:
+                self._busy_waiters.pop(chat_id, None)
+            await self.flush(chat_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._log.warning(
+                "clawchat group batch dispatch failed chat_id=%s",
+                chat_id,
+                exc_info=True,
+            )
+        finally:
+            if self._busy_waiters.get(chat_id) is task:
+                self._busy_waiters.pop(chat_id, None)
+
     async def flush(self, chat_id: str) -> None:
+        if chat_id in self._pending and self._chat_busy(chat_id):
+            self._hold_until_idle(chat_id)
+            return
         batch = self._pending.pop(chat_id, [])
         if not batch:
             return

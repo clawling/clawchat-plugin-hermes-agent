@@ -169,6 +169,17 @@ CREATE TABLE IF NOT EXISTS recalled_messages (
 );
 """
 
+# One row per group whose shared Hermes session the plugin has started: the
+# first turn of that session is seeded with recent group history, once.
+GROUP_SHARED_SESSIONS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS group_shared_sessions (
+  account_id TEXT NOT NULL,
+  chat_id TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  PRIMARY KEY (account_id, chat_id)
+);
+"""
+
 MIGRATIONS = [
     (1, "initial_schema", INITIAL_SCHEMA),
     (2, "message_id_dedup", MESSAGE_ID_DEDUP_SCHEMA),
@@ -179,6 +190,7 @@ MIGRATIONS = [
     (7, "liveware_sample", LIVEWARE_SAMPLE_SCHEMA),
     (8, "owner_profile", OWNER_PROFILE_SCHEMA),
     (9, "recalled_messages", RECALLED_MESSAGES_SCHEMA),
+    (10, "group_shared_sessions", GROUP_SHARED_SESSIONS_SCHEMA),
 ]
 
 _stores: dict[Path, ClawChatStore] = {}
@@ -1228,6 +1240,99 @@ class ClawChatStore:
             {"message_id": row[0], "text": row[1], "created_at": row[2]}
             for row in reversed(rows)
         ]
+
+    def list_recent_group_transcript(
+        self,
+        account_id: str,
+        chat_id: str,
+        limit: int,
+    ) -> list[dict]:
+        """Last *limit* real messages of one group, oldest-first, with speaker.
+
+        Like ``list_recent_group_messages`` (same filter, same index) but each
+        row also carries ``direction`` and, for inbound rows, ``sender_id`` /
+        ``sender_name`` taken from the stored frame. Empty list on any error.
+        """
+        self.initialize()
+        if self._disabled or limit <= 0:
+            return []
+        try:
+            conn = sqlite3.connect(self.db_path)
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT message_id, text, created_at, direction, raw_json
+                    FROM clawchat_messages
+                    WHERE account_id = ? AND chat_id = ?
+                      AND event_type IN ('message.send', 'message.reply')
+                    ORDER BY created_at DESC, rowid DESC
+                    LIMIT ?
+                    """,
+                    (account_id, chat_id, limit),
+                ).fetchall()
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "clawchat database read failed operation=list_recent_group_transcript",
+                exc_info=True,
+            )
+            return []
+        result: list[dict] = []
+        for message_id, text, created_at, direction, raw_json in reversed(rows):
+            sender_id = sender_name = ""
+            if direction == "inbound" and raw_json:
+                try:
+                    raw = json.loads(raw_json)
+                except (TypeError, ValueError):
+                    raw = None
+                sender = raw.get("sender") if isinstance(raw, dict) else None
+                if isinstance(sender, dict):
+                    sender_id = str(sender.get("id") or "")
+                    sender_name = str(sender.get("nick_name") or "")
+            result.append(
+                {
+                    "message_id": message_id,
+                    "text": text,
+                    "created_at": created_at,
+                    "direction": direction,
+                    "sender_id": sender_id,
+                    "sender_name": sender_name,
+                }
+            )
+        return result
+
+    def has_group_shared_session(self, account_id: str, chat_id: str) -> bool | None:
+        """Whether the shared session of this group was started; None if unknown."""
+        self.initialize()
+        if self._disabled:
+            return None
+        try:
+            conn = sqlite3.connect(self.db_path)
+            try:
+                row = conn.execute(
+                    "SELECT 1 FROM group_shared_sessions WHERE account_id = ? AND chat_id = ?",
+                    (account_id, chat_id),
+                ).fetchone()
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "clawchat database read failed operation=has_group_shared_session",
+                exc_info=True,
+            )
+            return None
+        return row is not None
+
+    def mark_group_shared_session(self, account_id: str, chat_id: str) -> None:
+        def write(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "INSERT OR IGNORE INTO group_shared_sessions(account_id, chat_id, started_at) "
+                "VALUES (?, ?, ?)",
+                (account_id, chat_id, _now_ms()),
+            )
+
+        self._write("mark_group_shared_session", write)
 
     def record_tool_call(
         self,

@@ -424,6 +424,8 @@ SESSION_INT_KEYS: dict[str, tuple[str, int, int, int]] = {
     "note-cap-user": ("note_cap_user", 1500, 300, 6000),
     "note-cap-group": ("note_cap_group", 2000, 300, 8000),
     "note-cap-turn": ("note_cap_turn", 4000, 1000, 16000),
+    "rebuild-recent-messages": ("rebuild_recent_messages", 20, 5, 100),
+    "rebuild-recent-chars": ("rebuild_recent_chars", 4000, 1000, 32000),
 }
 
 
@@ -503,6 +505,8 @@ class ClawChatConfig:
     note_cap_user: int = 1500
     note_cap_group: int = 2000
     note_cap_turn: int = 4000
+    rebuild_recent_messages: int = 20
+    rebuild_recent_chars: int = 4000
 
     @classmethod
     def from_platform_config(cls, platform_config: Any) -> "ClawChatConfig":

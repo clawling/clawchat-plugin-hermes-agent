@@ -177,6 +177,17 @@ MENTION_CONTEXT_N = 10
 # which silently discards every shared-group message. ``chat_id`` is already in
 # the session key, so a constant keeps different groups in distinct sessions.
 GROUP_SHARED_SESSION_USER_ID = "__group_shared__"
+# Per group, how many recently delivered message ids the adapter remembers so a
+# mention's context only adds group messages the shared session has not seen.
+DELIVERED_GROUP_IDS_MAX = 500
+GROUP_SEED_HEADER = (
+    "[ClawChat group messages from before this session, oldest first. "
+    "Context only; the new messages follow.]"
+)
+GROUP_UNSEEN_HEADER = (
+    "[ClawChat group messages you have not seen yet, oldest first. "
+    "Context only; the new messages follow.]"
+)
 TYPING_REFRESH_SECONDS = 10.0
 # Bounded FIFO of conversations known to be dissolved. Uplinks for these are
 # suppressed so a leaked upstream typing keepalive cannot hammer a dead chat.
@@ -855,10 +866,19 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._profile_sync_tasks: set[asyncio.Task[None]] = set()
         self._owner_metadata_refresh_task: asyncio.Task[None] | None = None
         self._conversation_metadata_versions: dict[str, int] = {}
+        # chat_id -> recently delivered group message ids (bounded FIFO). See
+        # _group_context_for_turn. In-memory: after a restart a mention may
+        # repeat up to MENTION_CONTEXT_N messages the session already has.
+        self._delivered_group_message_ids: dict[str, OrderedDict[str, None]] = {}
+        # Groups whose batch the plugin is handing to Hermes right now; with the
+        # host's own active-session guard this tells the coalescer to hold the
+        # next batch until the running group turn is over.
+        self._group_dispatching: set[str] = set()
         self._group_message_coalescer = GroupMessageCoalescer(
             idle_seconds=10.0,
             max_wait_seconds=30.0,
             dispatch=self._dispatch_group_batch,
+            is_busy=self._group_turn_in_flight,
         )
         self._group_settings_cache = GroupSettingsCache()
         # Monotonic fetch sequence assigned per dispatched settings pull. Passed
@@ -3224,7 +3244,34 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
         return self._group_settings_cache.effective(chat_id, static_fallback)
 
+    def _chat_session_active(self, chat_id: str) -> bool:
+        """Whether the host is running a turn in a session of *chat_id*.
+
+        Reads the base adapter's ``_active_sessions`` guard (present since
+        Hermes v0.12.0), whose keys are colon-joined session keys that contain
+        the chat id as one segment; ``cnv_`` ids never contain a colon.
+        """
+        active = getattr(self, "_active_sessions", None)
+        if not isinstance(active, dict) or not chat_id:
+            return False
+        return any(chat_id in str(key).split(":") for key in list(active))
+
+    def _group_turn_in_flight(self, chat_id: str) -> bool:
+        """Hold the next batch of a shared-session group while a turn runs."""
+        if effective_group_sessions_per_user(self._clawchat_config, chat_id):
+            return False
+        return chat_id in self._group_dispatching or self._chat_session_active(chat_id)
+
     async def _dispatch_group_batch(self, inbound: InboundMessage) -> None:
+        # Marked busy from the first line (no await before it) until the host
+        # has taken the event and installed its own active-session guard.
+        self._group_dispatching.add(inbound.chat_id)
+        try:
+            await self._dispatch_group_batch_now(inbound)
+        finally:
+            self._group_dispatching.discard(inbound.chat_id)
+
+    async def _dispatch_group_batch_now(self, inbound: InboundMessage) -> None:
         """Coalescer dispatch: re-check mute / reply mode at FLUSH time.
 
         A non-mention batch waits ``batch_delay_seconds`` before it runs. If an
@@ -3327,6 +3374,104 @@ class ClawChatAdapter(BasePlatformAdapter):
             lines.append(text)
         return "\n".join(lines)
 
+    def _group_context_for_turn(self, inbound: InboundMessage) -> str | None:
+        """Group history to put in front of this group turn, if any.
+
+        Shared session (the default): the session's first turn is seeded with
+        recent group messages (``rebuild-recent-messages`` /
+        ``rebuild-recent-chars``), once per group (persisted marker). Later, an
+        @-mention adds only the group messages this session has not been given
+        (``MENTION_CONTEXT_N`` at most) — e.g. ones a mention-only group held
+        back. Every call records the turn's own message ids as delivered.
+
+        Legacy per-speaker group: the old mention prior-context, unchanged.
+        """
+        if effective_group_sessions_per_user(self._clawchat_config, inbound.chat_id):
+            if not inbound.was_mentioned:
+                return None
+            return self._build_mention_prior_context_text(inbound)
+        batch_ids = self._batch_message_ids(inbound)
+        store = self._store
+        context: str | None = None
+        has_started = getattr(store, "has_group_shared_session", None)
+        can_read = callable(getattr(store, "list_recent_group_transcript", None))
+        started = has_started("default", inbound.chat_id) if callable(has_started) else None
+        if started is False and can_read:
+            context = self._build_group_seed_text(inbound.chat_id, batch_ids)
+            store.mark_group_shared_session("default", inbound.chat_id)
+            logger.info(
+                "clawchat group shared session started chat_id=%s seeded=%s",
+                inbound.chat_id,
+                bool(context),
+            )
+        elif inbound.was_mentioned and can_read:
+            context = self._build_group_unseen_text(inbound.chat_id, batch_ids)
+        self._remember_delivered_group_ids(inbound.chat_id, batch_ids)
+        return context
+
+    def _remember_delivered_group_ids(self, chat_id: str, message_ids: Any) -> None:
+        delivered = self._delivered_group_message_ids.setdefault(chat_id, OrderedDict())
+        for message_id in message_ids:
+            if not message_id:
+                continue
+            delivered[message_id] = None
+            delivered.move_to_end(message_id)
+        while len(delivered) > DELIVERED_GROUP_IDS_MAX:
+            delivered.popitem(last=False)
+
+    @staticmethod
+    def _format_group_history_line(row: Mapping[str, Any]) -> str:
+        text = str(row.get("text") or "").strip() or "(empty message)"
+        if row.get("direction") == "outbound":
+            return f"you: {text}"
+        sender_id = str(row.get("sender_id") or "")
+        name = str(row.get("sender_name") or "") or sender_id or "someone"
+        label = f"{name} ({sender_id})" if sender_id and name != sender_id else name
+        return f"{label}: {text}"
+
+    def _build_group_seed_text(self, chat_id: str, batch_ids: set[str]) -> str | None:
+        config = self._clawchat_config
+        rows = self._store.list_recent_group_transcript(
+            "default", chat_id, config.rebuild_recent_messages + len(batch_ids)
+        )
+        rows = [row for row in rows if row.get("message_id") not in batch_ids]
+        rows = rows[-config.rebuild_recent_messages :]
+        budget = config.rebuild_recent_chars
+        kept: list[str] = []
+        used = 0
+        for row in reversed(rows):  # newest first, so the budget keeps the latest
+            line = self._format_group_history_line(row)
+            cost = len(line) + (1 if kept else 0)
+            if used + cost > budget:
+                if not kept:
+                    kept.append(line[: max(0, budget - 1)] + "…")
+                break
+            kept.append(line)
+            used += cost
+        if not kept:
+            return None
+        self._remember_delivered_group_ids(chat_id, (row.get("message_id") for row in rows))
+        return "\n".join([GROUP_SEED_HEADER, *reversed(kept)])
+
+    def _build_group_unseen_text(self, chat_id: str, batch_ids: set[str]) -> str | None:
+        rows = self._store.list_recent_group_transcript(
+            "default", chat_id, MENTION_CONTEXT_N + len(batch_ids)
+        )
+        delivered = self._delivered_group_message_ids.get(chat_id, {})
+        unseen = [
+            row
+            for row in rows
+            if row.get("direction") != "outbound"
+            and row.get("message_id") not in batch_ids
+            and row.get("message_id") not in delivered
+        ][-MENTION_CONTEXT_N:]
+        if not unseen:
+            return None
+        self._remember_delivered_group_ids(chat_id, (row.get("message_id") for row in unseen))
+        return "\n".join(
+            [GROUP_UNSEEN_HEADER, *(self._format_group_history_line(row) for row in unseen)]
+        )
+
     async def _handle_inbound(self, inbound: InboundMessage) -> None:
         # Pending skill-update consent gate: an owner's direct affirm/deny reply
         # is consumed here (applies/cancels the update) and never reaches the LLM.
@@ -3366,12 +3511,12 @@ class ClawChatAdapter(BasePlatformAdapter):
         # and would treat it as chat. Skip the injection for command turns so
         # the slash stays at the start.
         event_text = inbound.text
-        if (
-            inbound.chat_type == "group"
-            and inbound.was_mentioned
-            and not is_group_command
-        ):
-            prior_context = self._build_mention_prior_context_text(inbound)
+        is_synthetic = (
+            isinstance(inbound.raw_message, dict)
+            and inbound.raw_message.get("synthetic") is True
+        )
+        if inbound.chat_type == "group" and not is_group_command and not is_synthetic:
+            prior_context = self._group_context_for_turn(inbound)
             if prior_context:
                 event_text = prior_context + "\n\n" + event_text
                 logger.info(

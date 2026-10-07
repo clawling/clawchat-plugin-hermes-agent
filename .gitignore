@@ -67,6 +67,11 @@ tmp
 #   * group_shared_session — a group is one Hermes session for every speaker
 #     by default; an explicit legacy per-speaker setting is honoured with a
 #     one-time warning; direct chats keep one session per conversation.
+#   * group_session_seed / group_turn_queue — a group's new shared session is
+#     seeded once with recent group messages, later mentions only add what the
+#     session has not seen, and a batch that arrives while the group's turn is
+#     running waits and goes out as the next batch instead of reaching
+#     Hermes' version-dependent busy handling.
 #   * inbound_dispatch_lanes — inbound messages are handled off the WS read
 #     loop, per chat and in order. A handler that awaits a send's ack inside
 #     the read loop can never get it: the read loop stalls for the ack timeout,
@@ -91,6 +96,8 @@ tests/*
 !tests/test_note_injection.py
 !tests/test_memory_routing_text.py
 !tests/test_group_shared_session.py
+!tests/test_group_session_seed.py
+!tests/test_group_turn_queue.py
 deploy/
 scripts/
 docs/superpowers/
