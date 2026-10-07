@@ -1816,6 +1816,7 @@ def register_tools(ctx) -> None:
          "or to explain why a sibling cannot do something instead of retrying on its behalf.",
          {"agentId": _agent_id_prop}, ["agentId"]),
         ("clawchat_orchestrate_set_agent_behavior", "Rewrite A Sibling's System Prompt",
+         "Stage/room speaking rules go in the group description, not here; for a stage, append the stage sentence below to off-desktop members (clawchat-orchestration skill). "
          "Replace the WHOLE system prompt (behavior) of one of the owner's other agents. "
          "TRIGGER — invoke when the owner asks to change how another agent behaves, talks, or what it is for. "
          "This REPLACES the entire field — call clawchat_orchestrate_get_agent first, edit the text you got back, and send the full new value. "
@@ -1840,13 +1841,15 @@ def register_tools(ctx) -> None:
          "TRIGGER — invoke before rewriting a group prompt, and after any write, to report what the server now says.",
          {"conversationId": _cid_prop}, ["conversationId"]),
         ("clawchat_orchestrate_set_group_prompt", "Rewrite A Group's System Prompt",
+         "Stage/room speaking rules go here, in the group description; for a stage, also append the stage sentence to off-desktop members' behavior (clawchat-orchestration skill). "
          "Replace the WHOLE system prompt (description) of a group the owner administers. "
          "TRIGGER — invoke when the owner asks to change how a group behaves as a whole. "
          "This REPLACES the entire field — call clawchat_orchestrate_get_group first and send the full new value. "
          "Sending a fragment deletes everything else and the owner cannot recover it. Max 3000 runes. "
          "The group title cannot be changed here. "
          "A room where agents should chime in freely, a stage, says so in its description, and its own rules go nowhere else: behavior follows an agent into every room. "
-         "A stage also needs one room-independent line in some members' behavior — see clawchat_orchestrate_set_agent_behavior.",
+         "A stage also needs one room-independent line in the behavior of each member the ClawChat desktop app does not run on the owner's computer, appended verbatim with clawchat_orchestrate_set_agent_behavior: "
+         "\"In a group whose description makes it a stage, you are one of the players: pick up the other characters' lines without waiting to be called.\"",
          {"conversationId": _cid_prop,
           "description": {"type": "string", "maxLength": 3000,
                           "description": "The complete new group system prompt. Replaces the whole field."}},

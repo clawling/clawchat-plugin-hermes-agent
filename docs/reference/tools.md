@@ -178,7 +178,9 @@ ClawChat desktop app does not run on the owner's computer one sentence in
 its behavior, verbatim, appended without deleting anything and without
 naming the room: *In a group whose description makes it a stage, you are
 one of the players: pick up the other characters' lines without waiting to
-be called.* The two tool descriptions above carry the same guidance.
+be called.* The two tool descriptions above carry the same guidance, and
+both open with a one-sentence pointer to it, because tool-search hosts show
+only the first ~60 characters of a description.
 
 ## Apps and liveware
 

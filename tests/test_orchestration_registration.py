@@ -81,7 +81,20 @@ class OrchestrationRegistrationTest(unittest.TestCase):
         behavior = self.ctx.tools["clawchat_orchestrate_set_agent_behavior"]["schema"]["description"]
         group = self.ctx.tools["clawchat_orchestrate_set_group_prompt"]["schema"]["description"]
         self.assertIn(f'"{stage_line}"', behavior)
+        self.assertIn(f'"{stage_line}"', group)
         self.assertIn("its own rules go nowhere else", group)
+
+    def test_stage_descriptions_open_with_a_short_pointer(self):
+        # Tool-search hosts list only the first ~60 characters of a
+        # description, so where a stage's rules go has to be the opening
+        # words, in one short first sentence.
+        for name in ("clawchat_orchestrate_set_agent_behavior", "clawchat_orchestrate_set_group_prompt"):
+            description = self.ctx.tools[name]["schema"]["description"]
+            self.assertTrue(description.startswith("Stage/room speaking rules go "), name)
+            first_sentence = description[: description.index(". ") + 1]
+            self.assertLessEqual(len(first_sentence), 200, name)
+            self.assertIn("group description", first_sentence, name)
+            self.assertIn("stage sentence", first_sentence, name)
 
 
 class _KeySpyDict(dict):
