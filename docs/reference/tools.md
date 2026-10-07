@@ -85,6 +85,13 @@ errors that carry a machine-readable discriminator, and `retryable` / `status` /
 | `clawchat_memory_write`             | Append to or replace the **agent-authored body** of a memory file. Never touches the metadata block. |
 | `clawchat_memory_edit`              | Replace exactly one existing text span in the agent-authored body.            |
 
+`clawchat_memory_write` with `mode=append` skips any paragraph (blank-line
+separated, surrounding whitespace ignored) whose lines already appear, in
+order, in the body, and appends only the rest. The result then carries
+`skippedDuplicateParagraphs` and a `note`; when every paragraph was already
+there nothing is written. `mode=replace` writes exactly what it is given
+(`clawchat_memory.write_clawchat_memory_body`).
+
 ## Server-authoritative metadata
 
 | Tool                                | What it does                                                                 |

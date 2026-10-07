@@ -379,8 +379,16 @@ async def memory_write(
     if err is not None:
         return err
     try:
-        write_clawchat_memory_body(root, target_type, target_id, mode, content)
-        return {"ok": True, "targetType": target_type, "targetId": target_id}
+        outcome = write_clawchat_memory_body(root, target_type, target_id, mode, content) or {}
+        result: dict[str, Any] = {"ok": True, "targetType": target_type, "targetId": target_id}
+        skipped = int(outcome.get("skipped_duplicate_paragraphs") or 0)
+        if skipped:
+            result["skippedDuplicateParagraphs"] = skipped
+            result["note"] = (
+                f"{skipped} paragraph(s) were already in this note and were not added again"
+                + ("; nothing new was written." if not outcome.get("appended") else ".")
+            )
+        return result
     except ValueError as exc:
         return _validation_error(str(exc))
     except Exception as exc:  # noqa: BLE001

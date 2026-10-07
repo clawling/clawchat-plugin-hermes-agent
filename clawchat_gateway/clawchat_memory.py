@@ -400,25 +400,77 @@ def _append_body(existing_body: str, content: str) -> str:
     return f"{existing_body}\n{content}"
 
 
+_PARAGRAPH_SPLIT_RE = re.compile(r"\n[ \t]*\n")
+
+
+def _content_lines(text: str) -> list[str]:
+    return [line.strip() for line in text.split("\n") if line.strip()]
+
+
+def _contains_run(haystack: list[str], needle: list[str]) -> bool:
+    if not needle or len(needle) > len(haystack):
+        return False
+    width = len(needle)
+    return any(haystack[i : i + width] == needle for i in range(len(haystack) - width + 1))
+
+
+def _drop_duplicate_paragraphs(existing_body: str, content: str) -> tuple[str, int]:
+    """Return ``(content without already-present paragraphs, skipped count)``.
+
+    A paragraph (blank-line separated) counts as present when its lines, with
+    surrounding whitespace ignored, already appear as consecutive lines of the
+    body. Lines are the unit because appends join with a single newline, so a
+    note appended earlier as its own paragraph sits on its own line(s). When
+    nothing is skipped the content is returned unchanged, formatting included.
+    """
+    known = _content_lines(existing_body)
+    kept: list[str] = []
+    skipped = 0
+    for paragraph in _PARAGRAPH_SPLIT_RE.split(content):
+        lines = _content_lines(paragraph)
+        if not lines:
+            continue
+        if _contains_run(known, lines):
+            skipped += 1
+            continue
+        kept.append(paragraph.strip("\n"))
+        known.extend(lines)
+    if not skipped:
+        return content, 0
+    return "\n\n".join(kept), skipped
+
+
 def write_clawchat_memory_body(
     root: str | Path,
     target_type: str,
     target_id: str,
     mode: str,
     content: str,
-) -> None:
+) -> dict[str, Any]:
+    """Write the agent-authored body; return what happened.
+
+    ``append`` skips paragraphs the body already holds (see
+    ``_drop_duplicate_paragraphs``) and reports how many; when every paragraph
+    was already there nothing is written.
+    """
     path = ensure_clawchat_memory_target_safe(root, target_type, target_id)
     content = _normalize_line_endings(content)
     existing = _normalize_line_endings(_read_existing_content(path))
+    skipped = 0
     if mode == "append":
         if not content:
             raise ValueError("append content must be non-empty")
-        body = _append_body(_parse_clawchat_memory_content(existing)["body"], content)
+        existing_body = _parse_clawchat_memory_content(existing)["body"]
+        content, skipped = _drop_duplicate_paragraphs(existing_body, content)
+        if not content:
+            return {"appended": False, "skipped_duplicate_paragraphs": skipped}
+        body = _append_body(existing_body, content)
     elif mode == "replace":
         body = content
     else:
         raise ValueError("mode must be 'append' or 'replace'")
     _atomic_write(path, _replace_body(existing, body))
+    return {"appended": mode == "append", "skipped_duplicate_paragraphs": skipped}
 
 
 def edit_clawchat_memory_body(

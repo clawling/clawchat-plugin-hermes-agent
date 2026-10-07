@@ -56,6 +56,8 @@ tmp
 #     memory keys that stop Hermes' single-user memory (USER.md, background
 #     review) from collecting every ClawChat sender; load never overwrites an
 #     operator's value.
+#   * memory_append_dedupe — appending a note paragraph the file already
+#     holds does not add it a second time, and the tool result says so.
 #   * inbound_dispatch_lanes — inbound messages are handled off the WS read
 #     loop, per chat and in order. A handler that awaits a send's ack inside
 #     the read loop can never get it: the read loop stalls for the ack timeout,
@@ -76,6 +78,7 @@ tests/*
 !tests/test_install_scan.py
 !tests/test_inbound_dispatch_lanes.py
 !tests/test_memory_defaults.py
+!tests/test_memory_append_dedupe.py
 deploy/
 scripts/
 docs/superpowers/
