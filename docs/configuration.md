@@ -539,8 +539,16 @@ peer's `users/<id>.md` (or `owner.md` for the owner); in a group the group's
 only for facts about the owner said in the group — append-only, since the
 memory tools do not let a group read `owner.md` (see
 [`./reference/tools.md`](./reference/tools.md#what-a-conversation-may-read)).
-It is told to skip anything someone in the conversation asked it not to
-remember or to forget, not to use Hermes' `memory` tool, not to send messages, and to answer with the no-reply token.
+In a shared group session the turn also carries the group messages the session
+has not seen yet (at most 10, the same ones a mention would add), so a request
+made since the agent's last turn — in a mention-only group, one that did not
+mention the agent — is in front of it. It is told to skip anything someone in
+the conversation asked it not to remember or to forget, not to use Hermes'
+`memory` tool, not to send messages, and to answer with the no-reply token.
+Which facts fall under such a request, and keeping to the listed notes, are
+the model's judgement steered by that prompt: the plugin does not filter what
+a sediment turn writes. What code does hold is the read scope of the memory
+tools, the same as in any turn of that conversation.
 Whatever it does send to that chat — text, edits, media, typing — is dropped
 until Hermes reports the turn finished (`on_processing_complete`); other chats
 are unaffected. A group's next batch waits for it like for any group turn. The

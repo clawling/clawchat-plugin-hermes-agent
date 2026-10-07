@@ -197,6 +197,12 @@ GROUP_UNSEEN_HEADER = (
     "[ClawChat group messages you have not seen yet, oldest first. "
     "Context only; the new messages follow.]"
 )
+# Same messages in front of a sediment turn: they are part of the conversation
+# being saved (a "don't remember that" among them counts as much as the rest).
+SEDIMENT_UNSEEN_HEADER = (
+    "[ClawChat group messages this conversation has had since you last saw it, "
+    "oldest first. They are part of the conversation to go over below.]"
+)
 TYPING_REFRESH_SECONDS = 10.0
 # Bounded FIFO of conversations known to be dissolved. Uplinks for these are
 # suppressed so a leaked upstream typing keepalive cannot hammer a dead chat.
@@ -3554,7 +3560,9 @@ class ClawChatAdapter(BasePlatformAdapter):
             return None
         return "\n".join([GROUP_SEED_HEADER, *reversed(kept)])
 
-    def _build_group_unseen_text(self, chat_id: str, batch_ids: set[str]) -> str | None:
+    def _build_group_unseen_text(
+        self, chat_id: str, batch_ids: set[str], header: str = GROUP_UNSEEN_HEADER
+    ) -> str | None:
         rows = self._store.list_recent_group_transcript(
             "default", chat_id, MENTION_CONTEXT_N + len(batch_ids)
         )
@@ -3577,7 +3585,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         names: dict[str, str] = {}
         return "\n".join(
             [
-                GROUP_UNSEEN_HEADER,
+                header,
                 *(self._format_group_history_line(row, chat_id, names) for row in unseen),
             ]
         )
@@ -3796,6 +3804,18 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
         turn_id = secrets.token_hex(16)
         done = asyncio.Event()
+        text = session_sediment.build_sediment_prompt(reason=reason, targets=targets)
+        if shared_group:
+            # A mention-only group holds back messages that do not mention the
+            # agent until the next mention, so the session may not have seen the
+            # latest ones — including a "don't remember that". Go over them too.
+            unseen = None
+            try:
+                unseen = self._build_group_unseen_text(chat_id, set(), SEDIMENT_UNSEEN_HEADER)
+            except Exception:  # noqa: BLE001 - the prompt alone still works
+                logger.warning("clawchat sediment unseen history failed chat_id=%s", chat_id, exc_info=True)
+            if unseen:
+                text = f"{unseen}\n\n{text}"
         inbound = InboundMessage(
             chat_id=chat_id,
             chat_type=chat_type,
@@ -3803,7 +3823,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             # legacy per-speaker group) session needs the real one.
             sender_id="" if shared_group else sender_id,
             sender_name="",
-            text=session_sediment.build_sediment_prompt(reason=reason, targets=targets),
+            text=text,
             raw_message={
                 "synthetic": True,
                 "clawchat_sediment": reason,

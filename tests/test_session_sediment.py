@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -300,3 +301,92 @@ async def test_a_reset_forgets_the_old_sessions_size(adapter, monkeypatch):
     await _settle()
     assert adapter.dispatched == []
     assert sediment.latest_usage(DM) is None
+
+
+# --- "don't remember" reaches the sediment turn --------------------------------
+#
+# What is enforced in code and what is not: the plugin cannot tell a fact
+# someone asked not to keep from one worth keeping — that is the model's
+# judgement, steered by the sediment prompt. Code makes sure (1) the prompt
+# carries the rule, (2) the request itself is in front of the sediment turn even
+# when the shared group session never saw it (a mention-only group holds back
+# messages that do not mention the agent until the next mention), and (3) the
+# memory tools the turn calls keep their read scope (a group cannot read
+# owner.md). Neither the skip nor keeping to the listed notes is filtered in
+# code. The stand-in model below keeps every fact unless the prompt carries the
+# rule; then it drops a message that asks not to be remembered.
+
+KEEP = "Our hike moved to Saturday 9am at the north gate."
+SECRET = "The codeword is PELICAN-42, please don't remember it."
+
+
+def _store_group_message(adapter, message_id, sender, name, text):
+    adapter._store.insert_message(
+        platform="hermes", account_id="default", kind="message", direction="inbound",
+        event_type="message.send", chat_id=GROUP, message_id=message_id, text=text,
+        raw={"sender": {"id": sender, "nick_name": name}},
+    )
+
+
+def _stand_in_model(prompt):
+    """The facts a model following *prompt* would append to the group note."""
+    obeys_rule = "asked you not to remember" in prompt.lower()
+    lines = [line for line in prompt.splitlines() if ": " in line and "(usr_" in line]
+    facts = [line.split(": ", 1)[1] for line in lines]
+    if not obeys_rule:
+        return facts
+    return [fact for fact in facts if "don't remember" not in fact.lower()]
+
+
+@pytest.mark.asyncio
+async def test_group_sediment_writes_the_kept_fact_not_the_one_asked_to_forget(adapter, monkeypatch):
+    from clawchat_gateway import plugin_tools, tools
+    from clawchat_gateway.clawchat_memory import read_clawchat_memory_file
+
+    memories = adapter._clawchat_config.memory_root
+    monkeypatch.setattr(tools, "_resolve_memory_root", lambda: (Path(memories), None))
+    # Neither message mentioned the agent, so the shared session has not seen them.
+    _store_group_message(adapter, "k1", "usr_ada", "Ada", KEEP)
+    _store_group_message(adapter, "k2", "usr_ben", "Ben", SECRET)
+    writes = []
+
+    async def handle_message(event):
+        adapter.dispatched.append(event)
+        raw = event.raw_message.get("clawchat_raw") or {}
+        if not raw.get("clawchat_sediment"):
+            return
+        for key, value in {
+            "HERMES_SESSION_PLATFORM": "clawchat", "HERMES_SESSION_CHAT_ID": GROUP,
+            "HERMES_SESSION_CHAT_TYPE": "group", "HERMES_SESSION_USER_ID": "__group_shared__",
+        }.items():
+            monkeypatch.setenv(key, value)
+        for fact in _stand_in_model(event.text):
+            args = {"targetType": "group", "targetId": GROUP, "mode": "append", "content": fact}
+            writes.append(args)
+            await plugin_tools.handle_clawchat_memory_write(args)
+        await adapter.on_processing_complete(event, None)
+
+    monkeypatch.setattr(adapter, "handle_message", handle_message, raising=False)
+    await adapter._handle_inbound(group("/new", sender="usr_ada"))
+
+    sediment_event = adapter.dispatched[0]
+    assert _is_sediment(sediment_event)
+    prompt = sediment_event.text
+    # (1) the rule, (2) both messages, with who said them.
+    assert "asked you not to remember" in prompt.lower()
+    assert f"Ada (usr_ada): {KEEP}" in prompt
+    assert f"Ben (usr_ben): {SECRET}" in prompt
+    # The stand-in kept to the listed notes, and only the kept fact landed.
+    assert {(w["targetType"], w["targetId"]) for w in writes} <= {
+        (t, i) for t, i, _ in adapter._sediment_targets(GROUP, "group", sender_id="")
+    }
+    body = read_clawchat_memory_file(memories, "group", GROUP)["body"]
+    assert KEEP in body
+    assert "PELICAN-42" not in body
+    assert adapter.frames == []
+
+
+def test_stand_in_model_without_the_rule_would_keep_the_codeword():
+    # Guards the test above: it passes because of the prompt's rule.
+    prompt = f"Ada (usr_ada): {KEEP}\nBen (usr_ben): {SECRET}"
+    assert any("PELICAN-42" in fact for fact in _stand_in_model(prompt))
