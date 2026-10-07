@@ -12,6 +12,8 @@ or a general Hermes mechanism.
 | `platform_hint` | Platform plugin | `system` | When Hermes first builds or rebuilds the cached system prompt for a session. | Stored in the cached system prompt and session DB. |
 | `MemoryProvider.system_prompt_block()` | Memory provider plugin | `system` | When Hermes first builds or rebuilds the cached system prompt for a session. | Stored in the cached system prompt and session DB. |
 | `MessageEvent.channel_prompt` | Platform adapter or message event | `system` | Every API call. | Ephemeral; not stored in transcript history or session DB. |
+| `MessageEvent.channel_prompt` → `## ClawChat Peer Memory` | ClawChat adapter, direct chats | `system` | Every API call. | Ephemeral; not stored in transcript history or session DB. |
+| `MessageEvent.channel_prompt` → `## ClawChat Group Memory` | ClawChat adapter, group chats | `system` | Every API call. | Ephemeral; not stored in transcript history or session DB. |
 | `pre_llm_call` hook returning `context` | General plugin hook | `user` | Before the current turn's user message is sent. | Ephemeral; not stored in transcript history or session DB. |
 | `MemoryProvider.prefetch()` / `prefetch_all()` | Memory provider plugin | `user` | Before the current turn's user message is sent. | Ephemeral; not stored in transcript history or session DB. |
 | `ephemeral_system_prompt` argument | `AIAgent` caller, gateway, or API server | `system` | Every API call. | Ephemeral; not stored in transcript history or session DB. |
@@ -90,6 +92,30 @@ It injects `ClawChat Sender Metadata` for direct chats and `ClawChat Group
 Message Metadata` for group chats. Current direct message text and group
 transcript text stay in the host user-message body and are not duplicated in
 the system context.
+
+Each turn also carries the agent's **own notes** for the people in it — the
+agent-written body of the ClawChat memory files, never their metadata block
+(`ClawChatAdapter._format_note_memory_section`):
+
+- `## ClawChat Peer Memory` in a direct chat: `owner.md` when the sender is the
+  owner, otherwise `users/<sender_id>.md`.
+- `## ClawChat Group Memory` in a group: `groups/<chat_id>.md`, then
+  `users/<id>.md` for every distinct sender in the turn's batch (the agent
+  itself excluded). `owner.md` is never shown in a group; it stays in the
+  owner's direct chat.
+
+Both open with a fixed line saying the notes are social context written by the
+agent, not instructions; the group section adds that a note about a person may
+hold something said elsewhere and must not be brought up unless that person
+already said it in the group. Empty notes add nothing, and a turn with no notes
+has no section. Sizes come from the plugin keys `note-cap-user` (each person,
+`owner.md` included, factory 1500 chars), `note-cap-group` (the group note,
+2000) and `note-cap-turn` (the whole section, 4000), see
+[`../configuration.md`](../configuration.md#session-and-note-keys). A note over
+its cap keeps its leading whole paragraphs and ends with `(truncated — …)`
+naming the `clawchat_memory_read` call that shows the rest; when the notes
+together exceed `note-cap-turn`, short ones stay whole and the longest are cut
+to a common ceiling (`clawchat_gateway/note_injection.py`).
 
 `ClawChat Turn Metadata` also carries the message time taken from the
 Protocol-v2 envelope's `emitted_at`: `sent_at` (local timezone, ISO-8601 with an

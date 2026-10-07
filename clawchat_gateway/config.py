@@ -385,6 +385,39 @@ def _read_positive_float(value: Any, default: float) -> float:
     return parsed
 
 
+# Session / note keys, named and valued as in the other ClawChat agent channels
+# (hyphenated, read from platforms.clawchat.extra). The factory value and the
+# safe range live only here: an out-of-range value is clamped to the nearest
+# bound, an unparsable one falls back to the factory value. Every key in this
+# table has a reader; keys from the shared set that this host has no use for
+# are deliberately absent (docs/configuration.md lists them).
+#   extra key -> (ClawChatConfig field, factory, minimum, maximum)
+SESSION_INT_KEYS: dict[str, tuple[str, int, int, int]] = {
+    "note-cap-user": ("note_cap_user", 1500, 300, 6000),
+    "note-cap-group": ("note_cap_group", 2000, 300, 8000),
+    "note-cap-turn": ("note_cap_turn", 4000, 1000, 16000),
+}
+
+
+def _read_clamped_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        parsed = int(str(value).strip()) if isinstance(value, str) else int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, parsed))
+
+
+def _read_session_keys(extra: dict[str, Any]) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    for key, (field_name, default, minimum, maximum) in SESSION_INT_KEYS.items():
+        values[field_name] = _read_clamped_int(
+            _get_config_value(extra, key, default), default, minimum, maximum
+        )
+    return values
+
+
 def _read_groups(value: Any) -> dict[str, dict[str, Any]]:
     if not isinstance(value, dict):
         return {}
@@ -439,6 +472,9 @@ class ClawChatConfig:
     friend_greeting: bool = True
     typing_max_continuous_seconds: float = 900.0
     liveware_sample: bool = True
+    note_cap_user: int = 1500
+    note_cap_group: int = 2000
+    note_cap_turn: int = 4000
 
     @classmethod
     def from_platform_config(cls, platform_config: Any) -> "ClawChatConfig":
@@ -555,6 +591,7 @@ class ClawChatConfig:
                 _get_config_value(extra, "runtime_status_messages", False)
             )
             is True,
+            **_read_session_keys(extra if isinstance(extra, dict) else {}),
         )
 
 

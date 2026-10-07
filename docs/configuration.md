@@ -411,6 +411,24 @@ Group messages are gated twice:
    agent, or switching the group to mention-only, also silences messages that
    were already queued.
 
+## Session and note keys
+
+These keys share their names and meaning with the other ClawChat agent
+channels, so they are hyphenated and read from `platforms.clawchat.extra`.
+Each has a factory value and a safe range in `clawchat_gateway.config`
+(`SESSION_INT_KEYS`): a value outside the range is clamped to the nearest
+bound, one that does not parse falls back to the factory value. They are read
+when the adapter starts, so a change needs a gateway restart.
+
+| `extra.*` key | Default | Range | What it controls |
+|---------------|---------|-------|------------------|
+| `note-cap-user` | `1500` | 300–6000 | Characters of one person's note (`users/<id>.md`, or `owner.md` in the owner's direct chat) shown in a turn. |
+| `note-cap-group` | `2000` | 300–8000 | Characters of the group's note (`groups/<id>.md`) shown in a group turn. |
+| `note-cap-turn` | `4000` | 1000–16000 | Characters of all notes shown in one turn together. |
+
+See [`./reference/prompt-injection.md`](./reference/prompt-injection.md) for
+where the notes appear and how they are cut.
+
 ## Allowlist / home channel (read by Hermes platform registry)
 
 | Env var                              | `extra.*` key             | Default        | Notes |
