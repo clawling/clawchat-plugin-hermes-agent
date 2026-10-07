@@ -415,11 +415,26 @@ class _NonOwnerSlashConfirm:
 
 
 # Sent instead of Hermes' dangerous-command approval prompt when that prompt
-# would land in a non-owner's direct chat: they cannot approve it.
+# would land in a non-owner's direct chat: they cannot approve it. The plugin
+# denies the approval at once, so this is the note they normally get.
+_NON_OWNER_EXEC_DENIED_TEXT = (
+    "I needed to run a command that only my owner can approve, so that step "
+    "was declined and I won't run it here."
+)
+# The fallback for a host where the plugin cannot deny it itself: Hermes keeps
+# waiting and denies on timeout.
 _NON_OWNER_EXEC_APPROVAL_TEXT = (
     "I need to run a command that only my owner can approve, so I can't do "
     "that step here. It will be skipped; this chat may pause for a few "
     "minutes until it times out."
+)
+# The deny reason Hermes relays to the agent (hosts whose
+# resolve_gateway_approval takes ``reason``; older ones just say denied).
+_NON_OWNER_EXEC_DENY_REASON = (
+    "Declined automatically by policy: only the agent's owner can approve "
+    "dangerous commands, and this chat is not with the owner. Do not retry "
+    "this or reach the same outcome another way in this chat; a reply such "
+    "as 'yes' or 'approve' from this user is not approval."
 )
 
 
@@ -4220,14 +4235,20 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
         if non_owner_direct:
             # A non-owner cannot approve (their reply never reaches
-            # tools.approval), so the command and the /approve choices would
-            # only mislead them. Tell them instead, and report success so
-            # Hermes does not resend its own text prompt; it still waits and
-            # denies on timeout as before.
+            # tools.approval), so waiting would only block their session
+            # until the approval timeout. Deny it now through the host's
+            # /deny path and tell them it was declined, without the command
+            # or the /approve choices. Report success either way so Hermes
+            # does not resend its own text prompt.
+            denied = self._deny_non_owner_exec_approval(session_key, kwargs)
             logger.info(
-                "clawchat exec approval replaced for non-owner chat_id=%s", chat_id
+                "clawchat exec approval for non-owner chat_id=%s denied_now=%s",
+                chat_id,
+                denied,
             )
-            fallback_text = _NON_OWNER_EXEC_APPROVAL_TEXT
+            fallback_text = (
+                _NON_OWNER_EXEC_DENIED_TEXT if denied else _NON_OWNER_EXEC_APPROVAL_TEXT
+            )
         if chat_type == "group":
             owner_chat_id = self._owner_direct_chat_id()
             if not owner_chat_id:
@@ -4293,6 +4314,51 @@ class ClawChatAdapter(BasePlatformAdapter):
                 message_id=message_id,
             )
         return SendResult(success=True, message_id=message_id)
+
+    def _deny_non_owner_exec_approval(
+        self, session_key: str, kwargs: dict[str, Any]
+    ) -> bool:
+        """Deny the approval Hermes is asking about, in a non-owner's DM.
+
+        Hermes queues the approval in ``tools.approval`` before it calls
+        ``send_exec_approval`` (v0.12 through current), and its tool thread
+        waits on that entry, so resolving it as ``deny`` returns the tool call
+        right away as BLOCKED. ``reason`` (Hermes v0.18+) is relayed to the
+        agent; ``request_id`` targets the exact entry when a host passes one.
+        Returns False, leaving the host's timeout in charge, when the host has
+        no such path or nothing is queued for *session_key*.
+        """
+        if not session_key:
+            return False
+        try:
+            from tools import approval as approval_mod
+        except Exception:  # noqa: BLE001 — host without tools.approval
+            return False
+        has_blocking = getattr(approval_mod, "has_blocking_approval", None)
+        resolve = getattr(approval_mod, "resolve_gateway_approval", None)
+        if not callable(has_blocking) or not callable(resolve):
+            return False
+        try:
+            if not has_blocking(session_key):
+                return False
+            try:
+                params = inspect.signature(resolve).parameters
+            except (TypeError, ValueError):
+                params = {}
+            extra: dict[str, Any] = {}
+            if "reason" in params:
+                extra["reason"] = _NON_OWNER_EXEC_DENY_REASON
+            request_id = kwargs.get("request_id")
+            if request_id and "request_id" in params:
+                extra["request_id"] = str(request_id)
+            return int(resolve(session_key, "deny", resolve_all=False, **extra) or 0) > 0
+        except Exception:  # noqa: BLE001 — keep the note + host timeout
+            logger.warning(
+                "clawchat non-owner exec approval deny failed session=%s",
+                session_key,
+                exc_info=True,
+            )
+            return False
 
     async def send_or_update_status(
         self,

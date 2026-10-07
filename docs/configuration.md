@@ -480,10 +480,16 @@ approval blocks that chat's session. In groups a non-owner's `/always` or
 
 When the agent hits a dangerous command inside a non-owner's direct chat,
 Hermes' approval prompt (the command plus `/approve` / `/deny` choices) is
-not shown to them, since they cannot approve it: the plugin sends a short
-note that only the owner can approve instead. Hermes still waits for the
-approval and denies it on timeout, so that chat's session stays busy until
-then; the owner is not notified.
+not shown to them, since they cannot approve it. The plugin denies that
+approval immediately through Hermes' own `/deny` path
+(`tools.approval.resolve_gateway_approval`), so the agent's tool call returns
+BLOCKED at once instead of holding the chat's session for the approval
+timeout, and tells the friend the step was declined because only the owner
+can approve it. On Hermes hosts whose resolve call accepts a reason, the
+agent also sees that it was declined by policy and must not retry; older
+hosts relay a plain denial. The owner is not notified. On a host without
+that resolve path the plugin only sends the note, and Hermes waits and
+denies on timeout as before. Owner chats and groups are unchanged.
 
 ## Reconnect, heartbeat, ack
 

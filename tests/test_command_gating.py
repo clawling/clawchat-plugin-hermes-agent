@@ -739,16 +739,62 @@ async def test_group_gateway_control_follows_the_senders(adapter, events, new_ho
 # --- A dangerous-command approval in a non-owner's direct chat --------------
 #
 # When the agent hits a dangerous command inside a friend's session, Hermes
-# sends its approval prompt into that friend's chat. The friend cannot approve
-# (their "yes"/"/approve" never reaches tools.approval), so the host's prompt —
-# the command plus /approve, /always, /deny — only misleads them. The plugin
-# replaces it with a short note that only the owner can approve; Hermes still
-# waits and denies on timeout exactly as before.
+# queues the approval in tools.approval and then calls send_exec_approval for
+# that friend's chat. The friend cannot approve (their "yes"/"/approve" never
+# reaches tools.approval), so waiting only blocks their session for the whole
+# approval timeout, after which a queued "yes" reads as consent to the agent.
+# The plugin therefore denies that approval right away through the host's own
+# resolve path (the one /deny uses), with a policy reason the agent sees, and
+# tells the friend it was declined: no command text, no /approve choices.
+# Hosts without that path keep the old behaviour: the note, then the timeout.
 
 
 def _frame_text(frame: dict) -> str:
     fragments = frame["payload"]["message"]["body"]["fragments"]
     return "".join(f.get("text", "") for f in fragments if isinstance(f, dict))
+
+
+class FakeApprovalQueue:
+    """tools.approval as of Hermes v0.18+: resolve_gateway_approval takes reason."""
+
+    def __init__(self) -> None:
+        self.pending: dict = {}
+        self.resolved: list = []
+
+    def has_blocking_approval(self, session_key):
+        return bool(self.pending.get(session_key))
+
+    def resolve_gateway_approval(
+        self, session_key, choice, resolve_all=False, reason=None, request_id=None
+    ):
+        queue = self.pending.get(session_key) or []
+        if not queue:
+            return 0
+        count = len(queue) if resolve_all else 1
+        del queue[:count]
+        self.resolved.append((session_key, choice, resolve_all, reason))
+        return count
+
+
+class OldApprovalQueue(FakeApprovalQueue):
+    """tools.approval as of Hermes v0.12: no reason parameter."""
+
+    def resolve_gateway_approval(self, session_key, choice, resolve_all=False):
+        return super().resolve_gateway_approval(session_key, choice, resolve_all)
+
+
+def _install_approval(monkeypatch, approval) -> None:
+    tools_pkg = types.ModuleType("tools")
+    tools_pkg.approval = approval
+    monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+    monkeypatch.setitem(sys.modules, "tools.approval", approval)
+
+
+@pytest.fixture
+def approval_queue(monkeypatch) -> FakeApprovalQueue:
+    approval = FakeApprovalQueue()
+    _install_approval(monkeypatch, approval)
+    return approval
 
 
 @pytest.fixture
@@ -765,8 +811,64 @@ def frames(adapter, monkeypatch) -> list:
     return out
 
 
+def _assert_no_prompt(body: str) -> None:
+    for leaked in ("/approve", "/always", "/deny", "run-cleanup"):
+        assert leaked not in body, f"{leaked!r} must not be shown to a non-owner"
+
+
 @pytest.mark.asyncio
-async def test_non_owner_dm_exec_approval_says_only_the_owner_can_approve(adapter, frames):
+async def test_non_owner_dm_exec_approval_is_denied_immediately(adapter, frames, approval_queue):
+    a, _ = adapter
+    await a._on_message(dm(STRANGER, "run the cleanup"))
+    approval_queue.pending["sk_friend"] = [{"command": "run-cleanup --everything"}]
+
+    result = await a.send_exec_approval(
+        chat_id=DIRECT, command="run-cleanup --everything", session_key="sk_friend",
+        metadata={"chat_type": "direct"},
+    )
+
+    assert result.success is True, "a failure would make Hermes resend its full text prompt"
+    assert len(approval_queue.resolved) == 1
+    session_key, choice, resolve_all, reason = approval_queue.resolved[0]
+    assert (session_key, choice, resolve_all) == ("sk_friend", "deny", False)
+    assert reason and "owner" in reason.lower() and "not retry" in reason.lower()
+    assert not approval_queue.has_blocking_approval("sk_friend")
+    assert [f["chat_id"] for f in frames] == [DIRECT]
+    body = _frame_text(frames[0])
+    assert "owner" in body.lower() and "declined" in body.lower()
+    assert "minutes" not in body, "nothing is left waiting for a timeout"
+    _assert_no_prompt(body)
+
+
+@pytest.mark.asyncio
+async def test_non_owner_dm_exec_approval_denied_on_a_host_without_reason(
+    adapter, frames, monkeypatch
+):
+    approval = OldApprovalQueue()
+    _install_approval(monkeypatch, approval)
+    a, _ = adapter
+    await a._on_message(dm(STRANGER, "run the cleanup"))
+    approval.pending["sk_friend"] = [{"command": "run-cleanup --everything"}]
+
+    result = await a.send_exec_approval(
+        chat_id=DIRECT, command="run-cleanup --everything", session_key="sk_friend",
+        metadata={"chat_type": "direct"},
+    )
+
+    assert result.success is True
+    assert approval.resolved == [("sk_friend", "deny", False, None)]
+    body = _frame_text(frames[0])
+    assert "declined" in body.lower()
+    _assert_no_prompt(body)
+
+
+@pytest.mark.asyncio
+async def test_non_owner_dm_exec_approval_falls_back_without_the_host_api(
+    adapter, frames, monkeypatch
+):
+    # A host whose tools.approval lacks the resolve path (or whose approval is
+    # not queued there): keep the note and leave the host's timeout in charge.
+    _install_approval(monkeypatch, types.ModuleType("tools.approval"))
     a, _ = adapter
     await a._on_message(dm(STRANGER, "run the cleanup"))
 
@@ -775,21 +877,40 @@ async def test_non_owner_dm_exec_approval_says_only_the_owner_can_approve(adapte
         metadata={"chat_type": "direct"},
     )
 
-    assert result.success is True, "a failure would make Hermes resend its full text prompt"
+    assert result.success is True
     assert [f["chat_id"] for f in frames] == [DIRECT]
     body = _frame_text(frames[0])
-    assert "owner" in body.lower()
-    for leaked in ("/approve", "/always", "/deny", "run-cleanup"):
-        assert leaked not in body, f"{leaked!r} must not be shown to a non-owner"
+    assert "owner" in body.lower() and "minutes" in body
+    assert "declined" not in body.lower()
+    _assert_no_prompt(body)
     assert a._direct_exec_approval_sessions[DIRECT] == "sk_friend"
 
 
 @pytest.mark.asyncio
-async def test_owner_dm_exec_approval_keeps_the_full_prompt(adapter, frames):
+async def test_non_owner_dm_exec_approval_falls_back_when_nothing_is_queued(
+    adapter, frames, approval_queue
+):
+    a, _ = adapter
+    await a._on_message(dm(STRANGER, "run the cleanup"))
+
+    await a.send_exec_approval(
+        chat_id=DIRECT, command="run-cleanup --everything", session_key="sk_friend",
+        metadata={"chat_type": "direct"},
+    )
+
+    assert approval_queue.resolved == []
+    body = _frame_text(frames[0])
+    assert "minutes" in body and "declined" not in body.lower()
+    _assert_no_prompt(body)
+
+
+@pytest.mark.asyncio
+async def test_owner_dm_exec_approval_keeps_the_full_prompt(adapter, frames, approval_queue):
     a, _ = adapter
     await a._on_message(
         _frame(chat_id=OWNER_DIRECT, chat_type="direct", sender=OWNER, fragments=[text("go")])
     )
+    approval_queue.pending["sk_owner"] = [{"command": "run-cleanup --everything"}]
 
     result = await a.send_exec_approval(
         chat_id=OWNER_DIRECT, command="run-cleanup --everything", session_key="sk_owner",
@@ -797,5 +918,27 @@ async def test_owner_dm_exec_approval_keeps_the_full_prompt(adapter, frames):
     )
 
     assert result.success is True
+    assert approval_queue.resolved == []
+    assert approval_queue.has_blocking_approval("sk_owner")
     body = _frame_text(frames[0])
     assert "/approve" in body and "run-cleanup" in body
+
+
+@pytest.mark.asyncio
+async def test_group_exec_approval_still_goes_to_the_owner(adapter, frames, approval_queue):
+    a, _ = adapter
+    set_group(a, reply_mode="all")
+    await a._on_message(group(STRANGER, mention(AGENT, "Helper"), text(" run the cleanup")))
+    approval_queue.pending["sk_group"] = [{"command": "run-cleanup --everything"}]
+
+    result = await a.send_exec_approval(
+        chat_id=GROUP, command="run-cleanup --everything", session_key="sk_group",
+        metadata={"chat_type": "group"},
+    )
+
+    assert result.success is True
+    assert approval_queue.resolved == []
+    assert approval_queue.has_blocking_approval("sk_group")
+    assert [f["chat_id"] for f in frames] == [OWNER_DIRECT]
+    body = _frame_text(frames[0])
+    assert "run-cleanup" in body and "/approve" in body
