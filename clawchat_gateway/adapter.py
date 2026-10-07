@@ -414,6 +414,15 @@ class _NonOwnerSlashConfirm:
     created_at: float
 
 
+# Sent instead of Hermes' dangerous-command approval prompt when that prompt
+# would land in a non-owner's direct chat: they cannot approve it.
+_NON_OWNER_EXEC_APPROVAL_TEXT = (
+    "I need to run a command that only my owner can approve, so I can't do "
+    "that step here. It will be skipped; this chat may pause for a few "
+    "minutes until it times out."
+)
+
+
 def _non_owner_slash_confirm_prompt(title: str, host_message: str) -> str:
     """The confirm prompt for a non-owner: Hermes' explanation, without the
     "Always Approve" option a non-owner may not choose."""
@@ -4195,7 +4204,10 @@ class ClawChatAdapter(BasePlatformAdapter):
         # no route, so the owner's reply never reached the group session.
         # `**kwargs` keeps a future host flag from reopening that failure.
         chat_type = self._resolve_chat_type(chat_id, metadata, kwargs)
-        if chat_type != "group" and self._is_non_owner_direct_chat(chat_id, metadata, kwargs):
+        non_owner_direct = chat_type != "group" and self._is_non_owner_direct_chat(
+            chat_id, metadata, kwargs
+        )
+        if non_owner_direct:
             self._direct_exec_approval_sessions[chat_id] = str(session_key or "")
         target_chat_id = chat_id
         approval_code = ""
@@ -4206,6 +4218,16 @@ class ClawChatAdapter(BasePlatformAdapter):
             allow_session=allow_session,
             smart_denied=smart_denied,
         )
+        if non_owner_direct:
+            # A non-owner cannot approve (their reply never reaches
+            # tools.approval), so the command and the /approve choices would
+            # only mislead them. Tell them instead, and report success so
+            # Hermes does not resend its own text prompt; it still waits and
+            # denies on timeout as before.
+            logger.info(
+                "clawchat exec approval replaced for non-owner chat_id=%s", chat_id
+            )
+            fallback_text = _NON_OWNER_EXEC_APPROVAL_TEXT
         if chat_type == "group":
             owner_chat_id = self._owner_direct_chat_id()
             if not owner_chat_id:

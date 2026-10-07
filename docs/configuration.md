@@ -478,6 +478,13 @@ plain-text restart phrases, and an approval word while a dangerous-command
 approval blocks that chat's session. In groups a non-owner's `/always` or
 `/remember` is dropped even when `group_command_mode` is `all`.
 
+When the agent hits a dangerous command inside a non-owner's direct chat,
+Hermes' approval prompt (the command plus `/approve` / `/deny` choices) is
+not shown to them, since they cannot approve it: the plugin sends a short
+note that only the owner can approve instead. Hermes still waits for the
+approval and denies it on timeout, so that chat's session stays busy until
+then; the owner is not notified.
+
 ## Reconnect, heartbeat, ack
 
 | `extra.*` key                          | Default        |

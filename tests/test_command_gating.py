@@ -734,3 +734,68 @@ async def test_group_gateway_control_follows_the_senders(adapter, events, new_ho
     await a._on_message(group(STRANGER, mention(AGENT, "Helper"), text(" always")))
     await a._on_message(group(OWNER, mention(AGENT, "Helper"), text(" hi")))
     assert [e.allow_gateway_control for e in events] == [False, True]
+
+
+# --- A dangerous-command approval in a non-owner's direct chat --------------
+#
+# When the agent hits a dangerous command inside a friend's session, Hermes
+# sends its approval prompt into that friend's chat. The friend cannot approve
+# (their "yes"/"/approve" never reaches tools.approval), so the host's prompt —
+# the command plus /approve, /always, /deny — only misleads them. The plugin
+# replaces it with a short note that only the owner can approve; Hermes still
+# waits and denies on timeout exactly as before.
+
+
+def _frame_text(frame: dict) -> str:
+    fragments = frame["payload"]["message"]["body"]["fragments"]
+    return "".join(f.get("text", "") for f in fragments if isinstance(f, dict))
+
+
+@pytest.fixture
+def frames(adapter, monkeypatch) -> list:
+    a, _ = adapter
+    out: list = []
+
+    async def capture(frame, **_kwargs):
+        out.append(frame)
+        return True
+
+    monkeypatch.setattr(a._connection, "send_frame", capture)
+    monkeypatch.setattr(a, "_owner_direct_chat_id", lambda: OWNER_DIRECT)
+    return out
+
+
+@pytest.mark.asyncio
+async def test_non_owner_dm_exec_approval_says_only_the_owner_can_approve(adapter, frames):
+    a, _ = adapter
+    await a._on_message(dm(STRANGER, "run the cleanup"))
+
+    result = await a.send_exec_approval(
+        chat_id=DIRECT, command="run-cleanup --everything", session_key="sk_friend",
+        metadata={"chat_type": "direct"},
+    )
+
+    assert result.success is True, "a failure would make Hermes resend its full text prompt"
+    assert [f["chat_id"] for f in frames] == [DIRECT]
+    body = _frame_text(frames[0])
+    assert "owner" in body.lower()
+    for leaked in ("/approve", "/always", "/deny", "run-cleanup"):
+        assert leaked not in body, f"{leaked!r} must not be shown to a non-owner"
+    assert a._direct_exec_approval_sessions[DIRECT] == "sk_friend"
+
+
+@pytest.mark.asyncio
+async def test_owner_dm_exec_approval_keeps_the_full_prompt(adapter, frames):
+    a, _ = adapter
+    await a._on_message(
+        _frame(chat_id=OWNER_DIRECT, chat_type="direct", sender=OWNER, fragments=[text("go")])
+    )
+
+    result = await a.send_exec_approval(
+        chat_id=OWNER_DIRECT, command="run-cleanup --everything", session_key="sk_owner",
+        metadata={"chat_type": "direct"},
+    )
+
+    assert result.success is True
+    body = _frame_text(frames[0])
+    assert "/approve" in body and "run-cleanup" in body
