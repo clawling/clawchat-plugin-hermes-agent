@@ -536,9 +536,11 @@ A sediment turn is a synthetic message in the same session telling the agent to
 read and then append to only this conversation's notes: in a direct chat the
 peer's `users/<id>.md` (or `owner.md` for the owner); in a group the group's
 `groups/<id>.md`, `users/<id>.md` of up to 10 recent speakers, and `owner.md`
-only for facts about the owner said in the group. It is told to skip anything
-someone in the conversation asked it not to remember or to forget, not to use Hermes'
-`memory` tool, not to send messages, and to answer with the no-reply token.
+only for facts about the owner said in the group — append-only, since the
+memory tools do not let a group read `owner.md` (see
+[`./reference/tools.md`](./reference/tools.md#what-a-conversation-may-read)).
+It is told to skip anything someone in the conversation asked it not to
+remember or to forget, not to use Hermes' `memory` tool, not to send messages, and to answer with the no-reply token.
 Whatever it does send to that chat — text, edits, media, typing — is dropped
 until Hermes reports the turn finished (`on_processing_complete`); other chats
 are unaffected. A group's next batch waits for it like for any group turn. The

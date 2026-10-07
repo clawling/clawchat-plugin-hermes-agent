@@ -840,7 +840,8 @@ def register_tools(ctx) -> None:
                 "Use this when the user asks who/what a remembered person, alias, relationship, prior note, group rule, group context, or local ClawChat memory item is and no explicit targetId is known. "
                 "This searches local memory metadata and agent-authored Markdown body. It does not contact the ClawChat server. "
                 "Use this before answering unknown when the user provides a name, alias, phrase, or uncertain reference that may exist in local memory. "
-                "If exactly one relevant result is found, use clawchat_memory_read with the returned targetType and targetId when full context is needed. If multiple relevant results are found, summarize the candidates or ask the user to clarify."
+                "If exactly one relevant result is found, use clawchat_memory_read with the returned targetType and targetId when full context is needed. If multiple relevant results are found, summarize the candidates or ask the user to clarify. "
+                "Results only cover the notes this conversation may read: owner.md only in your owner's direct chat; in a group, only that group's note and the notes of people who are members of it — owner.md, other groups' notes and notes about non-members are left out, because a tool result stays in the group's shared history where anyone in it can see it later."
             ),
             "parameters": {
                 "type": "object",
@@ -878,7 +879,8 @@ def register_tools(ctx) -> None:
         {
             "name": "clawchat_memory_read",
             "description": _direct_tool_description(
-                "Read one local ClawChat memory Markdown file by explicit targetType and targetId. Use this only when the memory target is already known, such as owner, a concrete userId, a concrete groupId, the current sender_id, or a target returned by clawchat_memory_search. Do not guess targetId from names, nicknames, aliases, or plain text. If the user gives a name, alias, phrase, relationship, or uncertain reference, use clawchat_memory_search first. This reads metadata and agent-authored body; it does not contact the ClawChat server."
+                "Read one local ClawChat memory Markdown file by explicit targetType and targetId. Use this only when the memory target is already known, such as owner, a concrete userId, a concrete groupId, the current sender_id, or a target returned by clawchat_memory_search. Do not guess targetId from names, nicknames, aliases, or plain text. If the user gives a name, alias, phrase, relationship, or uncertain reference, use clawchat_memory_search first. This reads metadata and agent-authored body; it does not contact the ClawChat server. "
+                "owner.md can only be read in your owner's direct chat. In a group you can read only that group's note and the notes of people who are members of it, never owner.md, another group's note or a note about a non-member: a tool result stays in the group's shared history where anyone in it can see it later. A refused read returns error=not_readable_here; do not try to get that note another way."
             ),
             "parameters": {
                 "type": "object",
@@ -904,6 +906,7 @@ def register_tools(ctx) -> None:
             "description": _direct_tool_description(
                 "Append to or replace only the agent-authored body of a ClawChat memory Markdown file by explicit targetType and targetId. This never modifies the metadata block. Do not use this to write or refresh ClawChat profile/metadata fields such as agent_nickname, agent_avatar_url, agent_bio, agent_behavior, agent_owner_nickname, agent_owner_avatar_url, agent_owner_bio, agent_owner_locale, nickname, avatar_url, bio, profile_type, group_title, or group_description. When the user asks to refresh, sync, or update local ClawChat current-agent/agent-owner/user/group profile information, use clawchat_metadata_sync with direction=pull instead. Do not use this to search memory. Use clawchat_memory_search to locate uncertain names, aliases, relationships, or prior notes before writing. Use append for new long-term memory notes and replace only when intentionally rewriting the whole body. "
                 "Routing: a fact about one ClawChat person goes to targetType=user with their usr_ id, a fact about a group to targetType=group with its cnv_ id, a fact about the owner to targetType=owner with targetId=owner; call clawchat_memory_read on that note first and add only what is new. "
+                "Where a note cannot be read (owner.md outside your owner's direct chat; in a group, another group's note or a non-member's note), you may still append a fact that belongs there, without reading it first; mode=replace on such a note is refused. "
                 "Do not put such facts into Hermes' own memory tool (MEMORY.md), which is only for facts that hold no matter who you are talking to."
             ),
             "parameters": {
@@ -928,7 +931,7 @@ def register_tools(ctx) -> None:
         {
             "name": "clawchat_memory_edit",
             "description": _direct_tool_description(
-                "Replace exactly one existing text span in the agent-authored body of a ClawChat memory Markdown file. This never modifies the metadata block. Do not use this to edit ClawChat profile/metadata fields such as agent_nickname, agent_avatar_url, agent_bio, agent_behavior, agent_owner_nickname, agent_owner_avatar_url, agent_owner_bio, agent_owner_locale, nickname, avatar_url, bio, profile_type, group_title, or group_description. Use clawchat_metadata_sync or clawchat_metadata_update for metadata. Do not use this to search memory. Use clawchat_memory_search to locate uncertain names, aliases, relationships, or prior notes before editing. The oldText must match exactly once; use read first when unsure."
+                "Replace exactly one existing text span in the agent-authored body of a ClawChat memory Markdown file. This never modifies the metadata block. Do not use this to edit ClawChat profile/metadata fields such as agent_nickname, agent_avatar_url, agent_bio, agent_behavior, agent_owner_nickname, agent_owner_avatar_url, agent_owner_bio, agent_owner_locale, nickname, avatar_url, bio, profile_type, group_title, or group_description. Use clawchat_metadata_sync or clawchat_metadata_update for metadata. Do not use this to search memory. Use clawchat_memory_search to locate uncertain names, aliases, relationships, or prior notes before editing. The oldText must match exactly once; use read first when unsure. Only works on notes this conversation may read (see clawchat_memory_read): never owner.md outside your owner's direct chat."
             ),
             "parameters": {
                 "type": "object",

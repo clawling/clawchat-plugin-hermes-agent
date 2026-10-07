@@ -3773,7 +3773,14 @@ class ClawChatAdapter(BasePlatformAdapter):
             targets.append(("user", speaker, f"{self._escape_prompt_field(name)}, who spoke here"))
             if len(targets) > SEDIMENT_GROUP_SPEAKERS_MAX:
                 break
-        targets.append(("owner", "owner", "your owner — only facts about them said in this group"))
+        targets.append(
+            (
+                "owner",
+                "owner",
+                "your owner — only facts about them said in this group (append-only: owner.md "
+                "cannot be read from a group)",
+            )
+        )
         return targets
 
     async def _run_sediment_turn(

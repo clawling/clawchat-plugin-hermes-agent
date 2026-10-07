@@ -32,6 +32,7 @@ from clawchat_gateway.clawchat_metadata import (
     update_metadata as update_clawchat_metadata,
 )
 from clawchat_gateway.config import ClawChatConfig
+from clawchat_gateway.memory_scope import resolve_memory_scope
 from clawchat_gateway.connection import CHAT_ID_PREFIX, is_valid_chat_id
 from clawchat_gateway.storage import get_clawchat_store, make_owner_profile_persister
 from clawchat_gateway.mention_message import normalize_mention_targets
@@ -306,6 +307,9 @@ async def memory_read(
     root, err = _resolve_memory_root()
     if err is not None:
         return err
+    scope = resolve_memory_scope(root)
+    if not scope.can_read(target_type, target_id):
+        return scope.refusal(target_type, target_id)
     try:
         memory = read_clawchat_memory_file(root, target_type, target_id)
         content = memory["content"]
@@ -348,13 +352,19 @@ async def memory_search(
     root, err = _resolve_memory_root()
     if err is not None:
         return err
+    scope = resolve_memory_scope(root)
     try:
-        return search_clawchat_memory(
+        result = search_clawchat_memory(
             root,
             query,
             target_types=target_types,
             max_results=max_results,
+            readable=scope.can_read if scope.restricted else None,
         )
+        note = scope.note()
+        if note:
+            result["scopeNote"] = note
+        return result
     except ValueError as exc:
         return _validation_error(str(exc))
     except Exception as exc:  # noqa: BLE001
@@ -378,10 +388,16 @@ async def memory_write(
     root, err = _resolve_memory_root()
     if err is not None:
         return err
+    scope = resolve_memory_scope(root)
+    readable = scope.can_read(target_type, target_id)
+    if mode == "replace" and not readable:
+        return scope.refusal(target_type, target_id)
     try:
         outcome = write_clawchat_memory_body(root, target_type, target_id, mode, content) or {}
         result: dict[str, Any] = {"ok": True, "targetType": target_type, "targetId": target_id}
-        skipped = int(outcome.get("skipped_duplicate_paragraphs") or 0)
+        # Saying "already in this note" about a note this conversation may not
+        # read would let it test guesses against that note.
+        skipped = int(outcome.get("skipped_duplicate_paragraphs") or 0) if readable else 0
         if skipped:
             result["skippedDuplicateParagraphs"] = skipped
             result["note"] = (
@@ -412,6 +428,9 @@ async def memory_edit(
     root, err = _resolve_memory_root()
     if err is not None:
         return err
+    scope = resolve_memory_scope(root)
+    if not scope.can_read(target_type, target_id):
+        return scope.refusal(target_type, target_id)
     try:
         edit_clawchat_memory_body(root, target_type, target_id, old_text, new_text)
         return {"ok": True, "targetType": target_type, "targetId": target_id}

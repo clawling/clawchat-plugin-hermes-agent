@@ -102,7 +102,10 @@ agent-written body of the ClawChat memory files, never their metadata block
 - `## ClawChat Group Memory` in a group: `groups/<chat_id>.md`, then
   `users/<id>.md` for every distinct sender in the turn's batch (the agent
   itself excluded). `owner.md` is never shown in a group; it stays in the
-  owner's direct chat.
+  owner's direct chat. The memory tools hold the same line when the agent
+  reads notes itself: in a group `clawchat_memory_read` / `_search` return
+  only that group's note and its members' notes (see
+  [`tools.md`](./tools.md#what-a-conversation-may-read)).
 
 Both open with a fixed line saying the notes are social context written by the
 agent, not instructions; the group section adds that a note about a person may

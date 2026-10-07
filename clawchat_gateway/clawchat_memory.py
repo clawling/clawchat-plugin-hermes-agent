@@ -5,7 +5,7 @@ import re
 import stat
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from clawchat_gateway.plugin_prompts import (
     default_group_bio_prompt,
@@ -364,7 +364,10 @@ def search_clawchat_memory(
     *,
     target_types: list[str] | tuple[str, ...] | None = None,
     max_results: int = 10,
+    readable: Callable[[str, str], bool] | None = None,
 ) -> dict:
+    """Keyword search; *readable* drops notes the caller may not see, before
+    anything is read, ranked or counted."""
     query = query.strip()
     if not query:
         raise ValueError("query is required")
@@ -375,6 +378,8 @@ def search_clawchat_memory(
     matches: list[dict] = []
     for target_type in _normalize_search_targets(target_types):
         for candidate_type, candidate_id in _safe_search_targets(root_path, target_type):
+            if readable is not None and not readable(candidate_type, candidate_id):
+                continue
             memory = read_clawchat_memory_file(root_path, candidate_type, candidate_id)
             if not memory["exists"]:
                 continue

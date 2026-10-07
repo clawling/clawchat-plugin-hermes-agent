@@ -61,6 +61,10 @@ tmp
 #   * note_injection — a turn shows the agent's own notes for the people and
 #     group in it, within note-cap-user / note-cap-group / note-cap-turn, and
 #     never shows owner.md outside the owner's direct chat.
+#   * memory_read_scope — the memory tools return owner.md only in the
+#     owner's direct chat, and in a group only that group's note and its
+#     members' notes: a tool result stays in the group's shared session for
+#     anyone in it. An unplaceable session reads nothing. A privacy invariant.
 #   * memory_routing_text — the platform hint, the clawchat_memory_write
 #     description and a one-line reminder in every turn's channel prompt (which
 #     also reaches sessions started before the hint had the rule) say facts
@@ -103,6 +107,7 @@ tests/*
 !tests/test_memory_append_dedupe.py
 !tests/test_note_injection.py
 !tests/test_memory_routing_text.py
+!tests/test_memory_read_scope.py
 !tests/test_group_shared_session.py
 !tests/test_group_session_seed.py
 !tests/test_group_turn_queue.py

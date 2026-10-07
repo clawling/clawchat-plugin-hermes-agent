@@ -80,8 +80,8 @@ errors that carry a machine-readable discriminator, and `retryable` / `status` /
 
 | Tool                                | What it does                                                                 |
 |-------------------------------------|------------------------------------------------------------------------------|
-| `clawchat_memory_search`            | Keyword search across `owner.md`, `users/*.md`, `groups/*.md`.                |
-| `clawchat_memory_read`              | Read one memory file by `targetType` (`owner`/`user`/`group`) + `targetId`.   |
+| `clawchat_memory_search`            | Keyword search across `owner.md`, `users/*.md`, `groups/*.md` — only the notes the calling conversation may read (below). |
+| `clawchat_memory_read`              | Read one memory file by `targetType` (`owner`/`user`/`group`) + `targetId`, if the calling conversation may read it (below). |
 | `clawchat_memory_write`             | Append to or replace the **agent-authored body** of a memory file. Never touches the metadata block. |
 | `clawchat_memory_edit`              | Replace exactly one existing text span in the agent-authored body.            |
 
@@ -90,6 +90,41 @@ a fact about one person goes to `targetType=user` (their `usr_…` id), about a
 group to `targetType=group` (its `cnv_…` id), about the owner to
 `targetType=owner`; read the note first; never put such facts into Hermes'
 `memory` tool (MEMORY.md). `prompts/platform.md` states the same rule.
+
+### What a conversation may read
+
+A tool result becomes part of the calling session's history, and a group is
+one Hermes session shared by everyone in it and kept across turns, so whatever
+a memory tool returns in a group can be surfaced to anyone in it later. The
+tools therefore judge each call by the conversation it comes from, read from
+the host's session context (`HERMES_SESSION_PLATFORM`, `_CHAT_ID`,
+`_CHAT_TYPE`, `_USER_ID`; `clawchat_gateway/memory_scope.py`):
+
+| Conversation | `clawchat_memory_read` / `_search` / `_edit`, `_write mode=replace` |
+|--------------|---------------------------------------------------------------------|
+| The owner's direct chat | every note |
+| Anyone else's direct chat | every note except `owner.md` |
+| A ClawChat group | that group's `groups/<id>.md` and `users/<id>.md` of its **members** only |
+| No gateway session in this process (`hermes chat`, the profile CLI) | every note — the operator owns the files |
+| Anything else (another platform, no chat id, an unknown chat type, a gateway call without a session) | nothing (treated as a group with no known members) |
+
+Group members are the participant list cached in the group note's metadata
+(`participant_ids`, refreshed on every group message and on membership
+signals); only when no list is cached do the group's recent speakers stand in.
+A note about someone outside the group is never readable there: it can hold
+what that person said elsewhere, so it may only come up where they are
+present. Another group's note is refused for the same reason. A host `dm` for
+a chat the plugin knows as a group (it has a participant list) counts as a
+group.
+
+A refused read or edit returns `{"error": "not_readable_here", "code":
+"memory_scope", "message": …}` with no content; a restricted search simply
+leaves those notes out, before ranking or counting, and adds a `scopeNote`
+saying what is not searched. Appends are not restricted — the routing rule
+still sends a fact about the owner said in a group to `owner.md` — but an
+append to a note the conversation cannot read never reports
+`skippedDuplicateParagraphs`, which would confirm the note already holds a
+guessed text.
 
 `clawchat_memory_write` with `mode=append` skips any paragraph (blank-line
 separated, surrounding whitespace ignored) whose lines already appear, in
