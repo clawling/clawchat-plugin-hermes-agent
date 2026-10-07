@@ -125,6 +125,10 @@ tmp
 #   * session_names — a direct chat's Hermes session is named after the peer
 #     (chat_name and user_name), a group's after its title with no user_name
 #     on the shared session.
+#   * permission_result_receipt — a permission receipt's result object reaches
+#     the agent; approved = done, do not call again; only approved_retry asks
+#     for one more call; refusals never retry; unknown outcomes are not
+#     refusals; window-settled receipts make no turn.
 #   * inbound_dispatch_lanes — inbound messages are handled off the WS read
 #     loop, per chat and in order. A handler that awaits a send's ack inside
 #     the read loop can never get it: the read loop stalls for the ack timeout,
@@ -166,6 +170,7 @@ tests/*
 !tests/test_cross_chat_file_send.py
 !tests/test_friend_greeting_nickname.py
 !tests/test_session_names.py
+!tests/test_permission_result_receipt.py
 deploy/
 scripts/
 docs/superpowers/

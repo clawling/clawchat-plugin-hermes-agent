@@ -15,7 +15,7 @@ from typing import Any
 
 from clawchat_gateway.api_client import ClawChatApiClient, ClawChatApiError
 from clawchat_gateway.device_id import get_device_id, resolve_paired_device_id
-from clawchat_gateway.gate_outcome import map_gate_outcome
+from clawchat_gateway.gate_outcome import PERMISSION_RECEIPT_RULE_TEXT, map_gate_outcome
 from clawchat_gateway.liveware_cli import (
     liveware_account_args,
     liveware_account_name,
@@ -55,6 +55,9 @@ MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 # - POLICY_FORBIDDEN: the op is blocked by owner policy.
 CODE_PENDING_APPROVAL = 21001
 CODE_POLICY_FORBIDDEN = 21003
+# What the later receipt means (agent protocol §2.8). Shared with
+# gate_outcome so every pending result states it the same way.
+PERMISSION_RECEIPT_RULE = PERMISSION_RECEIPT_RULE_TEXT
 
 
 def _config_error(message: str) -> dict[str, Any]:
@@ -122,7 +125,8 @@ def _permission_gate_result(err: ClawChatApiError, meta: dict[str, Any]) -> dict
             "This operation requires the owner's approval and has been submitted for review"
             f"{f' (request_id={request_id})' if request_id else ''}. "
             "It has NOT failed. Do not retry — the result will arrive later as a normal "
-            "chat message; wait for it instead of calling this tool again."
+            "chat message; wait for it instead of calling this tool again. "
+            f"{PERMISSION_RECEIPT_RULE}"
         )
         status = "pending"
     else:  # CODE_POLICY_FORBIDDEN

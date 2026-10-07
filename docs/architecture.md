@@ -215,7 +215,12 @@ to a newly added non-owner friend (`friend_greeting`,
 the `friend_greeting` config flag, conversation id resolved via
 `ClawChatApiClient.get_direct_conversation`, deduped by signal `event_id` in
 the message ledger — see `docs/configuration.md`), and `permission_result`
-receipts. Each runs on a tracked task set cancelled in `disconnect()`.
+receipts (`permission_result.handle_permission_result`: one turn per
+`request_id`, none for a receipt a live allow window settled; the turn states
+the outcome, passes the receipt's `result` object through as data, and says
+`approved` = already done, do not call again, `approved_retry` = call once
+more, anything else = do not retry). Each runs on a tracked task set cancelled
+in `disconnect()`.
 
 ### Inbound dispatch is off the read loop
 

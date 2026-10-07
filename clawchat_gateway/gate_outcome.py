@@ -11,6 +11,15 @@ from __future__ import annotations
 
 from typing import Any
 
+# What the later permission_result receipt means. "approved" is done — the
+# server replayed the operation — and calling again duplicates it; only
+# "approved_retry" (a read the server does not replay) asks for one more call.
+PERMISSION_RECEIPT_RULE_TEXT = (
+    "When the owner's answer arrives: approved means the server has already done it "
+    "(do not call this tool again); only approved_retry means call it once more; "
+    "denied, expired or failed means do not retry."
+)
+
 
 def map_gate_outcome(
     code: int | None,
@@ -34,6 +43,7 @@ def map_gate_outcome(
             "request_id": request_id_raw if isinstance(request_id_raw, str) else "",
             "operation": operation_raw if isinstance(operation_raw, str) else "",
             "expires_at": expires_at_raw if isinstance(expires_at_raw, (int, float)) else 0,
+            "instruction": PERMISSION_RECEIPT_RULE_TEXT,
         }
     if code == 21003:
         operation_raw = data.get("operation")

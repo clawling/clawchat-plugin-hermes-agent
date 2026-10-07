@@ -1644,10 +1644,21 @@ routing layer.
 > **`decision` is not the system message's `outcome`.** The durable
 > `permission_result` system message carries a *different* field on the same
 > conceptual axis, `metadata.outcome`, whose vocabulary is
-> `approved` / `denied` / `expired` / `failed` / `auto_allowed` /
-> `auto_denied`. Those six values **never** appear as `decision` on this
-> frame, and the four `decision` values never appear as an `outcome`. Do not
-> share one enum between the two.
+> `approved` / `approved_retry` / `denied` / `expired` / `failed` /
+> `auto_allowed` / `auto_denied` (open: tolerate unknown values). Those values
+> **never** appear as `decision` on this frame, and the four `decision`
+> values never appear as an `outcome`. Do not share one enum between the two.
+>
+> The receipt may also carry `metadata.result`, an object with what the
+> server's replay of the approved operation produced: an orchestration's
+> `conversation_id`, a connect `code`, a batch's `applied` / `total` (also on a
+> `failed` one), and for a read approved once the read's data under the read
+> endpoint's own keys (an invite code as `code`, plus `qr_content` when
+> present). The agent's own call only got `21001`, so this is the only place
+> it sees that data. On `approved` / `auto_allowed` the server has already
+> performed the operation — the agent must not call again; only
+> `approved_retry` (a read the server does not replay) means call once more.
+> The Hermes adapter's rendering is in `clawchat_gateway/permission_result.py`.
 
 **`decision` and `reason` are unvalidated pass-throughs.** msghub neither
 inspects nor normalizes either field — it relays verbatim whatever the
