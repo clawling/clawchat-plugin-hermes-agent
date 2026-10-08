@@ -161,6 +161,7 @@ tests/*
 !tests/test_inbound_dispatch_lanes.py
 !tests/test_memory_defaults.py
 !tests/test_memory_append_dedupe.py
+!tests/test_memory_migration_hint.py
 !tests/test_note_injection.py
 !tests/test_memory_routing_text.py
 !tests/test_memory_read_scope.py

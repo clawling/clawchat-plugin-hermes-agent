@@ -953,9 +953,21 @@ Activation writes both keys (overwriting, like the `agent.*` defaults). Plugin
 load (`activate.ensure_clawchat_host_defaults_on_load`, called from
 `__init__._register_platform`) fills them in only when they are missing, so an
 existing install picks them up on its next start while a value an operator set
-by hand is kept. Hermes has read both keys since v0.12.0. Existing `USER.md`
-content is not moved or deleted; when the file still has content the plugin
-logs one line at load suggesting where to move it.
+by hand is kept. Hermes has read both keys since v0.12.0.
+
+Facts saved before this split stay where they were. Once per profile, after the
+first connection that knows the owner's direct chat, the plugin counts the
+entries that look like they are about the owner or a specific person — every
+`USER.md` entry, and each `MEMORY.md` entry (entries are separated by `§`) that
+names an `usr_` id, a known nickname (owner.md, users/*.md) or reads like a fact
+about someone (`clawchat_gateway/memory_migration.py`). If there are any, it gives
+the agent one maintenance turn in the owner's direct chat: tell the owner how
+many, in their language, and offer to move them into `owner.md` /
+`users/<usr_id>.md`; move nothing until the owner agrees, and remove an entry from
+the global memory only after it was written to the note. The plugin itself never
+edits, moves or deletes `MEMORY.md` / `USER.md`. The marker
+`$HERMES_HOME/clawchat/.memory-migration-hint-done` records that the profile was
+checked; delete it to be asked again.
 
 ## Worked example — `config.yaml` after activation
 

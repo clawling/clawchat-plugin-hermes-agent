@@ -465,29 +465,6 @@ def _ensure_clawchat_compression_cap(config: dict[str, Any]) -> bool:
     return True
 
 
-def _hint_user_md_migration(config: dict[str, Any]) -> None:
-    """Log once at load when USER.md still holds entries Hermes no longer uses."""
-    memory = config.get("memory") if isinstance(config.get("memory"), dict) else {}
-    if memory.get("user_profile_enabled") is not False:
-        return
-    try:
-        from clawchat_gateway.hermes_home import hermes_home
-
-        user_md = hermes_home() / "memories" / "USER.md"
-        content = user_md.read_text(encoding="utf-8") if user_md.is_file() else ""
-    except Exception:  # noqa: BLE001 - a hint, never a failure
-        return
-    if not content.strip():
-        return
-    logger.info(
-        "clawchat: USER.md still holds %d chars, but memory.user_profile_enabled is "
-        "false so Hermes no longer reads it. Move facts about a specific person into "
-        "ClawChat notes (users/<usr_id>.md, or owner.md for the owner) and global facts "
-        "into MEMORY.md; the file itself is left untouched.",
-        len(content),
-    )
-
-
 def ensure_clawchat_host_defaults_on_load() -> None:
     """Fill missing ClawChat host defaults in ``config.yaml`` at plugin load.
 
@@ -503,7 +480,6 @@ def ensure_clawchat_host_defaults_on_load() -> None:
         if changed:
             _write_config(config_path, config)
             logger.info("clawchat: filled missing ClawChat host defaults in config.yaml")
-        _hint_user_md_migration(config)
     except Exception as exc:  # noqa: BLE001
         logger.warning("clawchat: could not ensure host defaults at load: %s", exc)
 

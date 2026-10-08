@@ -17,7 +17,6 @@ value is never replaced.
 
 from __future__ import annotations
 
-import logging
 
 import pytest
 
@@ -91,14 +90,16 @@ def test_load_never_raises(monkeypatch):
     activate.ensure_clawchat_host_defaults_on_load()
 
 
-def test_load_hints_when_user_md_still_has_content(fake_config, tmp_path, caplog):
+def test_load_leaves_existing_user_md_alone(fake_config, tmp_path):
+    # The owner is asked about these entries in their direct chat instead
+    # (tests/test_memory_migration_hint.py); load never touches the file.
     memories = tmp_path / "memories"
     memories.mkdir()
-    (memories / "USER.md").write_text("Ada likes tea\n§\nBo is a designer\n", encoding="utf-8")
+    content = "Ada likes tea\n§\nBo is a designer\n"
+    (memories / "USER.md").write_text(content, encoding="utf-8")
     fake_config["config"] = {}
-    with caplog.at_level(logging.INFO, logger="clawchat_gateway.activate"):
-        activate.ensure_clawchat_host_defaults_on_load()
-    assert any("USER.md" in record.getMessage() for record in caplog.records)
+    activate.ensure_clawchat_host_defaults_on_load()
+    assert (memories / "USER.md").read_text(encoding="utf-8") == content
 
 
 def test_plugin_load_runs_host_defaults(monkeypatch):

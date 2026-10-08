@@ -75,6 +75,7 @@ from clawchat_gateway.inbound import (
     split_leading_mentions,
 )
 from clawchat_gateway.hermes_home import hermes_home
+from clawchat_gateway import memory_migration
 from clawchat_gateway.liveware_cli import resolve_liveware_path, wait_liveware_cli_ready
 from clawchat_gateway.liveware_sample import LivewareSampleDeps, LivewareSampleSupervisor
 try:
@@ -1400,6 +1401,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._schedule_owner_metadata_refresh()
             self._schedule_activation_bootstrap()
             self._schedule_liveware_sample()
+            self._schedule_memory_migration_hint()
             self._spawn_group_settings_refresh("reconnect")
             self._spawn_permissions_refresh("reconnect")
             await self._schedule_reconnect_conversation_refresh()
@@ -2604,6 +2606,68 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._owner_metadata_refresh_task = task
         self._profile_sync_tasks.add(task)
         task.add_done_callback(self._owner_metadata_refresh_done)
+
+    def _schedule_memory_migration_hint(self) -> None:
+        task = asyncio.ensure_future(self._maybe_hint_memory_migration())
+        self._profile_sync_tasks.add(task)
+        task.add_done_callback(self._profile_sync_task_done)
+
+    def _known_person_names(self) -> set[str]:
+        names: set[str] = set()
+        try:
+            owner_nickname = self._read_memory_metadata("owner", "owner").get("agent_owner_nickname")
+        except Exception:  # noqa: BLE001
+            owner_nickname = None
+        if owner_nickname:
+            names.add(str(owner_nickname))
+        root = self._memory_root
+        users_dir = Path(root) / "users" if root else None
+        if users_dir is not None and users_dir.is_dir():
+            for path in sorted(users_dir.glob("*.md"))[:500]:
+                try:
+                    nickname = self._read_memory_metadata("user", path.stem).get("nickname")
+                except Exception:  # noqa: BLE001
+                    nickname = None
+                if nickname:
+                    names.add(str(nickname))
+        return names
+
+    async def _maybe_hint_memory_migration(self) -> None:
+        """Once per profile: have the agent ask the owner about person facts in the global memory.
+
+        The agent gets one maintenance turn in the owner's direct chat; the
+        plugin itself never edits, moves or deletes MEMORY.md / USER.md.
+        """
+        try:
+            home = hermes_home()
+            marker = memory_migration.marker_path(home)
+            if marker.exists():
+                return
+            await self._await_owner_metadata_refreshed()
+            scan = memory_migration.scan_global_memory(home, names=self._known_person_names())
+            if scan is not None:
+                owner_chat_id = self._owner_direct_chat_id()
+                if not owner_chat_id:
+                    return  # asked on a later connection, once the owner chat is known
+                await self._handle_inbound(
+                    InboundMessage(
+                        chat_id=owner_chat_id,
+                        chat_type="direct",
+                        sender_id="clawchat-maintenance",
+                        sender_name="ClawChat",
+                        text=memory_migration.build_migration_prompt(scan),
+                        raw_message={"synthetic": True, "memory_migration_hint": True},
+                    )
+                )
+                logger.info(
+                    "clawchat memory migration hint sent memory_person=%d user=%d",
+                    scan.memory_person_entries,
+                    scan.user_entries,
+                )
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(str(int(time.time())), encoding="utf-8")
+        except Exception:  # noqa: BLE001 - a hint, never a failure
+            logger.warning("clawchat memory migration hint failed", exc_info=True)
 
     def _owner_metadata_refresh_done(self, task: asyncio.Task[None]) -> None:
         if self._owner_metadata_refresh_task is task:
