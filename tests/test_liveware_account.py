@@ -214,3 +214,102 @@ def test_login_tool_names_the_account_and_tells_the_agent_to_use_it(monkeypatch)
     assert result["account"] == ACCOUNT
     assert f"--account {ACCOUNT}" in result["instructions"]
     assert "tok-secret" not in repr(result)
+
+
+# --- the real ProfileConfig carries the agent id -------------------------------
+#
+# The test above stubs load_profile_config with an object that HAS agent_id; the
+# real ProfileConfig did not, so `getattr(cfg, "agent_id", "")` was always empty
+# and the login never carried --account (dev e2e, 2026-10-07). These tests go
+# through the real loader.
+
+
+def _jwt(claims: dict) -> str:
+    import base64
+    import json
+
+    def seg(obj):
+        return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode()
+
+    return f"{seg({'alg': 'none'})}.{seg(claims)}.sig"
+
+
+def _profile_home(tmp_path, monkeypatch, *, extra: dict, token: str):
+    import yaml
+
+    home = tmp_path / "hermes-home"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        yaml.safe_dump({"platforms": {"clawchat": {"extra": extra}}}), encoding="utf-8"
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    for name in ("CLAWCHAT_AGENT_ID", "CLAWCHAT_USER_ID", "CLAWCHAT_BASE_URL", "CLAWCHAT_MEDIA_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CLAWCHAT_TOKEN", token)
+    return home
+
+
+def test_profile_config_agent_id_comes_from_the_token_aid(tmp_path, monkeypatch):
+    from clawchat_gateway.profile import load_profile_config
+
+    token = _jwt({"sub": "usr_bot", "aid": "AGT_FROM_TOKEN"})
+    _profile_home(tmp_path, monkeypatch, extra={"user_id": "usr_bot"}, token=token)
+
+    assert load_profile_config().agent_id == "AGT_FROM_TOKEN"
+
+
+def test_profile_config_agent_id_prefers_env_then_token_over_extra(tmp_path, monkeypatch):
+    from clawchat_gateway.profile import load_profile_config
+
+    token = _jwt({"sub": "usr_bot", "aid": "AGT_FROM_TOKEN"})
+    _profile_home(
+        tmp_path, monkeypatch, extra={"user_id": "usr_bot", "agent_id": "AGT_FROM_EXTRA"}, token=token
+    )
+    # The token is this profile's identity; a stale/foreign extra.agent_id must not win.
+    assert load_profile_config().agent_id == "AGT_FROM_TOKEN"
+
+    monkeypatch.setenv("CLAWCHAT_AGENT_ID", "AGT_FROM_ENV")
+    assert load_profile_config().agent_id == "AGT_FROM_ENV"
+
+
+def test_profile_config_agent_id_falls_back_to_extra_without_aid(tmp_path, monkeypatch):
+    from clawchat_gateway.profile import load_profile_config
+
+    _profile_home(
+        tmp_path, monkeypatch,
+        extra={"user_id": "usr_bot", "agent_id": "AGT_FROM_EXTRA"},
+        token=_jwt({"sub": "usr_bot"}),
+    )
+    assert load_profile_config().agent_id == "AGT_FROM_EXTRA"
+
+
+def test_login_with_the_real_profile_config_carries_the_account(tmp_path, monkeypatch):
+    token = _jwt({"sub": "usr_bot", "aid": "AGT_01ABC"})
+    _profile_home(tmp_path, monkeypatch, extra={"user_id": "usr_bot"}, token=token)
+    calls: list[tuple] = []
+
+    async def _exec(*argv, **_kw):
+        calls.append(argv)
+        return _Proc(0)
+
+    monkeypatch.setattr(tools, "resolve_liveware_path", lambda: "lw")
+    monkeypatch.setattr(tools.asyncio, "create_subprocess_exec", _exec)
+
+    result = asyncio.run(tools.liveware_login())
+
+    assert calls == [("lw", "login", "--access-token", token, "--account", ACCOUNT)]
+    assert result["account"] == ACCOUNT
+
+
+def test_clawchat_config_agent_id_prefers_the_token_aid_over_extra(monkeypatch):
+    from clawchat_gateway.config import ClawChatConfig
+
+    for name in ("CLAWCHAT_AGENT_ID", "CLAWCHAT_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr("clawchat_gateway.config._get_env", lambda *names: (
+        _jwt({"sub": "usr_bot", "aid": "AGT_FROM_TOKEN"}) if "CLAWCHAT_TOKEN" in names else ""
+    ))
+    cfg = ClawChatConfig.from_platform_config(
+        SimpleNamespace(extra={"user_id": "usr_bot", "agent_id": "AGT_FROM_EXTRA"})
+    )
+    assert cfg.agent_id == "AGT_FROM_TOKEN"

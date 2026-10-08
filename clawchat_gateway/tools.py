@@ -1382,7 +1382,7 @@ async def liveware_login() -> dict[str, Any]:
         return _config_error(str(exc))
 
     token = cfg.token
-    account = liveware_account_name(getattr(cfg, "agent_id", ""))
+    account = liveware_account_name(cfg.agent_id)
 
     liveware_path = resolve_liveware_path()
     if liveware_path is None:

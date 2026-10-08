@@ -12,7 +12,7 @@ from typing import Any
 import yaml
 
 from clawchat_gateway.api_client import DEFAULT_BASE_URL
-from clawchat_gateway.config import _get_env
+from clawchat_gateway.config import _get_env, _jwt_claim
 from clawchat_gateway.hermes_home import hermes_home
 
 
@@ -26,6 +26,10 @@ class ProfileConfig:
     token: str
     user_id: str
     config_path: Path
+    # This profile's agent id. Token ``aid`` before ``extra.agent_id``: under a
+    # multi-profile host the token is resolved per profile, while a config
+    # ``extra`` read at the wrong moment can belong to another profile.
+    agent_id: str = ""
 
 
 def _hermes_home() -> Path:
@@ -85,7 +89,18 @@ def load_profile_config() -> ProfileConfig:
         raise ProfileConfigError("missing CLAWCHAT_TOKEN; activate ClawChat first")
     if not user_id:
         raise ProfileConfigError("missing CLAWCHAT_USER_ID / platforms.clawchat.extra.user_id; activate ClawChat first")
-    return ProfileConfig(base_url=base_url, token=token, user_id=user_id, config_path=config_path)
+    agent_id = _first_non_empty(
+        _get_env("CLAWCHAT_AGENT_ID"),
+        _jwt_claim(token, "aid"),
+        extra.get("agent_id"),
+    )
+    return ProfileConfig(
+        base_url=base_url,
+        token=token,
+        user_id=user_id,
+        config_path=config_path,
+        agent_id=agent_id,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

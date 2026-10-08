@@ -588,9 +588,12 @@ class ClawChatConfig:
                 token,
                 _get_env("CLAWCHAT_USER_ID") or _get_config_value(extra, "user_id", ""),
             ),
+            # Token ``aid`` before extra: the token is resolved per profile,
+            # while ``extra`` handed in by a multi-profile host can be another
+            # profile's (it is only a fallback for tokens without ``aid``).
             agent_id=_get_env("CLAWCHAT_AGENT_ID")
-            or _get_config_value(extra, "agent_id", "")
-            or _jwt_claim(token, "aid"),
+            or _jwt_claim(token, "aid")
+            or _get_config_value(extra, "agent_id", ""),
             owner_user_id=_get_env("CLAWCHAT_OWNER_USER_ID")
             or _get_config_value(extra, "owner_user_id", "")
             or _jwt_claim(token, "oid"),
