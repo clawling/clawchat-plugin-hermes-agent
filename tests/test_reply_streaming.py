@@ -24,7 +24,9 @@ from 0), then ``message.done`` and a ``message.reply`` that reuses the stream's
 * Text that might still become a no-reply token is held back. A stream whose
   reply turns out to be suppressed is closed with ``message.failed``; one whose
   text stops extending what was streamed is failed and the reply goes out
-  whole under the same id.
+  whole under the same id. ``message.failed`` only withdraws a preview, so a run
+  that fails mid-stream is followed by a plain notice that the reply broke off,
+  and a reply already sent under the stream's id is never withdrawn.
 * With the opt-in on, a reply the host never finalizes (``/stop``, ``/new``, a
   bubble left behind for a mid-turn commentary) is sent with the text it had
   once the turn is over — streamed or not.
@@ -160,6 +162,53 @@ async def test_rewritten_text_fails_the_stream_and_the_reply_still_arrives(adapt
     assert adapter.frames[-1]["payload"]["message"]["body"]["fragments"] == [
         {"kind": "text", "text": "Goodbye all"}
     ]
+
+
+async def test_a_run_that_fails_mid_stream_withdraws_the_preview_and_says_so(adapter):
+    # message.failed only withdraws the preview (it leaves nothing behind), so a
+    # real failure must not end on it alone: the owner gets a plain message
+    # saying the reply broke off. The host's error text stays out of the chat.
+    message_id = await _stream(adapter, DM, "Half an ans", "Half an answer")
+    await adapter.on_run_failed(DM, "provider exploded: 500", message_id=message_id)
+    assert _events(adapter.frames) == [
+        "message.created",
+        "message.add",
+        "message.add",
+        "message.failed",
+        "message.reply",
+    ]
+    notice = adapter.frames[-1]["payload"]
+    assert notice["message_id"] != message_id
+    assert notice["message_mode"] == "normal"
+    text = notice["message"]["body"]["fragments"][0]["text"]
+    assert "provider exploded" not in text
+    assert text == adapter_mod.STREAM_INTERRUPTED_NOTICE["en"]
+
+
+async def test_the_interrupted_notice_follows_the_owner_language(adapter, monkeypatch):
+    monkeypatch.setattr(adapter, "_owner_locale", lambda: "zh-CN")
+    message_id = await _stream(adapter, DM, "Half an ans", "Half an answer")
+    await adapter.on_run_failed(DM, "boom", message_id=message_id)
+    text = adapter.frames[-1]["payload"]["message"]["body"]["fragments"][0]["text"]
+    assert text == adapter_mod.STREAM_INTERRUPTED_NOTICE["zh"]
+
+
+async def test_a_run_that_fails_before_anything_was_shown_sends_nothing(adapter):
+    # Nothing was on screen, so there is nothing to withdraw or explain; the
+    # error stays out of the chat as before.
+    first = await adapter.send(DM, "[claw" + CURSOR, reply_to="msg-in")
+    await adapter.on_run_failed(DM, "boom", message_id=first.message_id)
+    assert adapter.frames == []
+
+
+async def test_an_already_sent_reply_is_never_withdrawn(adapter):
+    # If the reply under this id already went out, failing the stream would
+    # make the client delete a delivered message: close it as done instead.
+    message_id = await _stream(adapter, DM, "Hello", "Hello, wor")
+    adapter._claim_outbound_message = lambda **_kw: False
+    await adapter.edit_message(DM, message_id, "Hello, world", finalize=True)
+    assert "message.failed" not in _events(adapter.frames)
+    assert _events(adapter.frames)[-1] == "message.done"
 
 
 async def test_a_sediment_turn_never_streams(adapter):

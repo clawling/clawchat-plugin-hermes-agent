@@ -105,7 +105,7 @@ from clawchat_gateway.mention_message import (
 )
 from clawchat_gateway.agent_files import agent_files_dir
 from clawchat_gateway.onboarding_report import read_onboarding_report
-from clawchat_gateway.owner_language import resolve_owner_language_if_known
+from clawchat_gateway.owner_language import resolve_owner_language, resolve_owner_language_if_known
 from clawchat_gateway.profile import load_profile_config
 from clawchat_gateway.profile_sync import relation_for_sender
 from clawchat_gateway.protocol import (
@@ -227,6 +227,17 @@ TYPING_REFRESH_SECONDS = 1.5
 # with the text it had. Far longer than the host's own wait for its final edits
 # (5 s). Without the opt-in such a reply is dropped, as Hermes intends.
 STREAM_ABANDON_GRACE_SECONDS = 30.0
+# Sent after a streamed reply's run fails: message.failed only withdraws the
+# preview and leaves nothing behind, so the owner is told the reply broke off.
+# The host's error text is not shown (reply failures stay out of the chat).
+STREAM_INTERRUPTED_NOTICE = {
+    "en": "This reply broke off before it finished. Try sending your message again.",
+    "zh": "这条回复中途出错了，没有发完。再发一次试试。",
+    "zh_Hant": "這條回覆中途出錯了，沒有發完。再傳一次試試。",
+    "ja": "この返信は途中でエラーになり、最後まで送れませんでした。もう一度送ってみてください。",
+    "es": "Esta respuesta se cortó antes de terminar. Prueba a enviar tu mensaje otra vez.",
+    "ko": "이 답장은 도중에 오류가 나서 끝까지 보내지 못했어요. 다시 보내 보세요.",
+}
 # Session-status chrome Hermes may put at the start of a reply; while a stream
 # starts with one of these the line may still be stripped, so it is held back.
 _STREAM_HOLD_PREFIXES = ("◐", "◆")
@@ -5780,6 +5791,9 @@ class ClawChatAdapter(BasePlatformAdapter):
             raw=frame,
         )
         if claimed is False:
+            # The reply under this id already went out: close the stream as
+            # done. A message.failed here would withdraw a delivered message.
+            await self._stream_finish(run, final_content)
             await self._retire_run(run)
             return SendResult(success=True, message_id=run.message_id)
         if claimed is None:
@@ -6182,7 +6196,10 @@ class ClawChatAdapter(BasePlatformAdapter):
                 message_id,
             )
             return
+        was_streaming = run.stream_open
         await self._retire_run(run)
+        if was_streaming:
+            await self._send_stream_interrupted_notice(run)
         if run.chat_type == "group":
             self._record_message(
                 kind="error",
@@ -6213,6 +6230,32 @@ class ClawChatAdapter(BasePlatformAdapter):
         logger.info(
             "clawchat reply failure suppressed from ClawChat clients chat_id=%s message_id=%s",
             chat_id,
+            run.message_id,
+        )
+
+    async def _send_stream_interrupted_notice(self, run: _ActiveRun) -> None:
+        """Tell the owner a streamed reply broke off (its preview was withdrawn)."""
+        language = resolve_owner_language(self._owner_locale())
+        text = STREAM_INTERRUPTED_NOTICE.get(language, STREAM_INTERRUPTED_NOTICE["en"])
+        frame = build_message_reply_event(
+            chat_id=run.chat_id,
+            chat_type=run.chat_type,
+            message_id=new_message_id(),
+            fragments=[{"kind": "text", "text": text}],
+            reply_to_message_id=run.reply_to_message_id,
+            reply_preview=self._reply_preview_for(run.reply_to_message_id),
+            include_message_id=True,
+        )
+        if not await self._connection.send_frame(frame, wait_for_ack=True):
+            logger.warning(
+                "clawchat stream interrupted notice dropped chat_id=%s message_id=%s",
+                run.chat_id,
+                run.message_id,
+            )
+            return
+        logger.info(
+            "clawchat stream interrupted notice sent chat_id=%s message_id=%s",
+            run.chat_id,
             run.message_id,
         )
 

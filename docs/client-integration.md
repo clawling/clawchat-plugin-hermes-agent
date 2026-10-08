@@ -879,7 +879,8 @@ incrementally. The lifecycle is:
 [message.created]  → opens the stream for one message_id
 [message.add]*     → zero or more fragment increments (monotonic sequence)
 [message.done]     → finalize successfully
-or [message.failed]→ abort (no consolidated reply is materialized)
+or [message.failed]→ withdraw: the preview is removed and nothing is left (no
+                      consolidated reply is materialized)
 ```
 
 All four lifecycle events use a **flat** payload — fragments, streaming
@@ -909,7 +910,13 @@ that may still turn into a no-reply token, a stripped session-status line, a
 runtime notice or an approval card is held back. If the text stops extending
 what was already streamed, the stream is ended with `message.failed` and the
 reply goes out whole under the same id; a reply that turns out to be suppressed
-ends its stream with `message.failed` and sends nothing else. A reply Hermes
+(or was already sent by a tool) ends its stream with `message.failed` and sends
+nothing else. At a tool boundary Hermes finalizes the text written so far, so
+it ends with `message.done` and a `message.reply` under the same id and stays
+on screen; the text after the tool is a new message. If the run fails while a
+stream is open, the stream is withdrawn and a short plain message in the
+owner's language says the reply broke off (the error text itself is not shown);
+if nothing was streamed yet, nothing is sent. A reply Hermes
 starts but never finalizes (`/stop`, `/new`) is sent with the text it had
 30 s after the turn ends. Without `stream_replies` the adapter never sends a
 §8 frame, even if Hermes streaming is on: the host's draft and its edits are
@@ -1005,7 +1012,8 @@ text_n_minus_1 + delta_n  ==  text_n
 ```
 
 If a producer cannot satisfy this (e.g. the upstream model rewrites prior
-text), it MUST fail the stream with `message.failed` and start a new one.
+text), it MUST fail the stream with `message.failed` and either start a new
+one or send the whole reply as a `message.reply` under the same `message_id`.
 
 `delta` is **absent** on `message.created`, `message.done`, and on
 materialized `message.send` / `message.reply`.
@@ -2624,9 +2632,17 @@ you missed; the server does.
 
 ### 14.2 In-stream errors
 
-`message.failed` is informational — the stream's buffered state on the
-recipient side is dropped, no consolidated `message.reply` is materialized,
-and offline recipients will not see the stream at all.
+`message.failed` means **withdraw this stream, leave nothing behind**. The
+stream's buffered state on the recipient side is dropped, no consolidated
+`message.reply` is materialized, offline recipients never see the stream, and
+clients delete the partial preview rather than leave a "reply interrupted"
+placeholder. A producer must therefore not end a genuine error with
+`message.failed` alone: after it, either send the complete reply as a
+`message.reply` under the same `message_id`, or send a separate normal
+message saying what went wrong. Use `message.failed` by itself only to
+withdraw a preview that should not stay — a reply that turned into no reply,
+text that was rewritten (the whole reply follows under the same id), or a reply
+that went out through a tool instead.
 
 ### 14.3 `message.error` — negative ack on the send path
 
