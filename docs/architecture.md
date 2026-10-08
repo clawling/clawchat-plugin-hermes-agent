@@ -105,6 +105,21 @@ because the host may run the adapter call on the gateway loop, where the
 stack no longer shows the tool). Before this, "mention the group, then send it
 the file" returned success and dropped the file.
 
+## `clawchat_send_file`
+
+Hermes v0.21 stopped handing the agent its built-in `send_message` tool
+(host-side outbound delivery goes through the `hermes send` CLI), so the patch
+above no longer gives the agent a way to put a file into another
+conversation. The plugin's own `clawchat_send_file(chat_id, path,
+as_document=false, caption="")` (`tools.send_file`) does it on the same path:
+the live adapter's `send` as an immediate media send
+(`_clawchat_immediate_media_send`, `_clawchat_media_files_validated`,
+`_clawchat_force_document`) inside `explicit_tool_send()`, or the standalone
+sender when no gateway runs in this process. The path must be absolute, an
+existing regular file, and outside the credential / system-path denylist
+(`media_runtime.ensure_allowed_local_path`). The `send_message` patch stays
+for hosts that still expose `send_message`.
+
 ## Outbound chat_id validity gate
 
 `ClawChatConnection.send_frame` drops any frame whose `chat_id` is present but

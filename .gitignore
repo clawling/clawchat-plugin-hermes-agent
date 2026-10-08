@@ -137,6 +137,9 @@ tmp
 #   * inbound_media_download — inbound attachment downloads send a
 #     non-default User-Agent (the CDN 403s urllib's), and a failed download
 #     is logged without the URL's query string.
+#   * send_file_tool — clawchat_send_file sends a local file into any chat by
+#     id (as_document, caption), is not swallowed after a same-turn mention,
+#     refuses credential paths, and falls back to the standalone sender.
 #   * inbound_dispatch_lanes — inbound messages are handled off the WS read
 #     loop, per chat and in order. A handler that awaits a send's ack inside
 #     the read loop can never get it: the read loop stalls for the ack timeout,
@@ -182,6 +185,7 @@ tests/*
 !tests/test_inbound_rate_warning.py
 !tests/test_tool_media_host.py
 !tests/test_inbound_media_download.py
+!tests/test_send_file_tool.py
 deploy/
 scripts/
 docs/superpowers/

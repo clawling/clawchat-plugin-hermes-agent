@@ -60,16 +60,27 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     return loaded
 
 
-def load_profile_config() -> ProfileConfig:
-    config_path = _hermes_home() / "config.yaml"
-    config = _load_yaml(config_path)
+def _extra_of(config: dict[str, Any]) -> dict[str, Any]:
     extra = (
-        config.get("platforms", {})
+        (config.get("platforms") or {})
         .get("clawchat", {})
         .get("extra", {})
     )
-    if not isinstance(extra, dict):
-        extra = {}
+    return extra if isinstance(extra, dict) else {}
+
+
+def load_clawchat_extra() -> dict[str, Any]:
+    """This profile's ``platforms.clawchat.extra`` from config.yaml; ``{}`` if unreadable."""
+    try:
+        return dict(_extra_of(_load_yaml(_hermes_home() / "config.yaml")))
+    except ProfileConfigError:
+        return {}
+
+
+def load_profile_config() -> ProfileConfig:
+    config_path = _hermes_home() / "config.yaml"
+    config = _load_yaml(config_path)
+    extra = _extra_of(config)
 
     # Resolve CLAWCHAT_* via config._get_env so the profile client reads the
     # SAME sources as the WS/other-tools client: os.environ -> Hermes-managed

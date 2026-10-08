@@ -375,6 +375,37 @@ async def handle_clawchat_mention_message(args, **kw):
     return _tool_result(result)
 
 
+async def handle_clawchat_send_file(args, **kw):
+    task_id = kw.get("task_id") or "default"
+    logger.info(
+        "clawchat_send_file start task_id=%s chat_id=%s as_document=%s",
+        task_id,
+        args.get("chat_id") or "",
+        args.get("as_document") is True,
+    )
+    from clawchat_gateway import tools
+
+    result = await _recorded_tool_call(
+        "clawchat_send_file",
+        args,
+        _account_id_from_kwargs(kw),
+        lambda: tools.send_file(
+            args.get("chat_id"),
+            args.get("path"),
+            as_document=args.get("as_document") is True,
+            caption=args.get("caption") if isinstance(args.get("caption"), str) else "",
+        ),
+    )
+    logger.info(
+        "clawchat_send_file done task_id=%s sent=%s message_id=%s error=%s",
+        task_id,
+        result.get("sent") if isinstance(result, dict) else None,
+        result.get("messageId") if isinstance(result, dict) else None,
+        result.get("error") if isinstance(result, dict) else None,
+    )
+    return _tool_result(result)
+
+
 async def handle_clawchat_react_message(args, **kw):
     task_id = kw.get("task_id") or "default"
     logger.info(
@@ -1291,7 +1322,7 @@ def register_tools(ctx) -> None:
                 "Resolve the direct (1:1) ClawChat conversation with a specific user to its conversation id (cnv_...), creating it if needed. "
                 "TRIGGER - invoke when you need to send a message to a ClawChat user and only know their userId (usr_...), for example to start a conversation with a newly added friend. "
                 "The user must already be your friend; otherwise the server rejects the call. "
-                "Use the returned conversation.id as chatId for clawchat_mention_message or as the send_message target clawchat:cnv_.... "
+                "Use the returned conversation.id as chatId for clawchat_mention_message, or as chat_id for clawchat_send_file to send that user a file. "
                 "Never pass a userId or a name as a chatId."
             ),
             "parameters": {
@@ -1442,6 +1473,52 @@ def register_tools(ctx) -> None:
         is_async=True,
         description="Send ClawChat Mention Message",
         emoji="@",
+    )
+
+    ctx.register_tool(
+        "clawchat_send_file",
+        "clawchat",
+        {
+            "name": "clawchat_send_file",
+            "description": _direct_tool_description(
+                "Send a local file (image, document, archive, any type) into a ClawChat conversation: "
+                "the current one or ANY other chat this agent is in, e.g. when the owner says in a direct chat "
+                "\"send this file to group X\". "
+                "Pass that conversation's id as chat_id (from ClawChat metadata or memory notes, or "
+                "clawchat_get_direct_conversation for a friend's direct chat) and the file's absolute local path as path. "
+                "Images go out inline; set as_document=true to send any file, images included, as a downloadable file. "
+                "caption is optional text sent with the file. "
+                "Files under credential or system locations (~/.ssh, ~/.aws, /etc, the Hermes .env …) are refused. "
+                "After this tool succeeds the file has already been delivered; do not send it again with MEDIA:. "
+                "It is delivered even right after clawchat_mention_message into the same chat."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "chat_id": {
+                        "type": "string",
+                        "description": "ClawChat conversation id (cnv_...) to send the file into; may differ from the current chat.",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute path of an existing local file.",
+                    },
+                    "as_document": {
+                        "type": "boolean",
+                        "description": "Send as a downloadable file even when it is an image. Defaults to false.",
+                    },
+                    "caption": {
+                        "type": "string",
+                        "description": "Optional text sent together with the file.",
+                    },
+                },
+                "required": ["chat_id", "path"],
+            },
+        },
+        handle_clawchat_send_file,
+        is_async=True,
+        description="Send ClawChat File",
+        emoji="📎",
     )
 
     ctx.register_tool(

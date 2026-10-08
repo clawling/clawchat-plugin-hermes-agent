@@ -39,10 +39,13 @@ from clawchat_gateway.config import ClawChatConfig
 from clawchat_gateway.memory_scope import resolve_memory_scope
 from clawchat_gateway.connection import CHAT_ID_PREFIX, is_valid_chat_id
 from clawchat_gateway.storage import get_clawchat_store, make_owner_profile_persister
-from clawchat_gateway.media_runtime import derive_base_url
+from clawchat_gateway.media_runtime import derive_base_url, ensure_allowed_local_path
 from clawchat_gateway.mention_message import normalize_mention_targets
-from clawchat_gateway.profile import ProfileConfigError, load_profile_config
+from clawchat_gateway.profile import ProfileConfigError, load_clawchat_extra, load_profile_config
+from clawchat_gateway.standalone_send import standalone_send
 from clawchat_gateway.terminal_send import (
+    explicit_tool_send,
+    get_clawchat_sender,
     send_clawchat_mention_message,
     send_clawchat_reaction_message,
 )
@@ -861,6 +864,77 @@ async def mention_message(
         return _config_error(str(exc))
     except Exception as exc:  # noqa: BLE001
         return _unknown_error(exc)
+
+
+async def send_file(
+    chat_id: Any,
+    path: Any,
+    *,
+    as_document: Any = False,
+    caption: Any = "",
+) -> dict[str, Any]:
+    """Send one local file into ``chat_id`` (any chat, not only the current one).
+
+    Same delivery path as the plugin's ``send_message`` media patch: the live
+    adapter's ``send`` as an immediate media send under ``explicit_tool_send``
+    (so a same-turn mention's terminal marker does not swallow it), or the
+    standalone sender when no gateway runs in this process. The credential /
+    system-path denylist applies.
+    """
+    if not isinstance(chat_id, str) or not chat_id.strip():
+        return _validation_error("chat_id is required")
+    target = chat_id.strip()
+    if not is_valid_chat_id(target):
+        return _invalid_chat_id_error(chat_id)
+    if not isinstance(path, str) or not path.strip():
+        return _validation_error("path is required")
+    if caption is None:
+        caption = ""
+    if not isinstance(caption, str):
+        return _validation_error("caption must be a string when provided")
+    raw = Path(path.strip())
+    if not raw.is_absolute():
+        return _validation_error(f"path must be an absolute local path (got {path!r})")
+    try:
+        resolved = ensure_allowed_local_path(str(raw))
+    except ValueError as exc:
+        return _validation_error(str(exc))
+    if not resolved.exists():
+        return _validation_error(f"file does not exist: {resolved}")
+    if not resolved.is_file():
+        return _validation_error(f"path is not a regular file: {resolved}")
+
+    media_files = [str(resolved)]
+    force_document = as_document is True
+    try:
+        sender = get_clawchat_sender()
+        if sender is None or not callable(getattr(sender, "send", None)):
+            outcome = await standalone_send(
+                SimpleNamespace(extra=load_clawchat_extra()),
+                target,
+                caption,
+                media_files=media_files,
+                force_document=force_document,
+            )
+            if not outcome.get("success"):
+                return {"error": "send", "message": str(outcome.get("error") or "send failed")}
+            message_id = outcome.get("message_id")
+        else:
+            with explicit_tool_send():
+                result = await sender.send(
+                    target,
+                    caption,
+                    metadata={"_clawchat_immediate_media_send": True},
+                    media_files=media_files,
+                    _clawchat_media_files_validated=True,
+                    _clawchat_force_document=force_document,
+                )
+            if not getattr(result, "success", False):
+                return {"error": "send", "message": str(getattr(result, "error", "") or "send failed")}
+            message_id = getattr(result, "message_id", None)
+    except Exception as exc:  # noqa: BLE001
+        return _unknown_error(exc)
+    return {"sent": True, "chatId": target, "messageId": message_id, "file": resolved.name}
 
 
 async def react_message(
