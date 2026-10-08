@@ -39,6 +39,7 @@ from clawchat_gateway.config import ClawChatConfig
 from clawchat_gateway.memory_scope import resolve_memory_scope
 from clawchat_gateway.connection import CHAT_ID_PREFIX, is_valid_chat_id
 from clawchat_gateway.storage import get_clawchat_store, make_owner_profile_persister
+from clawchat_gateway.media_runtime import derive_base_url
 from clawchat_gateway.mention_message import normalize_mention_targets
 from clawchat_gateway.profile import ProfileConfigError, load_profile_config
 from clawchat_gateway.terminal_send import (
@@ -199,6 +200,11 @@ def _build_client() -> tuple[ClawChatApiClient | None, dict[str, Any] | None]:
             token=config.token,
             user_id=config.user_id,
             device_id=_resolve_tool_device_id(config.token),
+            media_base_url=derive_base_url(
+                websocket_url=config.websocket_url,
+                base_url=config.base_url,
+                media_base_url=config.media_base_url,
+            ),
         ),
         None,
     )

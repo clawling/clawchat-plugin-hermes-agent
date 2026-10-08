@@ -11,7 +11,7 @@ from typing import Any
 
 import yaml
 
-from clawchat_gateway.api_client import DEFAULT_BASE_URL
+from clawchat_gateway.api_client import DEFAULT_BASE_URL, DEFAULT_WEBSOCKET_URL
 from clawchat_gateway.config import _get_env, _jwt_claim
 from clawchat_gateway.hermes_home import hermes_home
 
@@ -30,6 +30,10 @@ class ProfileConfig:
     # multi-profile host the token is resolved per profile, while a config
     # ``extra`` read at the wrong moment can belong to another profile.
     agent_id: str = ""
+    # Where ``/media/upload`` lives is resolved from these two, the same way
+    # the adapter's send path does (``media_runtime.derive_base_url``).
+    websocket_url: str = DEFAULT_WEBSOCKET_URL
+    media_base_url: str = ""
 
 
 def _hermes_home() -> Path:
@@ -100,6 +104,15 @@ def load_profile_config() -> ProfileConfig:
         user_id=user_id,
         config_path=config_path,
         agent_id=agent_id,
+        websocket_url=_first_non_empty(
+            _get_env("CLAWCHAT_WEBSOCKET_URL", "CLAWCHAT_WS_URL"),
+            extra.get("websocket_url"),
+            DEFAULT_WEBSOCKET_URL,
+        ),
+        media_base_url=_first_non_empty(
+            _get_env("CLAWCHAT_MEDIA_BASE_URL"),
+            extra.get("media_base_url"),
+        ).rstrip("/"),
     )
 
 

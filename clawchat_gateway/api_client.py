@@ -227,12 +227,16 @@ class ClawChatApiClient:
         user_id: str = "",
         device_id: str | None = None,
         timeout: float | None = None,
+        media_base_url: str = "",
     ) -> None:
         if not base_url.startswith(("http://", "https://")):
             raise ClawChatApiError(
                 "validation", f'base_url must start with http:// or https:// (got "{base_url}")'
             )
         self._base_url = base_url.rstrip("/")
+        # ``/media/upload`` is served by the media service, which is not always on
+        # the API host (dev: the API port answers 404 for it). Empty = API host.
+        self._media_base_url = (media_base_url or "").rstrip("/") or self._base_url
         self._token = token
         self._user_id = user_id
         self._device_id = device_id or get_device_id()
@@ -990,6 +994,7 @@ class ClawChatApiClient:
             filename=filename,
             mime=mime,
             required_fields=("kind", "url", "name", "mime", "size"),
+            base_url=self._media_base_url,
         )
 
     async def upload_avatar(
@@ -1015,6 +1020,7 @@ class ClawChatApiClient:
         filename: str,
         mime: str,
         required_fields: tuple[str, ...],
+        base_url: str | None = None,
     ) -> UploadResult:
         boundary = f"----clawchat-{uuid.uuid4().hex}"
         body = (
@@ -1027,6 +1033,7 @@ class ClawChatApiClient:
             path,
             body=body,
             extra_headers={"content-type": f"multipart/form-data; boundary={boundary}"},
+            base_url=base_url,
         )
         for field in required_fields:
             if field not in payload:
@@ -1050,6 +1057,7 @@ class ClawChatApiClient:
         *,
         body: bytes | None = None,
         extra_headers: dict[str, str] | None = None,
+        base_url: str | None = None,
     ) -> dict:
         return await asyncio.to_thread(
             self._call_json_sync,
@@ -1057,6 +1065,7 @@ class ClawChatApiClient:
             path,
             body,
             extra_headers or {},
+            base_url,
         )
 
     def _call_json_sync(
@@ -1065,8 +1074,9 @@ class ClawChatApiClient:
         path: str,
         body: bytes | None,
         extra_headers: dict[str, str],
+        base_url: str | None = None,
     ) -> dict:
-        payload, status = self._request_envelope_sync(method, path, body, extra_headers)
+        payload, status = self._request_envelope_sync(method, path, body, extra_headers, base_url)
 
         code = payload.get("code") if isinstance(payload, dict) else None
         msg = ""
@@ -1123,8 +1133,9 @@ class ClawChatApiClient:
         path: str,
         body: bytes | None,
         extra_headers: dict[str, str],
+        base_url: str | None = None,
     ) -> dict:
-        payload, status = self._request_envelope_sync(method, path, body, extra_headers)
+        payload, status = self._request_envelope_sync(method, path, body, extra_headers, base_url)
         if not isinstance(payload, dict):
             raise ClawChatApiError("transport", "invalid envelope: not an object", status=status, path=path)
         return payload
@@ -1135,6 +1146,7 @@ class ClawChatApiClient:
         path: str,
         body: bytes | None,
         extra_headers: dict[str, str],
+        base_url: str | None = None,
     ) -> tuple[Any, int]:
         """Perform the HTTP request and return the parsed JSON body + status.
 
@@ -1147,7 +1159,7 @@ class ClawChatApiClient:
         caller's own job.
         """
         request = Request(
-            f"{self._base_url}{path}",
+            f"{base_url or self._base_url}{path}",
             method=method,
             data=body,
             headers=self._headers(extra_headers, body),
