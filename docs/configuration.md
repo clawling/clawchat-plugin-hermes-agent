@@ -750,6 +750,13 @@ switching its toolset per speaker would rebuild the agent each time the
 owner and someone else alternate. The plugin's own ClawChat tools, web
 search/extract, memory, skills and the rest are unchanged, and so is the owner's direct chat.
 
+"The owner's direct chat" is the activation conversation, whoever the turn's
+sender is: turns the plugin itself starts there — permission receipts, the
+memory-migration hint, moment-comment and awareness notes, sender "ClawChat" —
+are owner turns too, because only the owner and the agent are in that chat.
+The same synthetic turns in a friend's direct chat (the friend greeting) or a
+group stay narrowed, and a failed lookup counts as "not the owner's chat".
+
 Two layers (`clawchat_gateway/host_tools_guard.py`):
 
 - the adapter's per-source toolset override (`toolsets_for_source`, Hermes

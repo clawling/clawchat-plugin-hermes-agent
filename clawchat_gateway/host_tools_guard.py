@@ -134,6 +134,18 @@ def _owner_user_id() -> str:
     return read_owner()
 
 
+def _owner_direct_chat_id() -> str:
+    """The owner's own direct chat (the activation conversation), or "".
+
+    Raises on a store failure; callers treat that as "not the owner's chat".
+    """
+    from clawchat_gateway.memory_scope import ACCOUNT_ID
+    from clawchat_gateway.storage import get_clawchat_store
+
+    chat_id = get_clawchat_store().get_activation_conversation(platform="hermes", account_id=ACCOUNT_ID)
+    return str(chat_id or "")
+
+
 def _session_value(name: str) -> str:
     from clawchat_gateway.memory_scope import _session_value as read_value
 
@@ -226,12 +238,35 @@ def is_restricted_tool(name: str) -> bool:
     return name in restricted_tool_names() or name.startswith(_RESTRICTED_TOOL_PREFIXES)
 
 
-def _is_owner_direct(chat_id: str, chat_type: str, user_id: str, owner: str) -> bool:
+def _is_owner_direct(
+    chat_id: str,
+    chat_type: str,
+    user_id: str,
+    owner: str,
+    owner_chat_lookup: Optional[Callable[[], str]] = None,
+) -> bool:
+    """A turn in the owner's own direct chat: the owner spoke, or the plugin did.
+
+    The owner's direct chat holds only the owner and the agent, so a turn the
+    plugin starts there (permission receipts, the memory-migration hint,
+    moment-comment and awareness notes — sender "ClawChat") is the owner's
+    turn too. A group never qualifies, whoever spoke; any lookup failure means
+    "not the owner's".
+    """
     if (chat_type or "").strip().lower() not in _DIRECT_CHAT_TYPES:
         return False
-    if not owner or not user_id or user_id != owner:
+    if _is_known_group(chat_id):
         return False
-    return not _is_known_group(chat_id)
+    if owner and user_id and user_id == owner:
+        return True
+    if not owner or not chat_id:
+        return False
+    try:
+        owner_chat = (owner_chat_lookup or _owner_direct_chat_id)()
+    except Exception as exc:  # noqa: BLE001 - fail closed
+        logger.warning("clawchat host tools: owner chat lookup failed (%s); treating the turn as not the owner's", exc)
+        return False
+    return bool(owner_chat) and chat_id == owner_chat
 
 
 def _narrowed_toolsets() -> list[str]:
@@ -251,7 +286,10 @@ def _narrowed_toolsets() -> list[str]:
 
 
 def toolsets_for_source(
-    source: Any, *, owner_user_id: str | Callable[[], str]
+    source: Any,
+    *,
+    owner_user_id: str | Callable[[], str],
+    owner_direct_chat_id: Optional[Callable[[], str]] = None,
 ) -> Optional[list[str]]:
     """The toolset override for a ClawChat turn, or ``None`` to keep the platform's.
 
@@ -265,7 +303,7 @@ def toolsets_for_source(
         chat_id = str(getattr(source, "chat_id", "") or "")
         chat_type = str(getattr(source, "chat_type", "") or "")
         user_id = str(getattr(source, "user_id", "") or "")
-        if _is_owner_direct(chat_id, chat_type, user_id, str(owner or "")):
+        if _is_owner_direct(chat_id, chat_type, user_id, str(owner or ""), owner_direct_chat_id):
             return None
         if non_owner_host_tools() == SETTING_APPROVE:
             return None

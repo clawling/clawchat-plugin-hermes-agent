@@ -2536,7 +2536,11 @@ class ClawChatAdapter(BasePlatformAdapter):
         """Host tools only in the owner's own direct chat (``host_tools_guard``)."""
         from clawchat_gateway.host_tools_guard import toolsets_for_source
 
-        return toolsets_for_source(source, owner_user_id=self._owner_user_id)
+        return toolsets_for_source(
+            source,
+            owner_user_id=self._owner_user_id,
+            owner_direct_chat_id=self._owner_direct_chat_id,
+        )
 
     def _owner_user_id(self) -> str:
         if self._clawchat_config.owner_user_id:

@@ -36,6 +36,7 @@ OWNER = "usr_owner"
 FRIEND = "usr_friend"
 DM = "cnv_dm"
 GROUP = "cnv_group"
+OWNER_DM = "cnv_owner_dm"  # the owner's own direct chat (activation conversation)
 
 HOST_TOOLSETS = {
     "terminal": ["terminal", "process_manage"],
@@ -75,6 +76,7 @@ def _host(monkeypatch):
     for key in SESSION_KEYS:
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(guard, "_owner_user_id", lambda: OWNER)
+    monkeypatch.setattr(guard, "_owner_direct_chat_id", lambda: OWNER_DM)
     monkeypatch.setattr(guard, "_is_known_group", lambda chat_id: chat_id == GROUP)
     monkeypatch.setattr(guard, "_platform_toolsets", lambda: set(FULL))
     monkeypatch.setattr(guard, "_resolve_tools", lambda name: list(HOST_TOOLSETS.get(name, [])))
@@ -282,6 +284,17 @@ def test_adapter_overrides_toolsets_per_source():
     assert kept and "terminal" not in kept and "file" not in kept
 
 
+def test_adapter_passes_its_own_owner_chat(monkeypatch):
+    from clawchat_gateway.adapter import ClawChatAdapter
+
+    monkeypatch.setattr(guard, "_owner_direct_chat_id", lambda: "")  # global lookup sees nothing
+    adapter = ClawChatAdapter.__new__(ClawChatAdapter)
+    adapter._owner_user_id = lambda: OWNER
+    adapter._owner_direct_chat_id = lambda: OWNER_DM  # this profile's activation conversation
+    assert adapter.toolsets_for_source(Source(OWNER_DM, "dm", "clawchat-permission-result")) is None
+    assert adapter.toolsets_for_source(Source(DM, "dm", "clawchat-awareness")) is not None
+
+
 def test_adapter_override_fails_closed_when_owner_lookup_breaks():
     from clawchat_gateway.adapter import ClawChatAdapter
 
@@ -327,3 +340,54 @@ def test_plugin_manifest_declares_the_hook():
 
     manifest = yaml.safe_load((Path(__file__).resolve().parent.parent / "plugin.yaml").read_text())
     assert "pre_tool_call" in manifest["provides_hooks"]
+
+
+# --- turns the plugin itself starts in the owner's direct chat ---------------
+#
+# The memory-migration hint, permission receipts, moment-comment and awareness
+# notes are synthetic turns the plugin starts in the owner's direct chat; their
+# sender is "ClawChat" (clawchat-*), not the owner. The batch3 e2e found them
+# treated as someone else's turn: the migration hint could not read MEMORY.md
+# under the default "off", and under "approve" the owner had to refuse two
+# prompts before the hint went out. The owner's direct chat holds only the owner
+# and the agent, so its chat id decides.
+
+PLUGIN_SENDERS = ["clawchat-permission-result", "clawchat-awareness", "clawchat-memory-migration", None]
+
+
+@pytest.mark.parametrize("sender", PLUGIN_SENDERS)
+def test_plugin_turn_in_the_owner_chat_keeps_the_host_tools(sender):
+    assert guard.toolsets_for_source(Source(OWNER_DM, "dm", sender), owner_user_id=OWNER) is None
+
+
+@pytest.mark.parametrize("sender", [s for s in PLUGIN_SENDERS if s])
+def test_plugin_turn_in_the_owner_chat_is_not_blocked(monkeypatch, sender):
+    _session(monkeypatch, chat_id=OWNER_DM, chat_type="dm", user_id=sender)
+    assert guard.clawchat_pre_tool_call(tool_name="read_file", args={"path": "MEMORY.md"}) is None
+
+
+def test_plugin_turn_in_a_friend_chat_is_still_narrowed(monkeypatch):
+    # e.g. the friend greeting: synthetic, but in the friend's direct chat.
+    kept = guard.toolsets_for_source(Source(DM, "dm", "clawchat-awareness"), owner_user_id=OWNER)
+    assert kept is not None and "file" not in kept
+    _session(monkeypatch, chat_id=DM, chat_type="dm", user_id="clawchat-awareness")
+    assert guard.clawchat_pre_tool_call(tool_name="read_file", args={})["action"] == "block"
+
+
+def test_owner_chat_id_never_unlocks_a_group(monkeypatch):
+    monkeypatch.setattr(guard, "_owner_direct_chat_id", lambda: GROUP)
+    assert guard.toolsets_for_source(Source(GROUP, "group", OWNER), owner_user_id=OWNER) is not None
+    _session(monkeypatch, chat_id=GROUP, chat_type="group", user_id="clawchat-awareness")
+    assert guard.clawchat_pre_tool_call(tool_name="terminal", args={})["action"] == "block"
+
+
+def test_owner_chat_lookup_failure_fails_closed(monkeypatch):
+    def boom():
+        raise RuntimeError("store unavailable")
+
+    monkeypatch.setattr(guard, "_owner_direct_chat_id", boom)
+    assert guard.toolsets_for_source(Source(OWNER_DM, "dm", "clawchat-awareness"), owner_user_id=OWNER) is not None
+    _session(monkeypatch, chat_id=OWNER_DM, chat_type="dm", user_id="clawchat-awareness")
+    assert guard.clawchat_pre_tool_call(tool_name="read_file", args={})["action"] == "block"
+    # the owner speaking in their own chat does not need the lookup
+    assert guard.toolsets_for_source(Source(OWNER_DM, "dm", OWNER), owner_user_id=OWNER) is None
