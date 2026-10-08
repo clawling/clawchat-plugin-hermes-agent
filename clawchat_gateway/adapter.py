@@ -4351,7 +4351,49 @@ class ClawChatAdapter(BasePlatformAdapter):
             ),
         )
 
+    _OWN_AGENT_FIELDS = (
+        "agent_id",
+        "agent_user_id",
+        "agent_nickname",
+        "agent_avatar_url",
+        "agent_bio",
+        "agent_behavior",
+    )
+    _OWNER_FIELDS = (
+        "agent_owner_id",
+        "agent_owner_nickname",
+        "agent_owner_avatar_url",
+        "agent_owner_bio",
+        "agent_owner_locale",
+    )
+
+    def _own_owner_metadata(self, metadata: dict[str, str]) -> dict[str, str]:
+        """``owner.md`` metadata minus the fields that describe someone else.
+
+        A profile's ``owner.md`` can be another profile's (``hermes profile
+        create --clone-all`` copies memories) until a pull rewrites it. The
+        adapter belongs to one profile: its own user id is the token ``sub``
+        and its owner is ``_owner_user_id()``. ``agent_*`` fields about another
+        agent and ``agent_owner_*`` fields about another owner are dropped, so
+        they are never presented as this agent's identity, behavior or owner.
+        """
+        own = dict(metadata)
+        self_id = self._clawchat_config.user_id
+        # Only a usr_ id is comparable: an old owner.md may carry the agt_
+        # record id under agent_id, which is never equal to the token sub.
+        md_agent = own.get("agent_user_id") or own.get("agent_id") or ""
+        if self_id and md_agent.startswith("usr_") and md_agent != self_id:
+            for key in self._OWN_AGENT_FIELDS:
+                own.pop(key, None)
+        owner_id = self._owner_user_id()
+        md_owner = own.get("agent_owner_id") or ""
+        if owner_id and md_owner and md_owner != owner_id:
+            for key in self._OWNER_FIELDS:
+                own.pop(key, None)
+        return own
+
     def _format_owner_metadata_sections(self, metadata: dict[str, str]) -> list[str]:
+        metadata = self._own_owner_metadata(metadata)
         sections: list[str] = []
         sections.append(
             "## ClawChat Agent Behavior\n"
@@ -4379,11 +4421,21 @@ class ClawChatAdapter(BasePlatformAdapter):
         return sections
 
     def _format_agent_profile_section(self, metadata: dict[str, str]) -> str | None:
-        metadata_source = dict(metadata)
+        metadata_source = self._own_owner_metadata(metadata)
         if not metadata_source.get("agent_user_id") and metadata_source.get("agent_id"):
             metadata_source["agent_user_id"] = metadata_source["agent_id"]
         if not metadata_source.get("agent_user_id") and self._clawchat_config.user_id:
             metadata_source["agent_user_id"] = self._clawchat_config.user_id
+            # owner.md had nothing (or was another agent's): this agent's own
+            # user note is the next source for how it looks.
+            user_note = self._read_memory_metadata("user", self._clawchat_config.user_id)
+            for field, key in (
+                ("agent_nickname", "nickname"),
+                ("agent_avatar_url", "avatar_url"),
+                ("agent_bio", "bio"),
+            ):
+                if not metadata_source.get(field) and user_note.get(key):
+                    metadata_source[field] = user_note[key]
         profile = self._pick_memory_metadata_fields(
             metadata_source,
             ("agent_user_id", "agent_nickname", "agent_avatar_url", "agent_bio"),
@@ -4395,8 +4447,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         """This turn's own agent: ``(user id, nickname)``; nickname may be ''.
 
         The id is the connection's user id (token ``sub``): the adapter belongs
-        to ONE profile, so it is right even when a multiplexed turn reads the
-        default profile's ``owner.md``. ``owner.md``'s nickname is used only
+        to ONE profile, so it is right even when this profile's ``owner.md``
+        still describes another agent (``--clone-all``). Its nickname is used only
         when its ``agent_user_id`` is this agent; otherwise ``users/<id>.md``.
         """
         owner_agent_id = owner_metadata.get("agent_user_id", "")

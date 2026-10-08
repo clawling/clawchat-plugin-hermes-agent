@@ -93,8 +93,8 @@ def test_no_nickname_names_the_id_only(monkeypatch):
 
 
 def test_second_profile_never_borrows_the_default_profiles_identity(monkeypatch):
-    # Under a multiplexed gateway the owner.md read at turn start can resolve
-    # to the DEFAULT profile's memory. The turn's own identity is this
+    # A profile's owner.md can still be another profile's (--clone-all copies
+    # memories). The turn's own identity is this
     # adapter's connection (token sub), and another agent's nickname must not
     # be shown as ours.
     default_owner = {("owner", "owner"): {"agent_user_id": "usr_a", "agent_nickname": "Alpha"}}

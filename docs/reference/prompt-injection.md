@@ -88,9 +88,17 @@ unless Hermes adds an explicit session prompt invalidation API for platform
 plugins. The ClawChat channel prompt includes the current agent profile from
 `owner.md` metadata (`agent_user_id`, `agent_nickname`, `agent_avatar_url`, and
 `agent_bio`) so group and direct turns know which agent identity is replying.
+`owner.md` can describe another agent (`hermes profile create --clone-all`
+copies the source profile's memories) until a pull rewrites it, so the adapter
+drops `owner.md`'s `agent_*` fields (profile and `agent_behavior`) when its
+`agent_user_id` is a different `usr_...` than the connection's own, and the
+`agent_owner_*` fields when `agent_owner_id` is not this agent's owner; the
+profile then comes from `users/<own id>.md`. A multiplexed gateway builds,
+connects and runs each profile's adapter under that profile's home override,
+so the files read are the served profile's own.
 Every turn also gets `## ClawChat Current Agent`: `current_agent_id` (the
-connection's own `usr_...` id, so a profile under a multiplexed gateway never
-shows the default profile's identity), `current_agent_nickname` (from
+connection's own `usr_...` id, so a profile never shows another agent's
+identity), `current_agent_nickname` (from
 `owner.md` only when its `agent_user_id` is this agent, else
 `users/<id>.md`; omitted when unknown), and one line telling the model that
 this id is itself and that `mentions_current_agent=true` addresses it,
