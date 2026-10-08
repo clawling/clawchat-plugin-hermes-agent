@@ -815,9 +815,10 @@ def _register_session_usage_hook(ctx) -> None:
     if not callable(register_hook):
         return
     try:
-        from clawchat_gateway.sediment import clawchat_post_api_request
+        from clawchat_gateway.sediment import clawchat_post_api_request, clawchat_pre_api_request
 
         register_hook("post_api_request", clawchat_post_api_request)
+        register_hook("pre_api_request", clawchat_pre_api_request)
     except Exception as exc:  # noqa: BLE001
         logger.warning("ClawChat session usage hook skipped: %s", exc)
 

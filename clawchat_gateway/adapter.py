@@ -903,6 +903,20 @@ def build_skill_update_ack(applied_targets: list[str], removed_ids: list[str]) -
     return "✅ " + ";".join(parts)
 
 
+def _read_host_compression_ratio() -> float | None:
+    """``compression.threshold`` (the ratio) from the host config, if set."""
+    try:
+        from hermes_cli.config import read_raw_config
+
+        compression = (read_raw_config() or {}).get("compression")
+        value = compression.get("threshold") if isinstance(compression, dict) else None
+    except Exception:  # noqa: BLE001 - absent or unreadable host config
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 1:
+        return None
+    return float(value)
+
+
 def _read_host_compression_cap() -> int | None:
     """``compression.threshold_tokens`` from the host config, if set."""
     try:
@@ -1039,6 +1053,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         # Delayed closers of streams the host left open (see stop_typing).
         self._stream_sweep_tasks: set[asyncio.Task[None]] = set()
         self._host_compression_cap = _read_host_compression_cap()
+        self._host_compression_ratio = _read_host_compression_ratio()
         # Groups whose batch the plugin is handing to Hermes right now; with the
         # host's own active-session guard this tells the coalescer to hold the
         # next batch until the running group turn is over.
@@ -4065,10 +4080,23 @@ class ClawChatAdapter(BasePlatformAdapter):
                 self._sediment_done.pop(chat_id, None)
             logger.info("clawchat sediment turn end chat_id=%s reason=%s", chat_id, reason)
 
-    def _compact_sediment_threshold(self) -> int:
+    def _compact_sediment_threshold(self, chat_id: str = "") -> int:
+        """``sediment-margin-tokens`` before the point Hermes compresses at.
+
+        That point is the lower of the ratio threshold (for this conversation's
+        window, which the request hooks record) and the absolute cap; without a
+        known window the cap alone decides.
+        """
         config = self._clawchat_config
         cap = self._host_compression_cap or config.session_cap_tokens
-        return max(1, cap - config.sediment_margin_tokens)
+        context_length, max_tokens = session_sediment.latest_window(chat_id) if chat_id else (None, None)
+        point = session_sediment.compaction_point(
+            context_length=context_length,
+            max_tokens=max_tokens,
+            threshold_percent=getattr(self, "_host_compression_ratio", None),
+            threshold_tokens=cap,
+        ) or cap
+        return max(1, point - config.sediment_margin_tokens)
 
     async def on_processing_complete(self, event: Any, outcome: Any) -> None:
         parent = getattr(super(), "on_processing_complete", None)
@@ -4102,7 +4130,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         if usage is None:
             return
         session_id, prompt_tokens = usage
-        if prompt_tokens < self._compact_sediment_threshold():
+        if prompt_tokens < self._compact_sediment_threshold(chat_id):
             return
         if session_id in self._sedimented_session_ids:
             return
@@ -4121,7 +4149,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             "clawchat sediment before compaction scheduled chat_id=%s prompt_tokens=%d threshold=%d",
             chat_id,
             prompt_tokens,
-            self._compact_sediment_threshold(),
+            self._compact_sediment_threshold(chat_id),
         )
         task = asyncio.ensure_future(
             self._compact_sediment_when_idle(chat_id, chat_type, sender_id)

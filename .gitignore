@@ -168,6 +168,7 @@ tests/*
 !tests/test_group_session_seed.py
 !tests/test_group_turn_queue.py
 !tests/test_session_sediment.py
+!tests/test_sediment_before_compaction.py
 !tests/test_typing_cadence.py
 !tests/test_message_length.py
 !tests/test_thinking_mode.py

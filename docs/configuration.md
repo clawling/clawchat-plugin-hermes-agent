@@ -557,7 +557,7 @@ when the adapter starts, so a change needs a gateway restart.
 | `rebuild-recent-messages` | `20` | 5–100 | Recent group messages that seed a group's new shared session. |
 | `rebuild-recent-chars` | `4000` | 1000–32000 | Character budget of that seed. |
 | `session-cap-tokens` | `150000` | 50000–1000000 | Context size at which a conversation's session is compressed; filled into Hermes' `compression.threshold_tokens` when that is missing (below). |
-| `sediment-margin-tokens` | `10000` | 2000–50000 | How far below the cap a turn has to reach for a sediment turn to run before compression. |
+| `sediment-margin-tokens` | `10000` | 2000–50000 | How far below the point Hermes compresses at (the lower of the cap and its ratio threshold) a turn has to reach for a sediment turn to run before compression. |
 | `sediment-on-compact` | `on` | `on` / `off` | Run a sediment turn before compression. |
 | `sediment-on-reset` | `on` | `on` / `off` | Run a sediment turn before `/new` / `/reset`. |
 
@@ -587,23 +587,26 @@ either happens:
   `/new` must stay an immediate way out of a stuck turn — and when nothing was
   said since the last reset.
 - **Before compression** (`sediment-on-compact`): after a turn whose last model
-  request used at least `session-cap-tokens − sediment-margin-tokens` tokens of
-  context, a sediment turn runs as soon as the conversation is idle, once per
-  Hermes session id. The request size comes from Hermes' `post_api_request`
-  plugin hook. So that compression happens right after, at the cap, plugin load
-  and activation fill `compression.threshold_tokens` with `session-cap-tokens`
-  when the key is missing. The key is global, so it applies to the host's other
-  platforms too; set it yourself to keep a different value — the plugin then
-  times the sediment turn against yours.
+  request reached `sediment-margin-tokens` below the point Hermes will compress
+  this conversation at, a sediment turn runs as soon as the conversation is idle,
+  once per Hermes session id.
 
   Hermes compresses at the lower of `compression.threshold_tokens` (read by
   Hermes 0.20.1 and later) and its ratio threshold `compression.threshold`
-  (default 0.5 of the model's context window; 0.20.1 and later raise it to 0.75
-  for windows under 512 K). The sediment turn comes before compression only
-  when the ratio threshold is not the lower one: with the defaults, a window of
-  at least 200 K tokens on 0.20.1+, or at least 300 K on older hosts. With a
-  smaller window compression comes first and that stretch is not sedimented
-  (facts the agent wrote to notes during the conversation are of course kept).
+  (default 0.5 of the model's context window minus the output reservation;
+  raised to 0.75 for windows under 512 K). Plugin load and activation fill
+  `compression.threshold_tokens` with `session-cap-tokens` when the key is
+  missing (the key is global, so it applies to the host's other platforms too;
+  set it yourself to keep a different value). The plugin records each
+  conversation's request size and context window (`post_api_request`:
+  `usage`, `context_length`) and output reservation (`pre_api_request`:
+  `max_tokens`), and computes the same lower point with Hermes' own
+  `ContextCompressor` threshold maths when it can import it (the same rule
+  otherwise). So on a 128 K window the sediment point is 0.75 × 128000 − 10000
+  = 86000, not `session-cap-tokens − sediment-margin-tokens` = 140000. A
+  per-model ratio override in Hermes is not seen; until a conversation's
+  window is known (the first request of a gateway process), the cap alone
+  decides.
 
 A sediment turn is a synthetic message in the same session telling the agent to
 read and then append to only this conversation's notes: in a direct chat the

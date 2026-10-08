@@ -16,7 +16,10 @@ This module holds the parts that do not need the adapter: the prompt, and a
 small registry of the last request size per ClawChat conversation, fed by the
 ``post_api_request`` plugin hook (Hermes has passed ``platform``,
 ``session_id`` and ``usage`` to it since v0.12.0; the conversation id comes from
-the gateway's session context).
+the gateway's session context), together with that conversation's context window
+(``context_length``, same hook) and output reservation (``max_tokens``, from
+``pre_api_request``), so the compaction sediment can run before the point Hermes
+actually compresses at (``compaction_point``).
 """
 
 from __future__ import annotations
@@ -37,6 +40,19 @@ _REASON_TEXT = {
 _usage_lock = threading.Lock()
 _latest_usage: dict[str, tuple[str, int, float]] = {}
 _USAGE_MAX_CHATS = 2048
+# chat_id -> (context window, output reservation) of the latest request. The
+# window comes with post_api_request (context_length), the reservation with
+# pre_api_request (max_tokens); either may be unknown on an older host.
+_latest_window: dict[str, tuple[int | None, int | None]] = {}
+
+# Hermes' own small-window floor (agent/context_compressor.py) and default
+# ratio (hermes_cli/config_defaults.py compression.threshold), used when the
+# host's helpers cannot be imported.
+_SMALL_WINDOW_LIMIT = 512_000
+_SMALL_WINDOW_RATIO = 0.75
+_DEFAULT_RATIO = 0.50
+_MINIMUM_CONTEXT_LENGTH = 64_000
+_MIN_CTX_TRIGGER_RATIO = 0.85
 
 
 def build_sediment_prompt(*, reason: str, targets: list[tuple[str, str, str]]) -> str:
@@ -104,13 +120,106 @@ def clawchat_post_api_request(**kwargs: Any) -> None:
         session_id = str(kwargs.get("session_id") or "")
         if tokens is None or not chat_id or not session_id:
             return
+        context_length = _positive_int(kwargs.get("context_length"))
         with _usage_lock:
             _latest_usage[chat_id] = (session_id, tokens, time.monotonic())
+            if context_length is not None:
+                _, max_tokens = _latest_window.get(chat_id, (None, None))
+                _latest_window[chat_id] = (context_length, max_tokens)
             if len(_latest_usage) > _USAGE_MAX_CHATS:
                 oldest = min(_latest_usage, key=lambda key: _latest_usage[key][2])
                 _latest_usage.pop(oldest, None)
+                _latest_window.pop(oldest, None)
     except Exception:  # noqa: BLE001 - an observer must never break a request
         return
+
+
+def clawchat_pre_api_request(**kwargs: Any) -> None:
+    """``pre_api_request`` hook: remember the request's output reservation."""
+    try:
+        if kwargs.get("platform") != "clawchat":
+            return
+        chat_id = _session_chat_id()
+        if not chat_id:
+            return
+        max_tokens = _positive_int(kwargs.get("max_tokens"))
+        with _usage_lock:
+            context_length, _ = _latest_window.get(chat_id, (None, None))
+            _latest_window[chat_id] = (context_length, max_tokens)
+    except Exception:  # noqa: BLE001 - an observer must never break a request
+        return
+
+
+def latest_window(chat_id: str) -> tuple[int | None, int | None]:
+    """``(context_length, max_tokens)`` of the conversation's latest request."""
+    with _usage_lock:
+        return _latest_window.get(chat_id, (None, None))
+
+
+def _positive_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return None
+    return int(value)
+
+
+def _host_threshold_helpers() -> Any:
+    """Hermes' ContextCompressor (its threshold maths), or None."""
+    try:
+        from agent.context_compressor import ContextCompressor
+
+        if callable(getattr(ContextCompressor, "_compute_threshold_tokens", None)) and callable(
+            getattr(ContextCompressor, "_effective_threshold_percent", None)
+        ):
+            return ContextCompressor
+    except Exception:  # noqa: BLE001 - absent or different host
+        pass
+    return None
+
+
+def _fallback_threshold_tokens(context_length: int, ratio: float, max_tokens: int | None) -> int:
+    window = context_length - (max_tokens or 0)
+    window = window if window > 0 else context_length
+    pct_value = int(window * ratio)
+    floored = max(pct_value, _MINIMUM_CONTEXT_LENGTH)
+    trigger_cap = int(window * _MIN_CTX_TRIGGER_RATIO)
+    if window > 0 and floored > pct_value and floored > trigger_cap:
+        floored = max(pct_value, trigger_cap)
+    if window > 0 and floored >= window:
+        return max(1, min(trigger_cap, window - 1))
+    return floored
+
+
+def compaction_point(
+    *,
+    context_length: int | None,
+    max_tokens: int | None,
+    threshold_percent: float | None,
+    threshold_tokens: int | None,
+) -> int | None:
+    """The prompt size at which Hermes will compress this conversation.
+
+    The lower of the ratio threshold (raised to 0.75 below a 512K window,
+    applied to the window minus the output reservation) and the absolute
+    ``compression.threshold_tokens``. ``None`` when neither is known.
+    """
+    ratio = threshold_percent if threshold_percent and threshold_percent > 0 else _DEFAULT_RATIO
+    ratio_point: int | None = None
+    if context_length:
+        helpers = _host_threshold_helpers()
+        if helpers is not None:
+            try:
+                effective = helpers._effective_threshold_percent(context_length, ratio)
+                ratio_point = int(helpers._compute_threshold_tokens(context_length, effective, max_tokens))
+            except Exception:  # noqa: BLE001 - fall back to the same rule
+                ratio_point = None
+        if ratio_point is None:
+            effective = max(ratio, _SMALL_WINDOW_RATIO) if context_length < _SMALL_WINDOW_LIMIT else ratio
+            ratio_point = _fallback_threshold_tokens(context_length, effective, max_tokens)
+    cap = threshold_tokens if threshold_tokens and threshold_tokens > 0 else None
+    if cap is not None and context_length:
+        cap = min(cap, context_length)
+    candidates = [p for p in (ratio_point, cap) if p]
+    return min(candidates) if candidates else None
 
 
 def latest_usage(chat_id: str) -> tuple[str, int] | None:
@@ -123,8 +232,10 @@ def forget_usage(chat_id: str) -> None:
     """Drop a conversation's size, e.g. once its session was reset."""
     with _usage_lock:
         _latest_usage.pop(chat_id, None)
+        _latest_window.pop(chat_id, None)
 
 
 def reset_usage_registry() -> None:
     with _usage_lock:
         _latest_usage.clear()
+        _latest_window.clear()
