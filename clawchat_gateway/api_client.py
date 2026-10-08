@@ -10,7 +10,7 @@ import socket
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
@@ -58,6 +58,18 @@ REFRESH_CODE_INTERNAL = 1  # server internal error (no rotation committed)
 # degrading to a fresh pairing; the client sheds the id and retries once.
 AGENT_NOT_FOUND_CODE = 16001
 
+# Connect-code failure guidance (``/v1/agents/connect`` and ``/connect/check``):
+# the error envelope's ``data`` may carry ``hint`` (an English sentence for the
+# agent), ``next_action`` (a closed enum) and, with ``wait_retry`` only,
+# ``retry_after_seconds``. Older servers omit all three.
+NEXT_ACTION_ASK_OWNER_NEW_CODE = "ask_owner_new_code"  # code is dead; never retry
+NEXT_ACTION_WAIT_RETRY = "wait_retry"  # throttled, code NOT consumed; wait, retry once
+NEXT_ACTION_RECONNECT = "reconnect"  # redeemed elsewhere; owner sends a reconnect prompt
+NEXT_ACTION_STOP = "stop"  # request rejected; an unchanged retry fails the same way
+# ``wait_retry`` delay when retry_after_seconds is missing/invalid, and its cap.
+WAIT_RETRY_DEFAULT_SECONDS = 60.0
+WAIT_RETRY_MAX_SECONDS = 120.0
+
 # Transient-refresh backoff (spec §B): min(30s, 1s * 2^(n-1)) ± jitter, cap 30s.
 REFRESH_RETRY_BACKOFF_CAP_SECONDS = 30.0
 REFRESH_RETRY_BASE_SECONDS = 1.0
@@ -103,9 +115,63 @@ class ClawChatApiError(Exception):
     # code != 0 so that callers (e.g. gate-outcome mapping) can read fields
     # like request_id, operation, and expires_at without re-parsing the body.
     data: dict | None = None
+    # True when agents_connect_with_retry already spent its single wait_retry
+    # re-redeem and the server throttled again, so callers can say "do not loop".
+    wait_retried: bool = False
 
     def __str__(self) -> str:
         return self.message
+
+    @property
+    def hint(self) -> str | None:
+        """``data.hint`` — the server's guidance sentence, if present."""
+        value = (self.data or {}).get("hint")
+        return value if isinstance(value, str) and value.strip() else None
+
+    @property
+    def next_action(self) -> str | None:
+        """``data.next_action`` verbatim (unknown values included), if present."""
+        value = (self.data or {}).get("next_action")
+        return value if isinstance(value, str) and value.strip() else None
+
+    @property
+    def retry_after_seconds(self) -> int | float | None:
+        """``data.retry_after_seconds`` as sent, if it is a number."""
+        value = (self.data or {}).get("retry_after_seconds")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return value
+
+
+def format_connect_guidance(exc: ClawChatApiError) -> list[str]:
+    """Extra ``clawchat: ...`` lines describing a connect failure's guidance.
+
+    Empty when the server sent neither ``next_action`` nor ``hint`` (an older
+    backend), so callers can append these after their existing failure line
+    without changing today's output.
+    """
+    lines: list[str] = []
+    if exc.next_action:
+        line = f"clawchat: next_action={exc.next_action}"
+        if exc.retry_after_seconds is not None:
+            line = f"{line} retry_after_seconds={exc.retry_after_seconds}"
+        lines.append(line)
+    if exc.hint:
+        lines.append(f"clawchat: hint: {exc.hint}")
+    if exc.wait_retried and exc.next_action == NEXT_ACTION_WAIT_RETRY:
+        lines.append(
+            "clawchat: the plugin already waited and retried once automatically; "
+            "do not loop — try again later."
+        )
+    return lines
+
+
+def _wait_retry_delay(exc: ClawChatApiError) -> float:
+    """Seconds to wait before the single ``wait_retry`` re-redeem."""
+    value = exc.retry_after_seconds
+    if value is None or value <= 0:
+        return WAIT_RETRY_DEFAULT_SECONDS
+    return min(value, WAIT_RETRY_MAX_SECONDS)
 
 
 def build_plugin_report_payload(
@@ -1174,14 +1240,21 @@ class ClawChatApiClient:
                 payload = json.loads(exc.read().decode("utf-8"))
             except Exception:
                 payload = None
+            data = None
             if isinstance(payload, dict):
                 code = payload.get("code")
                 message = str(payload.get("msg") or payload.get("message") or exc.reason)
+                # Keep the envelope's data so connect-code guidance (next_action /
+                # hint) survives a non-200 answer such as a proxy-level 429.
+                if isinstance(payload.get("data"), dict):
+                    data = payload["data"]
             else:
                 code = None
                 message = str(exc.reason or exc)
             kind = "auth" if status in (401, 403) else "api"
-            raise ClawChatApiError(kind, message, status=status, path=path, code=code) from exc
+            raise ClawChatApiError(
+                kind, message, status=status, path=path, code=code, data=data
+            ) from exc
         except URLError as exc:
             # connection-refused / DNS arrive here and prove the request never
             # reached the server, so they are safe to retry (connect_failed).
@@ -1320,6 +1393,7 @@ async def agents_connect_with_retry(
     retries: int = ACTIVATION_CONNECT_RETRIES,
     backoff: tuple[float, ...] = ACTIVATION_RETRY_BACKOFF_SECONDS,
     attempt_ceiling: float | None = ACTIVATION_ATTEMPT_CEILING_SECONDS,
+    sleep: Callable[[float], Awaitable[object]] | None = None,
 ) -> dict:
     """Call ``agents_connect`` for a single-use code, retrying ONLY failures that
     provably never reached the server (``connect_failed``). Ambiguous failures
@@ -1328,12 +1402,20 @@ async def agents_connect_with_retry(
     ``attempt_ceiling`` bounds each attempt's total wall clock (covering DNS
     resolution, which urlopen's timeout does not); a ceiling hit is ambiguous
     and therefore not retried.
+
+    A server answer of ``next_action=wait_retry`` (rate limited — the code was
+    NOT consumed) is re-redeemed exactly once after ``retry_after_seconds``
+    (capped, defaulted). That budget is separate from the transport retries and
+    never refills, so the loop stays bounded. Every other ``next_action`` is
+    surfaced immediately.
     """
+    sleeper = sleep if sleep is not None else asyncio.sleep
     connect_kwargs: dict[str, object] = {"code": code}
     if user_id and user_id.strip():
         connect_kwargs["user_id"] = user_id
     connect_kwargs["context"] = context
     attempt = 0
+    wait_retried = False
     while True:
         try:
             if attempt_ceiling and attempt_ceiling > 0:
@@ -1348,6 +1430,18 @@ async def agents_connect_with_retry(
                 "transport", "activation request timed out", connect_failed=False
             ) from exc
         except ClawChatApiError as exc:
+            if exc.next_action == NEXT_ACTION_WAIT_RETRY and not exc.connect_failed:
+                if wait_retried:
+                    raise replace(exc, wait_retried=True) from exc
+                wait_retried = True
+                delay = _wait_retry_delay(exc)
+                logger.warning(
+                    "clawchat activation rate limited (code=%s), retrying once in %.0fs",
+                    exc.code,
+                    delay,
+                )
+                await sleeper(delay)
+                continue
             if not exc.connect_failed or attempt >= retries:
                 raise
             delay = backoff[min(attempt, len(backoff) - 1)] if backoff else 0
@@ -1359,4 +1453,4 @@ async def agents_connect_with_retry(
             )
             attempt += 1
             if delay:
-                await asyncio.sleep(delay)
+                await sleeper(delay)

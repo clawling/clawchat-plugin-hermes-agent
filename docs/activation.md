@@ -183,7 +183,9 @@ join the same group — a shared host `device_id` is not a conflict.
 Successful activation prints `clawchat: activation complete for <user_id>` and
 exits 0. Treat any non-zero exit as a hard failure. Activation codes are
 single-use, so do not retry the same code; surface stderr to the operator and
-request a fresh code.
+request a fresh code. When the server sends connect-code guidance, stderr also
+carries `clawchat: next_action=<value>` and `clawchat: hint: <sentence>` lines
+— follow them (see [Connect-code failure guidance](#connect-code-failure-guidance)).
 
 ## REST Contract For This Host
 
@@ -227,13 +229,45 @@ reporting `pairable: true` right up to the failure. Two defences:
 - **16001 retry.** If the server still answers `16001` for a replayed id, the
   client logs a warning, drops the id, and retries the same code once as a
   fresh pairing. A `16001` failure leaves the invite code `pending`
-  server-side, so the retry cannot double-spend it. No other envelope code is
-  retried — an owner mismatch (`16014`) is a genuine rejection, and a code that
-  was never replayed has no stale state to shed.
+  server-side, so the retry cannot double-spend it. Apart from the
+  `wait_retry` re-redeem below, no other envelope code is retried — an owner
+  mismatch (`16014`) is a genuine rejection, and a code that was never replayed
+  has no stale state to shed.
 
 Recent backends fold this fallback into `POST /v1/agents/connect` itself (an
 unresolvable `user_id` degrades to a new pairing server-side), so the retry is
 only exercised against older deployments.
+
+### Connect-code failure guidance
+
+Newer backends attach machine-readable guidance to the error envelope's `data`
+on a failed `POST /v1/agents/connect` (and on `/connect/check` business
+errors):
+
+| `data` field | Meaning |
+|---|---|
+| `hint` | English sentence for the agent, ending with a link to the public onboarding guide. |
+| `next_action` | Closed enum: `ask_owner_new_code` (unknown / expired code — it is dead, never retry), `wait_retry` (rate limited — the code was **not** consumed), `reconnect` (redeemed from another device — the owner must send a reconnect prompt), `stop` (owner mismatch, bad `user_id`, malformed request — an unchanged retry fails the same way). |
+| `retry_after_seconds` | Only with `wait_retry`: how long to wait before retrying. |
+
+`ClawChatApiError` exposes them as `hint`, `next_action` (verbatim, including
+values this release does not know) and `retry_after_seconds`; all are `None`
+against older backends.
+
+- **`wait_retry` re-redeem.** `agents_connect_with_retry` waits
+  `retry_after_seconds` (capped at 120 s; 60 s if missing or invalid) and
+  redeems the same code **once** more. This budget is separate from the
+  transport retries (which only cover requests that provably never reached the
+  server) and never refills, so the call stays bounded. If the server throttles
+  again, the error carries `wait_retried=True` and the CLI adds a "do not loop"
+  line.
+- Every other `next_action` — including unknown values — fails immediately.
+- `hermes clawchat activate` keeps its `clawchat: activation failed (...)`
+  first line unchanged and appends `clawchat: next_action=<value>
+  [retry_after_seconds=N]` and `clawchat: hint: <sentence>` lines when present.
+  `/clawchat-activate` returns the same lines in-chat, and `hermes gateway
+  setup` prints them before re-raising. Without guidance fields, every surface
+  behaves exactly as before.
 `plugin_version` carries the package `__version__` so the backend can record
 which plugin build paired at connect time (optional, backward-compatible — the
 backend stores it when present and ignores its absence).

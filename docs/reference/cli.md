@@ -100,7 +100,7 @@ single-use connect code is **not** spent — the message names both flags and th
 | Code | Meaning                                                                                              |
 |------|------------------------------------------------------------------------------------------------------|
 | `0`  | Activation succeeded. Prints `clawchat: activation complete for <user_id>` to stdout.                |
-| `1`  | `ClawChatApiError` (validation, auth, network, etc.). The CLI prints `clawchat: activation failed (<kind> [<path>] [status=N] [code=N]): <message>` to stderr. |
+| `1`  | `ClawChatApiError` (validation, auth, network, etc.). The CLI prints `clawchat: activation failed (<kind> [<path>] [status=N] [code=N]): <message>` to stderr, followed by `clawchat: next_action=<value> [retry_after_seconds=N]` and `clawchat: hint: <sentence>` lines when the server sent them (see `docs/activation.md` § Connect-code failure guidance). |
 | `1`  | `ExistingActivationError` / `UnprovenRepairError` — a local precondition failure, refused before the code is spent. The CLI prints `clawchat: activation refused — <message>` to stderr. |
 | `2`  | `clawchat_cli.py` / `cli.handle_clawchat_cli` got no subcommand — prints help.                       |
 
