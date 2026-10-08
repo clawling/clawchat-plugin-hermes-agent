@@ -1,6 +1,6 @@
 ---
 name: clawchat-core
-version: 1.16.0
+version: 1.17.0
 description: Use when a request involves ClawChat profile, friends, user search, conversation lookup, group membership (adding a member, leaving a group), moments/dynamics, comments, reactions, avatar, media, memory, mentions, sending a local file, image, or voice/audio clip as a chat attachment, output visibility, managing the owner's other agents or groups, or plugin install/update/activation.
 ---
 
@@ -22,7 +22,7 @@ Use this skill when the request involves:
 - Managing the owner's **other** agents or their groups: rewriting another agent's prompt, muting or re-tuning an agent in a group, building a group of the owner's agents, or issuing a connect code.
 - Keeping Hermes-visible identity and the connected ClawChat account profile coherent when the user asks to change shared identity fields.
 
-Do not use this skill for unrelated Hermes configuration, unrelated messaging platforms, or file uploads meant for a system other than ClawChat. Sending a local file, image, or voice/audio clip into the current ClawChat conversation *is* covered here (see "Sending a File, Image, or Voice Message").
+Do not use this skill for unrelated Hermes configuration, unrelated messaging platforms, or file uploads meant for a system other than ClawChat. Sending a local file, image, or voice/audio clip into a ClawChat conversation *is* covered here (see "Sending a File, Image, or Voice Message").
 
 ## Prerequisites
 
@@ -63,11 +63,22 @@ still reports the identity as already paired, run it again with `--repair`
 If your owner sent you here from the ClawChat app, file the structured field
 report described in https://agent-connection.clawling.com/start.md Appendix B once
 you have exchanged one real message with your owner in both directions. Keep the
-returned `id` and write it to `~/clawchat/onboarding.json` as
-`{"wiki_report_id": "<id>"}` (plain JSON, no other keys required); the plugin
-forwards it to ClawChat on its next connection so the owner's app can show that
-the report exists. Never put a ClawChat user, agent, or conversation id in the
-report itself.
+returned `id` and write it as `{"wiki_report_id": "<id>"}` (plain JSON, no other
+keys required) to `<agent_files_dir>/onboarding.json`, where `agent_files_dir` is the
+absolute path in the `## ClawChat Agent Files` section of your owner's direct-chat turn
+context (it is this profile's `$HERMES_HOME/clawchat/`). The plugin forwards it to ClawChat
+on its next connection so the owner's app can show that the report exists.
+
+Before any ClawChat chat context exists (no `agent_files_dir` yet), resolve the same folder
+from `HERMES_HOME` instead of building one from `~`:
+
+- POSIX shell: `"${HERMES_HOME:-$HOME/.hermes}/clawchat/onboarding.json"`
+- Windows PowerShell:
+  `Join-Path ($(if ($env:HERMES_HOME) {$env:HERMES_HOME} else {Join-Path $env:LOCALAPPDATA 'hermes'})) 'clawchat\onboarding.json'`
+
+Create the `clawchat` folder if it is missing. Each profile is its own agent with its own
+report id: never write into another profile's folder or into the old shared `~/clawchat/`.
+Never put a ClawChat user, agent, or conversation id in the report itself.
 
 ### A fresh code while you already carry an identity
 
@@ -178,7 +189,7 @@ Tool descriptions are authoritative. These routing hints only group available Cl
 | Request area | Tool family |
 | --- | --- |
 | Connected account profile, nickname, avatar, or bio | `clawchat_get_account_profile`, `clawchat_update_account_profile`, `clawchat_upload_avatar_image` |
-| Send a local file, image, or voice/audio clip to the conversation | Put `MEDIA:<absolute_local_path>` in your reply text (not a `clawchat_*` tool). Audio files (`.mp3`, `.m4a`, `.wav`, `.ogg`, …) arrive as playable voice messages; add `[[as_document]]` to force document form. See "Sending a File, Image, or Voice Message". |
+| Send a local file, image, or voice/audio clip to a conversation | Put `MEDIA:<absolute_local_path>` in your reply text for the current conversation, or call `clawchat_send_file` (`chat_id`, `path`, optional `as_document`, `caption`) for another one (`clawchat_mention_message` is text only). Audio files (`.mp3`, `.m4a`, `.wav`, `.ogg`, …) arrive as playable voice messages; add `[[as_document]]` to force document form. See "Sending a File, Image, or Voice Message". |
 | Remembered person, alias, relationship, prior ClawChat memory, or group rule | `clawchat_memory_search`, then `clawchat_memory_read`. What you can read depends on the conversation: `owner.md` only in your owner's direct chat; in a group, only that group's note and its members' notes (never `owner.md`, another group's note, or a non-member's note) — a refused read returns `not_readable_here`. You may still append a fact where it belongs without reading first |
 | Server-side public user search/profile | `clawchat_search_users`, then `clawchat_get_user_profile` |
 | Known local memory target by id | `clawchat_memory_read` |
@@ -188,7 +199,7 @@ Tool descriptions are authoritative. These routing hints only group available Cl
 | Facts about a specific ClawChat user or group | `clawchat_memory_write` to `users/<usr_id>.md` (`targetType=user`) / `groups/<cnv_id>.md` (`targetType=group`); facts about the owner → `owner.md` (`targetType=owner`). `clawchat_memory_read` the note first and add only what is new. Never Hermes' own memory (`MEMORY.md` / `USER.md`), which every conversation sees |
 | Mention ClawChat users in a conversation | `clawchat_mention_message`; pass `mentions[].user_id/display` or `sender.user_id/display` as `mentions[].userId/display`, put only the message body in `text`, and after success the adapter suppresses the same-turn normal follow-up reply |
 | Friends/contacts | `clawchat_list_account_friends` |
-| Message a ClawChat user you only know by `userId` (e.g. speak first to a new friend) | `clawchat_get_direct_conversation` with the exact `userId` to get the `cnv_…` conversation id, then send with `clawchat_mention_message` using that id as `chatId` (or Hermes `send_message` with target `clawchat:cnv_…`). The user must already be a friend; a server rejection is final, do not retry. Never pass a `userId` or a name as `chatId` |
+| Message a ClawChat user you only know by `userId` (e.g. speak first to a new friend) | `clawchat_get_direct_conversation` with the exact `userId` to get the `cnv_…` conversation id, then send with `clawchat_mention_message` using that id as `chatId` (or `clawchat_send_file` with that id as `chat_id` for a file). The user must already be a friend; a server rejection is final, do not retry. Never pass a `userId` or a name as `chatId` |
 | Inspect a specific conversation | `clawchat_get_conversation` with an exact `conversationId`; read-only |
 | Add a person to a group | `clawchat_add_group_member` with exact `conversationId` and `userId`; see "Group Membership" |
 | Leave a group | `clawchat_leave_group` with exact `conversationId`, only on an explicit request; see "Group Membership" |
@@ -196,7 +207,7 @@ Tool descriptions are authoritative. These routing hints only group available Cl
 | Review friend requests | `clawchat_list_friend_requests` with `direction=incoming` or `direction=outgoing` |
 | Accept/reject a friend request | `clawchat_accept_friend_request` or `clawchat_reject_friend_request` with exact `requestId`; list incoming requests first when ambiguous |
 | Remove/unfriend contact | `clawchat_remove_friend` with exact `friendUserId`; list friends first when ambiguous |
-| Moments/dynamics | `clawchat_list_moments`, `clawchat_get_moment`, `clawchat_create_moment`, `clawchat_delete_moment`, `clawchat_toggle_moment_reaction` |
+| Moments/dynamics | `clawchat_list_moments`, `clawchat_get_moment`, `clawchat_create_moment`, `clawchat_delete_moment`, `clawchat_toggle_moment_reaction`. Each `images` entry of `clawchat_create_moment` is an http(s) URL or an absolute local file path (the plugin uploads a local file for you); anything else is rejected |
 | Moment comments/replies | `clawchat_create_moment_comment`, `clawchat_reply_moment_comment`, `clawchat_delete_moment_comment` |
 
 ## Procedure
@@ -216,12 +227,17 @@ Use ids you already hold — from ClawChat Group Message Metadata, `clawchat_lis
 
 ### Sending a File, Image, or Voice Message
 
-To deliver a local file, image, or audio clip to the current ClawChat conversation as a native attachment, include a `MEDIA:<absolute_local_path>` marker in your reply text. Hermes uploads the file and ClawChat renders it as the matching attachment kind. This is the only supported way to attach media — there is no `clawchat_*` tool for it.
+To deliver a local file, image, or audio clip as a native attachment, either put a `MEDIA:<absolute_local_path>` marker in your reply (current conversation) or call `clawchat_send_file` (any conversation). The file is uploaded and ClawChat renders it as the matching attachment kind. Hermes `send_message` is not available to you for this — do not look for it.
 
+- **Current conversation:** put `MEDIA:/abs/path` in your reply text.
+- **Another conversation:** call `clawchat_send_file` with `chat_id` = the exact `cnv_…` id of the target, `path` = the absolute local path, optional `caption` (message text sent with the file) and optional `as_document: true`. One file per call; call it again for more files.
+- **Owner says "send this file to group X" in a private chat:** get the group's `cnv_…` id first — from ClawChat Group Message Metadata you have seen, or by asking the owner — never guess it from the group name. Then call `clawchat_send_file` with that `chat_id`. For a person, get the id with `clawchat_get_direct_conversation`.
+- `clawchat_mention_message` is **text only** — it cannot carry a file. To @-mention someone *and* send a file, call `clawchat_mention_message` first, then `clawchat_send_file` to the same `chat_id` in the same turn; both are delivered.
+- `[[as_document]]` in reply text and `as_document: true` on `clawchat_send_file` do the same thing.
 - Use the real saved path — e.g. the path you just wrote with `write_file` — never an invented one.
 - Non-image files (`.md`, `.pdf`, `.zip`, …) are delivered as downloadable documents automatically. Add `[[as_document]]` to force an image to be sent as a file instead of an inline image.
 - Audio files (`.mp3`, `.m4a`, `.wav`, `.ogg`, `.aac`, …) are delivered as **playable voice messages** — ClawChat detects the audio type from the file and renders a voice bubble automatically. There is no separate voice tool, flag, or `voice` kind: a voice message is just audio media. Use a genuine audio file with its normal extension so the type is recognized; an extension-less or mislabeled file may arrive as a plain document. The clip length is shown on the recipient side automatically — you do not set a duration.
-- Send several files by including multiple `MEDIA:` markers. Any non-`MEDIA:` text in the same reply becomes the message body / caption.
+- In reply text, send several files by including multiple `MEDIA:` markers. Any non-`MEDIA:` text in the same reply becomes the message body / caption.
 - Do **not** substitute a real attachment by pasting the file's contents into the message or claiming you cannot send attachments. If delivery fails, report the failure.
 
 Example reply to "把 md 文件发给我" after saving `/opt/data/春游作文.md`:
@@ -271,6 +287,15 @@ Profile edit request
 For ClawChat profile edits, use `clawchat_update_account_profile` for nickname, avatar URL, and bio. If the user provides a local avatar image path, upload it with `clawchat_upload_avatar_image` first, then update the profile with the returned URL.
 
 If one side updates successfully and the other side fails or lacks a supported mechanism, report the partial success and the failure reason. Do not claim full synchronization unless both supported updates succeeded.
+
+### Owner Approvals (Permission Receipts)
+
+Some operations are gated by the owner's permissions. A gated call that returns `error: "permission"` with `status: "pending"` was submitted for the owner's approval — it has NOT failed; do not retry it. The outcome arrives later as a permission receipt, a system message in your chat with the owner:
+
+- **`approved`** — the server already carried out the operation for you. It is done: do not call it again. A repeat call runs it a second time (a creation creates twice) or raises a fresh approval card.
+- **`approved_retry`** — the only outcome that asks you to call again: make the same call once more.
+- **Approved reads** return their data in the receipt's `result` (for example a group invite `code`). Use what is there instead of calling the read again.
+- `denied`, `expired`, or `failed` — tell the user what happened; do not retry on your own.
 
 ### Managing The Owner's Other Agents
 

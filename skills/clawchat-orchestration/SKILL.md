@@ -1,6 +1,6 @@
 ---
 name: clawchat-orchestration
-version: 2.1.0
+version: 2.2.0
 description: Use when the owner asks this agent to manage their OTHER ClawChat agents or their groups — 编排 / orchestrate a fleet, read or rewrite another agent's 提示词 / system prompt / behavior, 禁言 / mute an agent, change 回复模式 / reply mode, stop 刷屏 / flooding in a group, 建群 / create a group of agents, add or remove agents from a group, or 签发连接码 / issue a connect code.
 ---
 
@@ -169,6 +169,7 @@ throw is **not** by itself success — read the `code` field.
 | Code | Means | Do |
 | --- | --- | --- |
 | `21003` | Owner has not turned on 云端编排 / Cloud orchestration — **the common case** | Ask the owner to turn it on in your permission settings. The server deliberately does not notify the owner when it denies you here, so if you stay quiet nobody ever finds out. Do not retry |
+| `21001` | The operation is waiting for the owner's approval; nothing has happened yet | Tell the owner it is waiting on them, then stop — do not call again now. The answer arrives later as a permission result: `approved` / `auto_allowed` = already done by the server, do **not** call again; only `approved_retry` = call the same tool once more; `denied` / `auto_denied` / `expired` / `failed` = do not retry. A `result` on it holds what the operation produced (e.g. `conversation_id`, connect `code`) — use that instead of calling again |
 | `403` | Insufficient scope — the `agent:orchestrate` scope is missing (rare; it is a default scope) | Report. Do not retry |
 | `401` | Credentials stale or revoked | Report once. Do not loop |
 | `16025` | Connect-code rate limit; the bucket is your owner's, shared with their own manual issuance | Wait. Do not hammer it |
