@@ -15,6 +15,11 @@ from urllib.request import Request, urlopen
 
 logger = logging.getLogger("clawchat_gateway.media_runtime")
 
+# The media CDN (Cloudflare) answers 403 to the stdlib default
+# "Python-urllib/x.y" User-Agent, so every request names itself (same reason
+# as liveware_cli._USER_AGENT).
+_USER_AGENT = "clawchat-hermes-plugin"
+
 
 def infer_media_kind_from_mime(mime: str) -> str:
     normalized = mime.split(";", 1)[0].strip().lower()
@@ -214,7 +219,7 @@ def _load_local_media(path: str, media_local_roots: Sequence[str]) -> LoadedMedi
 
 
 def _load_remote_media(url: str) -> LoadedMedia:
-    with urlopen(url) as response:
+    with urlopen(Request(url, headers={"User-Agent": _USER_AGENT})) as response:
         buffer = response.read()
         content_type = response.headers.get_content_type() or _guess_mime(url)
         filename = Path(urlparse(url).path).name or "upload.bin"
@@ -235,7 +240,9 @@ def _download_inbound_media_sync(
     token: str,
     download_dir: Path,
 ) -> DownloadedMedia:
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    headers = {"User-Agent": _USER_AGENT}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     request = Request(url, headers=headers)
     with urlopen(request) as response:
         buffer = response.read()
@@ -279,6 +286,7 @@ def _upload_media_sync(
         data=body,
         headers={
             "Authorization": f"Bearer {token}",
+            "User-Agent": _USER_AGENT,
             "Content-Type": f"multipart/form-data; boundary={boundary}",
             "Content-Length": str(len(body)),
         },
@@ -407,7 +415,14 @@ async def download_inbound_media(
                 download_dir=target_dir,
             )
             downloaded.append(item)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            # Keep going with the other attachments, but say why this one is
+            # missing. The query string is dropped: it may carry a signature.
+            logger.warning(
+                "clawchat inbound media download failed url=%s error=%s",
+                urlunparse(urlparse(str(url))._replace(query="", fragment="")),
+                exc,
+            )
             continue
     return downloaded
 
