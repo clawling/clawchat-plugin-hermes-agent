@@ -450,6 +450,7 @@ SESSION_INT_KEYS: dict[str, tuple[str, int, int, int]] = {
     "note-cap-turn": ("note_cap_turn", 4000, 1000, 16000),
     "rebuild-recent-messages": ("rebuild_recent_messages", 20, 5, 100),
     "rebuild-recent-chars": ("rebuild_recent_chars", 4000, 1000, 32000),
+    "delta-budget-chars": ("delta_budget_chars", 8000, 2000, 32000),
     "session-cap-tokens": ("session_cap_tokens", 150000, 50000, 1000000),
     "sediment-margin-tokens": ("sediment_margin_tokens", 10000, 2000, 50000),
 }
@@ -543,6 +544,7 @@ class ClawChatConfig:
     note_cap_turn: int = 4000
     rebuild_recent_messages: int = 20
     rebuild_recent_chars: int = 4000
+    delta_budget_chars: int = 8000
     session_cap_tokens: int = 150000
     sediment_margin_tokens: int = 10000
     sediment_on_compact: bool = True

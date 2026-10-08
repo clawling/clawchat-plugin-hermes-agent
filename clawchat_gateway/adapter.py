@@ -178,9 +178,13 @@ logger = logging.getLogger("clawchat_gateway.adapter")
 inbound_trace = logging.getLogger("clawchat_gateway.inbound_trace")
 
 CLAWCHAT_PLUGIN_PLATFORM = "hermes"
-# Number of prior group messages to prepend as context when the agent is @-mentioned.
-# Internal constant; not user-facing.
+# Number of prior group messages to prepend as context when the agent is
+# @-mentioned in a legacy per-speaker group. Internal constant; not user-facing.
 MENTION_CONTEXT_N = 10
+# Shared group sessions: the catch-up an @-mention adds is bounded by the
+# ``delta-budget-chars`` key, not by a count. This is only how far back the
+# ledger is read to find the unseen messages (one row per message).
+CATCH_UP_FETCH_ROWS = 500
 # Stable pseudo user_id for shared (non-per-user) group sessions. Returned by
 # ``_session_user_id_for_inbound`` so every sender in a shared group maps to ONE
 # session key (unified context). It MUST be non-None: the Hermes host drops a
@@ -206,6 +210,12 @@ RESET_SLASH_COMMANDS = frozenset({"new", "reset"})
 GROUP_UNSEEN_HEADER = (
     "[ClawChat group messages you have not seen yet, oldest first. "
     "Context only; the new messages follow.]"
+)
+# Closing line when unseen messages did not fit in ``delta-budget-chars``.
+GROUP_UNSEEN_LEFT_OUT = (
+    "[{count} earlier unseen group messages were left out for length. If you "
+    "need them, ask in the group; the group's note (clawchat_memory_read) "
+    "holds what was saved about it.]"
 )
 # Same messages in front of a sediment turn: they are part of the conversation
 # being saved (a "don't remember that" among them counts as much as the rest).
@@ -1049,7 +1059,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._conversation_metadata_versions: dict[str, int] = {}
         # chat_id -> recently delivered group message ids (bounded FIFO). See
         # _group_context_for_turn. In-memory: after a restart a mention may
-        # repeat up to MENTION_CONTEXT_N messages the session already has.
+        # repeat up to ``delta-budget-chars`` of messages the session already has.
         self._delivered_group_message_ids: dict[str, OrderedDict[str, None]] = {}
         # Sediment turns (see clawchat_gateway.sediment): chats whose outbound
         # text is dropped while their sediment turn runs; per chat the running
@@ -3720,8 +3730,9 @@ class ClawChatAdapter(BasePlatformAdapter):
         recent group messages (``rebuild-recent-messages`` /
         ``rebuild-recent-chars``), once per group (persisted marker). Later, an
         @-mention adds only the group messages this session has not been given
-        (``MENTION_CONTEXT_N`` at most) — e.g. ones a mention-only group held
-        back. Every call records the turn's own message ids as delivered.
+        (e.g. ones a mention-only group held back), newest kept first within
+        ``delta-budget-chars`` characters; what does not fit is announced in
+        one line. Every call records the turn's own message ids as delivered.
 
         Legacy per-speaker group: the old mention prior-context, unchanged.
         """
@@ -3843,9 +3854,17 @@ class ClawChatAdapter(BasePlatformAdapter):
     def _build_group_unseen_text(
         self, chat_id: str, batch_ids: set[str], header: str = GROUP_UNSEEN_HEADER
     ) -> str | None:
+        """The group messages this session has not been given, oldest first.
+
+        Bounded by ``delta-budget-chars`` characters, newest kept first; the
+        unseen messages that do not fit are counted in one closing line, and
+        are recorded as delivered with the rest, so a later mention does not
+        bring them back out of order.
+        """
         rows = self._store.list_recent_group_transcript(
-            "default", chat_id, MENTION_CONTEXT_N + len(batch_ids)
+            "default", chat_id, CATCH_UP_FETCH_ROWS + len(batch_ids)
         )
+        window_full = len(rows) >= CATCH_UP_FETCH_ROWS + len(batch_ids)
         delivered = self._delivered_group_message_ids.get(chat_id, {})
         unseen = [
             row
@@ -3858,17 +3877,29 @@ class ClawChatAdapter(BasePlatformAdapter):
             chat_id,
             (row.get("message_id") for row in unseen if self._is_group_history_command(row)),
         )
-        unseen = self._group_history_rows(unseen)[-MENTION_CONTEXT_N:]
+        unseen = self._group_history_rows(unseen)
         if not unseen:
             return None
         self._remember_delivered_group_ids(chat_id, (row.get("message_id") for row in unseen))
+        budget = self._clawchat_config.delta_budget_chars
         names: dict[str, str] = {}
-        return "\n".join(
-            [
-                header,
-                *(self._format_group_history_line(row, chat_id, names) for row in unseen),
-            ]
-        )
+        kept: list[str] = []
+        used = 0
+        for row in reversed(unseen):  # newest first, so the budget keeps the latest
+            line = self._format_group_history_line(row, chat_id, names)
+            cost = len(line) + (1 if kept else 0)
+            if used + cost > budget:
+                if not kept:
+                    kept.append(line[: max(0, budget - 1)] + "…")
+                break
+            kept.append(line)
+            used += cost
+        left_out = len(unseen) - len(kept)
+        lines = [header, *reversed(kept)]
+        if left_out or window_full:
+            count = f"{left_out}+" if window_full else str(left_out)
+            lines.append(GROUP_UNSEEN_LEFT_OUT.format(count=count))
+        return "\n".join(lines)
 
     async def _handle_inbound(self, inbound: InboundMessage) -> None:
         is_sediment_turn = (

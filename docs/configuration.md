@@ -488,9 +488,14 @@ session was started. A later `/new` starts an empty session that is not
 re-seeded (the agent's notes still come with every turn).
 
 After that, an @-mention adds only the group messages the session has not been
-given — for example messages a mention-only group held back — at most 10, never
-the agent's own replies. The adapter remembers delivered message ids in memory,
-so the first mention after a restart may repeat up to 10 messages. Slash
+given since its last turn — for example messages a mention-only group held
+back — never the agent's own replies and never the messages of the batch
+itself. They are bounded by `delta-budget-chars` characters (factory 8000,
+newest kept first), not by a count; when some do not fit, one closing line says
+how many were left out and where to look (ask in the group, or the group's
+note), and they count as delivered so a later mention does not bring them back
+out of order. The adapter remembers delivered message ids in memory, so the
+first mention after a restart may repeat up to that budget of messages. Slash
 commands and synthetic turns get no history. A legacy per-speaker group keeps
 the older behaviour: the 10 messages before an @-mention, without speakers.
 
@@ -556,6 +561,7 @@ when the adapter starts, so a change needs a gateway restart.
 | `note-cap-turn` | `4000` | 1000–16000 | Characters of all notes shown in one turn together. |
 | `rebuild-recent-messages` | `20` | 5–100 | Recent group messages that seed a group's new shared session. |
 | `rebuild-recent-chars` | `4000` | 1000–32000 | Character budget of that seed. |
+| `delta-budget-chars` | `8000` | 2000–32000 | Character budget of the group messages an @-mention adds that the shared session has not seen since its last turn (newest kept; the rest announced in one line). |
 | `session-cap-tokens` | `150000` | 50000–1000000 | Context size at which a conversation's session is compressed; filled into Hermes' `compression.threshold_tokens` when that is missing (below). |
 | `sediment-margin-tokens` | `10000` | 2000–50000 | How far below the point Hermes compresses at (the lower of the cap and its ratio threshold) a turn has to reach for a sediment turn to run before compression. |
 | `sediment-on-compact` | `on` | `on` / `off` | Run a sediment turn before compression. |
@@ -566,7 +572,6 @@ Keys of the shared set that the Hermes plugin does **not** read, and why:
 | Key | Why not here |
 |-----|--------------|
 | `idle-reset-dm`, `idle-reset-group`, `daily-reset` | Resetting a Hermes session by time is the host's job. Hermes up to 0.21.0 does it itself (`session_reset`, by default daily at 04:00 or after 24 h idle, with no plugin hook before it); Hermes 0.21.1 dropped time-based resets entirely, and a session is then bounded by compression at `session-cap-tokens`. A plugin-driven reset would have to go through the host's confirm-guarded `/new`. |
-| `delta-budget-chars` | A group session receives every batch itself; the only catch-up is the mention context above, capped at 10 messages. |
 | `archive-muted-groups` | The plugin's message ledger records muted groups' messages anyway. |
 | `digest-every-messages` | Applies to channels without a host session; every Hermes conversation has one. |
 
@@ -616,7 +621,7 @@ only for facts about the owner said in the group — append-only, since the
 memory tools do not let a group read `owner.md` (see
 [`./reference/tools.md`](./reference/tools.md#what-a-conversation-may-read)).
 In a shared group session the turn also carries the group messages the session
-has not seen yet (at most 10, the same ones a mention would add), so a request
+has not seen yet (within `delta-budget-chars`, the same ones a mention would add), so a request
 made since the agent's last turn — in a mention-only group, one that did not
 mention the agent — is in front of it. It is told to skip anything someone in
 the conversation asked it not to remember or to forget, not to use Hermes'

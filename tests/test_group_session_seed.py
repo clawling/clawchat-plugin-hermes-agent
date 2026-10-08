@@ -267,3 +267,58 @@ def test_only_commands_unseen_means_no_catch_up(adapter):
     adapter._group_context_for_turn(batch("b0"))
     record(adapter, "u1", "/new")
     assert adapter._group_context_for_turn(batch("q1", mentioned=True)) is None
+
+
+# --- catch-up budget (delta-budget-chars) --------------------------------------
+#
+# An @-mention adds the group messages the session has not seen since its last
+# turn, bounded by ``delta-budget-chars`` characters (factory 8000, newest kept),
+# not by a message count. What does not fit is announced in one line instead of
+# dropped silently.
+
+
+def _seeded(a):
+    record(a, "s0", "seeded")
+    a._group_context_for_turn(batch("b0"))
+
+
+def test_catch_up_is_not_capped_at_ten_messages(adapter):
+    _seeded(adapter)
+    for i in range(25):
+        record(adapter, f"u{i}", f"unseen message number {i}", sender="usr_cy", name="Cy")
+    record(adapter, "q", "@agent catch up")
+    context = adapter._group_context_for_turn(batch("q", mentioned=True))
+    for i in range(25):
+        assert f"unseen message number {i}" in context
+    assert "left out" not in context
+
+
+def test_catch_up_keeps_the_newest_within_the_char_budget(adapter):
+    adapter._clawchat_config = replace(adapter._clawchat_config, delta_budget_chars=2000)
+    _seeded(adapter)
+    for i in range(40):
+        record(adapter, f"u{i:02d}", f"{i:02d} " + "x" * 90, sender="usr_cy", name="Cy")
+    record(adapter, "q", "@agent catch up")
+    context = adapter._group_context_for_turn(batch("q", mentioned=True))
+    body = context.split("\n")
+    assert "39 " + "x" * 90 in context  # newest kept
+    assert "00 " + "x" * 90 not in context  # oldest gave way
+    kept = [line for line in body if "x" * 90 in line]
+    assert sum(len(line) + 1 for line in kept) <= 2000
+    # The rest is announced, with how many were left out.
+    left_out = 40 - len(kept)
+    assert any("left out" in line and str(left_out) in line for line in body)
+    # Left-out messages count as delivered: the next mention does not bring them back.
+    record(adapter, "q2", "@agent again")
+    assert adapter._group_context_for_turn(batch("q2", mentioned=True)) is None
+
+
+def test_delta_budget_key_read_and_clamped():
+    def cfg(extra):
+        return ClawChatConfig.from_platform_config(type("P", (), {"extra": extra})())
+
+    assert cfg({}).delta_budget_chars == 8000
+    assert cfg({"delta-budget-chars": "12000"}).delta_budget_chars == 12000
+    assert cfg({"delta-budget-chars": 100}).delta_budget_chars == 2000
+    assert cfg({"delta-budget-chars": 99999}).delta_budget_chars == 32000
+    assert cfg({"delta-budget-chars": "abc"}).delta_budget_chars == 8000
