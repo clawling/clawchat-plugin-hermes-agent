@@ -188,6 +188,7 @@ tests/*
 !tests/test_send_file_tool.py
 !tests/test_current_agent_prompt.py
 !tests/test_agent_profile_scope.py
+!tests/test_friend_turn_tools.py
 deploy/
 scripts/
 docs/superpowers/

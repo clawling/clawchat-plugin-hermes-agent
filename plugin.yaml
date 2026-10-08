@@ -8,6 +8,7 @@ provides_hooks:
   - pre_api_request
   - post_api_request
   - pre_gateway_dispatch
+  - pre_tool_call
 provides_tools:
   - clawchat_get_account_profile
   - clawchat_get_user_profile

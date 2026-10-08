@@ -822,6 +822,17 @@ def _register_session_usage_hook(ctx) -> None:
         logger.warning("ClawChat session usage hook skipped: %s", exc)
 
 
+def _register_host_tools_guard(ctx) -> None:
+    """Host terminal/file/code tools only in the owner's own direct chat
+    (clawchat_gateway.host_tools_guard)."""
+    try:
+        from clawchat_gateway.host_tools_guard import register_host_tools_guard
+
+        register_host_tools_guard(ctx)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ClawChat host tools guard not registered: %s", exc)
+
+
 def _start_liveware_cli_download() -> None:
     """Best-effort: download the liveware CLI on a daemon thread at load time."""
     try:
@@ -845,4 +856,5 @@ def register(ctx) -> None:
     _register_commands(ctx)
     _register_llm_context_debug_hooks(ctx)
     _register_session_usage_hook(ctx)
+    _register_host_tools_guard(ctx)
     ctx.register_hook("pre_gateway_dispatch", _clawchat_pre_gateway_dispatch)

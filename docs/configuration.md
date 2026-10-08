@@ -715,6 +715,51 @@ hosts relay a plain denial. The owner is not notified. On a host without
 that resolve path the plugin only sends the note, and Hermes waits and
 denies on timeout as before. Owner chats and groups are unchanged.
 
+### Host tools in turns the owner did not start
+
+| `extra.*` key          | Default | Values             |
+|------------------------|---------|--------------------|
+| `non-owner-host-tools` | `off`   | `off` / `approve`  |
+
+Hermes gives a ClawChat turn the platform's full host toolset, and its
+factory `approvals.mode: smart` lets an auxiliary model run a "dangerous"
+command it rates low-risk without asking anyone — while commands such as
+`cat`, `ls` or `curl` never count as dangerous at all. The approval handling
+above only sees calls that reach Hermes' gateway approval step, so on its own
+it could not stop a friend, or anyone in a group, from getting the agent to
+run commands on the owner's machine or read `$HERMES_HOME/.env`,
+`config.yaml` or `owner.md`.
+
+So every turn except the owner's own direct chat — a friend's direct chat
+and **every group turn, whoever spoke** — loses these host toolsets:
+`terminal` (`terminal`, `process_manage`), `file` (`read_file`, `write_file`,
+`patch`, `search_files`), `code_execution` (`execute_code`), `delegation`
+(`delegate_task`), `cronjob` (`cronjob_manage`) and `computer_use`. Group
+turns are narrowed as a whole because a group is one shared session:
+switching its toolset per speaker would rebuild the agent each time the
+owner and someone else alternate. The plugin's own ClawChat tools, web,
+memory, skills and the rest are unchanged, and so is the owner's direct chat.
+
+Two layers (`clawchat_gateway/host_tools_guard.py`):
+
+- the adapter's per-source toolset override (`toolsets_for_source`, Hermes
+  0.20.1+): the tools are not in the turn's schema at all. On an older host
+  the plugin logs a warning at load and relies on the second layer;
+- a `pre_tool_call` hook that blocks any of those tools still reaching
+  dispatch in such a turn.
+
+`non-owner-host-tools: approve` is the owner's opt-in: the tools stay
+visible and every call in such a turn goes to Hermes' human-approval gate,
+which smart never answers. A friend's direct chat then declines it on the
+spot (above); a group's approval goes to the owner. A host that cannot
+escalate a hook's `approve` keeps blocking. Any other value means `off`.
+
+Hermes ignores an exception from either layer and then *opens up* (all
+platform tools; the hook skipped), so both fail closed: an override that
+cannot work out the platform toolset narrows the turn to the plugin's own
+`clawchat` toolset, and a hook that cannot place the turn blocks the call.
+MCP servers the owner configured for ClawChat are not touched.
+
 ## Reconnect, heartbeat, ack
 
 | `extra.*` key                          | Default        |
