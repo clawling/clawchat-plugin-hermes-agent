@@ -88,6 +88,15 @@ unless Hermes adds an explicit session prompt invalidation API for platform
 plugins. The ClawChat channel prompt includes the current agent profile from
 `owner.md` metadata (`agent_user_id`, `agent_nickname`, `agent_avatar_url`, and
 `agent_bio`) so group and direct turns know which agent identity is replying.
+Every turn also gets `## ClawChat Current Agent`: `current_agent_id` (the
+connection's own `usr_...` id, so a profile under a multiplexed gateway never
+shows the default profile's identity), `current_agent_nickname` (from
+`owner.md` only when its `agent_user_id` is this agent, else
+`users/<id>.md`; omitted when unknown), and one line telling the model that
+this id is itself and that `mentions_current_agent=true` addresses it,
+whatever name the text shows. `ClawChat Group Participants` labels the same
+row `current_agent`. Without it a model in a group with a second agent cannot
+tell which participant it is (the OpenClaw plugin carries the same section).
 It injects `ClawChat Sender Metadata` for direct chats and `ClawChat Group
 Message Metadata` for group chats. Current direct message text and group
 transcript text stay in the host user-message body and are not duplicated in

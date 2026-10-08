@@ -347,7 +347,7 @@ Agent owner: creator/owner of this agent. `agent_owner_id` is the owner user's `
 
 Group owner: creator/owner of the group conversation. `group_owner_id` is group metadata, separate from the agent owner.
 
-Agent: current ClawChat agent receiving this turn. It is separate from the agent owner, group owner, and message sender.
+Agent: current ClawChat agent receiving this turn, named in `ClawChat Current Agent` (`current_agent_id`, your own `usr_...` id) and labeled `current_agent` in `ClawChat Group Participants`. It is separate from the agent owner, group owner, and message sender.
 
 Sender: message sender. `ClawChat Sender Metadata` is the source of truth for direct sender identity. `ClawChat Group Message Metadata` is the source of truth for indexed group sender identity, message-level agent-owner/group-owner status, mention targets, and mention routing. `sender_profile_type` is `user` or `agent`. Current message text comes from the user-message body, not from metadata sections.
 
@@ -4207,6 +4207,15 @@ class ClawChatAdapter(BasePlatformAdapter):
                     section,
                 )
             )
+        current_agent_section = self._format_current_agent_section(owner_metadata)
+        if current_agent_section:
+            parts.append(
+                self._channel_prompt_part(
+                    "current-agent",
+                    "metadata",
+                    current_agent_section,
+                )
+            )
         if inbound.chat_type == "group":
             group_section = self._format_group_profile_section(inbound.chat_id)
             if group_section:
@@ -4382,6 +4391,41 @@ class ClawChatAdapter(BasePlatformAdapter):
         fields = self._format_fields(tuple(profile.items()))
         return f"## ClawChat Agent Profile\n{fields}" if fields else None
 
+    def _current_agent_identity(self, owner_metadata: dict[str, str]) -> tuple[str, str]:
+        """This turn's own agent: ``(user id, nickname)``; nickname may be ''.
+
+        The id is the connection's user id (token ``sub``): the adapter belongs
+        to ONE profile, so it is right even when a multiplexed turn reads the
+        default profile's ``owner.md``. ``owner.md``'s nickname is used only
+        when its ``agent_user_id`` is this agent; otherwise ``users/<id>.md``.
+        """
+        owner_agent_id = owner_metadata.get("agent_user_id", "")
+        agent_id = self._clawchat_config.user_id or owner_agent_id
+        if not agent_id:
+            return "", ""
+        nickname = ""
+        if owner_agent_id in ("", agent_id):
+            nickname = owner_metadata.get("agent_nickname", "")
+        if not nickname:
+            nickname = self._read_memory_metadata("user", agent_id).get("nickname", "")
+        nickname = nickname.strip()
+        return agent_id, "" if nickname == agent_id else nickname
+
+    def _format_current_agent_section(self, owner_metadata: dict[str, str]) -> str | None:
+        agent_id, nickname = self._current_agent_identity(owner_metadata)
+        if not agent_id:
+            return None
+        self_name = f"{agent_id} ({nickname})" if nickname else agent_id
+        fields = self._format_fields(
+            (("current_agent_id", agent_id), ("current_agent_nickname", nickname))
+        )
+        line = self._escape_prompt_field(
+            f"You are {self_name}. A sender_id of {agent_id} is you. In a group, "
+            "mentions_current_agent=true (mention_routing addressed_to_current_agent) "
+            "means the message is addressed to you, whatever name the text shows."
+        )
+        return f"## ClawChat Current Agent\n{fields}\n{line}"
+
     def _format_agent_files_section(self) -> str | None:
         """The absolute directory of this agent's own files (owner DM only).
 
@@ -4462,6 +4506,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             return None
         agent_owner_id = owner_metadata.get("agent_owner_id") or self._owner_user_id()
         group_owner_id = group_metadata.get("group_owner_id", "")
+        current_agent_id, current_agent_nickname = self._current_agent_identity(owner_metadata)
         lines: list[str] = []
         for user_id in participant_ids:
             metadata = self._read_memory_metadata("user", user_id)
@@ -4469,16 +4514,19 @@ class ClawChatAdapter(BasePlatformAdapter):
             is_group_owner = bool(group_owner_id and user_id == group_owner_id)
             if is_agent_owner:
                 name = owner_metadata.get("agent_owner_nickname") or metadata.get("nickname") or user_id
-            elif user_id == self._clawchat_config.user_id:
-                name = owner_metadata.get("agent_nickname") or metadata.get("nickname") or user_id
+            elif current_agent_id and user_id == current_agent_id:
+                name = current_agent_nickname or metadata.get("nickname") or user_id
             elif is_group_owner:
                 name = group_metadata.get("group_owner_nickname") or metadata.get("nickname") or user_id
             else:
                 name = metadata.get("nickname") or user_id
+            is_current_agent = bool(current_agent_id and user_id == current_agent_id)
             profile_type = metadata.get("profile_type") or (
-                "agent" if user_id == self._clawchat_config.user_id else "user"
+                "agent" if is_current_agent else "user"
             )
             labels = [profile_type]
+            if is_current_agent:
+                labels.append("current_agent")
             if is_agent_owner:
                 labels.append("agent_owner")
             if is_group_owner:

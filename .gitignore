@@ -186,6 +186,7 @@ tests/*
 !tests/test_tool_media_host.py
 !tests/test_inbound_media_download.py
 !tests/test_send_file_tool.py
+!tests/test_current_agent_prompt.py
 deploy/
 scripts/
 docs/superpowers/
