@@ -1525,7 +1525,11 @@ class ClawChatAdapter(BasePlatformAdapter):
                 payload.get("type"),
                 moment_id,
             )
-            asyncio.ensure_future(self._emit_moment_comment_note(moment_id, replied))
+            asyncio.ensure_future(
+                self._emit_moment_comment_note(
+                    moment_id, replied, event_id=str(payload.get("event_id") or "")
+                )
+            )
         elif (
             payload.get("type") in {"friend.added", "friend.removed", "friend.profile_updated"}
             or (
@@ -1541,7 +1545,9 @@ class ClawChatAdapter(BasePlatformAdapter):
             if sig_type == "friend.added":
                 self._schedule_friend_greeting(payload)
 
-    async def _emit_moment_comment_note(self, moment_id: str, replied: bool) -> None:
+    async def _emit_moment_comment_note(
+        self, moment_id: str, replied: bool, *, event_id: str = ""
+    ) -> None:
         """Emit one content-free owner note pointing the agent at get_moment.
 
         Scheduled via ``asyncio.ensure_future`` for every
@@ -1556,6 +1562,14 @@ class ClawChatAdapter(BasePlatformAdapter):
         owner_user_id = self._owner_user_id()
         owner_chat_id = self._owner_direct_chat_id()
         if not owner_user_id or not owner_chat_id:
+            return
+        if event_id and not self._claim_receipt_once(
+            f"moment.comment:{event_id}", event_type="moment.comment.note"
+        ):
+            logger.info(
+                "clawchat moment comment note skipped event_id=%s reason=already_handled",
+                event_id,
+            )
             return
         if replied:
             text = (
@@ -3152,6 +3166,16 @@ class ClawChatAdapter(BasePlatformAdapter):
         _sender_obj = frame.get("sender")
         if isinstance(_sender_obj, dict) and _sender_obj.get("id") == "system":
             _synthetic = handle_permission_result(frame)
+            if _synthetic is not None and not self._claim_receipt_once(
+                f"permission_result:{_synthetic.raw_message.get('request_id')}",
+                event_type="permission_result",
+            ):
+                logger.info(
+                    "clawchat permission_result skipped chat_id=%s request_id=%s reason=already_handled",
+                    frame.get("chat_id"),
+                    _synthetic.raw_message.get("request_id"),
+                )
+                return
             if _synthetic is not None:
                 logger.info(
                     "clawchat permission_result dispatched chat_id=%s request_id=%s operation=%s outcome=%s",
@@ -7385,6 +7409,32 @@ class ClawChatAdapter(BasePlatformAdapter):
                 frame.get("chat_id"),
                 target,
             )
+
+    def _claim_receipt_once(self, key: str, *, event_type: str) -> bool:
+        """Claim a once-only ledger row for a synthetic turn keyed by ``key``.
+
+        Server receipts and signals are replayed from the reliable inbox after
+        a restart, and these synthetic turns bypass the message-id claim that
+        dedups ordinary inbound messages; their in-process dedup dies with the
+        process. The ledger row survives restarts. Returns False only for a
+        confirmed duplicate: an unavailable ledger (None) lets the turn run,
+        because losing a receipt is worse than a rare repeat and the in-process
+        dedup still collapses live redeliveries.
+        """
+        # kind must be "message": the once-only unique index is partial on it
+        # (storage.MESSAGE_ID_DEDUP_SCHEMA). chat_id stays NULL so the row never
+        # joins a transcript query.
+        claimed = self._claim_message_once(
+            kind="message",
+            direction="inbound",
+            event_type=event_type,
+            trace_id=None,
+            chat_id=None,
+            message_id=key,
+            text=None,
+            raw=None,
+        )
+        return claimed is not False
 
     def _claim_message_once(
         self,

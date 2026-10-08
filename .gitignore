@@ -144,6 +144,8 @@ tmp
 #     loop, per chat and in order. A handler that awaits a send's ack inside
 #     the read loop can never get it: the read loop stalls for the ack timeout,
 #     the connection is rebuilt, and frames for every chat are lost meanwhile.
+#   * receipt_replay_dedup — a permission receipt or moment-comment note
+#     replayed after a gateway restart starts no second turn (ledger claim).
 tests/*
 !tests/conftest.py
 !tests/test_multiplex_isolation.py
@@ -193,6 +195,7 @@ tests/*
 !tests/test_current_agent_prompt.py
 !tests/test_agent_profile_scope.py
 !tests/test_friend_turn_tools.py
+!tests/test_receipt_replay_dedup.py
 deploy/
 scripts/
 docs/superpowers/
