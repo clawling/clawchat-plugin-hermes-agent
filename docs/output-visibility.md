@@ -137,7 +137,17 @@ matched with and without the U+FE0F emoji variation selector (Hermes uses both
 `⚠` and `⚠️`). The list lives in `_HERMES_RUNTIME_STATUS_PREFIXES` /
 `_HERMES_RUNTIME_STATUS_PATTERNS` in `clawchat_gateway/adapter.py`; Hermes
 sends these through the same `send()` as replies, without a "this is status"
-marker, so a new Hermes notice needs a new entry there.
+marker, so a new Hermes notice needs a new entry there. (Hermes' own markers do not
+help on ClawChat: `non_conversational` is set for Discord only, `_interim_send`
+marks every mid-turn send including the agent's interim text, and `notify` marks
+only the turn-final reply.)
+
+Until a new notice is listed, a fallback limits the damage: while a turn runs, a
+send that opens with a status glyph (`⚠ ❌ ℹ 🔄 ↻ ⏳ ⏱ 🗜 📦 🔌 💾 ♻ ⛔ 🚫 🛑`) and
+is neither the turn-final reply nor an explicit tool send is held. When the turn
+ends in a no-reply the held notices are dropped; otherwise they are sent at the
+end of the turn. The agent's own interim text (no glyph) goes out at once, and
+in `full` nothing is held.
 Required approval/action controls are still delivered in every preset.
 
 Independently of the preset, Hermes CLI session-status lines that lead a

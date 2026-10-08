@@ -177,6 +177,7 @@ tests/*
 !tests/test_reply_streaming.py
 !tests/test_recovered_reply_redelivery.py
 !tests/test_silence_markers.py
+!tests/test_status_notice_fallback.py
 !tests/test_activation_websocket_url.py
 !tests/test_agent_files.py
 !tests/test_liveware_account.py

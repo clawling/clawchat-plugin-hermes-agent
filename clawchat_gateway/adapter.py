@@ -582,6 +582,16 @@ def _strip_host_recovered_marker(content: str) -> tuple[str, bool]:
     return body, True
 
 
+# Leading glyphs of Hermes runtime notices. A send that opens with one, is not
+# on the lists below and arrives while a turn runs is held until the turn ends
+# (see ClawChatAdapter._hold_unlisted_status): dropped if the turn ends in a
+# no-reply, sent otherwise. Hermes gives ClawChat no "this is status" signal.
+_STATUS_NOTICE_GLYPHS = tuple(
+    glyph.replace("\ufe0f", "")
+    for glyph in ("⚠", "❌", "ℹ", "🔄", "↻", "⏳", "⏱", "🗜", "📦", "🔌", "💾", "♻", "⛔", "🚫", "🛑")
+)
+
+
 _HERMES_RUNTIME_STATUS_PREFIXES = (
     "⚠ Auxiliary ",
     "⚠ No auxiliary LLM provider configured ",
@@ -1047,6 +1057,10 @@ class ClawChatAdapter(BasePlatformAdapter):
         # before compression; chats reset by /new with no turn since; and the
         # background tasks waiting to run a compaction sediment.
         self._sediment_chats: set[str] = set()
+        # Unlisted status-looking sends held during a turn (chat_id -> sends),
+        # and chats whose current turn ended in a no-reply.
+        self._held_status_sends: dict[str, list[tuple[str, Any, Any, dict[str, Any]]]] = {}
+        self._silent_turn_chats: set[str] = set()
         self._sediment_done: dict[str, tuple[str, asyncio.Event]] = {}
         self._sedimented_session_ids: OrderedDict[str, None] = OrderedDict()
         self._reset_clean_chats: set[str] = set()
@@ -4173,6 +4187,12 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._after_host_turn(event)
         except Exception:  # noqa: BLE001
             logger.warning("clawchat post-turn maintenance failed", exc_info=True)
+        chat_id = str(getattr(getattr(event, "source", None), "chat_id", "") or "")
+        if chat_id:
+            try:
+                await self._settle_held_status_sends(chat_id)
+            except Exception:  # noqa: BLE001
+                logger.warning("clawchat held status settle failed chat_id=%s", chat_id, exc_info=True)
 
     def _after_host_turn(self, event: Any) -> None:
         raw = getattr(event, "raw_message", None)
@@ -5410,6 +5430,53 @@ class ClawChatAdapter(BasePlatformAdapter):
         text = getattr(preview, "text", preview)
         return _markdown_code_span(text if isinstance(text, str) else str(text or ""))
 
+    def _hold_unlisted_status(
+        self,
+        chat_id: str,
+        content: str,
+        reply_to: Any,
+        metadata: Any,
+        kwargs: dict[str, Any],
+        *,
+        message_mode: str,
+        is_explicit_send: bool,
+    ) -> bool:
+        """Hold a status-looking send the lists do not know, while a turn runs.
+
+        Not held: the turn-final reply (``notify``), explicit tool / media
+        sends, process notices already sent as thinking, anything outside a
+        turn, and everything when runtime notices are shown (``full``).
+        """
+        if is_explicit_send or message_mode != MESSAGE_MODE_NORMAL:
+            return False
+        if isinstance(metadata, dict) and metadata.get("notify"):
+            return False
+        text = content.lstrip().replace(_EMOJI_VARIATION_SELECTOR, "")
+        if not text.startswith(_STATUS_NOTICE_GLYPHS):
+            return False
+        if self._runtime_status_messages_enabled() or not self._chat_session_active(chat_id):
+            return False
+        self._held_status_sends.setdefault(chat_id, []).append(
+            (content, reply_to, metadata, dict(kwargs))
+        )
+        logger.info("clawchat unlisted status held until turn end chat_id=%s text_len=%d", chat_id, len(content))
+        return True
+
+    async def _settle_held_status_sends(self, chat_id: str) -> None:
+        """At turn end: drop held notices after a no-reply turn, send them otherwise."""
+        held = self._held_status_sends.pop(chat_id, [])
+        silent = chat_id in self._silent_turn_chats
+        self._silent_turn_chats.discard(chat_id)
+        if not held:
+            return
+        if silent:
+            logger.info("clawchat unlisted status dropped after no-reply turn chat_id=%s count=%d", chat_id, len(held))
+            return
+        for content, reply_to, metadata, kwargs in held:
+            merged = dict(metadata) if isinstance(metadata, dict) else {}
+            merged["notify"] = True  # settled: never held again
+            await self.send(chat_id, content, reply_to=reply_to, metadata=merged, **kwargs)
+
     def _host_process_sender(self) -> str | None:
         """Name of the host sender this call came from, if it is a process one."""
         frame = inspect.currentframe()
@@ -5502,6 +5569,11 @@ class ClawChatAdapter(BasePlatformAdapter):
             return SendResult(success=True)
         if self._is_runtime_status_text(content or ""):
             message_mode = MESSAGE_MODE_THINKING
+        if self._hold_unlisted_status(
+            chat_id, content or "", reply_to, metadata, kwargs,
+            message_mode=message_mode, is_explicit_send=is_explicit_send,
+        ):
+            return SendResult(success=True)
         if is_group:
             owner_fragment = self._build_interaction_fragment(
                 content or "",
@@ -5589,6 +5661,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             return SendResult(success=True)
         if not has_media and self._is_pure_silent_response(fragments):
             logger.info("clawchat silent response suppressed chat_id=%s chat_type=%s", chat_id, chat_type)
+            self._silent_turn_chats.add(chat_id)
             return SendResult(success=True)
         if has_media and self._is_noop_response_text(visible_content):
             # Only strip when the token is actually there. Stripping trims the
@@ -5722,6 +5795,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=error, message_id=message_id)
         if message_mode == MESSAGE_MODE_NORMAL:
             self._note_visible_send(chat_id)
+            self._silent_turn_chats.discard(chat_id)
         if not has_media:
             self._record_emit(chat_id, visible_content)
         logger.info(
