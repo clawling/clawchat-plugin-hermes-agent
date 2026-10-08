@@ -44,8 +44,9 @@ logger = logging.getLogger(__name__)
 
 #: Host toolsets (Hermes 0.21 ``toolsets.py`` names) a turn the owner did not
 #: start never gets: shell + process management, file read/write/patch/search,
-#: Python execution, sub-agents (which inherit tools), scheduled jobs, and
-#: desktop control.
+#: Python execution, sub-agents (which inherit tools), scheduled jobs,
+#: desktop control, and browser automation (which opens ``file://`` URLs and
+#: runs page scripts / raw CDP, i.e. reads local files).
 RESTRICTED_TOOLSETS: tuple[str, ...] = (
     "terminal",
     "file",
@@ -53,7 +54,11 @@ RESTRICTED_TOOLSETS: tuple[str, ...] = (
     "delegation",
     "cronjob",
     "computer_use",
+    "browser",
 )
+
+#: Every host browser tool is ``browser_*``; a future one is covered too.
+_RESTRICTED_TOOL_PREFIXES: tuple[str, ...] = ("browser_",)
 
 #: The tools of :data:`RESTRICTED_TOOLSETS` on Hermes 0.21, used when the
 #: host's own resolver is not importable.
@@ -69,6 +74,24 @@ _STATIC_RESTRICTED_TOOLS = frozenset(
         "delegate_task",
         "cronjob_manage",
         "computer_use",
+        "browser_back",
+        "browser_cdp",
+        "browser_click",
+        "browser_console",
+        "browser_dialog",
+        "browser_exec",
+        "browser_get_images",
+        "browser_navigate",
+        "browser_press",
+        "browser_scroll",
+        "browser_snapshot",
+        "browser_type",
+        "browser_vault_enter_code",
+        "browser_vault_fill",
+        "browser_vault_list",
+        "browser_vault_save_login",
+        "browser_vault_unlock",
+        "browser_vision",
     }
 )
 
@@ -86,7 +109,7 @@ _PLATFORM = "clawchat"
 
 BLOCK_MESSAGE = (
     "This tool is not available here: only your owner's direct chat may use the "
-    "terminal, files, code execution, sub-agents or scheduled jobs on this machine. "
+    "terminal, files, code execution, the browser, sub-agents or scheduled jobs on this machine. "
     "Do not try to reach them another way; answer without them, or tell the person "
     "to ask your owner."
 )
@@ -198,6 +221,11 @@ def restricted_tool_names() -> frozenset[str]:
     return frozenset(names)
 
 
+def is_restricted_tool(name: str) -> bool:
+    name = str(name or "")
+    return name in restricted_tool_names() or name.startswith(_RESTRICTED_TOOL_PREFIXES)
+
+
 def _is_owner_direct(chat_id: str, chat_type: str, user_id: str, owner: str) -> bool:
     if (chat_type or "").strip().lower() not in _DIRECT_CHAT_TYPES:
         return False
@@ -216,7 +244,7 @@ def _narrowed_toolsets() -> list[str]:
             tools = set(_resolve_tools(name))
         except Exception:  # noqa: BLE001 - cannot see inside: drop it
             continue
-        if tools & restricted_tools:
+        if tools & restricted_tools or any(t.startswith(_RESTRICTED_TOOL_PREFIXES) for t in tools):
             continue
         kept.append(name)
     return kept or list(FALLBACK_TOOLSETS)
@@ -267,7 +295,7 @@ def _session_turn() -> str:
 def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **_: Any) -> Optional[dict[str, Any]]:
     """``pre_tool_call`` hook: host tools in a turn the owner did not start."""
     try:
-        if tool_name not in restricted_tool_names():
+        if not is_restricted_tool(tool_name):
             return None
         if _session_turn() != "other":
             return None
@@ -309,6 +337,7 @@ __all__ = [
     "clawchat_pre_tool_call",
     "non_owner_host_tools",
     "register_host_tools_guard",
+    "is_restricted_tool",
     "restricted_tool_names",
     "toolsets_for_source",
 ]

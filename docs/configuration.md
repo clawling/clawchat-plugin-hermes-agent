@@ -734,11 +734,13 @@ So every turn except the owner's own direct chat — a friend's direct chat
 and **every group turn, whoever spoke** — loses these host toolsets:
 `terminal` (`terminal`, `process_manage`), `file` (`read_file`, `write_file`,
 `patch`, `search_files`), `code_execution` (`execute_code`), `delegation`
-(`delegate_task`), `cronjob` (`cronjob_manage`) and `computer_use`. Group
+(`delegate_task`), `cronjob` (`cronjob_manage`), `computer_use` and
+`browser` (every `browser_*` tool: it opens `file://` URLs and runs page
+scripts and raw CDP, so it reads local files too). Group
 turns are narrowed as a whole because a group is one shared session:
 switching its toolset per speaker would rebuild the agent each time the
-owner and someone else alternate. The plugin's own ClawChat tools, web,
-memory, skills and the rest are unchanged, and so is the owner's direct chat.
+owner and someone else alternate. The plugin's own ClawChat tools, web
+search/extract, memory, skills and the rest are unchanged, and so is the owner's direct chat.
 
 Two layers (`clawchat_gateway/host_tools_guard.py`):
 

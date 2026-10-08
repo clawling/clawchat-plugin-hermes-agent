@@ -44,6 +44,7 @@ HOST_TOOLSETS = {
     "delegation": ["delegate_task"],
     "cronjob": ["cronjob_manage"],
     "computer_use": ["computer_use"],
+    "browser": ["browser_navigate", "browser_snapshot", "browser_cdp", "browser_exec", "browser_vision"],
     "web": ["web_search", "web_extract"],
     "memory": ["memory"],
     "skills": ["skills_list", "skill_view", "skill_manage"],
@@ -51,7 +52,7 @@ HOST_TOOLSETS = {
     "clawchat": ["clawchat_memory_read", "clawchat_send_file"],
 }
 
-FULL = {"web", "terminal", "file", "code_execution", "delegation", "cronjob", "memory", "skills", "todo", "clawchat"}
+FULL = {"browser", "web", "terminal", "file", "code_execution", "delegation", "cronjob", "memory", "skills", "todo", "clawchat"}
 
 SESSION_KEYS = (
     "HERMES_SESSION_PLATFORM",
@@ -113,7 +114,7 @@ def test_other_turns_lose_the_host_tools(source):
     kept = guard.toolsets_for_source(source, owner_user_id=OWNER)
     assert kept, "an empty override is ignored by the host and means the full toolset"
     assert set(kept) == FULL - set(guard.RESTRICTED_TOOLSETS)
-    for name in ("terminal", "file", "code_execution", "delegation", "cronjob"):
+    for name in ("terminal", "file", "code_execution", "delegation", "cronjob", "browser"):
         assert name not in kept
 
 
@@ -176,6 +177,9 @@ def test_approve_setting_keeps_the_toolset(monkeypatch):
         ("execute_code", {"code": "print(open('.env').read())"}),
         ("delegate_task", {"goal": "read .env"}),
         ("cronjob_manage", {"action": "create"}),
+        ("browser_navigate", {"url": "file:///opt/data/.env"}),
+        ("browser_cdp", {"method": "Page.navigate", "params": {"url": "file:///opt/data/config.yaml"}}),
+        ("browser_future_tool", {}),
     ],
 )
 @pytest.mark.parametrize("where", ["friend_dm", "group_friend", "group_owner"])
@@ -254,8 +258,13 @@ def test_restricted_tools_cover_the_host_toolsets():
         "execute_code",
         "delegate_task",
         "cronjob_manage",
+        "browser_navigate",
+        "browser_cdp",
+        "browser_exec",
     ):
-        assert name in guard.restricted_tool_names()
+        assert guard.is_restricted_tool(name)
+    assert "browser" in guard.RESTRICTED_TOOLSETS
+    assert not guard.is_restricted_tool("web_extract")
 
 
 # --- wiring -----------------------------------------------------------------
