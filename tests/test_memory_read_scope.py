@@ -9,7 +9,7 @@ context: platform, chat id, chat type, user id):
 
 * the owner's direct chat, or a local surface (CLI, no gateway session in
   this process): every note;
-* any other direct chat: every note except ``owner.md``;
+* any other direct chat: only the note about the person in it;
 * a group: that group's note, and the notes of people who are members of it
   (its cached participant list; recent speakers only when no list is known) —
   never ``owner.md``, never another group's note, never a note about someone
@@ -236,6 +236,33 @@ async def test_someone_elses_dm_cannot_read_owner_note(root, monkeypatch):
     assert (await read("owner", "owner")).get("error") == "not_readable_here"
     assert ("owner", "owner") not in _found(await search("condition Z"))
     assert ADA_FACT in (await read("user", ADA))["content"]
+
+
+@pytest.mark.asyncio
+async def test_someone_elses_dm_reads_only_that_persons_note(root, monkeypatch):
+    # The friend in this chat is present; nobody else is, and no group is.
+    # A note about someone else, or a group's note, can hold what was said
+    # where this friend was not — the same reason a group may not read a
+    # non-member's note.
+    in_friend_dm(monkeypatch)
+    assert ADA_FACT in (await read("user", ADA))["content"]
+    for target_type, target_id in (("user", OUTSIDER), ("group", GROUP), ("group", OTHER_GROUP)):
+        result = await read(target_type, target_id)
+        assert result.get("error") == "not_readable_here", (target_type, target_id)
+        assert "direct chat" in result["message"]
+    for query in ("bank", "Fridays", "surprise"):
+        assert _found(await search(query)) <= {("user", ADA)}
+
+
+@pytest.mark.asyncio
+async def test_someone_elses_dm_cannot_replace_another_persons_note(root, monkeypatch):
+    in_friend_dm(monkeypatch)
+    replaced = await write("user", OUTSIDER, "replace", "wiped")
+    edited = await edit("group", GROUP, "Fridays", "Mondays")
+    assert replaced.get("error") == "not_readable_here"
+    assert edited.get("error") == "not_readable_here"
+    assert OUTSIDER_FACT in _body(root, "user", OUTSIDER)
+    assert GROUP_FACT in _body(root, "group", GROUP)
 
 
 @pytest.mark.asyncio

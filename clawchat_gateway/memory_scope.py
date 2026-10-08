@@ -11,7 +11,10 @@ task-local ContextVars on current Hermes, ``os.environ`` on older ones):
 * ``local`` — no gateway session in this process (``hermes chat``, the profile
   CLI): every note. The operator there owns the files anyway.
 * ``owner_direct`` — the owner's direct chat: every note.
-* ``direct`` — anyone else's direct chat: every note except ``owner.md``.
+* ``direct`` — anyone else's direct chat: only the note about that person
+  (``users/<their id>.md``). Never ``owner.md``, another person's note or any
+  group's note, for the reason below: the friend in this chat is the only one
+  present.
 * ``group`` — a ClawChat group: that group's note and the notes of its members
   (the participant list cached in the group note's metadata, refreshed on every
   group message; the group's recent speakers only when no list is cached).
@@ -66,7 +69,7 @@ class MemoryScope:
         if target_type == "owner":
             return False
         if self.kind == "direct":
-            return True
+            return target_type == "user" and target_id in self.members
         if target_type == "group":
             return bool(self.chat_id) and target_id == self.chat_id
         if target_type == "user":
@@ -79,6 +82,13 @@ class MemoryScope:
                 "owner.md can only be read in your owner's direct chat. This conversation is "
                 "not that chat, and a tool result here stays in this conversation's history "
                 "where others can see it. Do not try to get the owner's notes another way."
+            )
+        elif self.kind == "direct":
+            message = (
+                f"{'groups' if target_type == 'group' else 'users'}/{target_id}.md is not readable in this "
+                "direct chat: here you can only read the note about the person you are talking to, "
+                "because another person's or a group's note can hold what was said where they were "
+                "not present."
             )
         elif target_type == "group":
             message = (
@@ -95,7 +105,10 @@ class MemoryScope:
     def note(self) -> str | None:
         """What a restricted search left out, for the model (no counts)."""
         if self.kind == "direct":
-            return "owner.md is not searched outside your owner's direct chat."
+            return (
+                "In this direct chat only the note about the person you are talking to is searched; "
+                "owner.md, other people's notes and group notes are left out."
+            )
         if self.kind == "group":
             return (
                 "In a group only that group's note and its members' notes are searched; "
@@ -208,7 +221,7 @@ def resolve_memory_scope(root: Path | str | None) -> MemoryScope:
         user_id = _session_value("HERMES_SESSION_USER_ID")
         if owner and user_id == owner:
             return MemoryScope(kind="owner_direct", chat_id=chat_id)
-        return MemoryScope(kind="direct", chat_id=chat_id)
+        return MemoryScope(kind="direct", chat_id=chat_id, members=frozenset({user_id}) if user_id else frozenset())
     if chat_type != "group" and not known_group:
         return _NOTHING
     members = participants or _recent_speakers(chat_id)

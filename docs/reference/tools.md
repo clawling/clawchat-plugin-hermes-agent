@@ -104,7 +104,7 @@ the host's session context (`HERMES_SESSION_PLATFORM`, `_CHAT_ID`,
 | Conversation | `clawchat_memory_read` / `_search` / `_edit`, `_write mode=replace` |
 |--------------|---------------------------------------------------------------------|
 | The owner's direct chat | every note |
-| Anyone else's direct chat | every note except `owner.md` |
+| Anyone else's direct chat | only `users/<id>.md` of the person in that chat |
 | A ClawChat group | that group's `groups/<id>.md` and `users/<id>.md` of its **members** only |
 | No gateway session in this process (`hermes chat`, the profile CLI) | every note — the operator owns the files |
 | Anything else (another platform, no chat id, an unknown chat type, a gateway call without a session) | nothing (treated as a group with no known members) |
@@ -114,7 +114,9 @@ Group members are the participant list cached in the group note's metadata
 signals); only when no list is cached do the group's recent speakers stand in.
 A note about someone outside the group is never readable there: it can hold
 what that person said elsewhere, so it may only come up where they are
-present. Another group's note is refused for the same reason. A host `dm` for
+present. Another group's note is refused for the same reason, and for the
+same reason a friend's direct chat reads only that friend's note: nobody else
+is present there, and no group is. A host `dm` for
 a chat the plugin knows as a group (it has a participant list) counts as a
 group.
 
