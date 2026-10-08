@@ -173,6 +173,7 @@ tests/*
 !tests/test_thinking_mode.py
 !tests/test_text_mentions.py
 !tests/test_reply_streaming.py
+!tests/test_recovered_reply_redelivery.py
 !tests/test_silence_markers.py
 !tests/test_activation_websocket_url.py
 !tests/test_agent_files.py

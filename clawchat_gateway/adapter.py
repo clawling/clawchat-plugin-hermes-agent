@@ -561,6 +561,26 @@ _STREAMING_CURSOR_RE = re.compile(r"\s*[▀-▟]+\s*\Z")
 _APPROVE_COMMAND_RE = re.compile(r"(?<!\w)/approve(?!\w)", re.IGNORECASE)
 _DENY_COMMAND_RE = re.compile(r"(?<!\w)/(?:deny|reject)(?!\w)", re.IGNORECASE)
 _HERMES_STREAM_CURSOR_RE = re.compile(r"[ \t]*▉\Z")
+# The host's delivery ledger (gateway/delivery_ledger.py: RECOVERED_MARKER,
+# RECONNECTED_MARKER, FLOOD_MARKER) resends a final reply whose send() did not
+# return success, prefixed with one of these, on the next gateway boot or after
+# a reconnect / flood wait. Matched by their shared opening so a reworded tail
+# still counts; the prefix runs up to the first blank line.
+_HOST_RECOVERED_REPLY_OPENING = "♻️ Recovered reply — "
+# Long enough to cover the ledger's 24 h staleness cut-off plus slack.
+_RECOVERED_REPLY_LOOKBACK_MS = 48 * 60 * 60 * 1000
+
+
+def _strip_host_recovered_marker(content: str) -> tuple[str, bool]:
+    text = content or ""
+    if not text.lstrip().startswith(_HOST_RECOVERED_REPLY_OPENING):
+        return text, False
+    head, sep, body = text.lstrip().partition("\n\n")
+    if not sep or not head.rstrip().endswith(":"):
+        return text, False
+    return body, True
+
+
 _HERMES_RUNTIME_STATUS_PREFIXES = (
     "⚠ Auxiliary ",
     "⚠ No auxiliary LLM provider configured ",
@@ -5363,6 +5383,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         message_mode = kwargs.pop("_clawchat_message_mode", None) or (
             MESSAGE_MODE_THINKING if self._host_process_sender() else MESSAGE_MODE_NORMAL
         )
+        content, is_host_redelivery = _strip_host_recovered_marker(content or "")
         if chat_id in self._sediment_chats:
             logger.info(
                 "clawchat sediment turn output dropped chat_id=%s text_len=%d",
@@ -5485,7 +5506,17 @@ class ClawChatAdapter(BasePlatformAdapter):
             before = len(fragments)
             fragments = self._strip_no_reply_from_fragments(fragments)
             fragment_count -= before - len(fragments)
-        message_id = new_message_id()
+        redelivered_id = (
+            self._earlier_attempt_message_id(chat_id, visible_content) if is_host_redelivery else None
+        )
+        message_id = redelivered_id or new_message_id()
+        if is_host_redelivery:
+            logger.info(
+                "clawchat host redelivery chat_id=%s message_id=%s reused=%s",
+                chat_id,
+                message_id,
+                bool(redelivered_id),
+            )
         mode = "complete" if is_immediate_media_send else "complete-buffered"
         logger.info(
             "clawchat send start chat_id=%s chat_type=%s mode=%s text_len=%d fragments=%d reply_to=%s",
@@ -5542,14 +5573,31 @@ class ClawChatAdapter(BasePlatformAdapter):
             message_mode=message_mode,
             context_mentions=context_mentions,
         )
-        claimed = self._claim_outbound_message(
-            event_type="message.reply",
-            trace_id=frame.get("trace_id") or frame.get("id"),
-            chat_id=chat_id,
-            message_id=message_id,
-            text=visible_content,
-            raw=frame,
-        )
+        if redelivered_id:
+            # The earlier attempt already holds this id's row, so a claim would
+            # read as "sent" and drop the resend. Resending under the same id is
+            # idempotent: the ClawChat server upserts the inbox row per (recipient,
+            # message_id) and clients dedupe by message_id.
+            self._update_message_record(
+                kind="message",
+                direction="outbound",
+                event_type="message.reply",
+                trace_id=frame.get("trace_id") or frame.get("id"),
+                chat_id=chat_id,
+                message_id=message_id,
+                text=visible_content,
+                raw=frame,
+            )
+            claimed: bool | None = True
+        else:
+            claimed = self._claim_outbound_message(
+                event_type="message.reply",
+                trace_id=frame.get("trace_id") or frame.get("id"),
+                chat_id=chat_id,
+                message_id=message_id,
+                text=visible_content,
+                raw=frame,
+            )
         if claimed is False:
             return SendResult(success=True, message_id=message_id)
         if claimed is None:
@@ -7238,6 +7286,45 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
         except Exception:  # noqa: BLE001
             logger.warning("clawchat message database update failed")
+
+    def _earlier_attempt_message_id(self, chat_id: str, visible_content: str) -> str | None:
+        """The message_id of this reply's earlier send attempt into ``chat_id``.
+
+        Used only for a host redelivery. A successful attempt's row keeps the
+        reply text; a failed one's text holds the error, so its frame is read.
+        """
+        if self._store is None or not chat_id:
+            return None
+        target = (visible_content or "").strip()
+        if not target:
+            return None
+        try:
+            rows = self._store.recent_outbound_messages(
+                account_id="default",
+                chat_id=chat_id,
+                since_ms=int(time.time() * 1000) - _RECOVERED_REPLY_LOOKBACK_MS,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat message database read failed")
+            return None
+        for row in rows:
+            texts = [str(row.get("text") or "")]
+            raw = row.get("raw")
+            if isinstance(raw, dict):
+                payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
+                message = payload.get("message") if isinstance(payload.get("message"), dict) else {}
+                body = message.get("body") if isinstance(message.get("body"), dict) else message
+                fragments = body.get("fragments") or payload.get("fragments") or []
+                texts.append(
+                    "".join(
+                        str(f.get("text") or "")
+                        for f in fragments
+                        if isinstance(f, dict) and f.get("kind") == "text"
+                    )
+                )
+            if any(t.strip() == target for t in texts):
+                return str(row["message_id"])
+        return None
 
     def _extract_protocol_message_id(self, frame: dict[str, Any]) -> str | None:
         payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}

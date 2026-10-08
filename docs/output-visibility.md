@@ -147,3 +147,22 @@ outbound text before delivery — they are advice for a terminal user
 (`/resume`, `config.yaml`) and are never the agent's words. The match is
 narrow (exact line prefixes); a message that consisted only of those lines is
 not sent at all. See `clawchat_gateway/hermes_session_status.py`.
+
+## Host redelivery after a restart
+
+Hermes keeps a delivery ledger of final text replies (`gateway/delivery_ledger.py`)
+and marks a row delivered only when `send()` returns success. A send that did not
+— the ClawChat ack never came back (a stalled read loop, a reconnect), or the
+gateway was stopped mid-send — is sent again on the next gateway boot (or after a
+reconnect / rate-limit wait), up to 24 hours later, prefixed with
+`♻️ Recovered reply — … may be a duplicate:` and a blank line. When only the ack
+had been lost, that showed the old reply in the chat a second time.
+
+The adapter recognises that prefix (`_strip_host_recovered_marker`), drops it, and
+looks up the earlier attempt in its own `clawchat_messages` ledger by chat and
+text. Found, the reply is resent under the earlier attempt's `message_id`: the ClawChat server
+upserts the inbox row per (recipient, `message_id`) and clients dedupe by
+`message_id`, so a reply that already arrived is not shown again and one that
+never arrived is delivered. Not found, it goes out as a new message, still without
+the prefix. A ledger row that was never attempted is resent by Hermes without a
+prefix; it never reached the chat, so it is delivered like any reply.

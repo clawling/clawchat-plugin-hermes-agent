@@ -1005,6 +1005,59 @@ class ClawChatStore:
 
         self._write("update_message_by_identity", write)
 
+    def recent_outbound_messages(
+        self,
+        *,
+        account_id: str,
+        chat_id: str,
+        since_ms: int,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Newest-first outbound ``message`` rows for one chat since ``since_ms``.
+
+        Each row carries ``message_id``, ``event_type``, ``text`` and the decoded
+        ``raw`` frame (a failed send's ``text`` holds the error, its ``raw`` still
+        holds the frame that was sent).
+        """
+
+        self.initialize()
+        if self._disabled:
+            return []
+        try:
+            conn = sqlite3.connect(self.db_path)
+            try:
+                rows = conn.execute(
+                """
+                SELECT message_id, event_type, text, raw_json
+                FROM clawchat_messages
+                WHERE account_id = ?
+                  AND direction = 'outbound'
+                  AND kind = 'message'
+                  AND chat_id = ?
+                  AND message_id IS NOT NULL
+                  AND created_at >= ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                    (account_id, chat_id, since_ms, limit),
+                ).fetchall()
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "clawchat database read failed operation=recent_outbound_messages",
+                exc_info=True,
+            )
+            return []
+        out: list[dict[str, Any]] = []
+        for message_id, event_type, text, raw_json in rows:
+            try:
+                raw = json.loads(raw_json) if raw_json else None
+            except (TypeError, ValueError):
+                raw = None
+            out.append({"message_id": message_id, "event_type": event_type, "text": text, "raw": raw})
+        return out
+
     def is_message_recalled(self, *, account_id: str, message_id: str | None) -> bool:
         """True when ``message_id`` carries a recall tombstone for this account."""
         if not message_id:
