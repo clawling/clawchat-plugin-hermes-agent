@@ -173,8 +173,9 @@ Each indexed `[message N]` also carries its `message_id` right after
 Metadata` for the current message, so the model can name the message it reacts
 to (`clawchat_react_message` `targetMessageId`) when the current-turn default is
 withdrawn (see [`tools.md`](./tools.md#explicit-message-ids)). Like the rest of
-the channel prompt it is a per-turn overlay, not part of the cached system
-prompt, so a per-message id does not disturb prompt caching.
+the channel prompt it is a per-turn overlay: it adds no churn beyond the
+per-turn `sent_at`/`sent_age` already there, and the cached system prompt is
+untouched.
 
 Who decides whether to speak in a group (`reply_guidance` plus the metadata
 glossary):

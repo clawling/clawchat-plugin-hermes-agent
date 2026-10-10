@@ -3993,9 +3993,9 @@ class ClawChatAdapter(BasePlatformAdapter):
         if inbound.chat_id and not self._inbound_trigger_id(inbound.raw_message):
             # A synthetic inbound (awareness / moment-comment note, permission
             # receipt, sediment turn) has no message id and never passes the
-            # arrival bookkeeping. Hosts (at least through 0.21.0) run it
-            # in-band inside the chat's open turn without the processing hooks, so withdraw the
-            # react default there: the open turn's trigger may no longer be
+            # arrival bookkeeping. Hosts through 0.21.x run it in-band inside
+            # the chat's open turn without the processing hooks, so withdraw
+            # the react default there: the open turn's trigger may no longer be
             # what the model is answering (see _current_turn_trigger).
             self._last_inbound_message_id_by_chat.pop(inbound.chat_id, None)
         is_sediment_turn = (
@@ -4375,9 +4375,9 @@ class ClawChatAdapter(BasePlatformAdapter):
         another chat never gets this turn's message. ``None`` unless exactly one
         turn is in progress in that chat, it has a ClawChat trigger, and that
         trigger is still the chat's latest inbound message. The last rule is
-        the "superseded" one: hosts (at least through 0.21.0) run the turn for
-        a message that arrives mid-turn inside the running one, without the processing hooks,
-        so a newer arrival means the open turn may no longer be the caller's.
+        the "superseded" one: hosts through 0.21.x run the turn for a message
+        that arrives mid-turn inside the running one, without the processing
+        hooks, so a newer arrival means the open turn may no longer be the caller's.
         It also withdraws the default when a later group message (even one
         that triggers nothing) arrives; a validation error beats a reaction on
         the wrong message.
@@ -5113,8 +5113,9 @@ class ClawChatAdapter(BasePlatformAdapter):
         ).split("\n")
         # The id of the message this turn carries (the channel prompt is the
         # per-turn overlay, not the cached system prompt), so a withdrawn
-        # react default can be recovered. The plugin builds each direct event
-        # from one frame, so this is that frame's (the latest message's) id.
+        # react default can be recovered. It is the id of the frame this event
+        # was built from; a text burst the host merges into one follow-up turn
+        # keeps the first frame's prompt, so it shows that first message's id.
         raw = inbound.raw_message if isinstance(inbound.raw_message, dict) else {}
         message_id = self._extract_protocol_message_id(raw)
         if message_id:

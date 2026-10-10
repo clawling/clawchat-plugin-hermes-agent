@@ -92,10 +92,12 @@ The echoed value is cut to 64 characters; for `replyToMessageId` the fallback
 reads "omit replyToMessageId" instead of skipping the reaction.
 
 The ids the model needs are in the turn's channel prompt: a direct chat's
-`ClawChat Sender Metadata` carries the current message's `message_id` (right
-after `sender_id`), and a group turn's `ClawChat Group Message Metadata` carries
-one per `[message N]`. The line is left out when the frame has no id (synthetic
-turns). Both error texts tell the model that users cannot see message ids, so
+`ClawChat Sender Metadata` carries the `message_id` of the message the turn's
+event was built from (right after `sender_id`), and a group turn's `ClawChat
+Group Message Metadata` carries one per `[message N]`. The line is left out when
+the frame has no id (synthetic turns). When Hermes merges several messages that
+arrived mid-turn into one follow-up turn, it keeps the first one's prompt, so
+the id shown is that first message's — still a real message in the chat. Both error texts tell the model that users cannot see message ids, so
 it must not ask for one and should skip the reaction when it cannot tell which
 message it means.
 
@@ -110,11 +112,12 @@ calls it. The default applies only when all of these hold:
   `HERMES_SESSION_CHAT_ID`, compared case-insensitively);
 - exactly one host turn is in progress in that chat, and it has a ClawChat
   trigger (synthetic turns — notes, receipts — do not);
-- no newer message has arrived in that chat since the trigger. Hermes, at
-  least through 0.21.0, runs the turn for a message that arrives mid-turn
-  inside the running one ("Queued follow-up") without the processing hooks, so
-  a newer arrival means the open turn may no longer be the caller's. Any later message counts, even a group message
-  that triggers nothing (muted, mention-only), and so does a synthetic turn
+- no newer message has arrived in that chat since the trigger. Hermes 0.21.x
+  (and earlier) runs the turn for a message that arrives mid-turn inside the
+  running one ("Queued follow-up") without the processing hooks, so a newer
+  arrival means the open turn may no longer be the caller's. Any later message
+  counts, even a group message that triggers nothing (muted, mention-only),
+  and so does a synthetic turn
   the plugin dispatches into the chat (awareness or moment-comment note,
   permission receipt), which those hosts also run in-band: the default is
   withdrawn rather than risk reacting to the wrong message.
@@ -122,8 +125,8 @@ calls it. The default applies only when all of these hold:
 Otherwise — another chat, no turn or two overlapping turns, a superseded
 trigger, or a call outside a gateway turn — the tool returns `targetMessageId
 is required` as a validation error and sends nothing; the model passes the
-`message_id` from the metadata of the message it means (direct or group). The chat's latest inbound
-message alone is never the default.
+`message_id` from the metadata of the message it means (direct or group). The
+chat's latest inbound message alone is never the default.
 
 The ledger has no retention (only a recall removes a row), so the limit runs
 the other way: a message the plugin never stored cannot be targeted — history

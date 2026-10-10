@@ -249,7 +249,7 @@ async def test_react_default_is_the_turns_trigger(adapter, host, monkeypatch):
 
 
 async def test_react_default_is_withdrawn_once_a_newer_message_arrives(adapter, host, monkeypatch):
-    # Hosts (at least through 0.21.0) run the turn for a mid-turn message inside the
+    # Hosts through 0.21.x run the turn for a mid-turn message inside the
     # running one, without on_processing_start: the open turn is still A's.
     monkeypatch.setenv("HERMES_SESSION_CHAT_ID", DM)
     frame_a = _frame(DM, text="first")
@@ -298,7 +298,7 @@ async def test_react_default_in_a_group_batch_is_its_last_message(adapter, host,
 
 
 async def test_react_default_is_withdrawn_by_a_synthetic_note_in_the_chat(adapter, host, monkeypatch):
-    # Hosts (at least through 0.21.0) run a synthetic note (awareness, moment comment,
+    # Hosts through 0.21.x run a synthetic note (awareness, moment comment,
     # permission receipt) in-band inside the open turn, without the hooks.
     from clawchat_gateway.inbound import InboundMessage
 
