@@ -1463,7 +1463,7 @@ def register_tools(ctx) -> None:
                     },
                     "replyToMessageId": {
                         "type": "string",
-                        "description": "Optional ClawChat message id to attach as reply context.",
+                        "description": "Optional message_id of a message in this chat (from its message metadata) to attach as reply context; an id this chat does not have is refused.",
                     },
                 },
                 "required": ["chatId", "mentions"],
@@ -1539,7 +1539,7 @@ def register_tools(ctx) -> None:
                 "properties": {
                     "chatId": {"type": "string", "minLength": 1, "description": "ClawChat conversation id where the target message lives."},
                     "emoji": {"type": "string", "minLength": 1, "description": "Single emoji to react with. Prefer the ClawChat quick set."},
-                    "targetMessageId": {"type": "string", "description": "Message id to react to. Omit to react to the message that triggered the current turn."},
+                    "targetMessageId": {"type": "string", "description": "message_id of the message to react to, from this chat's message metadata; never a made-up or session id. Omit to react to the message that triggered the current turn."},
                     "remove": {"type": "boolean", "description": "Set true to remove your reaction; omit/false to add or overwrite."},
                 },
                 "required": ["chatId", "emoji"],

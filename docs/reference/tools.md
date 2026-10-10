@@ -36,9 +36,9 @@ There are **47** tools, grouped by purpose.
 | `clawchat_get_direct_conversation`  | Resolve the direct (1:1) conversation with a friend by explicit `userId` to its `cnv_…` id (find-or-create; the peer must already be a friend, otherwise the server answers 19012). Use the returned id as `chatId` (or `chat_id` for `clawchat_send_file`) to message a user you only know by `usr_…` id — e.g. to speak first to a newly added friend. |
 | `clawchat_leave_group`              | Leave a group conversation by explicit `conversationId` (groups only; direct conversations are rejected by the server). No owner approval is needed. If the agent is the group owner, ownership auto-transfers to the earliest human member, or the group is dissolved if none remain. |
 | `clawchat_add_group_member`         | Add a ClawChat user to a group by explicit `conversationId` + `userId` (groups only). Requires the target to already be the agent's friend, and is gated by the owner's group-management permission: by default the owner is asked and the tool returns a non-retryable `permission` result with `status: "pending"` (the outcome arrives later as a chat message); an owner policy that denies it returns `status: "forbidden"`. Re-adding an existing member succeeds as a no-op. |
-| `clawchat_mention_message`          | Send a real `@` mention message over WebSocket. The adapter suppresses the same-turn normal follow-up reply into that chat after success; an explicit send into it (`clawchat_send_file`, a `send_message` call, a `MEDIA:` attachment) is still delivered. Text only: to send a file to another chat, use `clawchat_send_file`. |
+| `clawchat_mention_message`          | Send a real `@` mention message over WebSocket; an optional `replyToMessageId` must be a message the plugin has stored for that chat (see [Explicit message ids](#explicit-message-ids)). The adapter suppresses the same-turn normal follow-up reply into that chat after success; an explicit send into it (`clawchat_send_file`, a `send_message` call, a `MEDIA:` attachment) is still delivered. Text only: to send a file to another chat, use `clawchat_send_file`. |
 | `clawchat_send_file`                | Send one local file into any conversation by explicit `chat_id` (`cnv_…`, need not be the current chat) and absolute `path`; optional `caption` text and `as_document` (send an image as a downloadable file, like `[[as_document]]`). Credential / system paths are refused (same denylist as `MEDIA:`). Delivered through the live adapter as an explicit send, so it is not swallowed after a same-turn `clawchat_mention_message`; with no gateway in-process it uses the standalone sender. Hermes v0.21+ no longer gives the agent `send_message`, so this is the route for cross-chat files (see [`../architecture.md`](../architecture.md#clawchat_send_file)). |
-| `clawchat_react_message`            | React to a message with a single quick emoji (bubble long-press reaction) via `chatId` + `emoji`; omit `targetMessageId` to react to the triggering message, or set `remove:true` to retract a prior reaction. |
+| `clawchat_react_message`            | React to a message with a single quick emoji (bubble long-press reaction) via `chatId` + `emoji`; omit `targetMessageId` to react to the last message received in that chat (the triggering message, for the current chat), or set `remove:true` to retract a prior reaction. An explicit `targetMessageId` must be a message the plugin has stored for that chat (see [Explicit message ids](#explicit-message-ids)). A reaction the outbound layer refuses returns `send_blocked`, never `reacted: true`. |
 
 `clawchat_mention_message` and `clawchat_react_message` take a `chatId`
 straight from the model, so both reject anything that is not a conversation
@@ -57,6 +57,68 @@ WebSocket:
 A hallucinated `usr_…`, a nickname, or a placeholder therefore comes back as a
 correctable validation error naming the expected shape, instead of a generic
 transport failure.
+
+Hermes' session context tells the model to target a chat explicitly as
+`platform:chat_id`, so these two tools and `clawchat_send_file` accept the chat
+id with one leading `clawchat:` (any case) and use the bare id. Nothing else is
+stripped: another platform's prefix, a doubled prefix, or anything that is not
+a conversation id after it is still `invalid_chat_id`
+(`clawchat_gateway/tools.py`, `_tool_chat_id`).
+
+### Explicit message ids
+
+A model with no id for a message makes one up: a label (`B`) or a host session
+id (a UUID). The server only checks that a reaction target is non-empty, so
+such a reaction used to report `reacted: true` on no message. An explicit
+`clawchat_react_message` `targetMessageId` and an explicit
+`clawchat_mention_message` `replyToMessageId` are therefore accepted only when
+the plugin's `clawchat_messages` ledger has that message id in the same chat
+(`ClawChatStore.find_seen_message_in_chat`): an inbound message, or one of the
+agent's own sent messages (replies and mentions; a failed send is not a
+message). Chat id and message id are compared case-insensitively, and the ids
+as stored are what goes on the wire and back to the model. Otherwise the tool
+sends nothing and returns:
+
+```json
+{
+  "error": "validation",
+  "code": "unknown_message_id",
+  "message": "targetMessageId 'B' is not a message in this chat; use the real message id from this chat's message metadata (message_id, e.g. msg-…), or omit it"
+}
+```
+
+The echoed value is cut to 64 characters. An omitted `targetMessageId` defaults
+to the last message received in that same chat and is not checked; a chat with
+none (for example another chat that has not written since the gateway started)
+returns a validation error instead of borrowing the current turn's message.
+
+The ledger has no retention (only a recall removes a row), so the limit runs
+the other way: a message the plugin never stored cannot be targeted — history
+from before the plugin was installed or paired, a message that arrived while
+the store was failing, or one sent outside the gateway (the standalone sender).
+
+Every mention also maps its `chatId` to the case the ledger already stores for
+that chat (an inbound row preferred; `find_stored_chat_id`), and with
+`replyToMessageId` to the chat id of the matched row. The send, the
+terminal-send marker that suppresses the turn's follow-up reply, and the
+ledger row all use that id, so a model that changed the case neither splits the
+chat in the ledger nor gets a second reply out. A chat the ledger has never seen
+keeps the id as given. Reactions resolve the chat id the same way.
+
+Both lookups seek the `COLLATE NOCASE` indexes of storage migration 11
+(`message_target_nocase_indexes`). If the store is unavailable or a lookup
+fails, the tools fall back to a shape check (`msg-` / `msg_` / `sys-` prefixed,
+or a bare 26-character ULID, case-insensitive; no UUIDs) rather than block every
+call, and log `clawchat message-id store check unavailable` once per adapter,
+without ids or arguments.
+
+A reaction is fire-and-forget (no ack), so `clawchat_react_message` reports what
+it can see before sending: an invalid chat id, a chat the server recently
+rejected, or a dissolved chat returns `{"error": "send_blocked", "reason":
+"invalid_chat_id" | "chat_rejected_by_server" | "chat_dissolved", "message": …}`,
+and a frame the connection drops returns `{"error": "transport", …}`. Only a
+frame handed to the WebSocket (or queued for the next connection) is
+`reacted: true`.
 
 Every tool error body carries `error` (the class — `validation`, `config`,
 `permission`, `subprocess`, or `unknown`) and a human-readable `message`. Extra

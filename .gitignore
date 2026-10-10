@@ -149,6 +149,10 @@ tmp
 #   * owner_dm_without_chat_type — on Hermes before 0.19.1 (no chat type in
 #     the session) the owner's activation chat keeps the host tools and reads
 #     every note; any other chat, or a failed lookup, is not the owner's.
+#   * message_target_check — an explicit react target / mention reply-to id
+#     is sent only if the ledger has that message in that chat (stored ids
+#     on the wire, shape check when the store cannot answer, index-backed
+#     lookup); a refused reaction is send_blocked, never reacted:true.
 tests/*
 !tests/conftest.py
 !tests/test_multiplex_isolation.py
@@ -200,6 +204,7 @@ tests/*
 !tests/test_friend_turn_tools.py
 !tests/test_receipt_replay_dedup.py
 !tests/test_owner_dm_without_chat_type.py
+!tests/test_message_target_check.py
 deploy/
 scripts/
 docs/superpowers/

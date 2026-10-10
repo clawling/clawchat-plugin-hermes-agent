@@ -180,6 +180,18 @@ CREATE TABLE IF NOT EXISTS group_shared_sessions (
 );
 """
 
+# Explicit message ids from the model (a react target, a mention's reply-to) and
+# the chat ids beside them are matched case-insensitively against the ledger
+# (find_seen_message_in_chat / find_stored_chat_id). The BINARY indexes above
+# cannot serve a COLLATE NOCASE comparison, so without these every such tool
+# call would scan the whole unpruned ledger.
+MESSAGE_TARGET_NOCASE_SCHEMA = """
+CREATE INDEX IF NOT EXISTS idx_clawchat_messages_message_id_nocase
+  ON clawchat_messages(message_id COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS idx_clawchat_messages_chat_id_nocase
+  ON clawchat_messages(chat_id COLLATE NOCASE);
+"""
+
 MIGRATIONS = [
     (1, "initial_schema", INITIAL_SCHEMA),
     (2, "message_id_dedup", MESSAGE_ID_DEDUP_SCHEMA),
@@ -191,7 +203,47 @@ MIGRATIONS = [
     (8, "owner_profile", OWNER_PROFILE_SCHEMA),
     (9, "recalled_messages", RECALLED_MESSAGES_SCHEMA),
     (10, "group_shared_sessions", GROUP_SHARED_SESSIONS_SCHEMA),
+    (11, "message_target_nocase_indexes", MESSAGE_TARGET_NOCASE_SCHEMA),
 ]
+
+# Lookup behind ClawChatStore.find_seen_message_in_chat: a real chat message
+# (message.send / message.reply, either direction; a failed send is stored as
+# message.error and never reached anyone) with this id in this chat. One seek
+# on the NOCASE message-id index; account and chat are post-filters. INDEXED BY
+# pins the seek: without table statistics the planner may pick the chat-id
+# index and walk the whole chat. Module-level so a test can pin the plan.
+FIND_SEEN_MESSAGE_SQL = """
+SELECT chat_id, message_id
+FROM clawchat_messages INDEXED BY idx_clawchat_messages_message_id_nocase
+WHERE message_id = ? COLLATE NOCASE
+  AND account_id = ?
+  AND chat_id = ? COLLATE NOCASE
+  AND kind = 'message'
+  AND event_type IN ('message.send', 'message.reply')
+ORDER BY direction = 'inbound' DESC, id DESC
+LIMIT 1
+"""
+
+# Lookup behind ClawChatStore.find_stored_chat_id: an inbound row first (its
+# case is the server's), then any row. Each half is one seek on the NOCASE
+# chat-id index with LIMIT 1, so a long chat is never walked.
+FIND_STORED_CHAT_ID_SQL = """
+SELECT chat_id FROM (
+  SELECT chat_id, 0 AS rank FROM (
+    SELECT chat_id FROM clawchat_messages
+    WHERE chat_id = ? COLLATE NOCASE AND account_id = ? AND direction = 'inbound'
+    LIMIT 1
+  )
+  UNION ALL
+  SELECT chat_id, 1 AS rank FROM (
+    SELECT chat_id FROM clawchat_messages
+    WHERE chat_id = ? COLLATE NOCASE AND account_id = ?
+    LIMIT 1
+  )
+)
+ORDER BY rank
+LIMIT 1
+"""
 
 _stores: dict[Path, ClawChatStore] = {}
 _store_lock = threading.Lock()
@@ -1057,6 +1109,73 @@ class ClawChatStore:
                 raw = None
             out.append({"message_id": message_id, "event_type": event_type, "text": text, "raw": raw})
         return out
+
+    def find_seen_message_in_chat(
+        self,
+        *,
+        account_id: str,
+        chat_id: str,
+        message_id: str,
+    ) -> tuple[str, str] | bool | None:
+        """The stored ``(chat_id, message_id)`` of a message seen in this chat.
+
+        Matches inbound messages and the agent's own sent ones, chat id and
+        message id compared case-insensitively; the ids come back in their
+        stored case so callers put the real ids on the wire. ``False`` when no
+        row matches, ``None`` when the store cannot answer — callers must tell
+        "not seen" from "cannot say".
+        """
+        if not chat_id or not message_id:
+            return False
+        self.initialize()
+        if self._disabled:
+            return None
+        try:
+            conn = sqlite3.connect(self.db_path)
+            try:
+                row = conn.execute(
+                    FIND_SEEN_MESSAGE_SQL, (message_id, account_id, chat_id)
+                ).fetchone()
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "clawchat database read failed operation=find_seen_message_in_chat",
+                exc_info=True,
+            )
+            return None
+        if row is None or not isinstance(row[0], str) or not isinstance(row[1], str):
+            return False
+        return (row[0], row[1])
+
+    def find_stored_chat_id(self, *, account_id: str, chat_id: str) -> str | bool | None:
+        """``chat_id`` in the case the ledger already stores it (inbound first).
+
+        ``False`` when the ledger has no row for that chat, ``None`` when the
+        store cannot answer.
+        """
+        if not chat_id:
+            return False
+        self.initialize()
+        if self._disabled:
+            return None
+        try:
+            conn = sqlite3.connect(self.db_path)
+            try:
+                row = conn.execute(
+                    FIND_STORED_CHAT_ID_SQL, (chat_id, account_id, chat_id, account_id)
+                ).fetchone()
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "clawchat database read failed operation=find_stored_chat_id",
+                exc_info=True,
+            )
+            return None
+        if row is None or not isinstance(row[0], str) or not row[0]:
+            return False
+        return row[0]
 
     def is_message_recalled(self, *, account_id: str, message_id: str | None) -> bool:
         """True when ``message_id`` carries a recall tombstone for this account."""

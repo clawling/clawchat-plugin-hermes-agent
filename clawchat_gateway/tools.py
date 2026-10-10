@@ -91,6 +91,24 @@ def _invalid_chat_id_error(chat_id: Any) -> dict[str, Any]:
     )
 
 
+# Hermes' session context tells the model to target a chat explicitly as
+# "platform:chat_id" (`clawchat:cnv_…`), the form its own send_message takes,
+# and models copy it into these tools' chat ids. Strip at most one leading
+# `clawchat:` (any case); whatever remains is still validated as a chat id, so
+# another platform's prefix, a doubled one, or a non-chat id is still refused.
+_HOST_TARGET_PREFIX = "clawchat:"
+
+
+def _tool_chat_id(value: Any) -> str:
+    """The bare chat id a tool's chat-id argument names ("" when not a string)."""
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if text[: len(_HOST_TARGET_PREFIX)].lower() == _HOST_TARGET_PREFIX:
+        text = text[len(_HOST_TARGET_PREFIX) :].strip()
+    return text
+
+
 def _validation_error_from_exception(exc: ValueError) -> dict[str, Any]:
     message = str(exc)
     if message.startswith("missing_metadata_field:"):
@@ -836,7 +854,8 @@ async def mention_message(
 ) -> dict[str, Any]:
     if not isinstance(chat_id, str) or not chat_id.strip():
         return _validation_error("chatId is required")
-    if not is_valid_chat_id(chat_id.strip()):
+    target = _tool_chat_id(chat_id)
+    if not is_valid_chat_id(target):
         return _invalid_chat_id_error(chat_id)
     if chat_type not in {"direct", "group"}:
         return _validation_error("chatType must be direct or group")
@@ -850,7 +869,7 @@ async def mention_message(
         return _validation_error(str(exc))
     try:
         return await send_clawchat_mention_message(
-            chat_id=chat_id.strip(),
+            chat_id=target,
             chat_type=chat_type,
             text=text,
             mentions=normalized_mentions,
@@ -883,7 +902,7 @@ async def send_file(
     """
     if not isinstance(chat_id, str) or not chat_id.strip():
         return _validation_error("chat_id is required")
-    target = chat_id.strip()
+    target = _tool_chat_id(chat_id)
     if not is_valid_chat_id(target):
         return _invalid_chat_id_error(chat_id)
     if not isinstance(path, str) or not path.strip():
@@ -946,7 +965,8 @@ async def react_message(
 ) -> dict[str, Any]:
     if not isinstance(chat_id, str) or not chat_id.strip():
         return _validation_error("chatId is required")
-    if not is_valid_chat_id(chat_id.strip()):
+    target = _tool_chat_id(chat_id)
+    if not is_valid_chat_id(target):
         return _invalid_chat_id_error(chat_id)
     if not isinstance(emoji, str) or not emoji.strip():
         return _validation_error("emoji is required")
@@ -954,7 +974,7 @@ async def react_message(
         return _validation_error("targetMessageId must be a string when provided")
     try:
         return await send_clawchat_reaction_message(
-            chat_id=chat_id.strip(),
+            chat_id=target,
             target_message_id=(
                 target_message_id.strip()
                 if isinstance(target_message_id, str) and target_message_id.strip()

@@ -872,6 +872,47 @@ def _exec_approval_fallback_text(
     return "\n".join(lines)
 
 
+# Every message id shape a ClawChat message the model sees can carry. The
+# server keeps a client-supplied id verbatim and never parses it, so this is a
+# plausibility check, not the mint contract: `msg-<ULID>` (clients and the
+# server's fallback; `msg_…` kept for older ids), `sys-…` (server system
+# injections), or a bare ULID (the server's own publisher). No UUIDs: no
+# ClawChat message id has that shape, while host session ids do. Used only
+# when the ledger cannot say whether it has seen an id in the chat.
+_PLAUSIBLE_PREFIXED_MESSAGE_ID = re.compile(r"^(?:msg[-_]|sys-)\S+$", re.IGNORECASE)
+_PLAUSIBLE_BARE_ULID = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$", re.IGNORECASE)
+_MESSAGE_ID_ECHO_LIMIT = 64
+
+
+def is_plausible_message_id(value: Any) -> bool:
+    """Whether ``value`` (already trimmed) can be a real ClawChat message id."""
+    if not isinstance(value, str):
+        return False
+    return bool(_PLAUSIBLE_PREFIXED_MESSAGE_ID.match(value) or _PLAUSIBLE_BARE_ULID.match(value))
+
+
+def _unknown_message_id_error(field_name: str, value: str) -> dict[str, Any]:
+    shown = value if len(value) <= _MESSAGE_ID_ECHO_LIMIT else value[:_MESSAGE_ID_ECHO_LIMIT] + "…"
+    return {
+        "error": "validation",
+        "code": "unknown_message_id",
+        "message": (
+            f"{field_name} {shown!r} is not a message in this chat; use the real "
+            "message id from this chat's message metadata (message_id, e.g. msg-…), "
+            "or omit it"
+        ),
+    }
+
+
+def _reaction_blocked(chat_id: str, reason: str) -> dict[str, Any]:
+    messages = {
+        "invalid_chat_id": f"{chat_id!r} is not a ClawChat chat id (expected cnv_…); the reaction was not sent",
+        "chat_rejected_by_server": "this chat was rejected by the server; the reaction was not sent",
+        "chat_dissolved": "this chat has been dissolved; the reaction was not sent",
+    }
+    return {"error": "send_blocked", "reason": reason, "message": messages[reason]}
+
+
 @dataclass
 class _ActiveRun:
     chat_id: str
@@ -5143,6 +5184,20 @@ class ClawChatAdapter(BasePlatformAdapter):
             text=text,
         )
         validate_mention_payload(fragments, context_mentions)
+        # Send, mark and record under the case the ledger already stores for
+        # this chat: the host's follow-up reply consumes the terminal marker
+        # under that case, and transcript lookups match chat ids exactly.
+        if is_valid_chat_id(chat_id):
+            chat_id = self._stored_chat_id_case(chat_id)
+        if reply_to_message_id:
+            resolved = self._resolve_explicit_message_id(
+                field_name="replyToMessageId",
+                chat_id=chat_id,
+                message_id=reply_to_message_id,
+            )
+            if isinstance(resolved, dict):
+                return resolved
+            chat_id, reply_to_message_id = resolved
         message_id = new_message_id()
         frame = build_message_send_event(
             chat_id=chat_id,
@@ -5250,13 +5305,40 @@ class ClawChatAdapter(BasePlatformAdapter):
         removed: bool = False,
     ) -> dict[str, Any]:
         """Emit a fire-and-forget message.reaction. Non-terminal: does not
-        suppress the same-turn text reply. Defaults the target to the last
-        inbound message in this chat when target_message_id is omitted."""
-        resolved_target = target_message_id or self._last_inbound_message_id_by_chat.get(chat_id)
+        suppress the same-turn text reply.
+
+        Fire-and-forget means the server's verdict is never seen, and the server
+        only checks that the target is non-empty — so everything checkable is
+        checked here. A chat outbound would refuse returns ``send_blocked``. An
+        explicit ``target_message_id`` must be a message the ledger has seen in
+        this chat (``_resolve_explicit_message_id``); the stored ids go on the
+        wire. An omitted one defaults to the last inbound message of THIS chat
+        (never another chat's) and is not checked."""
+        if not is_valid_chat_id(chat_id):
+            return _reaction_blocked(chat_id, "invalid_chat_id")
+        chat_id = self._stored_chat_id_case(chat_id)
+        if self._is_chat_dead(chat_id):
+            return _reaction_blocked(chat_id, "chat_dissolved")
+        if self._is_chat_server_rejected(chat_id):
+            return _reaction_blocked(chat_id, "chat_rejected_by_server")
+        if target_message_id:
+            resolved = self._resolve_explicit_message_id(
+                field_name="targetMessageId",
+                chat_id=chat_id,
+                message_id=target_message_id,
+            )
+            if isinstance(resolved, dict):
+                return resolved
+            chat_id, resolved_target = resolved
+        else:
+            resolved_target = self._last_inbound_message_id_by_chat.get(chat_id)
         if not resolved_target:
             return {
                 "error": "validation",
-                "message": "no target message to react to (pass targetMessageId)",
+                "message": (
+                    "no target message to react to in this chat "
+                    "(pass targetMessageId from this chat's message metadata)"
+                ),
             }
         frame = build_message_reaction_event(
             chat_id=chat_id,
@@ -7284,6 +7366,55 @@ class ClawChatAdapter(BasePlatformAdapter):
             and fragments[0].get("kind") == "text"
             and not str(fragments[0].get("text") or "").strip()
         )
+
+    def _stored_chat_id_case(self, chat_id: str) -> str:
+        """``chat_id`` as the ledger already stores it, else as given."""
+        store = getattr(self, "_store", None)
+        if store is None or not chat_id:
+            return chat_id
+        try:
+            stored = store.find_stored_chat_id(account_id="default", chat_id=chat_id)
+        except Exception:  # noqa: BLE001
+            return chat_id
+        return stored if isinstance(stored, str) and stored else chat_id
+
+    def _resolve_explicit_message_id(
+        self,
+        *,
+        field_name: str,
+        chat_id: str,
+        message_id: str,
+    ) -> tuple[str, str] | dict[str, Any]:
+        """Accept a model-supplied message id only if this chat really has it.
+
+        Returns the stored ``(chat_id, message_id)`` on a ledger hit, or a
+        validation error. When the ledger cannot answer (no store, store
+        disabled, lookup error) the id is judged by its shape instead, so a
+        broken store does not block every reaction; that is logged once per
+        adapter, without ids or arguments. Rows are written under
+        ``account_id="default"`` (see ``_record_message``).
+        """
+        seen: Any = None
+        store = getattr(self, "_store", None)
+        if store is not None:
+            try:
+                seen = store.find_seen_message_in_chat(
+                    account_id="default", chat_id=chat_id, message_id=message_id
+                )
+            except Exception:  # noqa: BLE001
+                seen = None
+        if isinstance(seen, tuple):
+            return seen
+        if seen is None:
+            if not getattr(self, "_warned_message_id_store", False):
+                self._warned_message_id_store = True
+                logger.warning(
+                    "clawchat message-id store check unavailable; "
+                    "falling back to the message-id shape check"
+                )
+            if is_plausible_message_id(message_id):
+                return (chat_id, message_id)
+        return _unknown_message_id_error(field_name, message_id)
 
     def _record_message(
         self,
