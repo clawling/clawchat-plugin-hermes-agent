@@ -32,7 +32,8 @@ that raises falls back to the full platform toolset, and a hook that raises is
 ignored. Both therefore fail closed here.
 
 Turn ownership comes from the same host session context the memory tools use
-(``memory_scope``): platform, chat id, chat type and user id.
+(``memory_scope``): platform, chat id, chat type and user id. Hermes before
+0.19.1 binds no chat type; there the owner's activation chat id decides.
 """
 
 from __future__ import annotations
@@ -139,11 +140,9 @@ def _owner_direct_chat_id() -> str:
 
     Raises on a store failure; callers treat that as "not the owner's chat".
     """
-    from clawchat_gateway.memory_scope import ACCOUNT_ID
-    from clawchat_gateway.storage import get_clawchat_store
+    from clawchat_gateway.memory_scope import _owner_direct_chat_id as read_owner_chat
 
-    chat_id = get_clawchat_store().get_activation_conversation(platform="hermes", account_id=ACCOUNT_ID)
-    return str(chat_id or "")
+    return read_owner_chat()
 
 
 def _session_value(name: str) -> str:
@@ -252,8 +251,14 @@ def _is_owner_direct(
     moment-comment and awareness notes — sender "ClawChat") is the owner's
     turn too. A group never qualifies, whoever spoke; any lookup failure means
     "not the owner's".
+
+    Hermes before 0.19.1 binds no chat type into the session context; with
+    none, the chat id alone decides (:func:`_is_owner_chat_without_type`).
     """
-    if (chat_type or "").strip().lower() not in _DIRECT_CHAT_TYPES:
+    chat_type = (chat_type or "").strip().lower()
+    if not chat_type:
+        return _is_owner_chat_without_type(chat_id, owner, owner_chat_lookup)
+    if chat_type not in _DIRECT_CHAT_TYPES:
         return False
     if _is_known_group(chat_id):
         return False
@@ -267,6 +272,31 @@ def _is_owner_direct(
         logger.warning("clawchat host tools: owner chat lookup failed (%s); treating the turn as not the owner's", exc)
         return False
     return bool(owner_chat) and chat_id == owner_chat
+
+
+def _is_owner_chat_without_type(
+    chat_id: str,
+    owner: str,
+    owner_chat_lookup: Optional[Callable[[], str]] = None,
+) -> bool:
+    """No chat type (host < 0.19.1): the owner's activation chat, unless a known group.
+
+    Ids compare case-insensitively. No chat id, an unknown owner or owner chat,
+    or any lookup failure means "not the owner's".
+    """
+    if not chat_id or not owner:
+        return False
+    try:
+        from clawchat_gateway.memory_scope import same_chat_id
+
+        owner_chat = (owner_chat_lookup or _owner_direct_chat_id)()
+        return same_chat_id(chat_id, str(owner_chat or "")) and not _is_known_group(chat_id)
+    except Exception as exc:  # noqa: BLE001 - fail closed
+        logger.warning(
+            "clawchat host tools: owner chat check without a chat type failed (%s); treating the turn as not the owner's",
+            exc,
+        )
+        return False
 
 
 def _narrowed_toolsets() -> list[str]:

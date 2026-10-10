@@ -118,7 +118,9 @@ present. Another group's note is refused for the same reason, and for the
 same reason a friend's direct chat reads only that friend's note: nobody else
 is present there, and no group is. A host `dm` for
 a chat the plugin knows as a group (it has a participant list) counts as a
-group.
+group. Hermes before 0.19.1 passes no chat type: there the owner's activation
+conversation (not known as a group) is the owner's direct chat, and any other
+chat is a known group or nothing.
 
 A refused read or edit returns `{"error": "not_readable_here", "code":
 "memory_scope", "message": …}` with no content; a restricted search simply

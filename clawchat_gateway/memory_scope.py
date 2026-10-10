@@ -22,6 +22,11 @@ task-local ContextVars on current Hermes, ``os.environ`` on older ones):
   person's note can hold what they said elsewhere, so it may only come up where
   that person is present.
 
+Hermes before 0.19.1 binds no chat type at all. There the chat id decides: the
+owner's activation conversation (compared case-insensitively), when the plugin
+does not know it as a group and the owner is known, is ``owner_direct``; any
+other chat is placed as before (a known group as that group, else nothing).
+
 Whatever cannot be placed — another platform, a missing chat id, a chat type
 the plugin never sets, a host "dm" for a chat the plugin knows as a group, or a
 gateway process whose call carries no session — is a group with no known
@@ -174,6 +179,28 @@ def _owner_user_id() -> str:
     return str(owner or "")
 
 
+def _owner_direct_chat_id() -> str:
+    """The owner's own direct chat (the activation conversation), or "".
+
+    Raises on a store failure; callers treat that as "not the owner's chat".
+    """
+    chat_id = get_clawchat_store().get_activation_conversation(platform="hermes", account_id=ACCOUNT_ID)
+    return str(chat_id or "")
+
+
+def same_chat_id(chat_id: str, other: str) -> bool:
+    """Two non-empty chat ids naming the same chat (ids compare case-insensitively)."""
+    return bool(chat_id) and bool(other) and str(chat_id).casefold() == str(other).casefold()
+
+
+def _is_owner_chat_without_type(chat_id: str) -> bool:
+    """Hosts before 0.19.1 (no chat type): is this the owner's activation chat?"""
+    try:
+        return bool(_owner_user_id()) and same_chat_id(chat_id, _owner_direct_chat_id())
+    except Exception:  # noqa: BLE001 - fail closed
+        return False
+
+
 def _group_participants(root: Path, chat_id: str) -> tuple[bool, frozenset[str]]:
     """(known as a group, cached participant ids) from the group note's metadata."""
     try:
@@ -216,6 +243,8 @@ def resolve_memory_scope(root: Path | str | None) -> MemoryScope:
     if not chat_id or root is None:
         return _NOTHING
     known_group, participants = _group_participants(Path(root), chat_id)
+    if not chat_type and not known_group and _is_owner_chat_without_type(chat_id):
+        return MemoryScope(kind="owner_direct", chat_id=chat_id)
     if chat_type in DIRECT_CHAT_TYPES and not known_group:
         owner = _owner_user_id()
         user_id = _session_value("HERMES_SESSION_USER_ID")

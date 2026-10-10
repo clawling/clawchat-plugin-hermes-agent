@@ -146,6 +146,9 @@ tmp
 #     the connection is rebuilt, and frames for every chat are lost meanwhile.
 #   * receipt_replay_dedup — a permission receipt or moment-comment note
 #     replayed after a gateway restart starts no second turn (ledger claim).
+#   * owner_dm_without_chat_type — on Hermes before 0.19.1 (no chat type in
+#     the session) the owner's activation chat keeps the host tools and reads
+#     every note; any other chat, or a failed lookup, is not the owner's.
 tests/*
 !tests/conftest.py
 !tests/test_multiplex_isolation.py
@@ -196,6 +199,7 @@ tests/*
 !tests/test_agent_profile_scope.py
 !tests/test_friend_turn_tools.py
 !tests/test_receipt_replay_dedup.py
+!tests/test_owner_dm_without_chat_type.py
 deploy/
 scripts/
 docs/superpowers/

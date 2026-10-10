@@ -757,6 +757,13 @@ are owner turns too, because only the owner and the agent are in that chat.
 The same synthetic turns in a friend's direct chat (the friend greeting) or a
 group stay narrowed, and a failed lookup counts as "not the owner's chat".
 
+Hermes before 0.19.1 does not pass the turn's chat type to plugins. There the
+plugin falls back to the chat id: a turn is the owner's only in the owner's
+activation conversation (ids compared case-insensitively) when the plugin
+does not know that chat as a group; anything it cannot place is not the
+owner's. The memory tools' read scope uses the same fallback, so the owner's
+direct chat reads every note on those hosts too.
+
 Two layers (`clawchat_gateway/host_tools_guard.py`):
 
 - the adapter's per-source toolset override (`toolsets_for_source`, Hermes
