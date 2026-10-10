@@ -3984,6 +3984,14 @@ class ClawChatAdapter(BasePlatformAdapter):
         return "\n".join(lines)
 
     async def _handle_inbound(self, inbound: InboundMessage) -> None:
+        if inbound.chat_id and not self._inbound_trigger_id(inbound.raw_message):
+            # A synthetic inbound (awareness / moment-comment note, permission
+            # receipt, sediment turn) has no message id and never passes the
+            # arrival bookkeeping. Hosts up to 0.20.x run it in-band inside the
+            # chat's open turn without the processing hooks, so withdraw the
+            # react default there: the open turn's trigger may no longer be
+            # what the model is answering (see _current_turn_trigger).
+            self._last_inbound_message_id_by_chat.pop(inbound.chat_id, None)
         is_sediment_turn = (
             isinstance(inbound.raw_message, dict)
             and bool(inbound.raw_message.get("clawchat_sediment"))
@@ -4310,7 +4318,10 @@ class ClawChatAdapter(BasePlatformAdapter):
         trigger is its last message. Synthetic turns carry no message id.
         """
         raw = getattr(event, "raw_message", None)
-        inner = raw.get("clawchat_raw") if isinstance(raw, dict) else None
+        return self._inbound_trigger_id(raw.get("clawchat_raw") if isinstance(raw, dict) else None)
+
+    def _inbound_trigger_id(self, inner: Any) -> str:
+        """The protocol message id an inbound's raw_message carries, or ""."""
         if not isinstance(inner, dict):
             return ""
         if inner.get("clawchat_group_batch"):

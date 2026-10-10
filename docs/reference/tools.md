@@ -105,8 +105,10 @@ calls it. The default applies only when all of these hold:
   0.20.x runs the turn for a message that arrives mid-turn inside the running
   one without the processing hooks, so a newer arrival means the open turn may
   no longer be the caller's. Any later message counts, even a group message
-  that triggers nothing (muted, mention-only): the default is withdrawn rather
-  than risk reacting to the wrong message.
+  that triggers nothing (muted, mention-only), and so does a synthetic turn
+  the plugin dispatches into the chat (awareness or moment-comment note,
+  permission receipt), which those hosts also run in-band: the default is
+  withdrawn rather than risk reacting to the wrong message.
 
 Otherwise — another chat, no turn or two overlapping turns, a superseded
 trigger, or a call outside a gateway turn — the tool returns `targetMessageId

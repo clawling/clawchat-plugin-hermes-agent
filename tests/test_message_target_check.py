@@ -274,29 +274,50 @@ async def test_react_default_target_follows_the_stored_chat_case(adapter, host, 
 
 
 async def test_react_default_in_a_group_batch_is_its_last_message(adapter, host, monkeypatch):
-    from clawchat_gateway.group_message_coalescer import GroupMessageCoalescer
-    from clawchat_gateway.inbound import parse_inbound_message
+    from clawchat_gateway.group_settings import GroupSettings
 
     monkeypatch.setenv("HERMES_SESSION_CHAT_ID", GROUP)
+    adapter._group_settings_cache.apply_fetched(
+        [GroupSettings(conversation_id=GROUP, muted=False, reply_mode="all",
+                       batch_delay_seconds=3600, version=1)],
+        1,
+    )
     frames = [_frame(GROUP, chat_type="group", sender="usr_peer", text=t) for t in ("one", "two")]
-    batches = []
-
-    async def collect(merged):
-        batches.append(merged)
-
-    coalescer = GroupMessageCoalescer(idle_seconds=3600, max_wait_seconds=3600, dispatch=collect)
     for frame in frames:
-        inbound = parse_inbound_message(frame, adapter._clawchat_config)
-        adapter._last_inbound_message_id_by_chat[GROUP] = _trigger_of(frame)
-        coalescer.enqueue(inbound)
-    await coalescer.flush(GROUP)
-    await coalescer.cancel()
-    [merged] = batches
-    await adapter._handle_inbound(merged)
-    await adapter.on_processing_start(host[-1])
+        # The real arrival path: claim, latest-inbound bookkeeping, coalescer.
+        await adapter._on_message(frame)
+    assert adapter._last_inbound_message_id_by_chat[GROUP] == _trigger_of(frames[-1])
+    await adapter._group_message_coalescer.flush(GROUP)
+    await adapter._group_message_coalescer.cancel()
+    [event] = host
+    assert event.raw_message["clawchat_raw"].get("clawchat_group_batch") is True
+    await adapter.on_processing_start(event)
     result = await adapter.send_reaction_message(chat_id=GROUP, emoji="👍")
     assert result.get("reacted") is True
     assert _reactions(adapter)[0]["payload"]["target_message_id"] == _trigger_of(frames[-1])
+
+
+async def test_react_default_is_withdrawn_by_a_synthetic_note_in_the_chat(adapter, host, monkeypatch):
+    # Hosts up to 0.20.x run a synthetic note (awareness, moment comment,
+    # permission receipt) in-band inside the open turn, without the hooks.
+    from clawchat_gateway.inbound import InboundMessage
+
+    monkeypatch.setenv("HERMES_SESSION_CHAT_ID", DM)
+    await adapter.on_processing_start(await _arrive(adapter, host, _frame(DM)))
+    note = InboundMessage(
+        chat_id=DM,
+        chat_type="direct",
+        sender_id="clawchat-awareness",
+        sender_name="ClawChat",
+        text="ClawChat: something happened.",
+        raw_message={"synthetic": True, "awareness": True},
+    )
+    await adapter._handle_inbound(note)
+    assert host[-1].raw_message["clawchat_raw"].get("synthetic") is True
+    result = await adapter.send_reaction_message(chat_id=DM, emoji="👍")
+    assert result["error"] == "validation"
+    assert "targetMessageId" in result["message"]
+    assert _reactions(adapter) == []
 
 
 async def test_react_without_a_turn_in_progress_requires_a_target(adapter, host, monkeypatch):
