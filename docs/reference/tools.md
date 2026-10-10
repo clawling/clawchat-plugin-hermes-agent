@@ -38,7 +38,7 @@ There are **47** tools, grouped by purpose.
 | `clawchat_add_group_member`         | Add a ClawChat user to a group by explicit `conversationId` + `userId` (groups only). Requires the target to already be the agent's friend, and is gated by the owner's group-management permission: by default the owner is asked and the tool returns a non-retryable `permission` result with `status: "pending"` (the outcome arrives later as a chat message); an owner policy that denies it returns `status: "forbidden"`. Re-adding an existing member succeeds as a no-op. |
 | `clawchat_mention_message`          | Send a real `@` mention message over WebSocket; an optional `replyToMessageId` must be a message the plugin has stored for that chat (see [Explicit message ids](#explicit-message-ids)). The adapter suppresses the same-turn normal follow-up reply into that chat after success; an explicit send into it (`clawchat_send_file`, a `send_message` call, a `MEDIA:` attachment) is still delivered. Text only: to send a file to another chat, use `clawchat_send_file`. |
 | `clawchat_send_file`                | Send one local file into any conversation by explicit `chat_id` (`cnv_…`, need not be the current chat) and absolute `path`; optional `caption` text and `as_document` (send an image as a downloadable file, like `[[as_document]]`). Credential / system paths are refused (same denylist as `MEDIA:`). Delivered through the live adapter as an explicit send, so it is not swallowed after a same-turn `clawchat_mention_message`; with no gateway in-process it uses the standalone sender. Hermes v0.21+ no longer gives the agent `send_message`, so this is the route for cross-chat files (see [`../architecture.md`](../architecture.md#clawchat_send_file)). |
-| `clawchat_react_message`            | React to a message with a single quick emoji (bubble long-press reaction) via `chatId` + `emoji`; omit `targetMessageId` to react to the message that triggered the current turn (current chat only; elsewhere it is required), or set `remove:true` to retract a prior reaction. An explicit `targetMessageId` must be a message the plugin has stored for that chat (see [Explicit message ids](#explicit-message-ids)). A reaction the outbound layer refuses returns `send_blocked`, never `reacted: true`. |
+| `clawchat_react_message`            | React to a message with a single quick emoji (bubble long-press reaction) via `chatId` + `emoji`; omit `targetMessageId` to react to the message that triggered the current turn (current chat only, and only until a newer message arrives there; otherwise it is required), or set `remove:true` to retract a prior reaction. An explicit `targetMessageId` must be a message the plugin has stored for that chat (see [Explicit message ids](#explicit-message-ids)). A reaction the outbound layer refuses returns `send_blocked`, never `reacted: true`. |
 
 `clawchat_mention_message` and `clawchat_react_message` take a `chatId`
 straight from the model, so both reject anything that is not a conversation
@@ -91,18 +91,28 @@ sends nothing and returns:
 The echoed value is cut to 64 characters.
 
 An omitted `targetMessageId` defaults to the message that triggered the turn
-the tool is called from, and that default is not checked. It applies only when
-`chatId` names the calling turn's own chat (the host session context's
-`HERMES_SESSION_CHAT_ID`, compared case-insensitively) and exactly one host
-turn is in progress there. The adapter records each turn's triggering
-ClawChat message in the host's `on_processing_start` hook and drops it in
-`on_processing_complete`; a message that arrives while the turn runs is a
-later turn's trigger, not this one's. Another chat, a chat with no turn in
-progress (or with two overlapping turns), a synthetic turn (notes, receipts)
-and a call outside a gateway turn all get `targetMessageId is required` as a
-validation error, and nothing is sent. The chat's latest inbound message is
-never the default: it is recorded before the mute and mention-only gates, so
-it can be a message the agent was never asked about.
+the tool is called from, and that default is not checked. The adapter records
+each host turn's trigger in `on_processing_start` (the inbound frame's
+`payload.message_id`; for a coalesced group batch, its last message's) and
+drops it in `on_processing_complete`, or after 30 minutes if the host never
+calls it. The default applies only when all of these hold:
+
+- `chatId` names the calling turn's own chat (the host session context's
+  `HERMES_SESSION_CHAT_ID`, compared case-insensitively);
+- exactly one host turn is in progress in that chat, and it has a ClawChat
+  trigger (synthetic turns — notes, receipts — do not);
+- no newer message has arrived in that chat since the trigger. Hermes up to
+  0.20.x runs the turn for a message that arrives mid-turn inside the running
+  one without the processing hooks, so a newer arrival means the open turn may
+  no longer be the caller's. Any later message counts, even a group message
+  that triggers nothing (muted, mention-only): the default is withdrawn rather
+  than risk reacting to the wrong message.
+
+Otherwise — another chat, no turn or two overlapping turns, a superseded
+trigger, or a call outside a gateway turn — the tool returns `targetMessageId
+is required` as a validation error and sends nothing; the model passes the
+`message_id` from the chat's message metadata. The chat's latest inbound
+message alone is never the default.
 
 The ledger has no retention (only a recall removes a row), so the limit runs
 the other way: a message the plugin never stored cannot be targeted — history

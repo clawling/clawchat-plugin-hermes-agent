@@ -1529,7 +1529,7 @@ def register_tools(ctx) -> None:
             "description": _direct_tool_description(
                 "React to a ClawChat message with a single quick emoji (the bubble long-press reaction), instead of sending a text message. "
                 "TRIGGER - invoke when a short acknowledgement or emotional beat (agreement, thanks, laughter, celebration, sympathy) reads more naturally as an emoji on the message than as a sentence, e.g. a simple 👍 to \"done\" or ❤️ to good news. "
-                "Pass chatId for the current conversation. Omit targetMessageId to react to the message that triggered the current turn (only in the current conversation); pass it to react to an earlier message, or to any message in another conversation, using the message_id from that chat's message metadata. "
+                "Pass chatId for the current conversation. Omit targetMessageId to react to the message that triggered the current turn (only in the current conversation, and only while no newer message has arrived there); otherwise pass it — the message_id from that chat's message metadata — to react to an earlier message, to a message in another conversation, or when the tool says it is required. "
                 "Set remove:true to take back your reaction. "
                 "Prefer the quick set 👍 ❤️ 😂 😮 😢 🙏 🎉 👏 🔥 😍 🤔. "
                 "When a reaction is all you want to send, do not also send a normal text reply."

@@ -882,6 +882,10 @@ def _exec_approval_fallback_text(
 _PLAUSIBLE_PREFIXED_MESSAGE_ID = re.compile(r"^(?:msg[-_]|sys-)\S+$", re.IGNORECASE)
 _PLAUSIBLE_BARE_ULID = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$", re.IGNORECASE)
 _MESSAGE_ID_ECHO_LIMIT = 64
+# A host turn whose on_processing_complete never fires (an older host that
+# swallows a non-cancellation BaseException) would otherwise keep its chat
+# "busy" forever and switch the react default off there for good.
+TURN_TRIGGER_TTL_SECONDS = 30 * 60
 
 
 def is_plausible_message_id(value: Any) -> bool:
@@ -1083,12 +1087,15 @@ class ClawChatAdapter(BasePlatformAdapter):
         # what the user just sent" without a round-trip. Unbounded per-chat
         # (one entry per active chat, replaced on every inbound).
         self._last_inbound_message_id_by_chat: dict[str, str] = {}
-        # Turns the host is processing, per chat: (id of the host event, the
-        # ClawChat message that triggered it). Set by on_processing_start,
-        # removed by on_processing_complete. The react tool's omitted target
-        # defaults to the trigger only while exactly one turn runs in the
-        # calling turn's own chat (``_current_turn_trigger``).
-        self._turn_triggers_by_chat: dict[str, list[tuple[int, str]]] = {}
+        # Turns the host is processing, per chat: (the host event, the ClawChat
+        # message that triggered it, start time). Set by on_processing_start,
+        # removed by on_processing_complete, dropped after
+        # TURN_TRIGGER_TTL_SECONDS. The react tool's omitted target defaults to
+        # the trigger only while exactly one turn runs in the calling turn's
+        # own chat and no newer message has arrived there
+        # (``_current_turn_trigger``). The event object itself is held, not
+        # its id(), so a recycled id can never match another turn.
+        self._turn_triggers_by_chat: dict[str, list[tuple[Any, str, float]]] = {}
         self._auth_failed = False
         # In-memory mirror of a pending owner-consent skill update (also persisted
         # to a small file under the managed skills dir for crash-restart recovery).
@@ -4294,26 +4301,50 @@ class ClawChatAdapter(BasePlatformAdapter):
         except Exception:  # noqa: BLE001
             logger.debug("clawchat turn trigger bookkeeping failed", exc_info=True)
 
-    def _note_turn_started(self, event: Any) -> None:
-        chat_id = str(getattr(getattr(event, "source", None), "chat_id", "") or "")
+    def _turn_trigger_message_id(self, event: Any) -> str:
+        """The ClawChat message id that triggered a host turn, or "".
+
+        ``raw_message["clawchat_raw"]`` is the inbound protocol frame (id at
+        ``payload.message_id``), or for a coalesced group batch
+        ``{"clawchat_group_batch": True, "messages": [frame, ...]}``, whose
+        trigger is its last message. Synthetic turns carry no message id.
+        """
         raw = getattr(event, "raw_message", None)
         inner = raw.get("clawchat_raw") if isinstance(raw, dict) else None
-        trigger = inner.get("message_id") if isinstance(inner, dict) else None
-        if not chat_id or not isinstance(trigger, str) or not trigger:
-            # Synthetic turns (notes, receipts, sediment) have no message to
-            # react to; they still count as a turn in the chat.
-            trigger = ""
+        if not isinstance(inner, dict):
+            return ""
+        if inner.get("clawchat_group_batch"):
+            messages = [m for m in inner.get("messages") or [] if isinstance(m, dict)]
+            inner = messages[-1] if messages else {}
+        return self._extract_protocol_message_id(inner) or ""
+
+    def _open_turns(self, chat_id: str) -> list[tuple[Any, str, float]]:
+        turns = self._turn_triggers_by_chat.get(chat_id) or []
+        cutoff = time.monotonic() - TURN_TRIGGER_TTL_SECONDS
+        fresh = [entry for entry in turns if entry[2] >= cutoff]
+        if fresh:
+            self._turn_triggers_by_chat[chat_id] = fresh
+        else:
+            self._turn_triggers_by_chat.pop(chat_id, None)
+        return fresh
+
+    def _note_turn_started(self, event: Any) -> None:
+        chat_id = str(getattr(getattr(event, "source", None), "chat_id", "") or "")
         if not chat_id:
             return
-        turns = self._turn_triggers_by_chat.setdefault(chat_id, [])
-        turns.append((id(event), trigger))
+        # A synthetic turn (notes, receipts, sediment) has no message to react
+        # to but still counts as a turn in the chat.
+        trigger = self._turn_trigger_message_id(event)
+        turns = self._open_turns(chat_id)
+        turns.append((event, trigger, time.monotonic()))
+        self._turn_triggers_by_chat[chat_id] = turns
 
     def _note_turn_finished(self, event: Any) -> None:
         chat_id = str(getattr(getattr(event, "source", None), "chat_id", "") or "")
         turns = self._turn_triggers_by_chat.get(chat_id)
         if not turns:
             return
-        remaining = [entry for entry in turns if entry[0] != id(event)]
+        remaining = [entry for entry in turns if entry[0] is not event]
         if remaining:
             self._turn_triggers_by_chat[chat_id] = remaining
         else:
@@ -4325,17 +4356,29 @@ class ClawChatAdapter(BasePlatformAdapter):
         The calling turn's chat comes from the host session context
         (``HERMES_SESSION_CHAT_ID``, bound per turn), so a tool call naming
         another chat never gets this turn's message. ``None`` unless exactly one
-        turn is in progress in that chat and it has a ClawChat trigger.
+        turn is in progress in that chat, it has a ClawChat trigger, and that
+        trigger is still the chat's latest inbound message. The last rule is
+        the "superseded" one: hosts up to 0.20.x run the turn for a message that
+        arrives mid-turn inside the running one, without the processing hooks,
+        so a newer arrival means the open turn may no longer be the caller's.
+        It also withdraws the default when a later group message (even one
+        that triggers nothing) arrives; a validation error beats a reaction on
+        the wrong message.
         """
         from clawchat_gateway.memory_scope import _session_value, same_chat_id
 
         session_chat = _session_value("HERMES_SESSION_CHAT_ID")
         if not same_chat_id(session_chat, chat_id):
             return None
-        turns = self._turn_triggers_by_chat.get(chat_id) or []
+        turns = self._open_turns(chat_id)
         if len(turns) != 1:
             return None
-        return turns[0][1] or None
+        trigger = turns[0][1]
+        if not trigger:
+            return None
+        if self._last_inbound_message_id_by_chat.get(chat_id) != trigger:
+            return None
+        return trigger
 
     async def on_processing_complete(self, event: Any, outcome: Any) -> None:
         try:
