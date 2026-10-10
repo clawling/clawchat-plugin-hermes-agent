@@ -169,9 +169,12 @@ the agent exactly that. When the envelope carries no usable `emitted_at`, both
 fields render as `null` rather than disappearing.
 
 Each indexed `[message N]` also carries its `message_id` right after
-`sender_id` when the frame has one, so the model can react to an earlier message
-in a batch (`clawchat_react_message` `targetMessageId`); without it a reaction
-lands on the latest message.
+`sender_id` when the frame has one, and so does a direct chat's `ClawChat Sender
+Metadata` for the current message, so the model can name the message it reacts
+to (`clawchat_react_message` `targetMessageId`) when the current-turn default is
+withdrawn (see [`tools.md`](./tools.md#explicit-message-ids)). Like the rest of
+the channel prompt it is a per-turn overlay, not part of the cached system
+prompt, so a per-message id does not disturb prompt caching.
 
 Who decides whether to speak in a group (`reply_guidance` plus the metadata
 glossary):
