@@ -61,8 +61,11 @@ def adapter(monkeypatch, tmp_path):
     a._clawchat_config = replace(a._clawchat_config, user_id="usr_agent", owner_user_id="usr_owner")
     a.frames = []
     a.send_ok = True
+    a.send_exc = None
 
     async def send_frame(frame, *, wait_for_ack=False, **_kw):
+        if a.send_exc is not None:
+            raise a.send_exc
         if not a.send_ok:
             return False
         a.frames.append(frame)
@@ -162,28 +165,97 @@ async def test_react_rejects_a_failed_send_of_the_agent(adapter):
 
 
 # --- react: defaults and other chats -------------------------------------
+#
+# An omitted targetMessageId defaults only to the message that triggered the
+# turn in progress in the calling turn's own chat (host on_processing_start /
+# on_processing_complete). The chat's latest inbound is NOT the default: it is
+# recorded before the mute / mention-only gates and moves when a new message
+# arrives mid-turn.
+
+TRIGGER_ID = "msg-01HTRIGGERNOTSTOREDAAAAAA"
+LATER_ID = "msg-01HLATERINBOUNDAAAAAAAAAA"
 
 
-async def test_react_default_target_is_not_checked(adapter):
-    adapter._last_inbound_message_id_by_chat[GROUP] = "msg-01HDEFAULTNOTSTOREDAAAAAA"
+def _turn_event(chat_id, message_id):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        text="hi",
+        source=SimpleNamespace(chat_id=chat_id),
+        raw_message={"clawchat_raw": {"message_id": message_id}},
+    )
+
+
+@pytest.fixture
+def in_group_turn(adapter, monkeypatch):
+    """The calling tool runs in GROUP's session, whose turn TRIGGER_ID started."""
+    monkeypatch.setenv("HERMES_SESSION_CHAT_ID", GROUP)
+    event = _turn_event(GROUP, TRIGGER_ID)
+    return event
+
+
+async def test_react_default_is_the_turns_trigger_not_a_later_inbound(adapter, in_group_turn):
+    await adapter.on_processing_start(in_group_turn)
+    # A message that arrives mid-turn (queued by the host as pending) does not
+    # trigger this turn, even though it is the chat's latest inbound.
+    _seed_inbound(adapter._store, GROUP, LATER_ID)
+    adapter._last_inbound_message_id_by_chat[GROUP] = LATER_ID
     result = await adapter.send_reaction_message(chat_id=GROUP, emoji="👍")
     assert result.get("reacted") is True
-    assert _reactions(adapter)[0]["payload"]["target_message_id"] == "msg-01HDEFAULTNOTSTOREDAAAAAA"
+    # The trigger is not in the ledger: the default is not checked.
+    assert _reactions(adapter)[0]["payload"]["target_message_id"] == TRIGGER_ID
 
 
-async def test_react_default_target_follows_the_stored_chat_case(adapter):
+async def test_react_default_target_follows_the_stored_chat_case(adapter, in_group_turn):
+    await adapter.on_processing_start(in_group_turn)
     result = await adapter.send_reaction_message(chat_id=GROUP.lower(), emoji="👍")
     assert result.get("reacted") is True
     [frame] = _reactions(adapter)
     assert frame["chat_id"] == GROUP
-    assert frame["payload"]["target_message_id"] == INBOUND_ID
+    assert frame["payload"]["target_message_id"] == TRIGGER_ID
 
 
-async def test_react_in_another_chat_without_target_never_uses_the_current_message(adapter):
-    # The current turn is in GROUP; OTHER has had no live inbound this run.
+async def test_react_without_a_turn_in_progress_requires_a_target(adapter, monkeypatch):
+    monkeypatch.setenv("HERMES_SESSION_CHAT_ID", GROUP)
+    # The chat has a latest inbound, but no turn is running for it.
+    result = await adapter.send_reaction_message(chat_id=GROUP, emoji="👍")
+    assert result["error"] == "validation"
+    assert "targetMessageId" in result["message"]
+    assert _reactions(adapter) == []
+
+
+async def test_react_default_ends_with_the_turn(adapter, in_group_turn):
+    await adapter.on_processing_start(in_group_turn)
+    await adapter.on_processing_complete(in_group_turn, "success")
+    result = await adapter.send_reaction_message(chat_id=GROUP, emoji="👍")
+    assert result["error"] == "validation"
+    assert _reactions(adapter) == []
+
+
+async def test_react_in_another_chat_without_target_is_rejected(adapter, in_group_turn):
+    await adapter.on_processing_start(in_group_turn)
+    # OTHER even has a turn of its own running: the caller is in GROUP.
+    await adapter.on_processing_start(_turn_event(OTHER, OTHER_CHAT_ID))
+    adapter._last_inbound_message_id_by_chat[OTHER] = OTHER_CHAT_ID
     result = await adapter.send_reaction_message(chat_id=OTHER, emoji="👍")
     assert result["error"] == "validation"
     assert "targetMessageId" in result["message"]
+    assert _reactions(adapter) == []
+
+
+async def test_react_without_a_session_chat_has_no_default(adapter, monkeypatch):
+    monkeypatch.delenv("HERMES_SESSION_CHAT_ID", raising=False)
+    await adapter.on_processing_start(_turn_event(GROUP, TRIGGER_ID))
+    result = await adapter.send_reaction_message(chat_id=GROUP, emoji="👍")
+    assert result["error"] == "validation"
+    assert _reactions(adapter) == []
+
+
+async def test_react_with_two_overlapping_turns_in_the_chat_has_no_default(adapter, in_group_turn):
+    await adapter.on_processing_start(in_group_turn)
+    await adapter.on_processing_start(_turn_event(GROUP, LATER_ID))
+    result = await adapter.send_reaction_message(chat_id=GROUP, emoji="👍")
+    assert result["error"] == "validation"
     assert _reactions(adapter) == []
 
 
@@ -203,6 +275,34 @@ async def test_react_with_an_invalid_chat_id_is_send_blocked(adapter):
     result = await adapter.send_reaction_message(chat_id="usr_nobody", target_message_id=INBOUND_ID, emoji="👍")
     assert result["error"] == "send_blocked"
     assert result["reason"] == "invalid_chat_id"
+    assert _reactions(adapter) == []
+
+
+async def test_react_into_a_dissolved_chat_is_send_blocked(adapter):
+    adapter._mark_chat_dead(GROUP)
+    result = await adapter.send_reaction_message(chat_id=GROUP, target_message_id=INBOUND_ID, emoji="👍")
+    assert result["error"] == "send_blocked"
+    assert result["reason"] == "chat_dissolved"
+    assert "reacted" not in result
+    assert _reactions(adapter) == []
+
+
+async def test_react_rejects_a_mention_whose_send_raised(adapter):
+    # A server message.error, an ack timeout or a full queue raise out of
+    # send_frame instead of returning False; the ledger row must still be
+    # marked failed so the id is not a reactable message.
+    adapter.send_exc = RuntimeError("message.error from server")
+    with pytest.raises(RuntimeError):
+        await adapter.send_mention_message(
+            chat_id=GROUP, text="hi", mentions=[{"userId": "usr_peer", "display": "Peer"}]
+        )
+    adapter.send_exc = None
+    [row] = adapter._store.recent_outbound_messages(account_id="default", chat_id=GROUP, since_ms=0)
+    assert row["event_type"] == "message.error"
+    result = await adapter.send_reaction_message(
+        chat_id=GROUP, target_message_id=row["message_id"], emoji="👍"
+    )
+    assert result["error"] == "validation"
     assert _reactions(adapter) == []
 
 

@@ -1529,7 +1529,7 @@ def register_tools(ctx) -> None:
             "description": _direct_tool_description(
                 "React to a ClawChat message with a single quick emoji (the bubble long-press reaction), instead of sending a text message. "
                 "TRIGGER - invoke when a short acknowledgement or emotional beat (agreement, thanks, laughter, celebration, sympathy) reads more naturally as an emoji on the message than as a sentence, e.g. a simple 👍 to \"done\" or ❤️ to good news. "
-                "Pass chatId for the current conversation. Omit targetMessageId to react to the message that triggered the current turn; pass it to react to an earlier message. "
+                "Pass chatId for the current conversation. Omit targetMessageId to react to the message that triggered the current turn (only in the current conversation); pass it to react to an earlier message, or to any message in another conversation, using the message_id from that chat's message metadata. "
                 "Set remove:true to take back your reaction. "
                 "Prefer the quick set 👍 ❤️ 😂 😮 😢 🙏 🎉 👏 🔥 😍 🤔. "
                 "When a reaction is all you want to send, do not also send a normal text reply."
@@ -1539,7 +1539,7 @@ def register_tools(ctx) -> None:
                 "properties": {
                     "chatId": {"type": "string", "minLength": 1, "description": "ClawChat conversation id where the target message lives."},
                     "emoji": {"type": "string", "minLength": 1, "description": "Single emoji to react with. Prefer the ClawChat quick set."},
-                    "targetMessageId": {"type": "string", "description": "message_id of the message to react to, from this chat's message metadata; never a made-up or session id. Omit to react to the message that triggered the current turn."},
+                    "targetMessageId": {"type": "string", "description": "message_id of the message to react to, from this chat's message metadata; never a made-up or session id. Omit to react to the message that triggered the current turn; required for any other chat."},
                     "remove": {"type": "boolean", "description": "Set true to remove your reaction; omit/false to add or overwrite."},
                 },
                 "required": ["chatId", "emoji"],

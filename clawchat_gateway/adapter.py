@@ -1083,6 +1083,12 @@ class ClawChatAdapter(BasePlatformAdapter):
         # what the user just sent" without a round-trip. Unbounded per-chat
         # (one entry per active chat, replaced on every inbound).
         self._last_inbound_message_id_by_chat: dict[str, str] = {}
+        # Turns the host is processing, per chat: (id of the host event, the
+        # ClawChat message that triggered it). Set by on_processing_start,
+        # removed by on_processing_complete. The react tool's omitted target
+        # defaults to the trigger only while exactly one turn runs in the
+        # calling turn's own chat (``_current_turn_trigger``).
+        self._turn_triggers_by_chat: dict[str, list[tuple[int, str]]] = {}
         self._auth_failed = False
         # In-memory mirror of a pending owner-consent skill update (also persisted
         # to a small file under the managed skills dir for crash-restart recovery).
@@ -4276,7 +4282,66 @@ class ClawChatAdapter(BasePlatformAdapter):
         ) or cap
         return max(1, point - config.sediment_margin_tokens)
 
+    async def on_processing_start(self, event: Any) -> None:
+        parent = getattr(super(), "on_processing_start", None)
+        if callable(parent):
+            try:
+                await parent(event)
+            except Exception:  # noqa: BLE001
+                logger.debug("clawchat base on_processing_start failed", exc_info=True)
+        try:
+            self._note_turn_started(event)
+        except Exception:  # noqa: BLE001
+            logger.debug("clawchat turn trigger bookkeeping failed", exc_info=True)
+
+    def _note_turn_started(self, event: Any) -> None:
+        chat_id = str(getattr(getattr(event, "source", None), "chat_id", "") or "")
+        raw = getattr(event, "raw_message", None)
+        inner = raw.get("clawchat_raw") if isinstance(raw, dict) else None
+        trigger = inner.get("message_id") if isinstance(inner, dict) else None
+        if not chat_id or not isinstance(trigger, str) or not trigger:
+            # Synthetic turns (notes, receipts, sediment) have no message to
+            # react to; they still count as a turn in the chat.
+            trigger = ""
+        if not chat_id:
+            return
+        turns = self._turn_triggers_by_chat.setdefault(chat_id, [])
+        turns.append((id(event), trigger))
+
+    def _note_turn_finished(self, event: Any) -> None:
+        chat_id = str(getattr(getattr(event, "source", None), "chat_id", "") or "")
+        turns = self._turn_triggers_by_chat.get(chat_id)
+        if not turns:
+            return
+        remaining = [entry for entry in turns if entry[0] != id(event)]
+        if remaining:
+            self._turn_triggers_by_chat[chat_id] = remaining
+        else:
+            self._turn_triggers_by_chat.pop(chat_id, None)
+
+    def _current_turn_trigger(self, chat_id: str) -> str | None:
+        """The message that triggered the calling turn, if it is in ``chat_id``.
+
+        The calling turn's chat comes from the host session context
+        (``HERMES_SESSION_CHAT_ID``, bound per turn), so a tool call naming
+        another chat never gets this turn's message. ``None`` unless exactly one
+        turn is in progress in that chat and it has a ClawChat trigger.
+        """
+        from clawchat_gateway.memory_scope import _session_value, same_chat_id
+
+        session_chat = _session_value("HERMES_SESSION_CHAT_ID")
+        if not same_chat_id(session_chat, chat_id):
+            return None
+        turns = self._turn_triggers_by_chat.get(chat_id) or []
+        if len(turns) != 1:
+            return None
+        return turns[0][1] or None
+
     async def on_processing_complete(self, event: Any, outcome: Any) -> None:
+        try:
+            self._note_turn_finished(event)
+        except Exception:  # noqa: BLE001
+            logger.debug("clawchat turn trigger bookkeeping failed", exc_info=True)
         parent = getattr(super(), "on_processing_complete", None)
         if callable(parent):
             try:
@@ -5253,7 +5318,23 @@ class ClawChatAdapter(BasePlatformAdapter):
                 "messageId": message_id,
             }
 
-        sent = await self._connection.send_frame(frame, wait_for_ack=True)
+        try:
+            sent = await self._connection.send_frame(frame, wait_for_ack=True)
+        except BaseException as exc:
+            # A server message.error, an ack timeout or a full queue raise
+            # instead of returning False. Mark the ledger row failed first so
+            # the id never counts as a message of this chat, then propagate.
+            self._update_message_record(
+                kind="message",
+                direction="outbound",
+                event_type="message.error",
+                trace_id=frame.get("trace_id") or frame.get("id"),
+                chat_id=chat_id,
+                message_id=message_id,
+                text=f"clawchat mention message failed: {type(exc).__name__}",
+                raw=frame,
+            )
+            raise
         if not sent:
             error = "clawchat mention message dropped"
             logger.warning(
@@ -5312,8 +5393,9 @@ class ClawChatAdapter(BasePlatformAdapter):
         checked here. A chat outbound would refuse returns ``send_blocked``. An
         explicit ``target_message_id`` must be a message the ledger has seen in
         this chat (``_resolve_explicit_message_id``); the stored ids go on the
-        wire. An omitted one defaults to the last inbound message of THIS chat
-        (never another chat's) and is not checked."""
+        wire. An omitted one defaults to the message that triggered the turn in
+        progress in the calling turn's own chat (``_current_turn_trigger``),
+        unchecked; anywhere else it is a validation error."""
         if not is_valid_chat_id(chat_id):
             return _reaction_blocked(chat_id, "invalid_chat_id")
         chat_id = self._stored_chat_id_case(chat_id)
@@ -5331,13 +5413,13 @@ class ClawChatAdapter(BasePlatformAdapter):
                 return resolved
             chat_id, resolved_target = resolved
         else:
-            resolved_target = self._last_inbound_message_id_by_chat.get(chat_id)
+            resolved_target = self._current_turn_trigger(chat_id)
         if not resolved_target:
             return {
                 "error": "validation",
                 "message": (
-                    "no target message to react to in this chat "
-                    "(pass targetMessageId from this chat's message metadata)"
+                    "targetMessageId is required: no current-turn message in this chat "
+                    "to default to (pass the message_id from this chat's message metadata)"
                 ),
             }
         frame = build_message_reaction_event(
@@ -7405,15 +7487,17 @@ class ClawChatAdapter(BasePlatformAdapter):
                 seen = None
         if isinstance(seen, tuple):
             return seen
-        if seen is None:
-            if not getattr(self, "_warned_message_id_store", False):
-                self._warned_message_id_store = True
-                logger.warning(
-                    "clawchat message-id store check unavailable; "
-                    "falling back to the message-id shape check"
-                )
-            if is_plausible_message_id(message_id):
-                return (chat_id, message_id)
+        if seen is False:
+            return _unknown_message_id_error(field_name, message_id)
+        # seen is None: the ledger cannot say.
+        if not getattr(self, "_warned_message_id_store", False):
+            self._warned_message_id_store = True
+            logger.warning(
+                "clawchat message-id store check unavailable; "
+                "falling back to the message-id shape check"
+            )
+        if is_plausible_message_id(message_id):
+            return (chat_id, message_id)
         return _unknown_message_id_error(field_name, message_id)
 
     def _record_message(
