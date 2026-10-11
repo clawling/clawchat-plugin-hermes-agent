@@ -377,3 +377,144 @@ async def test_an_explicit_send_into_the_group_is_not_rerouted(adapter):
 
     assert replies_in(adapter, GROUP) == ["sent by a tool"]
     assert replies_in(adapter, OWNER_DM) == []
+
+
+# --- The confirm before /new is asked in the owner's direct chat -------------
+#
+# Hermes asks before /new, /reset, /undo …; the prompt is part of the
+# command's receipt. It is asked in the owner's direct chat and answered there,
+# for the group's session.
+
+HOST_PROMPT = (
+    "⚠️ **Confirm /new**\n\nThis starts a new session.\n\n"
+    "Choose: /approve, /always, /cancel"
+)
+
+
+class FakeSlashConfirm:
+    def __init__(self) -> None:
+        self.pending: dict = {}
+        self.resolved: list = []
+
+    def get_pending(self, session_key):
+        entry = self.pending.get(session_key)
+        return dict(entry) if entry else None
+
+    async def resolve(self, session_key, confirm_id, choice, timeout=300):
+        self.resolved.append((session_key, confirm_id, choice))
+        entry = self.pending.pop(session_key, None)
+        if not entry or entry["confirm_id"] != confirm_id:
+            return None
+        return "/new cancelled." if choice == "cancel" else "✨ Session reset!"
+
+
+@pytest.fixture
+def slash_confirm(monkeypatch):
+    import sys
+
+    fake = FakeSlashConfirm()
+    tools_pkg = types.ModuleType("tools")
+    tools_pkg.slash_confirm = fake
+    monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+    monkeypatch.setitem(sys.modules, "tools.slash_confirm", fake)
+    return fake
+
+
+def owner_dm(body: str) -> dict:
+    frame = group(OWNER, text(body))
+    frame["chat_id"] = OWNER_DM
+    frame["chat_type"] = "direct"
+    return frame
+
+
+def asks_confirm(adapter, slash_confirm, results: list, *, session_key="sk_group", confirm_id="9"):
+    async def handle_inbound(inbound):
+        adapter.host.dispatched.append(inbound)
+        if inbound.chat_type != "group":
+            return
+
+        async def run():
+            slash_confirm.pending[session_key] = {"confirm_id": confirm_id, "command": "new"}
+            results.append(
+                await adapter.send_slash_confirm(
+                    chat_id=inbound.chat_id,
+                    title="/new",
+                    message=HOST_PROMPT,
+                    session_key=session_key,
+                    confirm_id=confirm_id,
+                    metadata=None,
+                )
+            )
+
+        adapter.host.tasks.append(asyncio.create_task(run()))
+
+    adapter._handle_inbound = handle_inbound
+
+
+@pytest.mark.asyncio
+async def test_the_new_confirm_is_asked_and_answered_in_the_owners_chat(adapter, slash_confirm):
+    results: list = []
+    asks_confirm(adapter, slash_confirm, results)
+
+    command_id = await run(adapter, group(OWNER, text("/new")))
+
+    assert results[0].success is True, "Hermes does not send its own prompt into the group"
+    assert replies_in(adapter, OWNER_DM) == [f'From group "Build Crew": /new\n\n{HOST_PROMPT}']
+    assert replies_in(adapter, GROUP) == []
+    assert reactions(adapter) == [(GROUP, command_id, "✅")]
+
+    await run(adapter, owner_dm("/approve"))
+
+    assert slash_confirm.resolved == [("sk_group", "9", "once")]
+    assert replies_in(adapter, OWNER_DM)[-1] == 'From group "Build Crew": /new\n\n✨ Session reset!'
+    assert replies_in(adapter, GROUP) == []
+    assert [i.chat_id for i in adapter.host.dispatched] == [GROUP], "the answer never reaches the agent"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("reply", "choice"), [("/always", "always"), ("/cancel", "cancel"), ("approve", "once")])
+async def test_the_owner_may_answer_with_any_choice(adapter, slash_confirm, reply, choice):
+    asks_confirm(adapter, slash_confirm, [])
+    await run(adapter, group(OWNER, text("/new")))
+
+    await run(adapter, owner_dm(reply))
+
+    assert slash_confirm.resolved == [("sk_group", "9", choice)]
+
+
+@pytest.mark.asyncio
+async def test_an_expired_confirm_says_so_in_the_owners_chat(adapter, slash_confirm):
+    asks_confirm(adapter, slash_confirm, [])
+    await run(adapter, group(OWNER, text("/new")))
+    slash_confirm.pending.clear()
+
+    await run(adapter, owner_dm("/approve"))
+
+    assert slash_confirm.resolved == []
+    assert replies_in(adapter, OWNER_DM)[-1] == (
+        'From group "Build Crew": /new\n\nThat confirmation has expired. Send /new in the group again.'
+    )
+
+
+@pytest.mark.asyncio
+async def test_another_command_in_the_owners_chat_drops_the_pending_confirm(adapter, slash_confirm):
+    asks_confirm(adapter, slash_confirm, [])
+    await run(adapter, group(OWNER, text("/new")))
+
+    await run(adapter, owner_dm("/status"))
+    await run(adapter, owner_dm("/approve"))
+
+    assert slash_confirm.resolved == []
+    assert [i.text for i in adapter.host.dispatched[1:]] == ["/status", "/approve"]
+
+
+@pytest.mark.asyncio
+async def test_without_an_owner_chat_hermes_asks_in_the_group(adapter, slash_confirm, monkeypatch):
+    monkeypatch.setattr(adapter, "_owner_direct_chat_id", lambda: "")
+    results: list = []
+    asks_confirm(adapter, slash_confirm, results)
+
+    await run(adapter, group(OWNER, text("/new")))
+
+    assert results[0].success is False, "Hermes then sends its own text prompt"
+    assert adapter._owner_group_slash_confirms == {}

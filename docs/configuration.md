@@ -540,7 +540,12 @@ Group messages are gated twice:
    sends back for it (every message of it) to the owner's activation chat,
    each headed `From group "<group title>": <command>`, and reacts ✅ on the
    command in the group once the first one is delivered — whether the
-   command succeeded or not. Answered in the group as before: a non-owner's
+   command succeeded or not. Hermes' confirm before `/new`, `/reset`,
+   `/undo` … is part of that receipt: it is asked in the owner's direct chat,
+   and the owner's `/approve`, `/always` or `/cancel` there answers it for
+   the group's session (a code-bearing reply to a forwarded dangerous-command
+   approval keeps priority; another slash command drops the pending confirm).
+   Answered in the group as before: a non-owner's
    command (`group_command_mode` `all`), a confirm/approval reply
    (`/approve`, `/deny`, `/cancel` …), a command that runs an agent turn
    (`/plan`, `/learn`, `/init`, `/blueprint`, `/btw`, `/background`,

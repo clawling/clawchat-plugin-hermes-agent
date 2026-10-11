@@ -523,6 +523,17 @@ class _NonOwnerSlashConfirm:
     created_at: float
 
 
+@dataclass(frozen=True)
+class _OwnerGroupSlashConfirm:
+    """A confirm for the owner's group command, asked in the owner's direct chat."""
+
+    session_key: str
+    confirm_id: str
+    title: str
+    created_at: float
+    receipt: GroupCommandReceipt
+
+
 # Sent instead of Hermes' dangerous-command approval prompt when that prompt
 # would land in a non-owner's direct chat: they cannot approve it. The plugin
 # denies the approval at once, so this is the note they normally get.
@@ -1079,6 +1090,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._direct_chat_peers: dict[str, str] = {}
         # Direct chat -> the slash-confirm Hermes asked a NON-owner to answer.
         self._non_owner_slash_confirms: dict[str, _NonOwnerSlashConfirm] = {}
+        # Keyed by the owner's direct chat id.
+        self._owner_group_slash_confirms: dict[str, _OwnerGroupSlashConfirm] = {}
         # Non-owner direct chat -> session key of the dangerous-command
         # approval Hermes last asked there (old-host fallback only).
         self._direct_exec_approval_sessions: dict[str, str] = {}
@@ -3482,6 +3495,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             return
         if await self._handle_owner_forwarded_approval(inbound):
             return
+        if await self._answer_owner_group_slash_confirm(inbound):
+            return
         if await self._answer_non_owner_slash_confirm(inbound):
             return
         if not self._direct_command_allowed(inbound):
@@ -3666,7 +3681,9 @@ class ClawChatAdapter(BasePlatformAdapter):
 
         For the owner and for groups this returns "not supported", so Hermes
         sends its own text prompt and handles ``/approve`` / ``/always`` /
-        ``/cancel`` exactly as before.
+        ``/cancel`` exactly as before — except for the owner's own command in
+        a group, whose confirm is asked in the owner's direct chat with the
+        rest of its receipt (``_ask_owner_group_slash_confirm``).
 
         In a direct chat with anyone else the plugin renders the prompt itself
         and later resolves it itself (``_answer_non_owner_slash_confirm``), the
@@ -3675,6 +3692,11 @@ class ClawChatAdapter(BasePlatformAdapter):
         rule that ``/approve`` goes to a blocking dangerous-command approval in
         the same session before the confirm.
         """
+        receipt = active_receipt(chat_id)
+        if receipt is not None:
+            return await self._ask_owner_group_slash_confirm(
+                receipt, title, message, session_key, confirm_id
+            )
         if not self._is_non_owner_direct_chat(chat_id, metadata, kwargs):
             return SendResult(success=False, error="Not supported")
         pending = _NonOwnerSlashConfirm(
@@ -3698,6 +3720,106 @@ class ClawChatAdapter(BasePlatformAdapter):
             bool(getattr(result, "success", False)),
         )
         return result
+
+    async def _ask_owner_group_slash_confirm(
+        self,
+        receipt: GroupCommandReceipt,
+        title: str,
+        message: str,
+        session_key: str,
+        confirm_id: str,
+    ) -> SendResult:
+        """Ask the confirm for the owner's group command (``/new`` …) in the
+        owner's direct chat, where its result will go too.
+
+        Hermes' own prompt, unchanged, under the group/command header; the
+        owner answers there (``_answer_owner_group_slash_confirm``), "always"
+        included. If the direct chat cannot be reached, "not supported" lets
+        Hermes send its text prompt instead, which then lands in the group.
+        """
+        owner_chat_id = self._owner_direct_chat_id()
+        if not owner_chat_id:
+            return SendResult(success=False, error="Not supported")
+        pending = _OwnerGroupSlashConfirm(
+            session_key=str(session_key or ""),
+            confirm_id=str(confirm_id or ""),
+            title=str(title or "").strip() or receipt.command_text,
+            created_at=time.monotonic(),
+            receipt=receipt,
+        )
+        self._owner_group_slash_confirms[owner_chat_id] = pending
+        result = await self._send_group_command_receipt(
+            receipt, message, None, {}, MESSAGE_MODE_NORMAL
+        )
+        if result is None:
+            self._owner_group_slash_confirms.pop(owner_chat_id, None)
+            return SendResult(success=False, error="Not supported")
+        logger.info(
+            "clawchat slash confirm for owner group command asked in owner chat group=%s title=%s",
+            receipt.group_id,
+            pending.title,
+        )
+        return result
+
+    async def _answer_owner_group_slash_confirm(self, inbound: InboundMessage) -> bool:
+        """Consume the owner's direct-chat reply to a group command's confirm.
+
+        Resolved through ``tools.slash_confirm`` for the exact group session
+        and confirm id Hermes registered; the result goes back to the direct
+        chat under the same header. A different slash command from the owner
+        means they moved on: the pending confirm is dropped and the command
+        is handled normally.
+        """
+        pending = self._owner_group_slash_confirms.get(inbound.chat_id)
+        if pending is None or inbound.chat_type != "direct":
+            return False
+        if self._sender_relation(inbound.sender_id) != "owner":
+            return False
+        if time.monotonic() - pending.created_at > _SLASH_CONFIRM_TIMEOUT_SECONDS:
+            self._owner_group_slash_confirms.pop(inbound.chat_id, None)
+            return False
+        choice = _slash_confirm_choice(inbound.text)
+        if choice is None:
+            if _slash_command_name(inbound.text):
+                self._owner_group_slash_confirms.pop(inbound.chat_id, None)
+            return False
+        self._owner_group_slash_confirms.pop(inbound.chat_id, None)
+        header = pending.receipt.header()
+        try:
+            from tools import slash_confirm as slash_confirm_mod
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat slash confirm resolver unavailable", exc_info=True)
+            return True
+        entry = slash_confirm_mod.get_pending(pending.session_key)
+        if not entry or str(entry.get("confirm_id")) != pending.confirm_id:
+            await self.send(
+                inbound.chat_id,
+                f"{header}\n\nThat confirmation has expired. Send {pending.title} in the group again.",
+                metadata={"chat_type": "direct"},
+            )
+            return True
+        try:
+            result_text = await slash_confirm_mod.resolve(
+                pending.session_key, pending.confirm_id, choice
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "clawchat slash confirm resolve failed for owner group command group=%s",
+                pending.receipt.group_id,
+            )
+            return True
+        logger.info(
+            "clawchat slash confirm resolved for owner group command group=%s choice=%s",
+            pending.receipt.group_id,
+            choice,
+        )
+        if isinstance(result_text, str) and result_text.strip():
+            await self.send(
+                inbound.chat_id,
+                f"{header}\n\n{result_text.strip()}",
+                metadata={"chat_type": "direct"},
+            )
+        return True
 
     def _is_non_owner_direct_chat(
         self, chat_id: str, metadata: Any, kwargs: dict[str, Any]
