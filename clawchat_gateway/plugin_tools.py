@@ -1885,6 +1885,33 @@ def register_tools(ctx) -> None:
         "minLength": 1,
         "description": "Explicit group conversation id from clawchat_orchestrate_list_groups.",
     }
+    # Three working-group templates, verbatim from the app's orchestration
+    # skill (Team patterns); <...> are seats the orchestrator fills with the
+    # group's real members. The rules line is what keeps such a group from
+    # talking forever: plugin agents have no turn cap, the Stop line is their
+    # only limit.
+    team_patterns = (
+        "Team patterns: when the owner wants a working group (hub / executor / checker and the like), "
+        "pick one of the three below, fill each <seat> with the group's real members, and write it into this description once the owner agrees. "
+        "Seats and duties go only in the group description, never in a member's behavior (behavior follows an agent into every room). "
+        "Every pattern keeps these rules: exactly one seat replies to everything (replyMode all) and every other seat only when @-mentioned (replyMode mention), "
+        "both set with clawchat_orchestrate_set_group_agent_settings; "
+        "every hand-off is a real @-mention, never a typed \"@name\", which does not wake a plugin agent; "
+        "a checker or reviewer answers with the verdict alone (\"pass\" or numbered notes), never a \"received\" first; "
+        "and the Stop line stays, judgeable as written: it is the only limit plugin agents have.\n"
+        "1. Hub · executor · checker, for work with a quality bar (code, reports, plans): <hub> replyMode all; one to three executors and the checker replyMode mention.\n"
+        "Members: <hub> — splits the job, assigns each piece, sends each delivery to <checker>, reports to <owner>; <executor> — does the piece it was given; <checker> — checks a delivery against the brief and answers with the verdict alone: \"pass\" or numbered fixes, never the fix itself\n"
+        "Flow (each hand-off @-mentions the next seat): <owner> → <hub> → <executor> → <hub> → <checker> → <hub> → <owner>\n"
+        "Stop: <hub> reports to <owner> once every piece has passed; a piece that fails twice goes to <owner> as it stands\n"
+        "2. Writer · reviewer, for a text worth reading twice: <writer> replyMode all; <reviewer> replyMode mention.\n"
+        "Members: <writer> — drafts, revises, posts the final to <owner>; <reviewer> — reads each draft against the brief and answers with the verdict alone: \"pass\" or at most five numbered notes, never a rewrite\n"
+        "Flow (each hand-off @-mentions the next seat): <owner> → <writer> → <reviewer> → <writer>, at most two rounds of notes\n"
+        "Stop: on \"pass\" or after the second round, <writer> posts the final and any open notes to <owner>\n"
+        "3. Parallel research · synthesis, for a question worth several angles: <hub> replyMode all; two to four researchers replyMode mention.\n"
+        "Members: <hub> — gives each researcher one angle, waits for every answer, writes one synthesis for <owner>; <researcher> — answers its own angle once, with sources\n"
+        "Flow (each hand-off @-mentions the next seat): <owner> → <hub> → each <researcher> → <hub> → <owner>\n"
+        "Stop: each researcher delivers once and never answers another; the synthesis ends the run, and a second pass happens only when <hub> or <owner> asks\n"
+    )
     orchestration_specs = [
         ("clawchat_orchestrate_list_agents", "List The Owner's Agents",
          "List every agent the owner owns, including this one (flagged is_self). "
@@ -1930,7 +1957,8 @@ def register_tools(ctx) -> None:
          "The group title cannot be changed here. "
          "A room where agents should chime in freely, a stage, says so in its description, and its own rules go nowhere else: behavior follows an agent into every room. "
          "A stage also needs one room-independent line in the behavior of each member the ClawChat desktop app does not run on the owner's computer, appended verbatim with clawchat_orchestrate_set_agent_behavior: "
-         "\"In a group whose description makes it a stage, you are one of the players: pick up the other characters' lines without waiting to be called.\"",
+         "\"In a group whose description makes it a stage, you are one of the players: pick up the other characters' lines without waiting to be called.\"\n"
+         + team_patterns,
          {"conversationId": _cid_prop,
           "description": {"type": "string", "maxLength": 3000,
                           "description": "The complete new group system prompt. Replaces the whole field."}},

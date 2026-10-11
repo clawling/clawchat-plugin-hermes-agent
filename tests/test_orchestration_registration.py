@@ -97,6 +97,45 @@ class OrchestrationRegistrationTest(unittest.TestCase):
             self.assertIn("stage sentence", first_sentence, name)
 
 
+    def test_group_prompt_carries_the_three_team_patterns(self):
+        # Verbatim from the app's orchestration skill (Team patterns); the
+        # app side checks the plugin text against its own copy, so a reworded
+        # template line would teach a different group.
+        group = self.ctx.tools["clawchat_orchestrate_set_group_prompt"]["schema"]["description"]
+        lines = [
+            'Members: <hub> — splits the job, assigns each piece, sends each delivery to <checker>, reports to <owner>; <executor> — does the piece it was given; <checker> — checks a delivery against the brief and answers with the verdict alone: "pass" or numbered fixes, never the fix itself',
+            "Flow (each hand-off @-mentions the next seat): <owner> → <hub> → <executor> → <hub> → <checker> → <hub> → <owner>",
+            "Stop: <hub> reports to <owner> once every piece has passed; a piece that fails twice goes to <owner> as it stands",
+            'Members: <writer> — drafts, revises, posts the final to <owner>; <reviewer> — reads each draft against the brief and answers with the verdict alone: "pass" or at most five numbered notes, never a rewrite',
+            "Flow (each hand-off @-mentions the next seat): <owner> → <writer> → <reviewer> → <writer>, at most two rounds of notes",
+            'Stop: on "pass" or after the second round, <writer> posts the final and any open notes to <owner>',
+            "Members: <hub> — gives each researcher one angle, waits for every answer, writes one synthesis for <owner>; <researcher> — answers its own angle once, with sources",
+            "Flow (each hand-off @-mentions the next seat): <owner> → <hub> → each <researcher> → <hub> → <owner>",
+            "Stop: each researcher delivers once and never answers another; the synthesis ends the run, and a second pass happens only when <hub> or <owner> asks",
+        ]
+        description_lines = group.split("\n")
+        for line in lines:
+            self.assertIn(line, description_lines)
+
+    def test_team_patterns_keep_the_four_rules(self):
+        # The four rules are the part that stops a working group from talking
+        # forever; a shorter wording may not drop any of them.
+        group = self.ctx.tools["clawchat_orchestrate_set_group_prompt"]["schema"]["description"]
+        # 1. one seat replies to everything, the rest only on a mention, set
+        #    with the hard control
+        self.assertIn("exactly one seat replies to everything (replyMode all)", group)
+        self.assertIn("every other seat only when @-mentioned (replyMode mention)", group)
+        self.assertIn("clawchat_orchestrate_set_group_agent_settings", group)
+        # 2. real @-mentions, not typed ones
+        self.assertIn('every hand-off is a real @-mention, never a typed "@name"', group)
+        # 3. verdict alone, no "received" first
+        self.assertIn('never a "received" first', group)
+        # 4. a judgeable Stop line
+        self.assertIn("the Stop line stays", group)
+        # Seats live in the group description, not in a member's behavior.
+        self.assertIn("never in a member's behavior", group)
+        self.assertIn("once the owner agrees", group)
+
 class _KeySpyDict(dict):
     """A dict that records every key looked up via `.get()`.
 

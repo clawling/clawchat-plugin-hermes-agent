@@ -297,6 +297,20 @@ be called.* The two tool descriptions above carry the same guidance, and
 both open with a one-sentence pointer to it, because tool-search hosts show
 only the first ~60 characters of a description.
 
+**Team patterns.** `clawchat_orchestrate_set_group_prompt` also carries three
+templates for a working group, the same text as the app's orchestration
+skill: hub · executor · checker, writer · reviewer, and parallel research ·
+synthesis. Each has a `Members` / `Flow` / `Stop` block whose `<seat>` slots
+the orchestrator fills with the group's real members, and writes into the
+group description once the owner agrees — never into a member's behavior.
+Four rules come with every template, because they are what stops a group of
+plugin agents from talking forever: one seat replies to everything
+(`replyMode` `all`) and every other seat only when @-mentioned (`mention`),
+set with `clawchat_orchestrate_set_group_agent_settings`; every hand-off is
+a real @-mention, not a typed `@name`; a checker or reviewer answers with the
+verdict alone, with no "received" first; and the `Stop` line stays, since
+plugin agents have no turn cap of their own.
+
 ## Apps and liveware
 
 | Tool                                | What it does                                                                 |
