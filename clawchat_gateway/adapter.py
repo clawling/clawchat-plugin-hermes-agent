@@ -3535,13 +3535,15 @@ class ClawChatAdapter(BasePlatformAdapter):
         name = _slash_command_name(command_text)
         if not name or name in AGENT_TURN_COMMANDS or name in HERMES_CONFIRM_SLASH_COMMANDS:
             return None
-        title = (self._read_memory_metadata("group", inbound.chat_id).get("group_title") or "").strip()
         return GroupCommandReceipt(
             group_id=inbound.chat_id,
-            group_title=title,
+            group_title=self._cached_group_title(inbound.chat_id),
             command_message_id=self._inbound_trigger_id(inbound.raw_message),
             command_text=command_text.strip(),
         )
+
+    def _cached_group_title(self, group_id: str) -> str:
+        return (self._read_memory_metadata("group", group_id).get("group_title") or "").strip()
 
     async def _send_group_command_receipt(
         self,
@@ -3568,6 +3570,10 @@ class ClawChatAdapter(BasePlatformAdapter):
                 receipt.command_text,
             )
             return None
+        if not receipt.group_title:
+            # A group's first message can arrive before its title is cached;
+            # dispatch fetches the group's metadata, so by the reply it is.
+            receipt.group_title = self._cached_group_title(receipt.group_id)
         dm_metadata = dict(metadata) if isinstance(metadata, dict) else {}
         dm_metadata["chat_type"] = "direct"
         dm_kwargs = {k: v for k, v in kwargs.items() if k not in ("chat_type", "metadata")}

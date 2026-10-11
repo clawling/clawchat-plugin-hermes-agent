@@ -260,6 +260,25 @@ async def test_a_group_without_a_cached_title_is_named_by_id(adapter, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_a_new_groups_title_cached_during_dispatch_names_the_group(adapter, monkeypatch):
+    # The first message of a new group arrives before its title is cached;
+    # dispatch fetches the group's metadata, so the reply can name it.
+    metadata: dict = {}
+    monkeypatch.setattr(adapter, "_read_memory_metadata", lambda t, i: dict(metadata.get((t, i), {})))
+    host_handle = adapter.host.handle_inbound
+
+    async def fetch_then_handle(inbound):
+        metadata[("group", GROUP)] = {"group_title": "Fresh Group"}
+        await host_handle(inbound)
+
+    adapter._handle_inbound = fetch_then_handle
+
+    await run(adapter, group(OWNER, text("/model")))
+
+    assert replies_in(adapter, OWNER_DM) == ['From group "Fresh Group": /model\n\ndone']
+
+
+@pytest.mark.asyncio
 async def test_a_failed_command_still_gets_the_check(adapter):
     adapter.host.replies = ["Unknown model: zzz"]
 
