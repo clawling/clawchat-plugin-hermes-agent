@@ -535,6 +535,18 @@ Group messages are gated twice:
    mention fragments are stripped and Hermes receives the bare `/new`. It only
    counts as this agent's command when those mentions include this agent or
    `"all"` — `@other-agent /new` is the other agent's.
+   **The owner's command is answered in the owner's direct chat.** Hermes
+   still runs it on the group's session; the plugin delivers what Hermes
+   sends back for it (every message of it) to the owner's activation chat,
+   each headed `From group "<group title>": <command>`, and reacts ✅ on the
+   command in the group once the first one is delivered — whether the
+   command succeeded or not. Answered in the group as before: a non-owner's
+   command (`group_command_mode` `all`), a confirm/approval reply
+   (`/approve`, `/deny`, `/cancel` …), a command that runs an agent turn
+   (`/plan`, `/learn`, `/init`, `/blueprint`, `/btw`, `/background`,
+   `/queue`, `/steer`, `/moa`, `/goal`), and — with a warning in the log — any
+   reply that cannot reach the owner's direct chat (no activation chat stored,
+   or the send failed).
 2. **When the batch flushes.** Non-mention messages are coalesced per group:
    the batch runs after `batch_delay_seconds` of quiet, or after
    `max(30 s, batch_delay_seconds)` at most; a message that mentions the agent

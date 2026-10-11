@@ -12,6 +12,7 @@ import time
 
 from clawchat_gateway.no_reply import (
     contains_no_reply_token,
+    is_host_silence_marker,
     is_no_reply_token_prefix,
     strip_no_reply_tokens,
 )
@@ -143,6 +144,14 @@ from clawchat_gateway.storage import (
     get_clawchat_store,
     is_default_profile,
     make_owner_profile_persister,
+)
+from clawchat_gateway.group_command_receipt import (
+    AGENT_TURN_COMMANDS,
+    RECEIPT_REACTION,
+    GroupCommandReceipt,
+    active_receipt,
+    current_receipt,
+    group_command_receipt,
 )
 from clawchat_gateway.terminal_send import (
     clear_clawchat_mention_sender,
@@ -3437,7 +3446,12 @@ class ClawChatAdapter(BasePlatformAdapter):
                     command_mode,
                     inbound.text[:80],
                 )
-                await self._handle_inbound(inbound)
+                receipt = self._owner_group_command_receipt(inbound, command_text)
+                if receipt is None:
+                    await self._handle_inbound(inbound)
+                    return
+                with group_command_receipt(receipt):
+                    await self._handle_inbound(inbound)
                 return
             if _eff.reply_mode == "mention" and not inbound.was_mentioned:
                 logger.info(
@@ -3488,6 +3502,116 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
             return
         await self._handle_inbound(inbound)
+
+    def _owner_group_command_receipt(
+        self, inbound: InboundMessage, command_text: str
+    ) -> GroupCommandReceipt | None:
+        """The receipt marker for the owner's group command, or ``None``.
+
+        Only the owner's commands: anyone else's (``group_command_mode=all``)
+        is answered in the group as before, since the agent may have no direct
+        chat with them. Left in the group too: a command that runs an agent
+        turn (its output is work in the group), and a confirm/approval reply
+        (``/approve``, ``/deny`` …), which keeps its own routing.
+        """
+        if inbound.sender_relation != "owner":
+            return None
+        name = _slash_command_name(command_text)
+        if not name or name in AGENT_TURN_COMMANDS or name in HERMES_CONFIRM_SLASH_COMMANDS:
+            return None
+        title = (self._read_memory_metadata("group", inbound.chat_id).get("group_title") or "").strip()
+        return GroupCommandReceipt(
+            group_id=inbound.chat_id,
+            group_title=title,
+            command_message_id=self._inbound_trigger_id(inbound.raw_message),
+            command_text=command_text.strip(),
+        )
+
+    async def _send_group_command_receipt(
+        self,
+        receipt: GroupCommandReceipt,
+        content: str,
+        metadata: Any,
+        kwargs: dict[str, Any],
+        message_mode: str,
+    ) -> SendResult | None:
+        """Deliver a reply to the owner's group command in the owner's direct chat.
+
+        Headed with the group and the command, so a "new session started" read
+        in the direct chat is not taken for that chat's own session. After the
+        first delivery the command message in the group gets a ✅. ``None``
+        when it cannot be delivered there: the caller then answers in the
+        group as before — better a noisy group than no answer at all.
+        """
+        owner_chat_id = self._owner_direct_chat_id()
+        if not owner_chat_id:
+            logger.warning(
+                "clawchat group command receipt kept in group reason=missing_owner_direct_chat_id "
+                "group=%s command=%r",
+                receipt.group_id,
+                receipt.command_text,
+            )
+            return None
+        dm_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        dm_metadata["chat_type"] = "direct"
+        dm_kwargs = {k: v for k, v in kwargs.items() if k not in ("chat_type", "metadata")}
+        body = (content or "").strip()
+        text = f"{receipt.header()}\n\n{body}" if body else receipt.header()
+        try:
+            result = await self.send(
+                owner_chat_id,
+                text,
+                metadata=dm_metadata,
+                _clawchat_message_mode=message_mode,
+                **dm_kwargs,
+            )
+        except Exception:  # noqa: BLE001 — fall back to the group
+            logger.warning(
+                "clawchat group command receipt to owner failed group=%s owner_chat=%s",
+                receipt.group_id,
+                owner_chat_id,
+                exc_info=True,
+            )
+            return None
+        if not getattr(result, "success", False):
+            logger.warning(
+                "clawchat group command receipt kept in group reason=owner_send_failed "
+                "group=%s owner_chat=%s error=%s",
+                receipt.group_id,
+                owner_chat_id,
+                getattr(result, "error", None),
+            )
+            return None
+        logger.info(
+            "clawchat group command receipt sent to owner group=%s owner_chat=%s command=%r",
+            receipt.group_id,
+            owner_chat_id,
+            receipt.command_text,
+        )
+        await self._react_group_command_receipt(receipt)
+        return result
+
+    async def _react_group_command_receipt(self, receipt: GroupCommandReceipt) -> None:
+        """✅ on the owner's command in the group, once: "the result is in your
+        direct chat". Also when the command failed — success or failure is
+        written in the direct chat."""
+        if receipt.reacted or not receipt.command_message_id:
+            return
+        receipt.reacted = True
+        frame = build_message_reaction_event(
+            chat_id=receipt.group_id,
+            chat_type="group",
+            target_message_id=receipt.command_message_id,
+            emoji=RECEIPT_REACTION,
+            removed=False,
+        )
+        sent = await self._connection.send_frame(frame, wait_for_ack=False)
+        if not sent:
+            logger.warning(
+                "clawchat group command receipt reaction dropped group=%s target=%s",
+                receipt.group_id,
+                receipt.command_message_id,
+            )
 
     def _group_command_text(self, inbound: InboundMessage) -> str | None:
         """The Hermes slash command a group message carries for THIS agent.
@@ -4440,6 +4564,11 @@ class ClawChatAdapter(BasePlatformAdapter):
         return trigger
 
     async def on_processing_complete(self, event: Any, outcome: Any) -> None:
+        receipt = current_receipt()
+        if receipt is not None and self._turn_trigger_message_id(event) == receipt.command_message_id:
+            # The command's own processing is over; a queued follow-up the
+            # same host task drains next is not its reply.
+            receipt.closed = True
         try:
             self._note_turn_finished(event)
         except Exception:  # noqa: BLE001
@@ -5910,6 +6039,18 @@ class ClawChatAdapter(BasePlatformAdapter):
             or self._is_immediate_media_send(metadata, kwargs)
             or self._is_send_message_tool_call()
         )
+        receipt = active_receipt(chat_id)
+        if (
+            receipt is not None
+            and not is_explicit_send
+            and not self._is_stream_intermediate_output(content or "")
+            and not is_host_silence_marker(content or "")
+        ):
+            rerouted = await self._send_group_command_receipt(
+                receipt, content, metadata, kwargs, message_mode
+            )
+            if rerouted is not None:
+                return rerouted
         if not is_explicit_send and self._consume_terminal_send(chat_id, phase="send"):
             return SendResult(success=True)
         if self._should_suppress_runtime_status_message(content or ""):

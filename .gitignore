@@ -165,6 +165,12 @@ tmp
 #     (the app's whole Spark id list), and a lone [claw:spark.<id>] reply
 #     reaches the wire as exactly that one text fragment, group or direct,
 #     streamed or not: no prefix, no mention, no receipt appended.
+#   * group_command_receipt — the owner's group command (/new, @agent /new,
+#     /model …) is answered in the owner's direct chat, headed with the group
+#     and the command, and the group only gets a ✅ on the command; a
+#     non-owner's command, a muted group, approval replies, agent-turn
+#     commands and explicit sends keep their routing, and any failure to
+#     reach the owner's direct chat answers in the group as before.
 #   * message_target_check — an explicit react target / mention reply-to id
 #     is sent only if the ledger has that message in that chat (stored ids
 #     on the wire, shape check when the store cannot answer, index-backed
@@ -224,6 +230,7 @@ tests/*
 !tests/test_non_owner_residual.py
 !tests/test_non_owner_recall_and_connections.py
 !tests/test_sticker_hint.py
+!tests/test_group_command_receipt.py
 deploy/
 scripts/
 docs/superpowers/
