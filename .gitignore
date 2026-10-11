@@ -154,6 +154,10 @@ tmp
 #     other host tools (approve: every call to the human gate), owner.md takes
 #     no write at all (append included), a host without the override gets a
 #     channel-prompt line, and one without register_hook takes no such turn.
+#   * non_owner_recall_and_connections — the same turns lose session_search
+#     (it reads every conversation in the host's session store, the owner's
+#     direct chat included) and connections (manage_connections and the
+#     owner's hosted connector tools, connectors__*), in both layers.
 #   * message_target_check — an explicit react target / mention reply-to id
 #     is sent only if the ledger has that message in that chat (stored ids
 #     on the wire, shape check when the store cannot answer, index-backed
@@ -211,6 +215,7 @@ tests/*
 !tests/test_owner_dm_without_chat_type.py
 !tests/test_message_target_check.py
 !tests/test_non_owner_residual.py
+!tests/test_non_owner_recall_and_connections.py
 deploy/
 scripts/
 docs/superpowers/

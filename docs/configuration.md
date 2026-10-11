@@ -745,13 +745,26 @@ and **every group turn, whoever spoke** — loses these host toolsets:
 `patch`, `search_files`), `code_execution` (`execute_code`), `delegation`
 (`delegate_task`), `cronjob` (`cronjob_manage`), `computer_use` and
 `browser` (every `browser_*` tool: it opens `file://` URLs and runs page
-scripts and raw CDP, so it reads local files too), Hermes' `memory` tool, and
-every **MCP tool** — the MCP servers the owner configured for ClawChat (a
-filesystem or database server reads the same files the `file` tools do).
+scripts and raw CDP, so it reads local files too), Hermes' `memory` tool,
+`session_search`, `connections` (`manage_connections` and every hosted
+connector tool `connectors__<app>__<tool>`), and every **MCP tool** — the MCP
+servers the owner configured for ClawChat (a filesystem or database server
+reads the same files the `file` tools do).
 Group turns are narrowed as a whole because a group is one shared session:
 switching its toolset per speaker would rebuild the agent each time the
 owner and someone else alternate. The plugin's own ClawChat tools, web
 search/extract, skills and the rest are unchanged, and so is the owner's direct chat.
+
+`session_search` goes because it reads every conversation in Hermes' session
+store — the owner's direct chat, other friends' chats, other groups, other
+platforms, and with its `profile` argument other profiles' stores — and has no
+way to stay inside the current chat. Recalling what a person said before still
+works through their ClawChat note (`users/<usr_id>.md`, the group's note).
+`connections` (Hermes 0.21.3+) goes because on a messaging platform
+`manage_connections` installs, enables or authorizes MCP servers in the owner's
+config without a confirmation card, and while it is in a turn the owner's
+connected hosted accounts (mail, calendars, issue trackers, through
+`tool_search` / `tool_call`) are callable there.
 
 `memory` goes because what it writes to `MEMORY.md` / `USER.md` is in the
 system prompt of every later conversation, the owner's direct chat included
@@ -786,7 +799,9 @@ Two layers (`clawchat_gateway/host_tools_guard.py`):
 - a `pre_tool_call` hook that blocks any of those tools still reaching
   dispatch in such a turn. MCP tools are recognised by their host toolset
   (`mcp-<server>`), else by the `mcp_` name prefix (`mcp_<server>_<tool>`
-  before Hermes 0.18.1, `mcp__<server>__<tool>` since).
+  before Hermes 0.18.1, `mcp__<server>__<tool>` since); hosted connector tools
+  by their `connectors__` prefix (the `tool_call` bridge hands the hook the
+  underlying tool's name).
 
 `no_mcp` drops **every** MCP server from such a turn, including the
 "portable" MCP servers other Hermes plugins bring: they are configured by the

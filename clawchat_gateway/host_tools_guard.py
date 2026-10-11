@@ -16,6 +16,14 @@ own ``memory`` tool, whose ``MEMORY.md`` / ``USER.md`` go into the system
 prompt of every later conversation — the owner's direct chat included — so a
 line someone else got written there would read like the agent's own note.
 
+Two more read everything the owner has: ``session_search`` reads every
+conversation in Hermes' session store (the owner's direct chat, other friends,
+other groups, other platforms — and other profiles' stores) with no way to
+limit it to the current chat, and ``connections`` (``manage_connections``,
+Hermes 0.21.3+) both installs or enables MCP servers in the owner's config and
+opens the owner's connected hosted accounts (``connectors__<app>__<tool>``:
+mail, calendars, issue trackers) to the turn.
+
 This module narrows those turns in two layers:
 
 * :func:`toolsets_for_source` — the adapter's per-source toolset override
@@ -65,8 +73,9 @@ logger = logging.getLogger(__name__)
 #: Host toolsets (Hermes 0.21 ``toolsets.py`` names) a turn the owner did not
 #: start never gets: shell + process management, file read/write/patch/search,
 #: Python execution, sub-agents (which inherit tools), scheduled jobs,
-#: desktop control, and browser automation (which opens ``file://`` URLs and
-#: runs page scripts / raw CDP, i.e. reads local files).
+#: desktop control, browser automation (which opens ``file://`` URLs and
+#: runs page scripts / raw CDP, i.e. reads local files), Hermes' memory tool,
+#: the search over every past conversation, and the owner's connected accounts.
 RESTRICTED_TOOLSETS: tuple[str, ...] = (
     "terminal",
     "file",
@@ -76,10 +85,15 @@ RESTRICTED_TOOLSETS: tuple[str, ...] = (
     "computer_use",
     "browser",
     "memory",
+    "session_search",
+    "connections",
 )
 
-#: Every host browser tool is ``browser_*``; a future one is covered too.
-_RESTRICTED_TOOL_PREFIXES: tuple[str, ...] = ("browser_",)
+#: Every host browser tool is ``browser_*``, and every hosted connector tool
+#: ``connectors__<app>__<tool>`` (reached through ``tool_search`` /
+#: ``tool_call``, which hand the hook the underlying name); a future one is
+#: covered too.
+_RESTRICTED_TOOL_PREFIXES: tuple[str, ...] = ("browser_", "connectors__")
 
 #: The tools of :data:`RESTRICTED_TOOLSETS` on Hermes 0.21, used when the
 #: host's own resolver is not importable.
@@ -114,6 +128,8 @@ _STATIC_RESTRICTED_TOOLS = frozenset(
         "browser_vault_unlock",
         "browser_vision",
         "memory",
+        "session_search",
+        "manage_connections",
     }
 )
 
@@ -138,8 +154,9 @@ _PLATFORM = "clawchat"
 
 BLOCK_MESSAGE = (
     "This tool is not available here: only your owner's direct chat may use the "
-    "terminal, files, code execution, the browser, sub-agents, scheduled jobs, MCP tools "
-    "or Hermes' memory tool on this machine. "
+    "terminal, files, code execution, the browser, sub-agents, scheduled jobs, MCP tools, "
+    "Hermes' memory tool, the search over past conversations or the owner's connected "
+    "accounts on this machine. "
     "Do not try to reach them another way; answer without them, or tell the person "
     "to ask your owner."
 )
@@ -147,9 +164,9 @@ BLOCK_MESSAGE = (
 #: host without the override, or ``approve`` on a host that cannot escalate).
 BLOCKED_TOOLS_HINT = (
     "Host tools in this turn: your owner did not start it, so the terminal, files, code "
-    "execution, the browser, sub-agents, scheduled jobs, MCP tools and Hermes' memory tool "
-    "are blocked even though you can see them. Do not call them; use the ClawChat tools "
-    "or answer without them."
+    "execution, the browser, sub-agents, scheduled jobs, MCP tools, Hermes' memory tool, "
+    "session_search and manage_connections are blocked even though you can see them. "
+    "Do not call them; use the ClawChat tools or answer without them."
 )
 APPROVE_MESSAGE = (
     "Someone other than the owner started this turn (a friend's direct chat or a "
