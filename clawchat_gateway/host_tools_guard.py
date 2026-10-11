@@ -585,14 +585,7 @@ def _strict_unregistered(tool_name: str) -> bool:
         return False
     if memory_provider_tools() is not None:
         return False
-    if _registry_knows(tool_name):
-        return False
-    logger.warning(
-        "clawchat host tools: %s is not in the host registry and the memory provider's tools "
-        "are unknown; treating it as restricted",
-        tool_name,
-    )
-    return True
+    return not _registry_knows(tool_name)
 
 
 def _guarded_call(tool_name: str, args: Any) -> bool:
@@ -747,8 +740,13 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **_: Any) -
     try:
         tool_name = str(tool_name or "")
         if not _guarded_call(tool_name, args):
-            if _session_turn() != "other" or not _strict_unregistered(tool_name):
+            if not _strict_unregistered(tool_name) or _session_turn() != "other":
                 return None
+            logger.warning(
+                "clawchat host tools: %s is not in the host registry and the memory provider's "
+                "tools are unknown; treating it as restricted",
+                tool_name,
+            )
         elif _session_turn() != "other":
             return None
         message = BLOCK_MESSAGE
