@@ -11,9 +11,11 @@ The reply is recognised by turn, not by time: the adapter sets a context
 variable around handing the command to Hermes. Hermes runs the command in a
 task it creates from that call (or inline, when the session is busy), and a
 task copies the caller's context, so every send the command makes carries the
-marker. The marker is closed when Hermes finishes processing that event, so
-a queued follow-up that the same task drains afterwards is not taken for the
-command's reply.
+marker. Any other event Hermes starts processing from a context that copied
+the marker (a queued follow-up drained after a busy-session command, the
+sediment turn before ``/new``) drops it for its own task; and the marker is
+closed when the command's own processing completes, unless it failed — the
+error notice Hermes sends next is the command's reply too.
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ AGENT_TURN_COMMANDS = frozenset(
         "steer",
         "moa",
         "goal",
+        "retry",
     }
 )
 
@@ -83,3 +86,9 @@ def active_receipt(chat_id: str) -> GroupCommandReceipt | None:
 
 def current_receipt() -> GroupCommandReceipt | None:
     return _receipt.get()
+
+
+def detach_receipt() -> None:
+    """Drop the marker for the current task's context only: a task copies its
+    creator's context, so this never reaches the command's own task."""
+    _receipt.set(None)

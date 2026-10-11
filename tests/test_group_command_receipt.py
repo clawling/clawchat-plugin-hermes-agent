@@ -302,14 +302,14 @@ async def test_approval_replies_keep_their_routing(adapter, body):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("body", ["/plan ship it", "/btw what time is it", "/goal finish the deck"])
+@pytest.mark.parametrize("body", ["/plan ship it", "/btw what time is it", "/goal finish the deck", "/retry"])
 async def test_commands_that_run_an_agent_turn_answer_in_the_group(adapter, monkeypatch, body):
     # Hermes' own command table (absent here) knows these.
     known = adapter_mod._known_hermes_slash_command_name
     monkeypatch.setattr(
         adapter_mod,
         "_known_hermes_slash_command_name",
-        lambda name: name in {"plan", "btw", "goal"} or known(name),
+        lambda name: name in {"plan", "btw", "goal", "retry"} or known(name),
     )
 
     await run(adapter, group(OWNER, text(body)))
@@ -472,7 +472,7 @@ async def test_the_new_confirm_is_asked_and_answered_in_the_owners_chat(adapter,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("reply", "choice"), [("/always", "always"), ("/cancel", "cancel"), ("approve", "once")])
+@pytest.mark.parametrize(("reply", "choice"), [("/always", "always"), ("/cancel", "cancel"), ("/yes", "once")])
 async def test_the_owner_may_answer_with_any_choice(adapter, slash_confirm, reply, choice):
     asks_confirm(adapter, slash_confirm, [])
     await run(adapter, group(OWNER, text("/new")))
@@ -518,3 +518,85 @@ async def test_without_an_owner_chat_hermes_asks_in_the_group(adapter, slash_con
 
     assert results[0].success is False, "Hermes then sends its own text prompt"
     assert adapter._owner_group_slash_confirms == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reply", ["approve", "no", "/approve AB12CD"])
+async def test_plain_words_and_code_replies_are_not_taken_for_the_group_confirm(adapter, slash_confirm, reply):
+    # Plain words stay conversation with the agent; a code-bearing reply
+    # answers a forwarded dangerous-command approval.
+    asks_confirm(adapter, slash_confirm, [])
+    await run(adapter, group(OWNER, text("/new")))
+
+    await run(adapter, owner_dm(reply))
+
+    assert slash_confirm.resolved == []
+    assert [i.text for i in adapter.host.dispatched[1:]] == [reply]
+
+
+@pytest.mark.asyncio
+async def test_a_blocking_approval_in_the_owners_chat_answers_first(adapter, slash_confirm, monkeypatch):
+    asks_confirm(adapter, slash_confirm, [])
+    await run(adapter, group(OWNER, text("/new")))
+    monkeypatch.setattr(adapter, "_direct_chat_approval_blocking", lambda chat_id: chat_id == OWNER_DM)
+
+    await run(adapter, owner_dm("/approve"))
+
+    assert slash_confirm.resolved == []
+    assert [i.text for i in adapter.host.dispatched[1:]] == ["/approve"]
+    assert OWNER_DM in adapter._owner_group_slash_confirms, "still answerable once that one is settled"
+
+
+@pytest.mark.asyncio
+async def test_a_follow_up_hermes_drains_from_an_inline_command_is_not_its_receipt(adapter):
+    # Busy session: Hermes answers a command inline, without processing hooks for
+    # it, and starts the queued message's turn from the same call — so that
+    # task copies the open marker. Its own processing start drops it.
+    async def busy_host(inbound):
+        adapter.host.dispatched.append(inbound)
+        await adapter.send(inbound.chat_id, "Compressed.")
+        queued = types.SimpleNamespace(
+            raw_message={"clawchat_raw": {"payload": {"message_id": "msg_queued"}}},
+            source=types.SimpleNamespace(chat_id=inbound.chat_id),
+        )
+
+        async def drained_turn():
+            await adapter.on_processing_start(queued)
+            await adapter.send(inbound.chat_id, "answer to Bob")
+            await adapter.send(inbound.chat_id, "and a second message")
+
+        adapter.host.tasks.append(asyncio.create_task(drained_turn()))
+
+    adapter._handle_inbound = busy_host
+
+    await run(adapter, group(OWNER, text("/compress")))
+
+    assert replies_in(adapter, OWNER_DM) == ['From group "Build Crew": /compress\n\nCompressed.']
+    assert replies_in(adapter, GROUP) == ["answer to Bob", "and a second message"]
+
+
+@pytest.mark.asyncio
+async def test_the_error_notice_of_a_failed_command_is_its_receipt_too(adapter):
+    async def failing_host(inbound):
+        adapter.host.dispatched.append(inbound)
+        event = types.SimpleNamespace(
+            raw_message={"clawchat_raw": inbound.raw_message},
+            source=types.SimpleNamespace(chat_id=inbound.chat_id),
+        )
+
+        async def run_command():
+            await adapter.on_processing_start(event)
+            await adapter.on_processing_complete(event, types.SimpleNamespace(name="FAILURE"))
+            await adapter.send(inbound.chat_id, "Sorry, something went wrong.")
+
+        adapter.host.tasks.append(asyncio.create_task(run_command()))
+
+    adapter._handle_inbound = failing_host
+
+    command_id = await run(adapter, group(OWNER, text("/compress")))
+
+    assert replies_in(adapter, OWNER_DM) == [
+        'From group "Build Crew": /compress\n\nSorry, something went wrong.'
+    ]
+    assert replies_in(adapter, GROUP) == []
+    assert reactions(adapter) == [(GROUP, command_id, "✅")]

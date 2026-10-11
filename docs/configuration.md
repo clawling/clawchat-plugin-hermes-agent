@@ -542,14 +542,16 @@ Group messages are gated twice:
    command in the group once the first one is delivered — whether the
    command succeeded or not. Hermes' confirm before `/new`, `/reset`,
    `/undo` … is part of that receipt: it is asked in the owner's direct chat,
-   and the owner's `/approve`, `/always` or `/cancel` there answers it for
-   the group's session (a code-bearing reply to a forwarded dangerous-command
-   approval keeps priority; another slash command drops the pending confirm).
-   Answered in the group as before: a non-owner's
+   and the owner's bare `/approve`, `/always` or `/cancel` there answers it
+   for the group's session. Not taken for it: plain words (they stay
+   conversation), a code-bearing `/approve <code>` (a forwarded
+   dangerous-command approval), and any reply while a dangerous-command
+   approval blocks the direct chat's own session; another slash command
+   drops the pending confirm. Answered in the group as before: a non-owner's
    command (`group_command_mode` `all`), a confirm/approval reply
    (`/approve`, `/deny`, `/cancel` …), a command that runs an agent turn
    (`/plan`, `/learn`, `/init`, `/blueprint`, `/btw`, `/background`,
-   `/queue`, `/steer`, `/moa`, `/goal`), and — with a warning in the log — any
+   `/queue`, `/steer`, `/moa`, `/goal`, `/retry`), and — with a warning in the log — any
    reply that cannot reach the owner's direct chat (no activation chat stored,
    or the send failed).
 2. **When the batch flushes.** Non-mention messages are coalesced per group:

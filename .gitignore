@@ -171,6 +171,8 @@ tmp
 #     non-owner's command, a muted group, approval replies, agent-turn
 #     commands and explicit sends keep their routing, and any failure to
 #     reach the owner's direct chat answers in the group as before.
+#     A follow-up Hermes drains from the command's context is not its
+#     receipt; /new's confirm is asked and answered in the owner's chat.
 #   * message_target_check — an explicit react target / mention reply-to id
 #     is sent only if the ledger has that message in that chat (stored ids
 #     on the wire, shape check when the store cannot answer, index-backed

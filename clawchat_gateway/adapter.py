@@ -151,6 +151,7 @@ from clawchat_gateway.group_command_receipt import (
     GroupCommandReceipt,
     active_receipt,
     current_receipt,
+    detach_receipt,
     group_command_receipt,
 )
 from clawchat_gateway.terminal_send import (
@@ -3493,9 +3494,9 @@ class ClawChatAdapter(BasePlatformAdapter):
                 len(inbound.text),
             )
             return
-        if await self._handle_owner_forwarded_approval(inbound):
-            return
         if await self._answer_owner_group_slash_confirm(inbound):
+            return
+        if await self._handle_owner_forwarded_approval(inbound):
             return
         if await self._answer_non_owner_slash_confirm(inbound):
             return
@@ -3778,10 +3779,18 @@ class ClawChatAdapter(BasePlatformAdapter):
         if time.monotonic() - pending.created_at > _SLASH_CONFIRM_TIMEOUT_SECONDS:
             self._owner_group_slash_confirms.pop(inbound.chat_id, None)
             return False
-        choice = _slash_confirm_choice(inbound.text)
-        if choice is None:
-            if _slash_command_name(inbound.text):
+        text = (inbound.text or "").strip()
+        # Only the bare slash forms the prompt offers: plain words stay
+        # conversation, and a code-bearing reply answers a forwarded
+        # dangerous-command approval.
+        choice = _slash_confirm_choice(text) if len(text.split()) == 1 else None
+        if choice is None or not text.startswith("/"):
+            if _slash_command_name(text) and _slash_confirm_choice(text) is None:
                 self._owner_group_slash_confirms.pop(inbound.chat_id, None)
+            return False
+        if self._direct_chat_approval_blocking(inbound.chat_id):
+            # A dangerous-command approval blocks this direct chat's own
+            # session; Hermes reads /approve as that one first.
             return False
         self._owner_group_slash_confirms.pop(inbound.chat_id, None)
         header = pending.receipt.header()
@@ -4602,6 +4611,13 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._note_turn_started(event)
         except Exception:  # noqa: BLE001
             logger.debug("clawchat turn trigger bookkeeping failed", exc_info=True)
+        receipt = current_receipt()
+        if receipt is not None and self._turn_trigger_message_id(event) != receipt.command_message_id:
+            # Another event processed from a context that copied the owner's
+            # command marker (a follow-up drained after a busy-session
+            # command, the sediment turn before /new): its replies are not
+            # the command's.
+            detach_receipt()
 
     def _turn_trigger_message_id(self, event: Any) -> str:
         """The ClawChat message id that triggered a host turn, or "".
@@ -4687,9 +4703,13 @@ class ClawChatAdapter(BasePlatformAdapter):
 
     async def on_processing_complete(self, event: Any, outcome: Any) -> None:
         receipt = current_receipt()
-        if receipt is not None and self._turn_trigger_message_id(event) == receipt.command_message_id:
-            # The command's own processing is over; a queued follow-up the
-            # same host task drains next is not its reply.
+        if (
+            receipt is not None
+            and self._turn_trigger_message_id(event) == receipt.command_message_id
+            and getattr(outcome, "name", str(outcome)).upper() != "FAILURE"
+        ):
+            # The command's own processing is over. After a failure Hermes
+            # sends its error notice next: that one is still the receipt.
             receipt.closed = True
         try:
             self._note_turn_finished(event)
@@ -6161,18 +6181,6 @@ class ClawChatAdapter(BasePlatformAdapter):
             or self._is_immediate_media_send(metadata, kwargs)
             or self._is_send_message_tool_call()
         )
-        receipt = active_receipt(chat_id)
-        if (
-            receipt is not None
-            and not is_explicit_send
-            and not self._is_stream_intermediate_output(content or "")
-            and not is_host_silence_marker(content or "")
-        ):
-            rerouted = await self._send_group_command_receipt(
-                receipt, content, metadata, kwargs, message_mode
-            )
-            if rerouted is not None:
-                return rerouted
         if not is_explicit_send and self._consume_terminal_send(chat_id, phase="send"):
             return SendResult(success=True)
         if self._should_suppress_runtime_status_message(content or ""):
@@ -6185,6 +6193,18 @@ class ClawChatAdapter(BasePlatformAdapter):
             message_mode=message_mode, is_explicit_send=is_explicit_send,
         ):
             return SendResult(success=True)
+        receipt = active_receipt(chat_id)
+        if (
+            receipt is not None
+            and not is_explicit_send
+            and not self._is_stream_intermediate_output(content or "")
+            and not is_host_silence_marker(content or "")
+        ):
+            rerouted = await self._send_group_command_receipt(
+                receipt, content, metadata, kwargs, message_mode
+            )
+            if rerouted is not None:
+                return rerouted
         if is_group:
             owner_fragment = self._build_interaction_fragment(
                 content or "",
