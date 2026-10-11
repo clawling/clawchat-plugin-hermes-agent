@@ -803,18 +803,56 @@ Two layers (`clawchat_gateway/host_tools_guard.py`):
   by their `connectors__` prefix (the `tool_call` bridge hands the hook the
   underlying tool's name).
 
+The hook also limits a few tools those turns keep, by what a call asks for
+(these tools stay in the schema on every Hermes, so each such turn's channel
+prompt carries a line listing the limits):
+
+- `skill_manage` is blocked: a skill it creates or edits in place (bundled and
+  hub skills included, `scripts/` too) is in the owner's direct chat from then
+  on. `skills_list` and `skill_view` stay — the plugin's own `clawchat-*`
+  skills are read through them — except that when the owner turned on
+  `skills.inline_shell` (Hermes then runs a skill's ``!`cmd``` snippets when it
+  is viewed), `skill_view` opens only ClawChat's own skills (`clawchat:<name>`,
+  or the bare name of a bundled or updated one). An unreadable host config
+  counts as inline shell on;
+- `vision_analyze`, `video_analyze` and `image_generate` (`image_url`,
+  `reference_image_urls`) read any image on the machine on Hermes' default
+  local backend. They take only `http(s)://` and `data:` sources and files
+  inside the host's media caches (`$HERMES_HOME/cache`, `image_cache`, …) or
+  the plugin's inbound attachment directory (`media_download_dir`, default
+  `/tmp/clawchat-media`); paths are resolved (symlinks, `..`) first;
+- `text_to_speech` with an `output_path` is blocked: it writes anywhere outside
+  Hermes' protected paths. Without one the audio goes to Hermes' cache as usual.
+
+An external memory provider (`memory.provider`: honcho, mem0, supermemory, …)
+brings its own tools. Hermes gates them with the `memory` toolset only from
+0.18.1, and only layer 1 drops that toolset, so the hook blocks them by the
+names the provider itself lists (loaded once per process). If the provider
+cannot be loaded or lists no tools, a turn layer 1 does not narrow (no override,
+or `approve`) gets no tool the host's tool registry does not know, and the
+plugin logs it.
+
+Home Assistant (`homeassistant`, on by itself once `HASS_TOKEN` is set) and
+Spotify (`spotify`) stay available in these turns: a friend or a group can
+switch the owner's devices or play music on the owner's account. Owners who do
+not want that should disable those toolsets for ClawChat
+(`platform_toolsets.clawchat`).
+
 `no_mcp` drops **every** MCP server from such a turn, including the
 "portable" MCP servers other Hermes plugins bring: they are configured by the
 owner too. The owner's direct chat keeps all of them.
 
 What each Hermes version gets:
 
-| Hermes | Layer 1: tools left out of the schema | Layer 2: `pre_tool_call` block | `approve` |
-|---|---|---|---|
-| 0.21.0 and later | yes | yes | yes — every call goes to the human gate |
-| 0.20.1 – 0.20.x | yes | yes | no — blocked instead (the tools stay visible) |
-| 0.19.1 – 0.20.0 | no — the tools stay visible | yes | no — blocked instead |
-| 0.12.0 – 0.19.0 | no — the tools stay visible | yes (no chat type from the host: the owner's activation chat id decides, see above) | no — blocked instead |
+| Hermes | Layer 1: tools left out of the schema | Layer 2: `pre_tool_call` block | `approve` | Memory provider tools |
+|---|---|---|---|---|
+| 0.21.0 and later | yes | yes | yes — every call goes to the human gate | left out with `memory` (layer 1); under `approve` every call goes to the gate |
+| 0.20.1 – 0.20.x | yes | yes | no — blocked instead (the tools stay visible) | left out with `memory` (layer 1); under `approve` blocked by name |
+| 0.19.1 – 0.20.0 | no — the tools stay visible | yes | no — blocked instead | visible, blocked by name |
+| 0.12.0 – 0.19.0 | no — the tools stay visible | yes (no chat type from the host: the owner's activation chat id decides, see above) | no — blocked instead | visible, blocked by name |
+
+`connections` exists from Hermes 0.21.3. The argument limits above and the
+memory provider block are layer 2 only, on every version.
 
 Where the tools stay visible but every call is blocked, each such turn's
 ClawChat channel prompt says so, so the model does not spend rounds trying

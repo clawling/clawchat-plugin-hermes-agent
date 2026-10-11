@@ -82,6 +82,8 @@ def _host(monkeypatch):
     monkeypatch.setattr(guard, "_resolve_tools", lambda name: list(HOST_TOOLSETS.get(name, [])))
     monkeypatch.setattr(guard, "_config_extra", lambda: {})
     monkeypatch.setattr(guard, "_host_supports_approve", lambda: True)
+    # No external memory provider (``test_non_owner_recall_and_connections`` covers one).
+    monkeypatch.setattr(guard, "memory_provider_tools", lambda: frozenset())
 
 
 def _session(monkeypatch, *, chat_id, chat_type, user_id, platform="clawchat"):

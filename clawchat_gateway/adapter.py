@@ -2628,13 +2628,13 @@ class ClawChatAdapter(BasePlatformAdapter):
         """What a turn the owner did not start cannot do, for the model."""
         if self._is_owner_turn(inbound):
             return None
-        from clawchat_gateway.host_tools_guard import blocked_tools_hint
+        from clawchat_gateway.host_tools_guard import blocked_tools_hint, limited_tools_hint
         from clawchat_gateway.memory_scope import OWNER_NOTE_WRITE_HINT
 
         lines = [OWNER_NOTE_WRITE_HINT]
-        hint = blocked_tools_hint()
-        if hint:
-            lines.append(hint)
+        for hint in (blocked_tools_hint(), limited_tools_hint()):
+            if hint:
+                lines.append(hint)
         return "\n".join(lines)
 
     def toolsets_for_source(self, source):

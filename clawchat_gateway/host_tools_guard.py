@@ -47,6 +47,21 @@ This module narrows those turns in two layers:
   never answers — a friend's direct chat refuses it on the spot, a group's goes
   to the owner (``adapter.send_exec_approval``).
 
+  The hook also limits a few tools such turns keep, by what a call asks for
+  (:func:`_limited_call`): ``skill_manage`` (a skill it writes is in the
+  owner's direct chat from then on, scripts included); ``skill_view`` of
+  anything but ClawChat's own skills when the owner turned on
+  ``skills.inline_shell`` (the host then runs a skill's ``!`cmd``` snippets);
+  ``vision_analyze`` / ``video_analyze`` / ``image_generate`` on a local path
+  outside the host's media caches and the plugin's inbound attachments (they
+  read any image on the machine); ``text_to_speech`` with an ``output_path``
+  (it writes anywhere). And the tools of an external memory provider
+  (``memory.provider``: honcho, mem0, ...) — the host only gates them with the
+  ``memory`` toolset since 0.18.1, and only the override (0.20.1+) drops that
+  toolset. Their names come from the provider itself; when it cannot be
+  loaded, a turn the override does not narrow gets no tool the host registry
+  does not know (:func:`_strict_unregistered`).
+
 The host swallows exceptions from both places and then *opens up*: an override
 that raises falls back to the full platform toolset, and a hook that raises is
 ignored. Both therefore fail closed here.
@@ -58,14 +73,19 @@ Turn ownership comes from the same host session context the memory tools use
 Every host that can load the plugin (0.12.0+) has the hook; on one without the
 override the tools stay in the schema and the hook blocks them, and the
 adapter adds a line to such turns telling the model so
-(:func:`blocked_tools_hint`). Should a host ever load the plugin without
+(:func:`blocked_tools_hint`); the limits above get a line of their own
+(:func:`limited_tools_hint`). Should a host ever load the plugin without
 ``register_hook``, nothing would stand between those turns and the tools, so
 the adapter does not take them at all (:func:`refuses_non_owner_turns`).
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import re
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -168,10 +188,57 @@ BLOCKED_TOOLS_HINT = (
     "session_search and manage_connections are blocked even though you can see them. "
     "Do not call them; use the ClawChat tools or answer without them."
 )
+#: For every turn the owner did not start where the hook limits these calls.
+LIMITED_TOOLS_HINT = (
+    "Also limited in this turn: skill_manage is blocked; vision_analyze, video_analyze and "
+    "image_generate take images from the web or this conversation's attachments only, no "
+    "other file on this machine; text_to_speech takes no output_path."
+)
+#: Added to :data:`LIMITED_TOOLS_HINT` when the owner turned on inline shell in skills.
+LIMITED_SKILL_VIEW_HINT = "skill_view opens only ClawChat's own skills (clawchat:<name>)."
+LIMITED_BLOCK_MESSAGE = (
+    "This call is not available here: in a turn your owner did not start, skill_manage is "
+    "blocked, skill_view may open only ClawChat's own skills while inline shell is on, "
+    "images must come from the web or this conversation's attachments, and text_to_speech "
+    "takes no output_path. Do not try another way; answer without it, or tell the person "
+    "to ask your owner."
+)
 APPROVE_MESSAGE = (
     "Someone other than the owner started this turn (a friend's direct chat or a "
     "group); host tools need the owner's approval for every call."
 )
+
+
+#: A call the hook judges by its arguments: tool -> the arguments naming a
+#: local or remote media source (one value or a list).
+_MEDIA_SOURCE_ARGS: dict[str, tuple[str, ...]] = {
+    "vision_analyze": ("image_url",),
+    "video_analyze": ("video_url",),
+    "image_generate": ("image_url", "reference_image_urls"),
+}
+_SKILL_WRITE_TOOL = "skill_manage"
+_SKILL_VIEW_TOOL = "skill_view"
+_TTS_TOOL = "text_to_speech"
+_PLUGIN_SKILL_PREFIX = "clawchat:"
+_REMOTE_MEDIA_PREFIXES = ("http://", "https://", "data:")
+_FILE_URI = "file://"
+_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
+#: The host's media cache roots under ``$HERMES_HOME`` (0.21
+#: ``tools.image_source._MEDIA_CACHE_SUBDIRS`` and the gateway's caches), used
+#: when the host's own list is not importable.
+_STATIC_MEDIA_CACHE_SUBDIRS = (
+    "cache",
+    "images",
+    "image_cache",
+    "audio_cache",
+    "video_cache",
+    "document_cache",
+    "temp_vision_images",
+    "temp_video_files",
+)
+#: ``memory.provider`` values that mean Hermes' built-in store (no provider tools).
+_CORE_MEMORY_PROVIDERS = frozenset({"", "default", "builtin", "built-in", "none"})
+_DEFAULT_MEDIA_DOWNLOAD_DIR = "/tmp/clawchat-media"
 
 
 # --- host / plugin lookups (module-level so tests can stand in for them) ----
@@ -266,6 +333,84 @@ def _registry_toolset(name: str) -> str:
     return str(registry.get_toolset_for_tool(name) or "")
 
 
+def _registry_knows(name: str) -> bool:
+    from tools.registry import registry
+
+    return bool(registry.get_toolset_for_tool(name))
+
+
+def _skills_inline_shell() -> bool:
+    """Whether the host runs a skill's ``!`cmd``` snippets (``skills.inline_shell``).
+
+    Read like the host does (any truthy value); unreadable counts as on.
+    """
+    try:
+        skills = _host_config().get("skills") or {}
+        return bool(skills.get("inline_shell", False)) if isinstance(skills, dict) else False
+    except Exception:  # noqa: BLE001 - fail closed
+        return True
+
+
+def _plugin_skill_ids() -> set[str]:
+    """ClawChat's own skills: bundled with the plugin, or delivered by a skill update."""
+    from clawchat_gateway.skill_update import bundled_skill_ids, read_local_manifest
+
+    ids = set(bundled_skill_ids())
+    try:
+        ids.update(read_local_manifest())
+    except Exception:  # noqa: BLE001 - the bundled ones still count
+        pass
+    return ids
+
+
+def _hermes_home() -> Path:
+    try:
+        from hermes_constants import get_hermes_home
+
+        return Path(get_hermes_home())
+    except Exception:  # noqa: BLE001 - older host layout
+        return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+
+
+def _media_roots() -> list[Path]:
+    """Where a turn the owner did not start may read media from: the host's
+    media caches and the plugin's inbound attachment directory."""
+    roots: list[Path] = []
+    try:
+        from tools.image_source import _media_cache_roots
+
+        roots.extend(Path(root) for root in _media_cache_roots())
+    except Exception:  # noqa: BLE001 - older host: the static list below
+        pass
+    home = _hermes_home()
+    roots.extend(home / sub for sub in _STATIC_MEDIA_CACHE_SUBDIRS)
+    try:
+        download_dir = (_config_extra() or {}).get("media_download_dir") or _DEFAULT_MEDIA_DOWNLOAD_DIR
+    except Exception:  # noqa: BLE001
+        download_dir = _DEFAULT_MEDIA_DOWNLOAD_DIR
+    roots.append(Path(os.path.expanduser(str(download_dir))))
+    return roots
+
+
+def _load_memory_provider_tools(name: str) -> frozenset[str]:
+    """The tool names the host's memory provider *name* exposes; raises if unknown."""
+    from plugins.memory import load_memory_provider
+
+    provider = load_memory_provider(name)
+    if provider is None:
+        raise LookupError(f"memory provider {name!r} not found")
+    names = set()
+    for schema in provider.get_tool_schemas() or []:
+        if not isinstance(schema, dict):
+            continue
+        fn = schema.get("function") if isinstance(schema.get("function"), dict) else schema
+        if fn.get("name"):
+            names.add(str(fn["name"]))
+    if not names:
+        raise LookupError(f"memory provider {name!r} listed no tools")
+    return frozenset(names)
+
+
 def host_supports_toolset_override() -> bool:
     try:
         from gateway.platforms.base import BasePlatformAdapter
@@ -316,6 +461,148 @@ def is_restricted_tool(name: str) -> bool:
         or name.startswith(_RESTRICTED_TOOL_PREFIXES)
         or is_mcp_tool(name)
     )
+
+
+#: ``memory.provider`` -> its tool names, or ``None`` when they could not be
+#: worked out. One lookup per process: the host picks the provider at start.
+_provider_tools: dict[str, Optional[frozenset[str]]] = {}
+_UNSET: Any = object()
+_provider_tools_result: Any = _UNSET
+
+
+def memory_provider_tools() -> Optional[frozenset[str]]:
+    """The external memory provider's tool names; empty without one, ``None`` if unknown."""
+    global _provider_tools_result
+    if _provider_tools_result is _UNSET:
+        result = _memory_provider_tools()
+        if result is not _UNSET:
+            _provider_tools_result = result
+        return None if result is _UNSET else result
+    return _provider_tools_result
+
+
+def _memory_provider_tools() -> Any:
+    """:func:`memory_provider_tools` uncached; ``_UNSET`` when the config was unreadable."""
+    try:
+        memory = _host_config().get("memory") or {}
+        name = str((memory.get("provider") if isinstance(memory, dict) else "") or "").strip()
+    except Exception as exc:  # noqa: BLE001 - unknown; try again next call
+        logger.warning("clawchat host tools: could not read memory.provider (%s)", exc)
+        return _UNSET
+    if name.lower() in _CORE_MEMORY_PROVIDERS:
+        return frozenset()
+    if name not in _provider_tools:
+        try:
+            _provider_tools[name] = _load_memory_provider_tools(name)
+        except Exception as exc:  # noqa: BLE001 - unknown: the strict rule applies
+            logger.warning(
+                "clawchat host tools: could not list the tools of memory provider %r (%s); "
+                "turns your owner did not start get no tool the host registry does not know "
+                "where the toolset override does not narrow them",
+                name,
+                exc,
+            )
+            _provider_tools[name] = None
+    return _provider_tools[name]
+
+
+def _call_args(args: Any) -> dict[str, Any]:
+    if isinstance(args, dict):
+        return args
+    if isinstance(args, str):
+        try:
+            parsed = json.loads(args)
+        except ValueError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _is_plugin_skill(name: Any) -> bool:
+    name = str(name or "").strip()
+    if name.startswith(_PLUGIN_SKILL_PREFIX):
+        name = name[len(_PLUGIN_SKILL_PREFIX) :]
+    return bool(name) and name in _plugin_skill_ids()
+
+
+def _media_source_allowed(source: Any) -> bool:
+    """A web / data: source, or a file inside :func:`_media_roots`. Anything else no."""
+    if source is None:
+        return True
+    if not isinstance(source, str):
+        return False
+    text = source.strip()
+    if not text:
+        return True
+    lower = text.lower()
+    if lower.startswith(_REMOTE_MEDIA_PREFIXES):
+        return True
+    if lower.startswith(_FILE_URI):
+        text = text[len(_FILE_URI) :]
+    elif _SCHEME_RE.match(text) and not re.match(r"^[a-zA-Z]:[\\/]", text):
+        return False
+    path = Path(os.path.expanduser(text)).resolve()
+    for root in _media_roots():
+        try:
+            if path.is_relative_to(root.resolve()):
+                return True
+        except Exception:  # noqa: BLE001 - an unresolvable root admits nothing
+            continue
+    return False
+
+
+def _limited_call(tool_name: str, args: Any) -> bool:
+    """A call of a tool such turns keep that reaches what is the owner's (see module doc)."""
+    if tool_name == _SKILL_WRITE_TOOL:
+        return True
+    call = _call_args(args)
+    if tool_name == _SKILL_VIEW_TOOL:
+        return _skills_inline_shell() and not _is_plugin_skill(call.get("name"))
+    if tool_name == _TTS_TOOL:
+        return bool(str(call.get("output_path") or "").strip())
+    if tool_name in _MEDIA_SOURCE_ARGS:
+        for key in _MEDIA_SOURCE_ARGS[tool_name]:
+            value = call.get(key)
+            values = value if isinstance(value, (list, tuple)) else [value]
+            if not all(_media_source_allowed(v) for v in values):
+                return True
+    return False
+
+
+def _override_narrows() -> bool:
+    """Whether layer 1 takes the restricted toolsets out of such turns."""
+    return host_supports_toolset_override() and non_owner_host_tools() != SETTING_APPROVE
+
+
+def _strict_unregistered(tool_name: str) -> bool:
+    """A tool the host registry does not know, while the provider's tools are unknown.
+
+    Only where layer 1 does not narrow the turn: there an external memory
+    provider's tools may be in the schema, and without their names the hook
+    cannot tell them from anything else the registry does not hold.
+    """
+    if _override_narrows():
+        return False
+    if memory_provider_tools() is not None:
+        return False
+    if _registry_knows(tool_name):
+        return False
+    logger.warning(
+        "clawchat host tools: %s is not in the host registry and the memory provider's tools "
+        "are unknown; treating it as restricted",
+        tool_name,
+    )
+    return True
+
+
+def _guarded_call(tool_name: str, args: Any) -> bool:
+    """Whether a call needs the turn check at all (cheap tests first)."""
+    if is_restricted_tool(tool_name) or _limited_call(tool_name, args):
+        return True
+    provider = memory_provider_tools()
+    if provider and tool_name in provider:
+        return True
+    return False
 
 
 def _is_owner_direct(
@@ -458,17 +745,22 @@ def _session_turn() -> str:
 def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **_: Any) -> Optional[dict[str, Any]]:
     """``pre_tool_call`` hook: host tools in a turn the owner did not start."""
     try:
-        if not is_restricted_tool(tool_name):
+        tool_name = str(tool_name or "")
+        if not _guarded_call(tool_name, args):
+            if _session_turn() != "other" or not _strict_unregistered(tool_name):
+                return None
+        elif _session_turn() != "other":
             return None
-        if _session_turn() != "other":
-            return None
+        message = BLOCK_MESSAGE
+        if not is_restricted_tool(tool_name) and _limited_call(tool_name, args):
+            message = LIMITED_BLOCK_MESSAGE
         if non_owner_host_tools() == SETTING_APPROVE and _host_supports_approve():
             return {
                 "action": "approve",
                 "message": APPROVE_MESSAGE,
                 "rule_key": f"clawchat-non-owner:{tool_name}",
             }
-        return {"action": "block", "message": BLOCK_MESSAGE}
+        return {"action": "block", "message": message}
     except Exception as exc:  # noqa: BLE001 - the host would ignore us and run the tool
         logger.warning("clawchat host tools: pre_tool_call check failed (%s); blocking %s", exc, tool_name)
         return {"action": "block", "message": BLOCK_MESSAGE}
@@ -510,6 +802,19 @@ def blocked_tools_hint() -> Optional[str]:
         return None
     except Exception:  # noqa: BLE001 - a hint only
         return BLOCKED_TOOLS_HINT
+
+
+def limited_tools_hint() -> Optional[str]:
+    """:data:`LIMITED_TOOLS_HINT` for a turn the owner did not start, unless every
+    limited call goes to the owner instead (``approve`` on a host that escalates)."""
+    try:
+        if non_owner_host_tools() == SETTING_APPROVE and _host_supports_approve():
+            return None
+        if _skills_inline_shell():
+            return f"{LIMITED_TOOLS_HINT} {LIMITED_SKILL_VIEW_HINT}"
+        return LIMITED_TOOLS_HINT
+    except Exception:  # noqa: BLE001 - a hint only
+        return LIMITED_TOOLS_HINT
 
 
 #: Set by :func:`register_host_tools_guard` when the host could not take the
@@ -561,6 +866,8 @@ __all__ = [
     "BLOCK_MESSAGE",
     "BLOCKED_TOOLS_HINT",
     "FALLBACK_TOOLSETS",
+    "LIMITED_BLOCK_MESSAGE",
+    "LIMITED_TOOLS_HINT",
     "NO_MCP",
     "RESTRICTED_TOOLSETS",
     "SETTING_KEY",
@@ -568,6 +875,8 @@ __all__ = [
     "clawchat_pre_tool_call",
     "is_mcp_tool",
     "is_owner_turn",
+    "limited_tools_hint",
+    "memory_provider_tools",
     "non_owner_host_tools",
     "refuses_non_owner_turns",
     "register_host_tools_guard",

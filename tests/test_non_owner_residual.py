@@ -110,6 +110,8 @@ def _host(monkeypatch):
     monkeypatch.setattr(guard, "_mcp_server_names", lambda: {"filesystem", "github"})
     monkeypatch.setattr(guard, "_config_extra", lambda: {})
     monkeypatch.setattr(guard, "_host_supports_approve", lambda: True)
+    # No external memory provider (``test_non_owner_recall_and_connections`` covers one).
+    monkeypatch.setattr(guard, "memory_provider_tools", lambda: frozenset())
     monkeypatch.setattr(guard, "host_supports_toolset_override", lambda: True)
     monkeypatch.setattr(guard, "_hook_missing", None)
 

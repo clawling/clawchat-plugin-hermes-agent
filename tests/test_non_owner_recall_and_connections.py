@@ -19,11 +19,30 @@ Both layers now cover them like the other host tools (``non-owner-host-tools``:
 off drops / blocks them, approve escalates every call). Tools with nothing of
 the owner's to reach — the per-session ``todo_list``, web search, clarify —
 stay.
+
+The hook also limits calls of tools such turns keep, by their arguments:
+
+* ``skill_manage`` — a skill it writes is in the owner's direct chat from then
+  on (scripts included). ``skill_view`` / ``skills_list`` stay, except that with
+  the owner's ``skills.inline_shell`` on (the host runs a skill's ``!`cmd```)
+  ``skill_view`` opens only ClawChat's own skills;
+* ``vision_analyze`` / ``video_analyze`` / ``image_generate`` read any local
+  image: only web / data: sources and files in the host's media caches or the
+  plugin's inbound attachment directory pass;
+* ``text_to_speech`` with an ``output_path`` writes anywhere.
+
+And an external memory provider's tools (honcho, mem0, ...): the host gates
+them with the ``memory`` toolset only from 0.18.1, and only the override
+(0.20.1+) drops that toolset, so the hook blocks them by the names the provider
+lists; when it cannot be loaded, a turn the override does not narrow gets no
+tool the host registry does not know.
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -63,6 +82,9 @@ KEPT_CALLS = [
     ("clawchat_memory_read", {"target": "user", "user_id": FRIEND}),
 ]
 
+#: Tools the host registry holds (an external memory provider's are not in it).
+REGISTERED = {"web_search", "todo_list", "clarify", "clawchat_memory_read", "skill_view", "vision_analyze"}
+
 SESSION_KEYS = (
     "HERMES_SESSION_PLATFORM",
     "HERMES_SESSION_SOURCE",
@@ -98,6 +120,10 @@ def _host(monkeypatch):
     monkeypatch.setattr(guard, "_resolve_tools", lambda name: list(HOST_TOOLSETS.get(name, [])))
     monkeypatch.setattr(guard, "_mcp_server_names", lambda: set())
     monkeypatch.setattr(guard, "_registry_toolset", lambda name: "")
+    monkeypatch.setattr(guard, "_registry_knows", lambda name: name in REGISTERED)
+    monkeypatch.setattr(guard, "memory_provider_tools", lambda: frozenset())
+    monkeypatch.setattr(guard, "_skills_inline_shell", lambda: False)
+    monkeypatch.setattr(guard, "_plugin_skill_ids", lambda: {"clawchat-core", "clawchat-liveware"})
     monkeypatch.setattr(guard, "_config_extra", lambda: {})
     monkeypatch.setattr(guard, "_host_supports_approve", lambda: True)
     monkeypatch.setattr(guard, "host_supports_toolset_override", lambda: True)
@@ -227,3 +253,307 @@ def test_block_message_and_hint_name_them():
     assert "connected accounts" in guard.BLOCK_MESSAGE
     assert "session_search" in guard.BLOCKED_TOOLS_HINT
     assert "manage_connections" in guard.BLOCKED_TOOLS_HINT
+
+
+# --- calls limited by their arguments ----------------------------------------
+
+
+@pytest.fixture
+def media(tmp_path, monkeypatch):
+    """A Hermes home with an image cache, an inbound directory, and a private photo."""
+    home = tmp_path / "hermes"
+    inbound = tmp_path / "clawchat-media"
+    for path in (home / "cache" / "images", inbound, tmp_path / "Pictures"):
+        path.mkdir(parents=True)
+    monkeypatch.setattr(guard, "_hermes_home", lambda: home)
+    monkeypatch.setattr(guard, "_config_extra", lambda: {"media_download_dir": str(inbound)})
+    files = {
+        "cached": home / "cache" / "images" / "img_1.png",
+        "inbound": inbound / "abc-photo.jpg",
+        "private": tmp_path / "Pictures" / "passport.jpg",
+    }
+    for path in files.values():
+        path.write_bytes(b"\x89PNG")
+    return files
+
+
+def _limited(monkeypatch, where, tool, args):
+    _session(monkeypatch, **TURNS[where])
+    return guard.clawchat_pre_tool_call(tool_name=tool, args=args)
+
+
+@pytest.mark.parametrize("where", list(TURNS))
+def test_skill_manage_is_blocked(monkeypatch, where):
+    result = _limited(monkeypatch, where, "skill_manage", {"action": "create", "name": "x", "content": "y"})
+    assert result == {"action": "block", "message": guard.LIMITED_BLOCK_MESSAGE}
+
+
+@pytest.mark.parametrize("where", list(TURNS))
+@pytest.mark.parametrize("name", ["owner-notes", "clawchat:clawchat-core", "clawchat-liveware"])
+def test_skill_view_stays_without_inline_shell(monkeypatch, where, name):
+    assert _limited(monkeypatch, where, "skill_view", {"name": name}) is None
+    assert _limited(monkeypatch, where, "skills_list", {}) is None
+
+
+@pytest.mark.parametrize("where", list(TURNS))
+@pytest.mark.parametrize("name", ["owner-notes", "research/arxiv", "clawchat:owner-notes", "", None])
+def test_inline_shell_limits_skill_view_to_clawchat_skills(monkeypatch, where, name):
+    monkeypatch.setattr(guard, "_skills_inline_shell", lambda: True)
+    result = _limited(monkeypatch, where, "skill_view", {"name": name})
+    assert result == {"action": "block", "message": guard.LIMITED_BLOCK_MESSAGE}
+
+
+@pytest.mark.parametrize("where", list(TURNS))
+@pytest.mark.parametrize("name", ["clawchat:clawchat-core", "clawchat-core", "clawchat-liveware"])
+def test_inline_shell_still_opens_clawchat_skills(monkeypatch, where, name):
+    monkeypatch.setattr(guard, "_skills_inline_shell", lambda: True)
+    assert _limited(monkeypatch, where, "skill_view", {"name": name}) is None
+    assert _limited(monkeypatch, where, "skills_list", {}) is None
+
+
+def test_inline_shell_unreadable_counts_as_on(monkeypatch):
+    monkeypatch.undo()  # the real reader
+    monkeypatch.setattr(guard, "_host_config", lambda: (_ for _ in ()).throw(OSError("no config")))
+    assert guard._skills_inline_shell() is True
+    monkeypatch.setattr(guard, "_host_config", lambda: {"skills": {"inline_shell": True}})
+    assert guard._skills_inline_shell() is True
+    monkeypatch.setattr(guard, "_host_config", lambda: {"skills": {}})
+    assert guard._skills_inline_shell() is False
+
+
+def test_plugin_skill_ids_include_bundled_and_updated(monkeypatch):
+    monkeypatch.undo()
+    from clawchat_gateway import skill_update
+
+    monkeypatch.setattr(skill_update, "read_local_manifest", lambda: {"clawchat-new": "1.0.0"})
+    ids = guard._plugin_skill_ids()
+    assert "clawchat-core" in ids and "clawchat-new" in ids
+
+
+@pytest.mark.parametrize("where", list(TURNS))
+@pytest.mark.parametrize(
+    "source",
+    ["https://cdn.example.com/a.png", "http://example.com/b.jpg", "data:image/png;base64,iVBORw0KGgo=", "cached", "inbound"],
+)
+def test_vision_on_web_and_conversation_media_passes(monkeypatch, media, where, source):
+    source = str(media.get(source, source))
+    assert _limited(monkeypatch, where, "vision_analyze", {"image_url": source, "question": "what?"}) is None
+    assert _limited(monkeypatch, where, "vision_analyze", {"image_url": f"file://{source}"} if source.startswith("/") else {"image_url": source}) is None
+
+
+@pytest.mark.parametrize("where", list(TURNS))
+def test_vision_on_other_local_files_is_blocked(monkeypatch, media, where):
+    private = media["private"]
+    escape = media["cached"].parent / ".." / ".." / ".." / "Pictures" / "passport.jpg"
+    for source in (str(private), f"file://{private}", str(escape), "~/.hermes/.env", "s3://bucket/key.png"):
+        result = _limited(monkeypatch, where, "vision_analyze", {"image_url": source})
+        assert result == {"action": "block", "message": guard.LIMITED_BLOCK_MESSAGE}, source
+
+
+def test_vision_through_a_symlink_out_of_the_cache_is_blocked(monkeypatch, media):
+    link = media["cached"].parent / "link.jpg"
+    link.symlink_to(media["private"])
+    assert _limited(monkeypatch, "friend_dm", "vision_analyze", {"image_url": str(link)})["action"] == "block"
+
+
+@pytest.mark.parametrize("where", list(TURNS))
+def test_image_generate_and_video_analyze_follow_the_same_rule(monkeypatch, media, where):
+    private, cached = str(media["private"]), str(media["cached"])
+    assert _limited(monkeypatch, where, "image_generate", {"prompt": "a cat"}) is None
+    assert _limited(monkeypatch, where, "image_generate", {"prompt": "x", "image_url": cached}) is None
+    assert _limited(monkeypatch, where, "image_generate", {"prompt": "x", "image_url": private})["action"] == "block"
+    blocked = _limited(
+        monkeypatch, where, "image_generate", {"prompt": "x", "reference_image_urls": ["https://e.com/a.png", private]}
+    )
+    assert blocked["action"] == "block"
+    assert _limited(monkeypatch, where, "video_analyze", {"video_url": private})["action"] == "block"
+    assert _limited(monkeypatch, where, "video_analyze", {"video_url": "https://e.com/v.mp4"}) is None
+
+
+def test_media_args_as_a_json_string(monkeypatch, media):
+    args = '{"image_url": "%s"}' % media["private"]
+    assert _limited(monkeypatch, "friend_dm", "vision_analyze", args)["action"] == "block"
+
+
+@pytest.mark.parametrize("where", list(TURNS))
+def test_tts_with_an_output_path_is_blocked(monkeypatch, where):
+    assert _limited(monkeypatch, where, "text_to_speech", {"text": "hi"}) is None
+    assert _limited(monkeypatch, where, "text_to_speech", {"text": "hi", "output_path": " "}) is None
+    result = _limited(monkeypatch, where, "text_to_speech", {"text": "hi", "output_path": "/home/me/notes.md"})
+    assert result == {"action": "block", "message": guard.LIMITED_BLOCK_MESSAGE}
+
+
+@pytest.mark.parametrize("chat_type", ["dm", ""])
+def test_owner_direct_chat_keeps_every_limited_call(monkeypatch, media, chat_type):
+    monkeypatch.setattr(guard, "_skills_inline_shell", lambda: True)
+    _session(monkeypatch, chat_id=OWNER_DM, chat_type=chat_type, user_id=OWNER)
+    for tool, args in (
+        ("skill_manage", {"action": "create"}),
+        ("skill_view", {"name": "owner-notes"}),
+        ("vision_analyze", {"image_url": str(media["private"])}),
+        ("text_to_speech", {"text": "hi", "output_path": "/tmp/x.mp3"}),
+    ):
+        assert guard.clawchat_pre_tool_call(tool_name=tool, args=args) is None, tool
+
+
+@pytest.mark.parametrize("where", list(TURNS))
+def test_approve_escalates_limited_calls(monkeypatch, media, where):
+    _approve(monkeypatch)
+    monkeypatch.setattr(guard, "_config_extra", lambda: {"non-owner-host-tools": "approve"})
+    result = _limited(monkeypatch, where, "skill_manage", {"action": "create"})
+    assert result["action"] == "approve"
+
+
+def test_limited_tools_hint(monkeypatch):
+    assert guard.limited_tools_hint() == guard.LIMITED_TOOLS_HINT
+    monkeypatch.setattr(guard, "_skills_inline_shell", lambda: True)
+    assert guard.LIMITED_SKILL_VIEW_HINT in guard.limited_tools_hint()
+    _approve(monkeypatch)
+    assert guard.limited_tools_hint() is None  # every limited call asks the owner
+    monkeypatch.setattr(guard, "_host_supports_approve", lambda: False)
+    assert guard.limited_tools_hint().startswith(guard.LIMITED_TOOLS_HINT)
+
+
+def test_channel_prompt_carries_the_limits_only_outside_the_owner_chat(monkeypatch):
+    from clawchat_gateway.adapter import ClawChatAdapter
+
+    adapter = ClawChatAdapter.__new__(ClawChatAdapter)
+    monkeypatch.setattr(ClawChatAdapter, "_is_owner_turn", lambda self, inbound: inbound == "owner")
+    assert guard.LIMITED_TOOLS_HINT in adapter._non_owner_turn_section("friend")
+    assert adapter._non_owner_turn_section("owner") is None
+
+
+# --- an external memory provider ---------------------------------------------
+
+PROVIDER_TOOLS = frozenset({"honcho_search", "honcho_profile", "honcho_conclude"})
+
+
+@pytest.mark.parametrize("override", [True, False])
+@pytest.mark.parametrize("tool", sorted(PROVIDER_TOOLS))
+@pytest.mark.parametrize("where", list(TURNS))
+def test_memory_provider_tools_are_blocked(monkeypatch, override, tool, where):
+    monkeypatch.setattr(guard, "memory_provider_tools", lambda: PROVIDER_TOOLS)
+    monkeypatch.setattr(guard, "host_supports_toolset_override", lambda: override)
+    result = _limited(monkeypatch, where, tool, {"query": "owner"})
+    assert result == {"action": "block", "message": guard.BLOCK_MESSAGE}
+
+
+@pytest.mark.parametrize("chat_type", ["dm", ""])
+def test_owner_direct_chat_keeps_the_provider(monkeypatch, chat_type):
+    monkeypatch.setattr(guard, "memory_provider_tools", lambda: PROVIDER_TOOLS)
+    _session(monkeypatch, chat_id=OWNER_DM, chat_type=chat_type, user_id=OWNER)
+    assert guard.clawchat_pre_tool_call(tool_name="honcho_search", args={}) is None
+
+
+def test_approve_escalates_provider_tools(monkeypatch):
+    monkeypatch.setattr(guard, "memory_provider_tools", lambda: PROVIDER_TOOLS)
+    _approve(monkeypatch)
+    assert _limited(monkeypatch, "group_owner", "honcho_conclude", {})["action"] == "approve"
+
+
+@pytest.mark.parametrize("where", list(TURNS))
+def test_unknown_provider_blocks_unregistered_tools_without_the_override(monkeypatch, caplog, where):
+    monkeypatch.setattr(guard, "memory_provider_tools", lambda: None)
+    monkeypatch.setattr(guard, "host_supports_toolset_override", lambda: False)
+    with caplog.at_level(logging.WARNING, logger="clawchat_gateway.host_tools_guard"):
+        result = _limited(monkeypatch, where, "honcho_search", {})
+    assert result == {"action": "block", "message": guard.BLOCK_MESSAGE}
+    assert "not in the host registry" in caplog.text
+    for tool, args in KEPT_CALLS:
+        assert _limited(monkeypatch, where, tool, args) is None, tool
+
+
+def test_unknown_provider_under_approve_escalates_unregistered_tools(monkeypatch):
+    monkeypatch.setattr(guard, "memory_provider_tools", lambda: None)
+    _approve(monkeypatch)
+    assert _limited(monkeypatch, "friend_dm", "honcho_search", {})["action"] == "approve"
+
+
+def test_unknown_provider_with_the_override_leaves_the_rest(monkeypatch):
+    """0.20.1+, off: the override drops the memory toolset and the provider's tools with it."""
+    monkeypatch.setattr(guard, "memory_provider_tools", lambda: None)
+    assert _limited(monkeypatch, "friend_dm", "honcho_search", {}) is None
+
+
+def test_unknown_provider_owner_chat_is_untouched(monkeypatch):
+    monkeypatch.setattr(guard, "memory_provider_tools", lambda: None)
+    monkeypatch.setattr(guard, "host_supports_toolset_override", lambda: False)
+    _session(monkeypatch, chat_id=OWNER_DM, chat_type="dm", user_id=OWNER)
+    assert guard.clawchat_pre_tool_call(tool_name="honcho_search", args={}) is None
+
+
+class _Provider:
+    def __init__(self, schemas):
+        self._schemas = schemas
+
+    def get_tool_schemas(self):
+        return self._schemas
+
+
+@pytest.fixture
+def provider_lookup(monkeypatch):
+    monkeypatch.undo()
+    monkeypatch.setattr(guard, "_provider_tools", {})
+    monkeypatch.setattr(guard, "_provider_tools_result", guard._UNSET)
+    return monkeypatch
+
+
+def test_provider_tool_names_come_from_the_provider(provider_lookup):
+    mp = provider_lookup
+    calls = []
+
+    def load(name):
+        calls.append(name)
+        return _Provider([{"name": "mem0_search"}, {"type": "function", "function": {"name": "mem0_profile"}}])
+
+    mp.setattr(guard, "_host_config", lambda: {"memory": {"provider": "mem0"}})
+    import types, sys
+
+    mp.setitem(sys.modules, "plugins", types.ModuleType("plugins"))
+    mod = types.ModuleType("plugins.memory")
+    mod.load_memory_provider = load
+    mp.setitem(sys.modules, "plugins.memory", mod)
+    assert guard.memory_provider_tools() == {"mem0_search", "mem0_profile"}
+    assert guard.memory_provider_tools() == {"mem0_search", "mem0_profile"}
+    assert calls == ["mem0"]  # once per process
+
+
+@pytest.mark.parametrize("provider", ["", "builtin", "none", None])
+def test_builtin_memory_has_no_provider_tools(provider_lookup, provider):
+    provider_lookup.setattr(guard, "_host_config", lambda: {"memory": {"provider": provider}})
+    assert guard.memory_provider_tools() == frozenset()
+
+
+@pytest.mark.parametrize("schemas", [None, [], "boom"])
+def test_provider_that_cannot_list_its_tools_is_unknown(provider_lookup, caplog, schemas):
+    mp = provider_lookup
+    import types, sys
+
+    def load(name):
+        if schemas == "boom":
+            raise RuntimeError("import error")
+        return None if schemas is None else _Provider(schemas)
+
+    mp.setattr(guard, "_host_config", lambda: {"memory": {"provider": "honcho"}})
+    mp.setitem(sys.modules, "plugins", types.ModuleType("plugins"))
+    mod = types.ModuleType("plugins.memory")
+    mod.load_memory_provider = load
+    mp.setitem(sys.modules, "plugins.memory", mod)
+    with caplog.at_level(logging.WARNING, logger="clawchat_gateway.host_tools_guard"):
+        assert guard.memory_provider_tools() is None
+    assert "could not list the tools of memory provider" in caplog.text
+
+
+def test_unreadable_config_is_unknown_and_retried(provider_lookup):
+    mp = provider_lookup
+    state = {"fail": True}
+
+    def config():
+        if state["fail"]:
+            raise OSError("locked")
+        return {}
+
+    mp.setattr(guard, "_host_config", config)
+    assert guard.memory_provider_tools() is None
+    state["fail"] = False
+    assert guard.memory_provider_tools() == frozenset()
