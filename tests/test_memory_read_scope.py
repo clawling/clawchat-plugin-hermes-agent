@@ -19,11 +19,13 @@ context: platform, chat id, chat type, user id):
   known members.
 
 Search drops what the conversation may not read before it ranks or counts.
-Writes keep the routing rule (``owner.md`` takes facts about the owner from
-anywhere): ``mode=append`` is allowed for any target, but ``mode=replace`` and
-``clawchat_memory_edit`` — which read or wipe what is there — only for notes
-the conversation may read, and an append to an unreadable note does not say
-whether its text was already there.
+Writes: ``owner.md`` can only be changed (append included) in the owner's
+direct chat — it is injected there, where the agent has every tool, so a line
+appended from a group or a friend's chat would read like the owner's own
+(``not_writable_here``). Any other note takes ``mode=append`` from any
+conversation, but ``mode=replace`` and ``clawchat_memory_edit`` — which read or
+wipe what is there — only for notes the conversation may read, and an append
+to an unreadable note does not say whether its text was already there.
 """
 
 from __future__ import annotations
@@ -357,11 +359,11 @@ def _body(root, target_type, target_id):
 
 
 @pytest.mark.asyncio
-async def test_group_may_append_a_fact_about_the_owner(root, monkeypatch):
+async def test_group_cannot_append_to_the_owner_note(root, monkeypatch):
     in_group(monkeypatch)
     result = await write("owner", "owner", "append", "Owner said in Hikers: moving to Berlin")
-    assert result.get("ok") is True
-    assert "moving to Berlin" in _body(root, "owner", "owner")
+    assert result.get("error") == "not_writable_here"
+    assert "moving to Berlin" not in _body(root, "owner", "owner")
     assert OWNER_PRIVATE_FACT in _body(root, "owner", "owner")
 
 
@@ -370,19 +372,19 @@ async def test_group_cannot_replace_or_edit_the_owner_note(root, monkeypatch):
     in_group(monkeypatch)
     replaced = await write("owner", "owner", "replace", "wiped")
     edited = await edit("owner", "owner", "condition Z", "nothing")
-    assert replaced.get("error") == "not_readable_here"
-    assert edited.get("error") == "not_readable_here"
+    assert replaced.get("error") == "not_writable_here"
+    assert edited.get("error") == "not_writable_here"
     assert OWNER_PRIVATE_FACT in _body(root, "owner", "owner")
 
 
 @pytest.mark.asyncio
-async def test_group_append_to_owner_note_does_not_confirm_existing_text(root, monkeypatch):
+async def test_group_append_to_unreadable_note_does_not_confirm_existing_text(root, monkeypatch):
     # "already in this note" would let anyone in the group test guesses.
     in_group(monkeypatch)
-    result = await write("owner", "owner", "append", OWNER_PRIVATE_FACT)
+    result = await write("user", OUTSIDER, "append", OUTSIDER_FACT)
     assert result.get("ok") is True
     assert "skippedDuplicateParagraphs" not in result and "note" not in result
-    assert _body(root, "owner", "owner").count(OWNER_PRIVATE_FACT) == 1
+    assert _body(root, "user", OUTSIDER).count(OUTSIDER_FACT) == 1
 
 
 @pytest.mark.asyncio

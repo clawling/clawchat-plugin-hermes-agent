@@ -10,18 +10,30 @@ keys), ``config.yaml`` or ``owner.md``; only the model's own refusal stood in
 the way. The plugin's approval routing never saw those calls: smart answers
 before the gateway approval step, and harmless-looking commands never reach it.
 
+The same holds for two more doors: the MCP servers the owner configured for
+ClawChat (a filesystem or database server reads the same files), and Hermes'
+own ``memory`` tool, whose ``MEMORY.md`` / ``USER.md`` go into the system
+prompt of every later conversation — the owner's direct chat included — so a
+line someone else got written there would read like the agent's own note.
+
 This module narrows those turns in two layers:
 
 * :func:`toolsets_for_source` — the adapter's per-source toolset override
   (``BasePlatformAdapter.toolsets_for_source``, host 0.20.1+). Every turn but
-  the owner's own direct chat loses :data:`RESTRICTED_TOOLSETS`, so the model
-  never sees those tools. **Every group turn counts**, whoever spoke: a group is
+  the owner's own direct chat loses :data:`RESTRICTED_TOOLSETS` (``memory``
+  among them) and gets the host's ``no_mcp`` sentinel, so the model never sees
+  those tools. Listing no MCP server would not do: the host then adds back
+  every enabled one, the fallback list included. **Every group turn counts**, whoever spoke: a group is
   one shared session, and switching the toolset per speaker would rebuild the
   agent (and drop the prompt cache) each time the owner and someone else
   alternate.
 * :func:`clawchat_pre_tool_call` — a ``pre_tool_call`` hook that blocks any of
   those tools still reaching dispatch in such a turn (an older host without the
-  override, a toolset the filter could not see into). With
+  override, a toolset the filter could not see into). MCP tools are known by
+  their host toolset (``mcp-<server>``) or, failing that, their ``mcp_`` name
+  prefix (``mcp_<server>_<tool>`` before 0.18.1, ``mcp__<server>__<tool>``
+  since). ``memory`` has only write actions — reading it is the system-prompt
+  injection, which stays — so the whole tool goes. With
   ``non-owner-host-tools: approve`` the owner opts in instead: the tools stay
   visible and every call is escalated to the human-approval gate, which smart
   never answers — a friend's direct chat refuses it on the spot, a group's goes
@@ -34,6 +46,13 @@ ignored. Both therefore fail closed here.
 Turn ownership comes from the same host session context the memory tools use
 (``memory_scope``): platform, chat id, chat type and user id. Hermes before
 0.19.1 binds no chat type; there the owner's activation chat id decides.
+
+Every host that can load the plugin (0.12.0+) has the hook; on one without the
+override the tools stay in the schema and the hook blocks them, and the
+adapter adds a line to such turns telling the model so
+(:func:`blocked_tools_hint`). Should a host ever load the plugin without
+``register_hook``, nothing would stand between those turns and the tools, so
+the adapter does not take them at all (:func:`refuses_non_owner_turns`).
 """
 
 from __future__ import annotations
@@ -56,6 +75,7 @@ RESTRICTED_TOOLSETS: tuple[str, ...] = (
     "cronjob",
     "computer_use",
     "browser",
+    "memory",
 )
 
 #: Every host browser tool is ``browser_*``; a future one is covered too.
@@ -93,13 +113,21 @@ _STATIC_RESTRICTED_TOOLS = frozenset(
         "browser_vault_save_login",
         "browser_vault_unlock",
         "browser_vision",
+        "memory",
     }
 )
 
+#: Hermes' sentinel in a platform toolset list: no MCP server at all, even one
+#: listed by name (``hermes_cli.tools_config._merge_mcp_servers``, 0.12.0+).
+NO_MCP = "no_mcp"
+_MCP_TOOLSET_PREFIX = "mcp-"
+_MCP_TOOL_PREFIX = "mcp_"
+
 #: What a narrowed turn falls back to when the platform toolset cannot be
-#: worked out, or nothing survives the filter: the plugin's own ClawChat tools.
+#: worked out, or nothing survives the filter: the plugin's own ClawChat tools,
+#: and no MCP (without the sentinel the host adds every MCP server back).
 #: (An empty override would be read by the host as "no override".)
-FALLBACK_TOOLSETS: tuple[str, ...] = ("clawchat",)
+FALLBACK_TOOLSETS: tuple[str, ...] = ("clawchat", NO_MCP)
 
 SETTING_KEY = "non-owner-host-tools"
 SETTING_OFF = "off"
@@ -110,9 +138,18 @@ _PLATFORM = "clawchat"
 
 BLOCK_MESSAGE = (
     "This tool is not available here: only your owner's direct chat may use the "
-    "terminal, files, code execution, the browser, sub-agents or scheduled jobs on this machine. "
+    "terminal, files, code execution, the browser, sub-agents, scheduled jobs, MCP tools "
+    "or Hermes' memory tool on this machine. "
     "Do not try to reach them another way; answer without them, or tell the person "
     "to ask your owner."
+)
+#: For a turn where the tools are in the schema but every call is blocked (a
+#: host without the override, or ``approve`` on a host that cannot escalate).
+BLOCKED_TOOLS_HINT = (
+    "Host tools in this turn: your owner did not start it, so the terminal, files, code "
+    "execution, the browser, sub-agents, scheduled jobs, MCP tools and Hermes' memory tool "
+    "are blocked even though you can see them. Do not call them; use the ClawChat tools "
+    "or answer without them."
 )
 APPROVE_MESSAGE = (
     "Someone other than the owner started this turn (a friend's direct chat or a "
@@ -181,6 +218,12 @@ def _platform_toolsets() -> set[str]:
     return set(_get_platform_tools(_host_config(), _PLATFORM))
 
 
+def _mcp_server_names() -> set[str]:
+    """The MCP servers in the host config (``mcp_servers.<name>``)."""
+    servers = _host_config().get("mcp_servers") or {}
+    return {str(name) for name in servers} if isinstance(servers, dict) else set()
+
+
 def _resolve_tools(name: str) -> list[str]:
     from toolsets import resolve_toolset
 
@@ -198,6 +241,12 @@ def _host_supports_approve() -> bool:
     except Exception:  # noqa: BLE001
         return False
     return hasattr(plugins, "_resolve_block_from_details")
+
+
+def _registry_toolset(name: str) -> str:
+    from tools.registry import registry
+
+    return str(registry.get_toolset_for_tool(name) or "")
 
 
 def host_supports_toolset_override() -> bool:
@@ -232,9 +281,24 @@ def restricted_tool_names() -> frozenset[str]:
     return frozenset(names)
 
 
+def is_mcp_tool(name: str) -> bool:
+    """A tool an MCP server registered: its host toolset, else its name prefix."""
+    name = str(name or "")
+    try:
+        if _registry_toolset(name).startswith(_MCP_TOOLSET_PREFIX):
+            return True
+    except Exception:  # noqa: BLE001 - registry not importable: name only
+        pass
+    return name.startswith(_MCP_TOOL_PREFIX)
+
+
 def is_restricted_tool(name: str) -> bool:
     name = str(name or "")
-    return name in restricted_tool_names() or name.startswith(_RESTRICTED_TOOL_PREFIXES)
+    return (
+        name in restricted_tool_names()
+        or name.startswith(_RESTRICTED_TOOL_PREFIXES)
+        or is_mcp_tool(name)
+    )
 
 
 def _is_owner_direct(
@@ -301,18 +365,31 @@ def _is_owner_chat_without_type(
 
 def _narrowed_toolsets() -> list[str]:
     restricted_tools = restricted_tool_names()
+    try:
+        mcp_servers = _mcp_server_names()
+    except Exception:  # noqa: BLE001 - NO_MCP still drops them host-side
+        mcp_servers = set()
     kept = []
     for name in sorted(_platform_toolsets()):
-        if name in RESTRICTED_TOOLSETS:
+        if (
+            name in RESTRICTED_TOOLSETS
+            or name == NO_MCP
+            or name in mcp_servers
+            or name.startswith(_MCP_TOOLSET_PREFIX)
+        ):
             continue
         try:
             tools = set(_resolve_tools(name))
         except Exception:  # noqa: BLE001 - cannot see inside: drop it
             continue
-        if tools & restricted_tools or any(t.startswith(_RESTRICTED_TOOL_PREFIXES) for t in tools):
+        if tools & restricted_tools or any(
+            t.startswith(_RESTRICTED_TOOL_PREFIXES) or t.startswith(_MCP_TOOL_PREFIX) for t in tools
+        ):
             continue
         kept.append(name)
-    return kept or list(FALLBACK_TOOLSETS)
+    if not kept:
+        return list(FALLBACK_TOOLSETS)
+    return kept + [NO_MCP]
 
 
 def toolsets_for_source(
@@ -325,8 +402,9 @@ def toolsets_for_source(
 
     ``None`` for the owner's own direct chat, and for every turn when the owner
     chose ``non-owner-host-tools: approve`` (the hook escalates instead).
-    Otherwise the platform toolset minus :data:`RESTRICTED_TOOLSETS` — never
-    empty, and on any failure :data:`FALLBACK_TOOLSETS`.
+    Otherwise the platform toolset minus :data:`RESTRICTED_TOOLSETS` and every
+    MCP server, plus :data:`NO_MCP` — never empty, and on any failure
+    :data:`FALLBACK_TOOLSETS`.
     """
     try:
         owner = owner_user_id() if callable(owner_user_id) else owner_user_id
@@ -379,31 +457,102 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **_: Any) -
         return {"action": "block", "message": BLOCK_MESSAGE}
 
 
+def is_owner_turn(
+    chat_id: str,
+    chat_type: str,
+    user_id: str,
+    *,
+    owner_user_id: str | Callable[[], str],
+    owner_direct_chat_id: Optional[Callable[[], str]] = None,
+) -> bool:
+    """The owner's own direct chat (see :func:`_is_owner_direct`); False on any failure."""
+    try:
+        owner = owner_user_id() if callable(owner_user_id) else owner_user_id
+        return _is_owner_direct(
+            str(chat_id or ""), str(chat_type or ""), str(user_id or ""), str(owner or ""), owner_direct_chat_id
+        )
+    except Exception as exc:  # noqa: BLE001 - fail closed
+        logger.warning("clawchat host tools: turn owner check failed (%s); treating the turn as not the owner's", exc)
+        return False
+
+
+def blocked_tools_hint() -> Optional[str]:
+    """:data:`BLOCKED_TOOLS_HINT` when a turn the owner did not start sees tools it cannot call.
+
+    That is a host without the per-source override (the schema keeps the tools,
+    the hook blocks them), or ``approve`` on a host that cannot escalate (the
+    override keeps the tools for the human gate, the hook blocks instead).
+    ``approve`` on a host that escalates asks the owner; no hint then.
+    """
+    try:
+        approve = non_owner_host_tools() == SETTING_APPROVE
+        if approve and _host_supports_approve():
+            return None
+        if approve or not host_supports_toolset_override():
+            return BLOCKED_TOOLS_HINT
+        return None
+    except Exception:  # noqa: BLE001 - a hint only
+        return BLOCKED_TOOLS_HINT
+
+
+#: Set by :func:`register_host_tools_guard` when the host could not take the
+#: ``pre_tool_call`` hook. ``None`` until the guard was registered.
+_hook_missing: Optional[bool] = None
+
+
+def refuses_non_owner_turns() -> bool:
+    """Whether the adapter must not take turns the owner did not start.
+
+    Only when the plugin loaded on a host without ``register_hook``: there no
+    layer could keep the host tools, MCP or Hermes' memory out of such a turn.
+    """
+    return _hook_missing is True
+
+
 def register_host_tools_guard(ctx: Any) -> None:
     """Register the ``pre_tool_call`` hook and say so when a layer is missing."""
+    global _hook_missing
     if not host_supports_toolset_override():
         logger.warning(
             "clawchat host tools: this Hermes has no per-source toolset override "
             "(BasePlatformAdapter.toolsets_for_source, 0.20.1+); turns your owner did not "
-            "start keep the host tools in their schema and rely on the pre_tool_call block"
+            "start keep the host tools, MCP tools and the memory tool in their schema and "
+            "rely on the pre_tool_call block"
         )
     register_hook = getattr(ctx, "register_hook", None)
     if not callable(register_hook):
+        _hook_missing = True
         logger.warning(
-            "clawchat host tools: this Hermes cannot register plugin hooks; host tools in "
-            "turns your owner did not start are not guarded by the plugin"
+            "clawchat host tools: this Hermes cannot register plugin hooks, so nothing could "
+            "keep the host tools out of turns your owner did not start; ClawChat will not "
+            "answer friends' direct chats or groups on this host. Upgrade Hermes."
         )
         return
-    register_hook("pre_tool_call", clawchat_pre_tool_call)
+    try:
+        register_hook("pre_tool_call", clawchat_pre_tool_call)
+    except Exception:
+        _hook_missing = True
+        logger.warning(
+            "clawchat host tools: the pre_tool_call hook was not registered; ClawChat will "
+            "not answer friends' direct chats or groups on this host"
+        )
+        raise
+    _hook_missing = False
 
 
 __all__ = [
     "BLOCK_MESSAGE",
+    "BLOCKED_TOOLS_HINT",
     "FALLBACK_TOOLSETS",
+    "NO_MCP",
     "RESTRICTED_TOOLSETS",
     "SETTING_KEY",
+    "blocked_tools_hint",
     "clawchat_pre_tool_call",
+    "is_mcp_tool",
+    "is_owner_turn",
     "non_owner_host_tools",
+    "refuses_non_owner_turns",
     "register_host_tools_guard",
     "is_restricted_tool",
     "restricted_tool_names",

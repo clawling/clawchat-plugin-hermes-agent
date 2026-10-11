@@ -2592,6 +2592,51 @@ class ClawChatAdapter(BasePlatformAdapter):
             profile_type=profile_type if isinstance(profile_type, str) else None,
         )
 
+    def _is_owner_turn(self, inbound: InboundMessage) -> bool:
+        """The owner's own direct chat, as ``host_tools_guard`` judges a turn."""
+        from clawchat_gateway.host_tools_guard import is_owner_turn
+
+        return is_owner_turn(
+            inbound.chat_id,
+            inbound.chat_type,
+            inbound.sender_id,
+            owner_user_id=self._owner_user_id,
+            owner_direct_chat_id=self._owner_direct_chat_id,
+        )
+
+    def _refuses_turn(self, inbound: InboundMessage) -> bool:
+        """Drop a turn the owner did not start on a host the guard cannot cover.
+
+        Only a host that loaded the plugin without ``register_hook``
+        (``host_tools_guard.refuses_non_owner_turns``): there nothing keeps the
+        host tools, MCP or Hermes' memory out of a friend's or a group's turn.
+        """
+        from clawchat_gateway.host_tools_guard import refuses_non_owner_turns
+
+        if not refuses_non_owner_turns() or self._is_owner_turn(inbound):
+            return False
+        logger.warning(
+            "clawchat turn refused chat_id=%s chat_type=%s sender_id=%s "
+            "reason=host_without_plugin_hooks (upgrade Hermes)",
+            inbound.chat_id,
+            inbound.chat_type,
+            inbound.sender_id,
+        )
+        return True
+
+    def _non_owner_turn_section(self, inbound: InboundMessage) -> str | None:
+        """What a turn the owner did not start cannot do, for the model."""
+        if self._is_owner_turn(inbound):
+            return None
+        from clawchat_gateway.host_tools_guard import blocked_tools_hint
+        from clawchat_gateway.memory_scope import OWNER_NOTE_WRITE_HINT
+
+        lines = [OWNER_NOTE_WRITE_HINT]
+        hint = blocked_tools_hint()
+        if hint:
+            lines.append(hint)
+        return "\n".join(lines)
+
     def toolsets_for_source(self, source):
         """Host tools only in the owner's own direct chat (``host_tools_guard``)."""
         from clawchat_gateway.host_tools_guard import toolsets_for_source
@@ -3990,6 +4035,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         return "\n".join(lines)
 
     async def _handle_inbound(self, inbound: InboundMessage) -> None:
+        if self._refuses_turn(inbound):
+            return
         if inbound.chat_id and not self._inbound_trigger_id(inbound.raw_message):
             # A synthetic inbound (awareness / moment-comment note, permission
             # receipt, sediment turn) has no message id and never passes the
@@ -4190,14 +4237,9 @@ class ClawChatAdapter(BasePlatformAdapter):
             targets.append(("user", speaker, f"{self._escape_prompt_field(name)}, who spoke here"))
             if len(targets) > SEDIMENT_GROUP_SPEAKERS_MAX:
                 break
-        targets.append(
-            (
-                "owner",
-                "owner",
-                "your owner — only facts about them said in this group (append-only: owner.md "
-                "cannot be read from a group)",
-            )
-        )
+        # Never owner.md: it can only be written in the owner's direct chat
+        # (memory_scope); a fact about the owner said here goes to the
+        # speaker's or the group's note.
         return targets
 
     async def _run_sediment_turn(
@@ -4629,6 +4671,15 @@ class ClawChatAdapter(BasePlatformAdapter):
                 MEMORY_ROUTING_REMINDER,
             )
         )
+        non_owner_section = self._non_owner_turn_section(inbound)
+        if non_owner_section:
+            parts.append(
+                self._channel_prompt_part(
+                    "non-owner-turn",
+                    "platform",
+                    non_owner_section,
+                )
+            )
         note_section = self._format_note_memory_section(inbound)
         if note_section:
             parts.append(

@@ -72,9 +72,9 @@ def build_sediment_prompt(*, reason: str, targets: list[tuple[str, str, str]]) -
         "- Skip anything someone in this conversation asked you not to remember, not to save "
         "or to forget, even if it looks worth keeping; that request wins.",
         "- For each note below, call clawchat_memory_read first, then clawchat_memory_write "
-        "with mode=append for what is new. If nothing is new, write nothing. A note marked "
-        "append-only cannot be read from this conversation: append what belongs there "
-        "without reading it.",
+        "with mode=append for what is new. If nothing is new, write nothing. If owner.md is "
+        "not listed, a fact about your owner goes into the note of whoever said it or this "
+        "group's note.",
         "- These are the only notes you may write:",
     ]
     for target_type, target_id, label in targets:

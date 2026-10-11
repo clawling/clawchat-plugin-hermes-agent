@@ -124,7 +124,7 @@ def test_prompt_skips_what_participants_asked_not_to_remember():
     assert "skip" in lowered
 
 
-def test_group_targets_cover_group_speakers_and_owner(adapter):
+def test_group_targets_cover_group_speakers_never_owner(adapter):
     adapter._store.insert_message(
         platform="hermes", account_id="default", kind="message", direction="inbound",
         event_type="message.send", chat_id=GROUP, message_id="x1", text="hi",
@@ -133,7 +133,8 @@ def test_group_targets_cover_group_speakers_and_owner(adapter):
     targets = adapter._sediment_targets(GROUP, "group", sender_id="")
     assert ("group", GROUP) == targets[0][:2]
     assert ("user", "usr_ada") in [t[:2] for t in targets]
-    assert ("owner", "owner") in [t[:2] for t in targets]
+    # owner.md can only be written in the owner's direct chat (memory_scope)
+    assert ("owner", "owner") not in [t[:2] for t in targets]
     assert ("user", AGENT) not in [t[:2] for t in targets]
 
 

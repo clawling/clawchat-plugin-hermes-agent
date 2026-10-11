@@ -149,6 +149,11 @@ tmp
 #   * owner_dm_without_chat_type — on Hermes before 0.19.1 (no chat type in
 #     the session) the owner's activation chat keeps the host tools and reads
 #     every note; any other chat, or a failed lookup, is not the owner's.
+#   * non_owner_residual — in a friend's direct chat and every group turn, MCP
+#     tools and Hermes' memory tool are left out (no_mcp) or blocked like the
+#     other host tools (approve: every call to the human gate), owner.md takes
+#     no write at all (append included), a host without the override gets a
+#     channel-prompt line, and one without register_hook takes no such turn.
 #   * message_target_check — an explicit react target / mention reply-to id
 #     is sent only if the ledger has that message in that chat (stored ids
 #     on the wire, shape check when the store cannot answer, index-backed
@@ -205,6 +210,7 @@ tests/*
 !tests/test_receipt_replay_dedup.py
 !tests/test_owner_dm_without_chat_type.py
 !tests/test_message_target_check.py
+!tests/test_non_owner_residual.py
 deploy/
 scripts/
 docs/superpowers/

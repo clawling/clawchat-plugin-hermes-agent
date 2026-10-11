@@ -425,8 +425,8 @@ async def memory_write(
         return err
     scope = resolve_memory_scope(root)
     readable = scope.can_read(target_type, target_id)
-    if mode == "replace" and not readable:
-        return scope.refusal(target_type, target_id)
+    if not scope.can_write(target_type, target_id, mode):
+        return scope.write_refusal(target_type, target_id)
     try:
         outcome = write_clawchat_memory_body(root, target_type, target_id, mode, content) or {}
         result: dict[str, Any] = {"ok": True, "targetType": target_type, "targetId": target_id}
@@ -464,8 +464,8 @@ async def memory_edit(
     if err is not None:
         return err
     scope = resolve_memory_scope(root)
-    if not scope.can_read(target_type, target_id):
-        return scope.refusal(target_type, target_id)
+    if not scope.can_write(target_type, target_id, "edit"):
+        return scope.write_refusal(target_type, target_id)
     try:
         edit_clawchat_memory_body(root, target_type, target_id, old_text, new_text)
         return {"ok": True, "targetType": target_type, "targetId": target_id}

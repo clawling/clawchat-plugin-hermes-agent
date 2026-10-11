@@ -616,10 +616,11 @@ either happens:
 A sediment turn is a synthetic message in the same session telling the agent to
 read and then append to only this conversation's notes: in a direct chat the
 peer's `users/<id>.md` (or `owner.md` for the owner); in a group the group's
-`groups/<id>.md`, `users/<id>.md` of up to 10 recent speakers, and `owner.md`
-only for facts about the owner said in the group — append-only, since the
-memory tools do not let a group read `owner.md` (see
-[`./reference/tools.md`](./reference/tools.md#what-a-conversation-may-read)).
+`groups/<id>.md`, `users/<id>.md` of up to 10 recent speakers — never `owner.md`, which can only
+be written in the owner's direct chat (see
+[`./reference/tools.md`](./reference/tools.md#what-a-conversation-may-read));
+a fact about the owner said in the group goes to the speaker's or the group's
+note.
 In a shared group session the turn also carries the group messages the session
 has not seen yet (within `delta-budget-chars`, the same ones a mention would add), so a request
 made since the agent's last turn — in a mention-only group, one that did not
@@ -744,11 +745,22 @@ and **every group turn, whoever spoke** — loses these host toolsets:
 `patch`, `search_files`), `code_execution` (`execute_code`), `delegation`
 (`delegate_task`), `cronjob` (`cronjob_manage`), `computer_use` and
 `browser` (every `browser_*` tool: it opens `file://` URLs and runs page
-scripts and raw CDP, so it reads local files too). Group
-turns are narrowed as a whole because a group is one shared session:
+scripts and raw CDP, so it reads local files too), Hermes' `memory` tool, and
+every **MCP tool** — the MCP servers the owner configured for ClawChat (a
+filesystem or database server reads the same files the `file` tools do).
+Group turns are narrowed as a whole because a group is one shared session:
 switching its toolset per speaker would rebuild the agent each time the
 owner and someone else alternate. The plugin's own ClawChat tools, web
-search/extract, memory, skills and the rest are unchanged, and so is the owner's direct chat.
+search/extract, skills and the rest are unchanged, and so is the owner's direct chat.
+
+`memory` goes because what it writes to `MEMORY.md` / `USER.md` is in the
+system prompt of every later conversation, the owner's direct chat included
+(from the next new session, or the next compression of a running one), where
+it reads like the agent's own note. The tool only writes (`add` / `replace` /
+`remove`); reading is that system-prompt injection, which is unchanged. For the
+same reason the memory tools refuse any write to `owner.md` — append included —
+outside the owner's direct chat (see
+[`./reference/tools.md`](./reference/tools.md#what-a-conversation-may-read)).
 
 "The owner's direct chat" is the activation conversation, whoever the turn's
 sender is: turns the plugin itself starts there — permission receipts, the
@@ -767,10 +779,35 @@ direct chat reads every note on those hosts too.
 Two layers (`clawchat_gateway/host_tools_guard.py`):
 
 - the adapter's per-source toolset override (`toolsets_for_source`, Hermes
-  0.20.1+): the tools are not in the turn's schema at all. On an older host
-  the plugin logs a warning at load and relies on the second layer;
+  0.20.1+): the tools are not in the turn's schema at all. MCP needs Hermes'
+  `no_mcp` sentinel in that list: a list that names no MCP server makes
+  Hermes add back every enabled one. On an older host the plugin logs a
+  warning at load and relies on the second layer;
 - a `pre_tool_call` hook that blocks any of those tools still reaching
-  dispatch in such a turn.
+  dispatch in such a turn. MCP tools are recognised by their host toolset
+  (`mcp-<server>`), else by the `mcp_` name prefix (`mcp_<server>_<tool>`
+  before Hermes 0.18.1, `mcp__<server>__<tool>` since).
+
+`no_mcp` drops **every** MCP server from such a turn, including the
+"portable" MCP servers other Hermes plugins bring: they are configured by the
+owner too. The owner's direct chat keeps all of them.
+
+What each Hermes version gets:
+
+| Hermes | Layer 1: tools left out of the schema | Layer 2: `pre_tool_call` block | `approve` |
+|---|---|---|---|
+| 0.21.0 and later | yes | yes | yes — every call goes to the human gate |
+| 0.20.1 – 0.20.x | yes | yes | no — blocked instead (the tools stay visible) |
+| 0.19.1 – 0.20.0 | no — the tools stay visible | yes | no — blocked instead |
+| 0.12.0 – 0.19.0 | no — the tools stay visible | yes (no chat type from the host: the owner's activation chat id decides, see above) | no — blocked instead |
+
+Where the tools stay visible but every call is blocked, each such turn's
+ClawChat channel prompt says so, so the model does not spend rounds trying
+them. Every Hermes that can load the plugin (0.12.0+, `register_platform`)
+can take the hook; should one ever load it without `register_hook`, no layer
+could keep these tools out, so the plugin does not answer friends' direct
+chats or groups at all there (it logs `reason=host_without_plugin_hooks`)
+and only the owner's direct chat works.
 
 `non-owner-host-tools: approve` is the owner's opt-in: the tools stay
 visible and every call in such a turn goes to Hermes' human-approval gate,
@@ -781,8 +818,8 @@ escalate a hook's `approve` keeps blocking. Any other value means `off`.
 Hermes ignores an exception from either layer and then *opens up* (all
 platform tools; the hook skipped), so both fail closed: an override that
 cannot work out the platform toolset narrows the turn to the plugin's own
-`clawchat` toolset, and a hook that cannot place the turn blocks the call.
-MCP servers the owner configured for ClawChat are not touched.
+`clawchat` toolset plus `no_mcp` (without the sentinel Hermes would add
+every MCP server back), and a hook that cannot place the turn blocks the call.
 
 ## Reconnect, heartbeat, ack
 
@@ -966,7 +1003,10 @@ memory:
 
 `memory_enabled` is left as is: `MEMORY.md` remains the agent's global notebook
 for facts that do not depend on who it is talking to. Facts about one person or
-one group go into the ClawChat notes above.
+one group go into the ClawChat notes above. Only the owner's direct chat can
+write it: in a friend's direct chat or a group the `memory` tool is left out or
+blocked like the other host tools (see
+[Host tools in turns the owner did not start](#host-tools-in-turns-the-owner-did-not-start)).
 
 Activation writes both keys (overwriting, like the `agent.*` defaults). Plugin
 load (`activate.ensure_clawchat_host_defaults_on_load`, called from

@@ -137,7 +137,8 @@ def test_toolset_override_with_empty_chat_type_uses_the_chat_id(host, monkeypatc
     lookup = lambda: OWNER_DM  # noqa: E731
     assert guard.toolsets_for_source(Source(OWNER_DM.lower(), OWNER), owner_user_id=OWNER, owner_direct_chat_id=lookup) is None
     assert guard.toolsets_for_source(Source(FRIEND_DM, FRIEND), owner_user_id=OWNER, owner_direct_chat_id=lookup) == [
-        "clawchat"
+        "clawchat",
+        "no_mcp",
     ]
 
 

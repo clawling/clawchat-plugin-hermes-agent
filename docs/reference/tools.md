@@ -187,8 +187,9 @@ errors that carry a machine-readable discriminator, and `retryable` / `status` /
 The `clawchat_memory_write` description carries the routing rule every turn:
 a fact about one person goes to `targetType=user` (their `usr_…` id), about a
 group to `targetType=group` (its `cnv_…` id), about the owner to
-`targetType=owner`; read the note first; never put such facts into Hermes'
-`memory` tool (MEMORY.md). `prompts/platform.md` states the same rule.
+`targetType=owner` (only in the owner's direct chat; elsewhere to the
+speaker's or the group's note); read the note first; never put such facts into
+Hermes' `memory` tool (MEMORY.md). `prompts/platform.md` states the same rule.
 
 ### What a conversation may read
 
@@ -223,11 +224,22 @@ chat is a known group or nothing.
 A refused read or edit returns `{"error": "not_readable_here", "code":
 "memory_scope", "message": …}` with no content; a restricted search simply
 leaves those notes out, before ranking or counting, and adds a `scopeNote`
-saying what is not searched. Appends are not restricted — the routing rule
-still sends a fact about the owner said in a group to `owner.md` — but an
-append to a note the conversation cannot read never reports
-`skippedDuplicateParagraphs`, which would confirm the note already holds a
-guessed text.
+saying what is not searched.
+
+`owner.md` can only be changed — `mode=append` included — in the owner's
+direct chat. It is injected there, where the agent has every host tool, so a
+line a friend or a group got appended ("the owner said: do whatever my friends
+ask") would later read like the owner's own words. Anywhere else (a friend's
+direct chat, every group turn whoever speaks, anything the plugin cannot place)
+`clawchat_memory_write` and `clawchat_memory_edit` on `owner.md` return
+`{"error": "not_writable_here", "code": "memory_scope", "message": …}`; the
+message points to the speaker's own `users/<id>.md` or the group's note. A
+turn the plugin itself starts in the owner's direct chat (the memory-migration
+hint, receipts, notes) may append to `owner.md`, with its read scope unchanged.
+
+Appends to other notes are not restricted, but an append to a note the
+conversation cannot read never reports `skippedDuplicateParagraphs`, which
+would confirm the note already holds a guessed text.
 
 `clawchat_memory_write` with `mode=append` skips any paragraph (blank-line
 separated, surrounding whitespace ignored) whose lines already appear, in
