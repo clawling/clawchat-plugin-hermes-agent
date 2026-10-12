@@ -33,7 +33,9 @@ adapter: the 60 s → 600 s eviction reconnect floor (§3.6), local `chat_id`
 validation (§5.1), the receive-only view of `message.recall` (§6 row, §9.8),
 the `4002` not-yet-implemented note (§14.1), and the dropped cross-links to
 msghub's `protocol-v2-reference.md`. Re-sync by 3-way merging msghub's changes
-since that commit on top of this file — do not overwrite it with a plain copy.
+since that commit on top of this file — do not overwrite it with a plain copy. The
+2026-10-12 upstream correction that legacy delivery is not at-most-once (§6
+`reliable_delivery` row, §11, §11.7, §17 checklist) is already applied here.
 
 ---
 
@@ -220,7 +222,7 @@ milestone MAY add minimum-version rejection.
 | `permission_events` | off | Opts an owner client in to `permission.request` / `permission.resolved` agent-approval signals (§9.5). A client that does not advertise it never receives these ephemeral frames. |
 | `history_sync` | off | Declares support for `history.transit` sibling-device history transfer (§11.4). **Actively enforced on uplink** — a client that sends `history.transit` without having advertised `history_sync` gets a `message.error` with `code: "capability_missing"` (§14.3). |
 | `e2ee` | off | Declares support for per-device ciphertext-fragment peeling on E2EE envelopes. A capable target receives the matching `ciphertext_fragments[device_id]`; a client that omits it sees only the sender-supplied placeholder payload. E2EE crypto detail is out of this document's scope. |
-| `reliable_delivery` | off | **v1 reliable delivery.** Client emits `message.cursor_ack` after durably persisting received frames and understands `history.truncated`. The server then advances the replay cursor only on the ack (not on socket-write) and stamps the storage `seq` on downlinks. Absent → legacy advance-on-write. See §11 (reconnect/replay) and §6's `seq`/`dseq` field rows. ⚠️ If you advertise it you **MUST** implement `message.cursor_ack`. |
+| `reliable_delivery` | off | **v1 reliable delivery.** Client emits `message.cursor_ack` after durably persisting received frames and understands `history.truncated`. The server then advances the replay cursor only on the ack (not on socket-write) and stamps the storage `seq` on downlinks. Absent → legacy advance-on-write, which can both lose a frame and replay frames already received (§11.7) — a legacy client MUST dedupe by `payload.message_id` in durable storage. See §11 (reconnect/replay) and §6's `seq`/`dseq` field rows. ⚠️ If you advertise it you **MUST** implement `message.cursor_ack`. |
 | `reliable_delivery_v2` | off | **v2 reliable delivery (dseq).** Successor to `reliable_delivery`: client acks the per-connection dense `dseq` via `message.sync_ack{dseq,epoch}`, verifies dseq density at the socket read layer, echoes the hello-ok `ack_epoch`, and quarantines un-persistable frames instead of stalling. Granted only when the server returns `hello-ok.ack_mode="dseq"`; otherwise fall back to v1/legacy. **MUST** be advertised **together with** `reliable_delivery`: v2 does not imply v1 on the server, `seq` stamping is gated on `reliable_delivery` alone (a v2-only client gets no `seq`), and a server that does not grant v2 falls back to v1 only if you advertised it — otherwise to legacy. `history.truncated` reaches any v1 **or** granted-v2 connection (§11.7). See §11. ⚠️ If you advertise it you **MUST** implement `message.sync_ack`. |
 
 Note that `e2ee` is gated by client-side policy (advertised only when E2EE is enabled), whereas `history_sync` is advertised **unconditionally** by current clients because both the E2EE and plaintext history-transfer paths share the same `history.transit` wire (§11.4).
@@ -262,7 +264,8 @@ and the server enabled it, `hello-ok.payload` additionally carries
   high-water state to zero on **every** such `hello-ok` (dseq + epoch are
   per-connection, starting from 1).
 - `ack_mode` absent → the server did not grant v2; fall back to v1
-  (`message.cursor_ack` over storage `seq`) or legacy advance-on-write.
+  (`message.cursor_ack` over storage `seq`) or legacy advance-on-write (not
+  at-most-once — see §11.7 for when legacy replays).
 
 Whether v2 is granted is a per-deployment operator decision as well as a client
 one, so treat both outcomes as normal: branch strictly on the presence of
@@ -2053,11 +2056,12 @@ new live ones. Replay is keyed by **`(user_id, device_id)`**:
   messages received during replay — receipts are not suppressed during replay
   (only self-echo is excluded).
 - **How the cursor advances depends on the reliability generation you
-  negotiated** (§11.7): **legacy** advances on socket-write success; **v1**
-  (`reliable_delivery`) advances only on your `message.cursor_ack`; **v2**
-  (`reliable_delivery_v2`) advances only on your `message.sync_ack`. In all
-  cases a connection that closes mid-replay resumes from the last advanced point
-  on the next session.
+  negotiated** (§11.7): **legacy** advances on socket-write success, but only
+  on the server instance that owns your message partition, so a legacy client
+  can be replayed frames it already received (§11.7); **v1** (`reliable_delivery`)
+  advances only on your `message.cursor_ack`; **v2** (`reliable_delivery_v2`)
+  advances only on your `message.sync_ack`. In all cases a connection that
+  closes mid-replay resumes from the last advanced point on the next session.
 - Once replay catches up, the connection transitions seamlessly into live
   delivery. At the **seam** (the brief window where the server is catching
   up to the inbox tail), live writes routed to the user can be delivered
@@ -2312,10 +2316,28 @@ client that offers a full re-pull action may rely on it.
 
 ### 11.7 Reliable delivery — durable cursor models (v1 seq vs v2 dseq)
 
-By default the replay cursor advances on socket-write success — which loses a
-frame if the client crashes after the write but before durably persisting it. To
-close that window, advertise a reliability capability at `connect` (§3.3). There
-are two generations; advertise **both** so an older server cleanly falls back.
+By default (**legacy**, no reliability capability) the replay cursor advances
+on socket-write success. That is **not** at-most-once — a legacy client sees
+both failure modes:
+
+- **Loss.** A client that crashes after the write but before durably
+  persisting the frame never gets it again.
+- **Replay.** The write-time advance happens only on the server instance that
+  owns the recipient's message partition. With two or more instances, a
+  connection that landed on another instance receives its live frames over the
+  cross-instance relay and its cursor does not move for that whole connection;
+  the next reconnect (to any instance) replays everything it already received live. A cursor write that fails or
+  times out, or a server crash between the write and the cursor commit, can
+  replay the same way on a single replica too.
+
+A legacy client therefore **MUST** deduplicate by `payload.message_id` in
+storage that survives a restart — an in-memory cache misses replays that follow
+an app restart or exceed its size.
+
+To close the loss window and the multi-replica replay, advertise a reliability
+capability at `connect` (§3.3): v1 and v2 acks advance the cursor from whichever
+server instance receives them. There are two generations; advertise **both** so an older
+server cleanly falls back.
 
 > **Two version numbers.** The envelope `"version":"2"` is the **Protocol v2**
 > wire format (every client speaks it; unchanged here). **legacy / v1 / v2** below
@@ -3011,7 +3033,10 @@ Use this list as a final pass before integration testing.
       and is absent on `message.ack`, `message.error` and every signal/control
       frame (`notify.signal`, `replay.done`, `sync.mark`, `history.truncated`,
       `presence.*`).
-- [ ] Use `payload.message_id` to deduplicate against your local store.
+- [ ] Use `payload.message_id` to deduplicate against your local store —
+      durably, so it survives a restart. v1/v2 re-send frames that were
+      written but not yet acked when a connection dropped; legacy can be
+      replayed a whole session it already received (§11.7).
 - [ ] Preserve unknown `fragment.kind` values; render as "unsupported".
 - [ ] Parse `payload.message.context.mentions` tolerantly (§7.1): mention
       objects, bare user-id strings, `null`, and unknown elements must all be
