@@ -214,11 +214,16 @@ async def test_memory_owner_dm_without_chat_type_reads_everything(root, monkeypa
     "chat_id,user_id",
     [(FRIEND_DM, FRIEND), (FRIEND_DM, OWNER), (GROUP, OWNER), (GROUP, FRIEND), ("", OWNER)],
 )
-async def test_memory_other_chats_without_chat_type_never_read_owner_note(root, monkeypatch, chat_id, user_id):
+async def test_memory_other_chats_without_chat_type_are_not_the_owner_dm(root, monkeypatch, chat_id, user_id):
     _session(monkeypatch, chat_id=chat_id, user_id=user_id)
     assert memory_scope.resolve_memory_scope(root).kind != "owner_direct"
-    assert (await _read("owner", "owner")).get("error") == "not_readable_here"
-    assert ("owner", "owner") not in await _search("condition Z")
+    if chat_id == GROUP:
+        # A known group reads owner.md like any group (it is injected there).
+        assert OWNER_FACT in (await _read("owner", "owner"))["content"]
+    else:
+        # Not placeable without a chat type: nothing, owner.md included.
+        assert (await _read("owner", "owner")).get("error") == "not_readable_here"
+        assert ("owner", "owner") not in await _search("condition Z")
 
 
 async def test_memory_group_without_chat_type_is_still_scoped_to_the_group(root, monkeypatch):
@@ -232,7 +237,6 @@ async def test_memory_owner_chat_that_is_a_known_group_stays_a_group(root, monke
     monkeypatch.setattr(memory_scope, "_owner_direct_chat_id", lambda: GROUP)
     _session(monkeypatch, chat_id=GROUP, user_id=OWNER)
     assert memory_scope.resolve_memory_scope(root).kind == "group"
-    assert (await _read("owner", "owner")).get("error") == "not_readable_here"
 
 
 @pytest.mark.parametrize("lookup", [_boom, lambda: "", lambda: None])

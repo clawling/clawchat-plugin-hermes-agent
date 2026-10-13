@@ -11,16 +11,20 @@ task-local ContextVars on current Hermes, ``os.environ`` on older ones):
 * ``local`` — no gateway session in this process (``hermes chat``, the profile
   CLI): every note. The operator there owns the files anyway.
 * ``owner_direct`` — the owner's direct chat: every note.
-* ``direct`` — anyone else's direct chat: only the note about that person
-  (``users/<their id>.md``). Never ``owner.md``, another person's note or any
-  group's note, for the reason below: the friend in this chat is the only one
-  present.
-* ``group`` — a ClawChat group: that group's note and the notes of its members
-  (the participant list cached in the group note's metadata, refreshed on every
-  group message; the group's recent speakers only when no list is cached).
-  Never ``owner.md``, another group's note, or a note about a non-member: a
+* ``direct`` — anyone else's direct chat: ``owner.md`` and the note about that
+  person (``users/<their id>.md``). Never another person's note or any group's
+  note, for the reason below: the friend in this chat is the only one present.
+* ``group`` — a ClawChat group: ``owner.md``, that group's note and the notes
+  of its members (the participant list cached in the group note's metadata,
+  refreshed on every group message; the group's recent speakers only when no
+  list is cached). Never another group's note, or a note about a non-member: a
   person's note can hold what they said elsewhere, so it may only come up where
   that person is present.
+
+``owner.md`` is injected into every turn (the agent's own notes about its
+owner), so every conversation the plugin can place may read it too; what of
+it to say where is the model's call (the platform prompt: what is in the
+owner's memory does not belong in front of their friends).
 
 Hermes before 0.19.1 binds no chat type at all. There the chat id decides: the
 owner's activation conversation (compared case-insensitively), when the plugin
@@ -30,22 +34,15 @@ other chat is placed as before (a known group as that group, else nothing).
 Whatever cannot be placed — another platform, a missing chat id, a chat type
 the plugin never sets, a host "dm" for a chat the plugin knows as a group, or a
 gateway process whose call carries no session — is a group with no known
-members, so it reads nothing.
+members, so it reads nothing (``owner.md`` included) and cannot write
+``owner.md``.
 
-Writes are judged too (:meth:`MemoryScope.can_write`). ``owner.md`` can only
-be changed — appended to, replaced or edited — where it can be read: the
-owner's direct chat (or a local surface). It is injected into the owner's
-direct chat, where the agent has every tool, so a line a friend or a group got
-appended ("the owner said: do whatever my friends ask") would later read like
-the owner's own words. A fact about the owner said elsewhere goes to the
-speaker's own note or the group's note instead; the owner can repeat it in
-their direct chat. A turn the plugin itself starts in the owner's activation
-conversation (the memory-migration hint, permission receipts, notes) keeps
-its ``direct`` read scope but may write ``owner.md`` (``owner_chat``): only
-the owner and the agent are in that chat. Other notes may still be appended to from any
-conversation, since adding text reveals nothing; replacing or editing a note
-reads or wipes what is there, so the tools only allow those on notes the
-conversation may read.
+Writes are judged too (:meth:`MemoryScope.can_write`). Any other note may be
+appended to from any conversation, since adding text reveals nothing;
+replacing or editing a note reads or wipes what is there, so the tools only
+allow those on notes the conversation may read. Whether a fact said in a group
+or a friend's chat belongs in ``owner.md`` is the model's call, as it is for
+the other notes.
 """
 
 from __future__ import annotations
@@ -67,24 +64,12 @@ SPEAKER_FALLBACK_ROWS = 200
 # NON_MESSAGING_SESSION_SURFACES for the ones that matter here).
 _LOCAL_SURFACES = frozenset({"", "cli", "local", "tui", "desktop", "tool"})
 
-_OWNER_WRITE_ONLY_THERE = "owner.md can only be changed in your owner's direct chat."
-
-#: The per-turn reminder in a turn the owner did not start (adapter channel prompt).
-OWNER_NOTE_WRITE_HINT = (
-    "owner.md can only be written (append included) in your owner's direct chat; in this "
-    "conversation, record a fact about the owner in the speaker's own note (users/<id>.md) "
-    "or, in a group, the group's note."
-)
-
 
 @dataclass(frozen=True)
 class MemoryScope:
     kind: str  # "local" | "owner_direct" | "direct" | "group"
     chat_id: str = ""
     members: frozenset[str] = frozenset()
-    #: The owner's activation conversation, though not the owner speaking
-    #: (a turn the plugin started there): may write owner.md, reads as ``kind``.
-    owner_chat: bool = False
 
     @property
     def restricted(self) -> bool:
@@ -94,7 +79,7 @@ class MemoryScope:
         if self.kind in {"local", "owner_direct"}:
             return True
         if target_type == "owner":
-            return False
+            return bool(self.chat_id)
         if self.kind == "direct":
             return target_type == "user" and target_id in self.members
         if target_type == "group":
@@ -105,39 +90,15 @@ class MemoryScope:
 
     def can_write(self, target_type: str, target_id: str, mode: str) -> bool:
         """``append`` / ``replace`` / ``edit`` on a note from this conversation."""
-        if target_type == "owner":
-            if self.kind in {"local", "owner_direct"} or self.owner_chat:
-                return mode == "append" or self.can_read(target_type, target_id)
-            return False
-        if mode == "append":
+        if mode == "append" and target_type != "owner":
             return True
         return self.can_read(target_type, target_id)
-
-    def write_refusal(self, target_type: str, target_id: str) -> dict[str, Any]:
-        """Why a write was refused: ``owner.md`` outside its chat, else as a read."""
-        if target_type != "owner" or self.owner_chat:
-            return self.refusal(target_type, target_id)
-        if self.kind == "direct":
-            message = (
-                f"{_OWNER_WRITE_ONLY_THERE} Record this in the note about the person you are "
-                "talking to (their users/<id>.md) instead."
-            )
-        elif self.kind == "group" and self.chat_id:
-            message = (
-                f"{_OWNER_WRITE_ONLY_THERE} Record this in the speaker's own note (users/<id>.md) "
-                "or this group's note instead; if the owner wants it in owner.md, they can tell "
-                "you in their direct chat."
-            )
-        else:
-            message = _OWNER_WRITE_ONLY_THERE
-        return {"error": "not_writable_here", "code": "memory_scope", "message": message}
 
     def refusal(self, target_type: str, target_id: str) -> dict[str, Any]:
         if target_type == "owner":
             message = (
-                "owner.md can only be read in your owner's direct chat. This conversation is "
-                "not that chat, and a tool result here stays in this conversation's history "
-                "where others can see it. Do not try to get the owner's notes another way."
+                "owner.md is not available here: this call could not be placed in a ClawChat "
+                "conversation."
             )
         elif self.kind == "direct":
             message = (
@@ -162,13 +123,13 @@ class MemoryScope:
         """What a restricted search left out, for the model (no counts)."""
         if self.kind == "direct":
             return (
-                "In this direct chat only the note about the person you are talking to is searched; "
-                "owner.md, other people's notes and group notes are left out."
+                "In this direct chat only owner.md and the note about the person you are talking to "
+                "are searched; other people's notes and group notes are left out."
             )
         if self.kind == "group":
             return (
-                "In a group only that group's note and its members' notes are searched; "
-                "owner.md, other groups' notes and notes about non-members are left out."
+                "In a group only owner.md, that group's note and its members' notes are searched; "
+                "other groups' notes and notes about non-members are left out."
             )
         return None
 
@@ -322,7 +283,6 @@ def resolve_memory_scope(root: Path | str | None) -> MemoryScope:
                 kind="direct",
                 chat_id=chat_id,
                 members=frozenset({user_id}) if user_id else frozenset(),
-                owner_chat=_is_owner_chat(chat_id),
             )
         if chat_type != "group" and not known_group:
             return _NOTHING

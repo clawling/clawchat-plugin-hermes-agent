@@ -9,21 +9,19 @@ context: platform, chat id, chat type, user id):
 
 * the owner's direct chat, or a local surface (CLI, no gateway session in
   this process): every note;
-* any other direct chat: only the note about the person in it;
-* a group: that group's note, and the notes of people who are members of it
-  (its cached participant list; recent speakers only when no list is known) —
-  never ``owner.md``, never another group's note, never a note about someone
+* any other direct chat: ``owner.md`` and the note about the person in it;
+* a group: ``owner.md``, that group's note, and the notes of people who are
+  members of it (its cached participant list; recent speakers only when no
+  list is known) — never another group's note, never a note about someone
   outside the group;
 * anything the plugin cannot place (another platform, no chat id, an unknown
   chat type, a gateway process with no session bound): like a group with no
-  known members.
+  known members, ``owner.md`` included.
 
 Search drops what the conversation may not read before it ranks or counts.
-Writes: ``owner.md`` can only be changed (append included) in the owner's
-direct chat — it is injected there, where the agent has every tool, so a line
-appended from a group or a friend's chat would read like the owner's own
-(``not_writable_here``). Any other note takes ``mode=append`` from any
-conversation, but ``mode=replace`` and ``clawchat_memory_edit`` — which read or
+``owner.md`` is injected into every turn, so every placed conversation may
+read and change it; what to say or record where is the model's call. Any
+other note takes ``mode=append`` from any conversation, but ``mode=replace`` and ``clawchat_memory_edit`` — which read or
 wipe what is there — only for notes the conversation may read, and an append
 to an unreadable note does not say whether its text was already there.
 """
@@ -130,41 +128,26 @@ def _found(result):
     return {(m["targetType"], m["targetId"]) for m in result["matches"]}
 
 
-# --- group: owner.md never comes back -------------------------------------
+# --- group: owner.md is read like the injected note -------------------------
 
 
 @pytest.mark.asyncio
-async def test_group_read_of_owner_note_is_refused_without_content(root, monkeypatch):
+async def test_group_reads_and_searches_owner_note(root, monkeypatch):
+    # owner.md is injected into every group turn; the tools agree with that.
     in_group(monkeypatch)
-    result = await read("owner", "owner")
-    assert result.get("error") == "not_readable_here"
-    assert "condition Z" not in json.dumps(result)
-    assert "owner" in result["message"].lower()
-
-
-@pytest.mark.asyncio
-async def test_group_search_leaves_out_owner_note(root, monkeypatch):
-    in_group(monkeypatch)
+    assert OWNER_PRIVATE_FACT in (await read("owner", "owner"))["content"]
     result = await search("condition Z")
-    assert result["matches"] == []
-    assert OWNER_PRIVATE_FACT not in json.dumps(result)
-    # The model is told why, so it does not go looking another way.
-    assert "owner" in result["scopeNote"].lower()
-
-
-@pytest.mark.asyncio
-async def test_group_search_limited_to_owner_finds_nothing(root, monkeypatch):
-    in_group(monkeypatch)
-    result = await search("private", targetTypes=["owner"])
-    assert result["matches"] == []
+    assert _found(result) == {("owner", "owner")}
+    assert "owner.md" in result["scopeNote"]
+    assert _found(await search("private", targetTypes=["owner"])) == {("owner", "owner")}
 
 
 @pytest.mark.asyncio
 async def test_legacy_per_speaker_group_session_is_still_a_group(root, monkeypatch):
     # Per-speaker group sessions carry the real speaker as the session user —
-    # even the owner speaking in a group must not open owner.md there.
+    # even the owner speaking in a group reads as a group there.
     _session(monkeypatch, chat_id=GROUP, chat_type="group", user_id=OWNER)
-    assert (await read("owner", "owner")).get("error") == "not_readable_here"
+    assert (await read("group", OTHER_GROUP)).get("error") == "not_readable_here"
 
 
 # --- group: members yes, outsiders and other groups no ---------------------
@@ -196,7 +179,7 @@ async def test_group_search_keeps_only_this_group_and_its_members(root, monkeypa
     for target_type, target_id in (("user", ADA), ("user", OUTSIDER), ("group", GROUP), ("group", OTHER_GROUP)):
         write_clawchat_memory_body(root, target_type, target_id, "append", "keyword-shared")
     result = await search("keyword-shared")
-    assert _found(result) == {("user", ADA), ("group", GROUP)}
+    assert _found(result) == {("owner", "owner"), ("user", ADA), ("group", GROUP)}
 
 
 @pytest.mark.asyncio
@@ -233,10 +216,10 @@ async def test_owner_dm_keeps_reading_any_note(root, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_someone_elses_dm_cannot_read_owner_note(root, monkeypatch):
+async def test_someone_elses_dm_reads_owner_note(root, monkeypatch):
     in_friend_dm(monkeypatch)
-    assert (await read("owner", "owner")).get("error") == "not_readable_here"
-    assert ("owner", "owner") not in _found(await search("condition Z"))
+    assert OWNER_PRIVATE_FACT in (await read("owner", "owner"))["content"]
+    assert ("owner", "owner") in _found(await search("condition Z"))
     assert ADA_FACT in (await read("user", ADA))["content"]
 
 
@@ -253,7 +236,7 @@ async def test_someone_elses_dm_reads_only_that_persons_note(root, monkeypatch):
         assert result.get("error") == "not_readable_here", (target_type, target_id)
         assert "direct chat" in result["message"]
     for query in ("bank", "Fridays", "surprise"):
-        assert _found(await search(query)) <= {("user", ADA)}
+        assert _found(await search(query)) <= {("owner", "owner"), ("user", ADA)}
 
 
 @pytest.mark.asyncio
@@ -272,7 +255,7 @@ async def test_a_dm_id_that_is_a_known_group_is_treated_as_a_group(root, monkeyp
     # The host says "dm", but the plugin knows this chat as a group (its
     # cached participant list): the more restrictive reading wins.
     _session(monkeypatch, chat_id=GROUP, chat_type="dm", user_id=OWNER)
-    assert (await read("owner", "owner")).get("error") == "not_readable_here"
+    assert (await read("group", OTHER_GROUP)).get("error") == "not_readable_here"
 
 
 @pytest.mark.asyncio
@@ -280,7 +263,7 @@ async def test_owner_dm_needs_a_known_owner(root, monkeypatch):
     monkeypatch.delenv("CLAWCHAT_OWNER_USER_ID")
     monkeypatch.setattr(memory_scope, "_owner_user_id", lambda: "")
     in_owner_dm(monkeypatch)
-    assert (await read("owner", "owner")).get("error") == "not_readable_here"
+    assert (await read("group", OTHER_GROUP)).get("error") == "not_readable_here"
 
 
 # --- unknown context is restrictive -----------------------------------------
@@ -298,8 +281,8 @@ async def test_owner_dm_needs_a_known_owner(root, monkeypatch):
 )
 async def test_unplaceable_session_is_treated_as_a_group(root, monkeypatch, platform, chat_id, chat_type):
     _session(monkeypatch, chat_id=chat_id, chat_type=chat_type, user_id=OWNER, platform=platform)
-    assert (await read("owner", "owner")).get("error") == "not_readable_here"
-    assert ("owner", "owner") not in _found(await search("condition Z"))
+    assert (await read("group", OTHER_GROUP)).get("error") == "not_readable_here"
+    assert ("group", OTHER_GROUP) not in _found(await search("surprise"))
 
 
 @pytest.mark.asyncio
@@ -334,7 +317,7 @@ async def test_host_context_vars_win_over_process_env(root, monkeypatch):
     module.session_context_engaged = lambda: True
     monkeypatch.setitem(sys.modules, "gateway.session_context", module)
     monkeypatch.setattr(memory_scope, "_session_context_engaged", memory_scope._host_session_context_engaged)
-    assert (await read("owner", "owner")).get("error") == "not_readable_here"
+    assert (await read("group", OTHER_GROUP)).get("error") == "not_readable_here"
 
 
 # --- writes -----------------------------------------------------------------
@@ -359,22 +342,22 @@ def _body(root, target_type, target_id):
 
 
 @pytest.mark.asyncio
-async def test_group_cannot_append_to_the_owner_note(root, monkeypatch):
+async def test_group_may_append_to_the_owner_note(root, monkeypatch):
+    # Whether a fact said in a group belongs in owner.md is the model's call.
     in_group(monkeypatch)
     result = await write("owner", "owner", "append", "Owner said in Hikers: moving to Berlin")
-    assert result.get("error") == "not_writable_here"
-    assert "moving to Berlin" not in _body(root, "owner", "owner")
+    assert result.get("ok") is True
+    assert "moving to Berlin" in _body(root, "owner", "owner")
     assert OWNER_PRIVATE_FACT in _body(root, "owner", "owner")
 
 
 @pytest.mark.asyncio
-async def test_group_cannot_replace_or_edit_the_owner_note(root, monkeypatch):
+async def test_group_may_replace_or_edit_the_owner_note(root, monkeypatch):
     in_group(monkeypatch)
-    replaced = await write("owner", "owner", "replace", "wiped")
-    edited = await edit("owner", "owner", "condition Z", "nothing")
-    assert replaced.get("error") == "not_writable_here"
-    assert edited.get("error") == "not_writable_here"
-    assert OWNER_PRIVATE_FACT in _body(root, "owner", "owner")
+    assert (await edit("owner", "owner", "condition Z", "condition Y")).get("ok") is True
+    assert "condition Y" in _body(root, "owner", "owner")
+    assert (await write("owner", "owner", "replace", "fresh")).get("ok") is True
+    assert _body(root, "owner", "owner") == "fresh"
 
 
 @pytest.mark.asyncio

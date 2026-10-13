@@ -233,6 +233,7 @@ tests/*
 !tests/test_owner_dm_without_chat_type.py
 !tests/test_message_target_check.py
 !tests/test_non_owner_residual.py
+!tests/test_owner_note_soft_rule.py
 !tests/test_non_owner_recall_and_connections.py
 !tests/test_sticker_hint.py
 !tests/test_group_command_receipt.py
