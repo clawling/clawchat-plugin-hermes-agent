@@ -2652,13 +2652,9 @@ class ClawChatAdapter(BasePlatformAdapter):
         if self._is_owner_turn(inbound):
             return None
         from clawchat_gateway.host_tools_guard import blocked_tools_hint, limited_tools_hint
-        from clawchat_gateway.memory_scope import OWNER_NOTE_WRITE_HINT
 
-        lines = [OWNER_NOTE_WRITE_HINT]
-        for hint in (blocked_tools_hint(), limited_tools_hint()):
-            if hint:
-                lines.append(hint)
-        return "\n".join(lines)
+        lines = [hint for hint in (blocked_tools_hint(), limited_tools_hint()) if hint]
+        return "\n".join(lines) or None
 
     def toolsets_for_source(self, source):
         """Host tools only in the owner's own direct chat (``host_tools_guard``)."""
@@ -4498,9 +4494,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             targets.append(("user", speaker, f"{self._escape_prompt_field(name)}, who spoke here"))
             if len(targets) > SEDIMENT_GROUP_SPEAKERS_MAX:
                 break
-        # Never owner.md: it can only be written in the owner's direct chat
-        # (memory_scope); a fact about the owner said here goes to the
-        # speaker's or the group's note.
+        targets.append(("owner", "owner", "your owner — only facts about them said in this group"))
         return targets
 
     async def _run_sediment_turn(
@@ -5342,15 +5336,27 @@ class ClawChatAdapter(BasePlatformAdapter):
     def _format_note_memory_section(self, inbound: InboundMessage) -> str | None:
         """The agent's own notes for the people / group in this turn, capped.
 
-        Direct chat: ``owner.md`` for the owner, else ``users/<sender>.md``.
-        Group: ``groups/<chat>.md`` plus ``users/<id>.md`` of each speaker in
-        the batch (never ``owner.md``, which stays in the owner's direct chat).
+        Every turn starts with ``owner.md``. Direct chat with anyone else:
+        then ``users/<sender>.md``. Group: then ``groups/<chat>.md`` plus
+        ``users/<id>.md`` of each speaker in the batch (the owner's note is
+        ``owner.md``, so the owner is not listed again).
         Caps: ``note-cap-user`` per person, ``note-cap-group`` for the group,
         ``note-cap-turn`` for the whole section (longest notes give way first).
         """
         config = self._clawchat_config
         # (title, body, per-note cap, read hint)
         entries: list[tuple[str, str, int, str]] = []
+        owner_id = self._owner_user_id()
+        owner_body = self._read_memory_body("owner", "owner")
+        if owner_body:
+            entries.append(
+                (
+                    "### Your owner (owner.md)",
+                    owner_body,
+                    config.note_cap_user,
+                    "clawchat_memory_read targetType=owner targetId=owner",
+                )
+            )
         if inbound.chat_type == "group":
             heading = "## ClawChat Group Memory"
             preamble = f"{NOTE_MEMORY_PREAMBLE} {GROUP_NOTE_MEMORY_PRIVACY}"
@@ -5367,7 +5373,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             seen: set[str] = set()
             for message in self._group_messages_for_metadata(inbound):
                 sender_id = message.sender_id
-                if not sender_id or sender_id in seen or sender_id in {config.user_id, "system"}:
+                if not sender_id or sender_id in seen or sender_id in {config.user_id, "system", owner_id}:
                     continue
                 seen.add(sender_id)
                 body = self._read_memory_body("user", sender_id)
@@ -5385,17 +5391,17 @@ class ClawChatAdapter(BasePlatformAdapter):
         else:
             heading = "## ClawChat Peer Memory"
             preamble = NOTE_MEMORY_PREAMBLE
-            owner_id = self._owner_user_id()
-            if owner_id and inbound.sender_id == owner_id:
-                body = self._read_memory_body("owner", "owner")
-                title = "### Your owner (owner.md)"
-                hint = "clawchat_memory_read targetType=owner targetId=owner"
-            else:
+            if not (owner_id and inbound.sender_id == owner_id):
                 body = self._read_memory_body("user", inbound.sender_id)
-                title = f"### This person (users/{inbound.sender_id}.md)"
-                hint = f"clawchat_memory_read targetType=user targetId={inbound.sender_id}"
-            if body:
-                entries.append((title, body, config.note_cap_user, hint))
+                if body:
+                    entries.append(
+                        (
+                            f"### This person (users/{inbound.sender_id}.md)",
+                            body,
+                            config.note_cap_user,
+                            f"clawchat_memory_read targetType=user targetId={inbound.sender_id}",
+                        )
+                    )
         if not entries:
             return None
         capped = [cap_note(body, cap, read_hint=hint) for _title, body, cap, hint in entries]

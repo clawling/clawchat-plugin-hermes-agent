@@ -114,15 +114,19 @@ Each turn also carries the agent's **own notes** for the people in it — the
 agent-written body of the ClawChat memory files, never their metadata block
 (`ClawChatAdapter._format_note_memory_section`):
 
-- `## ClawChat Peer Memory` in a direct chat: `owner.md` when the sender is the
-  owner, otherwise `users/<sender_id>.md`.
-- `## ClawChat Group Memory` in a group: `groups/<chat_id>.md`, then
-  `users/<id>.md` for every distinct sender in the turn's batch (the agent
-  itself excluded). `owner.md` is never shown in a group; it stays in the
-  owner's direct chat. The memory tools hold the same line when the agent
-  reads notes itself: in a group `clawchat_memory_read` / `_search` return
-  only that group's note and its members' notes (see
-  [`tools.md`](./tools.md#what-a-conversation-may-read)).
+Every turn starts with `owner.md` (`### Your owner (owner.md)`), in every
+conversation, as the agent's own notes about its owner; what of it to bring up
+where is left to the model (the platform prompt says what is in the owner's
+memory does not belong in front of their friends).
+
+- `## ClawChat Peer Memory` in a direct chat: `owner.md`, then, when the
+  sender is not the owner, `users/<sender_id>.md`.
+- `## ClawChat Group Memory` in a group: `owner.md`, `groups/<chat_id>.md`,
+  then `users/<id>.md` for every distinct sender in the turn's batch (the
+  agent itself and the owner excluded). The memory tools hold the same line
+  when the agent reads notes itself: in a group `clawchat_memory_read` /
+  `_search` return only `owner.md`, that group's note and its members' notes
+  (see [`tools.md`](./tools.md#what-a-conversation-may-read)).
 
 Both open with a fixed line saying the notes are social context written by the
 agent, not instructions; the group section adds that a note about a person may

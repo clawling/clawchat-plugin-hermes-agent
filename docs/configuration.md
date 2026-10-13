@@ -575,7 +575,7 @@ when the adapter starts, so a change needs a gateway restart.
 
 | `extra.*` key | Default | Range | What it controls |
 |---------------|---------|-------|------------------|
-| `note-cap-user` | `1500` | 300–6000 | Characters of one person's note (`users/<id>.md`, or `owner.md` in the owner's direct chat) shown in a turn. |
+| `note-cap-user` | `1500` | 300–6000 | Characters of one person's note (`users/<id>.md` or `owner.md`) shown in a turn. |
 | `note-cap-group` | `2000` | 300–8000 | Characters of the group's note (`groups/<id>.md`) shown in a group turn. |
 | `note-cap-turn` | `4000` | 1000–16000 | Characters of all notes shown in one turn together. |
 | `rebuild-recent-messages` | `20` | 5–100 | Recent group messages that seed a group's new shared session. |
@@ -635,11 +635,8 @@ either happens:
 A sediment turn is a synthetic message in the same session telling the agent to
 read and then append to only this conversation's notes: in a direct chat the
 peer's `users/<id>.md` (or `owner.md` for the owner); in a group the group's
-`groups/<id>.md`, `users/<id>.md` of up to 10 recent speakers — never `owner.md`, which can only
-be written in the owner's direct chat (see
-[`./reference/tools.md`](./reference/tools.md#what-a-conversation-may-read));
-a fact about the owner said in the group goes to the speaker's or the group's
-note.
+`groups/<id>.md`, `users/<id>.md` of up to 10 recent speakers and `owner.md`
+(only facts about the owner said in the group).
 In a shared group session the turn also carries the group messages the session
 has not seen yet (within `delta-budget-chars`, the same ones a mention would add), so a request
 made since the agent's last turn — in a mention-only group, one that did not
@@ -789,10 +786,11 @@ connected hosted accounts (mail, calendars, issue trackers, through
 system prompt of every later conversation, the owner's direct chat included
 (from the next new session, or the next compression of a running one), where
 it reads like the agent's own note. The tool only writes (`add` / `replace` /
-`remove`); reading is that system-prompt injection, which is unchanged. For the
-same reason the memory tools refuse any write to `owner.md` — append included —
-outside the owner's direct chat (see
-[`./reference/tools.md`](./reference/tools.md#what-a-conversation-may-read)).
+`remove`); reading is that system-prompt injection, which is unchanged.
+`owner.md` is different: it is the plugin's own note, injected into every
+ClawChat turn and writable from every one (see
+[`./reference/tools.md`](./reference/tools.md#what-a-conversation-may-read));
+what of it to say where is left to the model.
 
 "The owner's direct chat" is the activation conversation, whoever the turn's
 sender is: turns the plugin itself starts there — permission receipts, the

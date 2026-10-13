@@ -134,8 +134,10 @@ def test_group_turn_carries_group_and_speaker_notes(adapter):
     assert "Ada runs the book club." in content
     assert "Bo is new here." in content
     assert "Cy did not speak" not in content
-    assert "owner-private detail" not in content
     assert content.count("Ada runs the book club.") == 1
+    # owner.md is in every turn, first, shaped as in the owner's direct chat.
+    assert "### Your owner (owner.md)\nowner-private detail" in content
+    assert content.index("### Your owner (owner.md)") < content.index("### This group (")
 
 
 def test_group_turn_total_cap_shrinks_the_longest_first(adapter):
