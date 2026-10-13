@@ -366,6 +366,10 @@ inside the backend's refresh grace window (requires server grace window
 (member-backend ≥ release TBD)). A `10003` on that retry still logs out. See
 [`./token-refresh.md`](./token-refresh.md) §B.
 
+Integer business codes `10003` and `400` are permanent even in a non-200
+response or urllib HTTPError. HTML, malformed JSON and string codes in non-200
+responses remain transient.
+
 ### Auto-logout (permanent refresh failure)
 
 When the refresh token is **permanently invalid** — revoked, expired, or a
@@ -373,11 +377,20 @@ device-mismatch (see
 [`./configuration.md`](./configuration.md#device-id-is-also-the-token-refresh-precondition))
 — the plugin cannot mint new tokens. It then:
 
-1. Clears the stored credentials in both stores: removes `CLAWCHAT_TOKEN` /
-   `CLAWCHAT_REFRESH_TOKEN` from `.env` and blanks the access/refresh columns of
-   the SQLite `activations` row (the user/owner/agent identity is **kept**, so a
-   re-pair reuses the same identity).
-2. Surfaces a user-visible message (in addition to logs):
+1. Writes the rejected refresh token's SHA-256 hex fingerprint and rejection
+   time to SQLite (`revoked_refresh_tokens`, migration 12), before clearing
+   credentials. The marker never contains the plaintext token.
+2. Writes empty `CLAWCHAT_TOKEN` / `CLAWCHAT_REFRESH_TOKEN` tombstones in `.env`
+   and blanks the SQLite `activations` token columns, preserving identity.
+   Each clear result is logged; a failed clear leaves the durable guard active.
+3. Clears in-memory credentials, sets `AUTH_FAILED`, closes the WebSocket and
+   waits for new activation for startup, proactive, REST and hello-fail failures.
+   On restart and during activation polling, an existing marker blocks empty
+   refresh tokens and tokens matching its fingerprint. Adopting a different
+   refresh token clears the marker. Without a marker, access-token-only setups
+   still connect, and fresh installs keep their original waiting status. A
+   marker read failure preserves credentials; the in-memory guard still applies.
+4. Surfaces a user-visible message (in addition to logs):
 
    > ClawChat token expired and could not be refreshed. Ask your owner to send you the reconnect prompt from the ClawChat app, then follow https://agent-connection.clawling.com/reconnect.md.
 
@@ -388,10 +401,8 @@ re-activating with any activation entrypoint above (e.g. `/clawchat-activate
 <CODE>` or `hermes clawchat activate <CODE>`). Activation usually restores the
 identity on its own; if it still reports the identity as already paired, re-run
 it with `--repair`. The waiting-for-activation supervisor picks
-up the new credentials without a Hermes restart. Note that an env-booted process
-switches onto the SQLite-credentials path after its first successful refresh, so
-it can self-recover into this waiting state on a later permanent expiry instead
-of requiring a gateway restart.
+up the new credentials without a Hermes restart, including after an env-booted
+process's first permanent refresh failure.
 
 ### Device-id column (SQLite migration)
 

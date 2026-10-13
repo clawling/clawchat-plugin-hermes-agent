@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -192,6 +193,22 @@ CREATE INDEX IF NOT EXISTS idx_clawchat_messages_chat_id_nocase
   ON clawchat_messages(chat_id COLLATE NOCASE);
 """
 
+REVOKED_REFRESH_SCHEMA = """
+CREATE TABLE IF NOT EXISTS revoked_refresh_tokens (
+  platform TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  rejected_at INTEGER NOT NULL,
+  PRIMARY KEY (platform, account_id)
+);
+"""
+
+
+def refresh_token_fingerprint(refresh_token: str) -> str:
+    """Fingerprint the credential as submitted to the refresh endpoint."""
+    return hashlib.sha256(refresh_token.strip().encode("utf-8")).hexdigest()
+
+
 MIGRATIONS = [
     (1, "initial_schema", INITIAL_SCHEMA),
     (2, "message_id_dedup", MESSAGE_ID_DEDUP_SCHEMA),
@@ -204,6 +221,7 @@ MIGRATIONS = [
     (9, "recalled_messages", RECALLED_MESSAGES_SCHEMA),
     (10, "group_shared_sessions", GROUP_SHARED_SESSIONS_SCHEMA),
     (11, "message_target_nocase_indexes", MESSAGE_TARGET_NOCASE_SCHEMA),
+    (12, "revoked_refresh_tokens", REVOKED_REFRESH_SCHEMA),
 ]
 
 # Lookup behind ClawChatStore.find_seen_message_in_chat: a real chat message
@@ -640,6 +658,47 @@ class ClawChatStore:
             )
 
         self._write("set_activation_device_id", write)
+
+    def mark_revoked_refresh_token(
+        self, *, platform: str, account_id: str, refresh_token: str,
+    ) -> bool:
+        fingerprint = refresh_token_fingerprint(refresh_token)
+
+        def write(conn: sqlite3.Connection) -> bool:
+            conn.execute(
+                """INSERT INTO revoked_refresh_tokens
+                   (platform, account_id, fingerprint, rejected_at) VALUES (?, ?, ?, ?)
+                   ON CONFLICT(platform, account_id) DO UPDATE SET
+                   fingerprint = excluded.fingerprint, rejected_at = excluded.rejected_at""",
+                (platform, account_id, fingerprint, _now_ms()),
+            )
+            return True
+
+        return self._write("mark_revoked_refresh_token", write)
+
+    def get_revoked_refresh_fingerprint(self, *, platform: str, account_id: str) -> str | None:
+        self.initialize()
+        if self._disabled:
+            raise RuntimeError("ClawChat revoked-refresh guard unavailable")
+        conn = sqlite3.connect(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT fingerprint FROM revoked_refresh_tokens WHERE platform = ? AND account_id = ?",
+                (platform, account_id),
+            ).fetchone()
+            return str(row[0]) if row else None
+        finally:
+            conn.close()
+
+    def clear_revoked_refresh_token(self, *, platform: str, account_id: str) -> bool:
+        def write(conn: sqlite3.Connection) -> bool:
+            conn.execute(
+                "DELETE FROM revoked_refresh_tokens WHERE platform = ? AND account_id = ?",
+                (platform, account_id),
+            )
+            return True
+
+        return self._write("clear_revoked_refresh_token", write)
 
     def clear_activation_credentials(
         self,

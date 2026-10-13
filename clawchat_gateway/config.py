@@ -574,6 +574,21 @@ class ClawChatConfig:
         # config.yaml (env/.env/SQLite only), but a config written by an older
         # plugin must still boot — fall back to extra when env is empty.
         token = _get_env("CLAWCHAT_TOKEN") or _get_config_value(extra, "token", "")
+        refresh_token = _get_env("CLAWCHAT_REFRESH_TOKEN") or _get_config_value(extra, "refresh_token", "")
+        from clawchat_gateway.storage import get_clawchat_store, refresh_token_fingerprint
+
+        rejected = None
+        try:
+            rejected = get_clawchat_store().get_revoked_refresh_fingerprint(
+                platform="hermes", account_id="default",
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat revoked-refresh guard read failed; using existing credentials")
+        if rejected and (
+            not refresh_token or not refresh_token.strip()
+            or refresh_token_fingerprint(refresh_token) == rejected
+        ):
+            token = refresh_token = ""
         return cls(
             websocket_url=_get_env("CLAWCHAT_WEBSOCKET_URL", "CLAWCHAT_WS_URL")
             or _get_config_value(extra, "websocket_url", "")
@@ -584,8 +599,7 @@ class ClawChatConfig:
             media_base_url=_get_env("CLAWCHAT_MEDIA_BASE_URL")
             or _get_config_value(extra, "media_base_url", ""),
             token=token,
-            refresh_token=_get_env("CLAWCHAT_REFRESH_TOKEN")
-            or _get_config_value(extra, "refresh_token", ""),
+            refresh_token=refresh_token,
             user_id=_resolve_user_id(
                 token,
                 _get_env("CLAWCHAT_USER_ID") or _get_config_value(extra, "user_id", ""),

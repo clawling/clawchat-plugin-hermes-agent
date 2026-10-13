@@ -882,7 +882,8 @@ class ClawChatApiClient:
           device mismatch → caller auto-logs-out.
         - ``400`` → PERMANENT client bug (kind ``validation``) → auto-logout.
         - ``1`` → TRANSIENT (kind ``api``, retryable) → server internal error.
-        - any non-200 / network error → TRANSIENT (kind ``transport``, retryable).
+        - non-200 with integer ``10003`` / ``400`` → PERMANENT; otherwise
+          non-200 / network error → TRANSIENT (kind ``transport``, retryable).
         - attempt deadline (``REFRESH_ATTEMPT_CEILING_SECONDS``) hit → TRANSIENT
           (kind ``transport``, not ``connect_failed``: the outcome is unknown).
         """
@@ -940,17 +941,12 @@ class ClawChatApiClient:
                 status = getattr(response, "status", 200)
                 raw = response.read().decode("utf-8")
         except HTTPError as exc:
-            # Non-200 (500 / LB / transport) → TRANSIENT, retryable.
+            # Preserve the business envelope even when urllib raises for HTTP status.
+            status = exc.code
             try:
-                detail = exc.read().decode("utf-8")
+                raw = exc.read().decode("utf-8")
             except Exception:
-                detail = ""
-            raise ClawChatApiError(
-                "transport",
-                f"refresh HTTP {exc.code}: {detail or exc.reason}",
-                status=exc.code,
-                path="/v1/auth/refresh",
-            ) from exc
+                raw = ""
         except URLError as exc:
             reason = exc.reason
             connect_failed = isinstance(reason, (ConnectionRefusedError, socket.gaierror))
@@ -969,14 +965,6 @@ class ClawChatApiClient:
         except Exception as exc:  # noqa: BLE001
             raise ClawChatApiError("transport", str(exc), path="/v1/auth/refresh") from exc
 
-        if status != 200:
-            # Defensive: any non-200 is TRANSIENT (the contract says always 200).
-            raise ClawChatApiError(
-                "transport",
-                f"refresh non-200 status={status}",
-                status=status,
-                path="/v1/auth/refresh",
-            )
         try:
             payload = json.loads(raw)
         except Exception as exc:
@@ -987,9 +975,18 @@ class ClawChatApiClient:
                 path="/v1/auth/refresh",
             ) from exc
         code = payload.get("code") if isinstance(payload, dict) else None
+        if type(code) is not int:
+            code = None
         msg = ""
         if isinstance(payload, dict):
             msg = str(payload.get("msg") or payload.get("message") or "")
+        if status != 200 and code not in (REFRESH_CODE_INVALID_REFRESH, REFRESH_CODE_BAD_REQUEST):
+            raise ClawChatApiError(
+                "transport",
+                f"refresh non-200 status={status}",
+                status=status,
+                path="/v1/auth/refresh",
+            )
         if code == REFRESH_CODE_SUCCESS:
             data = payload.get("data") if isinstance(payload, dict) else None
             if not isinstance(data, dict):
@@ -1297,15 +1294,16 @@ def is_permanent_refresh_error(exc: ClawChatApiError) -> bool:
     """Classify a refresh failure as PERMANENT (auto-logout) vs TRANSIENT (retry).
 
     Per spec §B, only ``code == 10003`` (invalid refresh) and ``code == 400``
-    (client bug) are permanent. ``code == 1`` (internal), non-200, and any
-    network error are transient and must keep retrying — a transient failure
+    (client bug) are permanent, including in a non-200 JSON envelope. Integer
+    codes are required. ``code == 1`` (internal), other non-200 responses, and
+    network errors are transient and must keep retrying — a transient failure
     never auto-logs-out. Either no rotation was committed (the old refresh token
     is still valid), or the server rotated but the response was lost, in which
     case a retry inside the backend refresh grace window redeems the old token
     again. A ``10003`` after such a timeout is still permanent: it means the
     window has passed or the token was revoked (spec §B escalation).
     """
-    return exc.code in (REFRESH_CODE_INVALID_REFRESH, REFRESH_CODE_BAD_REQUEST)
+    return type(exc.code) is int and exc.code in (REFRESH_CODE_INVALID_REFRESH, REFRESH_CODE_BAD_REQUEST)
 
 
 def _refresh_outcome_unknown(exc: ClawChatApiError) -> bool:

@@ -117,6 +117,7 @@ BuildClient = Callable[[], ClawChatApiClient]
 PersistTokens = Callable[[str, str], Awaitable[bool]]
 # persist_logout(reason) -> None: clear creds in both stores, keep identity (§C.1).
 PersistLogout = Callable[[str], Awaitable[None]]
+PersistRejection = Callable[[str], Awaitable[None]]
 
 
 class RefreshManager:
@@ -129,6 +130,7 @@ class RefreshManager:
         persist_tokens: PersistTokens,
         persist_logout: PersistLogout,
         device_id_provider: Callable[[], str],
+        persist_rejection: PersistRejection | None = None,
         min_interval_seconds: float = MIN_REFRESH_INTERVAL_SECONDS,
         monotonic: Callable[[], float] | None = None,
         max_transient_retries: int | None = None,
@@ -138,6 +140,7 @@ class RefreshManager:
         self._build_client = build_client
         self._persist_tokens = persist_tokens
         self._persist_logout = persist_logout
+        self._persist_rejection = persist_rejection
         self._device_id_provider = device_id_provider
         self._min_interval = min_interval_seconds
         self._monotonic = monotonic or time.monotonic
@@ -244,6 +247,11 @@ class RefreshManager:
                     exc.code,
                     exc,
                 )
+                try:
+                    if self._persist_rejection is not None:
+                        await self._persist_rejection(refresh_token)
+                except Exception:  # noqa: BLE001
+                    logger.warning("clawchat revoked-refresh marker persistence failed")
                 try:
                     await self._persist_logout(str(exc))
                 except Exception:  # noqa: BLE001

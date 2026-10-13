@@ -59,8 +59,18 @@ written by activation for the no-row case. The plugin never copies them into
 `CLAWCHAT_TOKEN` automatically before/at its 24h expiry and rewrites the rotated
 pair to **both** `.env` and SQLite (see
 [`./activation.md`](./activation.md#automatic-token-refresh--auto-logout)). On a
-permanent refresh failure both keys are cleared from `.env` and SQLite and a
-re-pair is required.
+permanent refresh failure a SHA-256 fingerprint of the rejected refresh token
+and rejection time are persisted to SQLite before either store is cleared.
+Both keys become empty `.env` tombstones and the SQLite token columns are blanked;
+clear failures are logged separately. The durable marker overrides every
+credential source, including legacy `extra.token` / `extra.refresh_token`.
+When a marker exists, empty refresh tokens and tokens matching that marker
+cannot refresh or connect, including after restart. The connection stays in
+`AUTH_FAILED` waiting for activation; adopting a different refresh token clears
+the marker and resumes connection. Without a marker, access-token-only setups
+continue to connect. Marker read failures preserve existing credentials, while
+an in-memory rejection still applies. Fresh installs waiting for activation
+retain their original state.
 
 ## Connection
 

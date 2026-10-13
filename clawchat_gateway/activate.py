@@ -739,7 +739,13 @@ def persist_rotated_tokens(
     return env_ok and db_ok
 
 
-def clear_persisted_credentials(*, account_id: str = "default") -> None:
+@dataclass(frozen=True)
+class CredentialClearResult:
+    env_cleared: bool
+    sqlite_cleared: bool
+
+
+def clear_persisted_credentials(*, account_id: str = "default") -> CredentialClearResult:
     """Clear ClawChat credentials in BOTH .env and SQLite, keeping identity.
 
     Token-refresh spec §C.1: auto-logout on permanent refresh failure clears
@@ -754,22 +760,29 @@ def clear_persisted_credentials(*, account_id: str = "default") -> None:
     the next adapter would read it straight back and keep retrying auth. An
     empty value is a tombstone ``config._env_tombstoned`` resolves to "".
     """
+    env_cleared = False
+    sqlite_cleared = False
     try:
-        _write_env_values(
+        env_cleared = bool(_write_env_values(
             {
                 "CLAWCHAT_TOKEN": "",
                 "CLAWCHAT_REFRESH_TOKEN": "",
             }
-        )
+        ))
+        if not env_cleared:
+            logger.warning("clawchat logout .env clear returned false")
     except Exception:  # noqa: BLE001
-        logger.warning("clawchat logout .env clear failed", exc_info=True)
+        logger.warning("clawchat logout .env clear failed")
     try:
-        get_clawchat_store().clear_activation_credentials(
+        sqlite_cleared = bool(get_clawchat_store().clear_activation_credentials(
             platform="hermes",
             account_id=account_id,
-        )
+        ))
+        if not sqlite_cleared:
+            logger.warning("clawchat logout database clear returned false")
     except Exception:  # noqa: BLE001
-        logger.warning("clawchat logout database clear failed", exc_info=True)
+        logger.warning("clawchat logout database clear failed")
+    return CredentialClearResult(env_cleared=env_cleared, sqlite_cleared=sqlite_cleared)
 
 
 async def activate(
