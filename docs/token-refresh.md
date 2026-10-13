@@ -30,7 +30,7 @@ refresh, correct auto-logout on permanent expiry, and protocol-correct WebSocket
 |---|----------|
 | Scope | **Proactive + reactive** refresh (not reactive-only). |
 | Hermes device id | Persist a `device_id` column **and** require deployments to pin `CLAWCHAT_DEVICE_ID`; warn on boot if unpinned. |
-| Hermes recovery | On successful refresh, write the rotated token to **both** `.env` and SQLite and switch the process onto the SQLite-credentials path, so a future permanent expiry self-recovers via wait-for-activation without a gateway restart. |
+| Hermes recovery | Successful refresh persists to **both** `.env` and SQLite before adoption. Every permanent refresh failure persists the revoked fingerprint, closes WS and waits for activation without a restart, including env bootstrap failures. Adoption must pass the access-token latch and fingerprint guard. |
 | Auto-logout UX | On permanent failure, surface a user-visible status/chat message (in addition to logs). |
 
 ---
@@ -42,15 +42,16 @@ refresh, correct auto-logout on permanent expiry, and protocol-correct WebSocket
 - **Unauthenticated** — send **no** `Authorization` header; the refresh token in the body is the credential.
 - **Required header:** `X-Device-Id` — must equal the device id baked into the session at connect time (the backend rejects any mismatch against the session's device id). ≤128 bytes.
 - **Body:** `{ "refresh_token": "<64-char hex>" }`.
-- **Always returns HTTP 200.** Branch on the envelope `code`, never on HTTP status:
+- **Normally returns HTTP 200.** Classify both the HTTP status and the integer envelope `code`:
 
-| `code` | meaning | class |
+| HTTP status / integer `code` | meaning | class |
 |--------|---------|-------|
-| `0` | success; `data = { access_token, refresh_token }` — **rotated**; the old refresh token is dead for normal use (the backend only tolerates a replay of it inside the short grace window — see Rotation hazard) | success |
-| `10003` (`CodeInvalidRefresh`) | refresh token not found / revoked / expired / **device mismatch** | **PERMANENT** → auto-logout |
-| `400` | bad body / missing or oversized device id | **PERMANENT (client bug)** → auto-logout |
-| `1` (`CodeInternal`) | server internal error (no rotation committed) | **TRANSIENT** → retry |
-| any non-200 (500/LB/transport) / network error | — | **TRANSIENT** → retry |
+| HTTP 200 + `0` | success; `data = { access_token, refresh_token }` — **rotated**; the old refresh token is dead for normal use (the backend only tolerates a replay of it inside the short grace window — see Rotation hazard) | success |
+| HTTP 200 + `10003` (`CodeInvalidRefresh`) | refresh token not found / revoked / expired / **device mismatch** | **PERMANENT** → auto-logout |
+| HTTP 200 + `400` | bad body / missing or oversized device id | **PERMANENT (client bug)** → auto-logout |
+| HTTP 200 + `1` (`CodeInternal`) | server internal error (no rotation committed) | **TRANSIENT** → retry |
+| non-200 + parseable JSON integer `10003` | invalid refresh, including an urllib HTTPError body | **PERMANENT** → auto-logout |
+| all other non-200 responses (including `400`) / network errors | HTML, malformed JSON and string codes do not prove revocation | **TRANSIENT** → retry |
 
 - The refreshed access token preserves the agent identity (`aid`/`oid`); scopes are read live server-side.
 - TTLs: access **24h**, refresh **60d** (sliding).
@@ -159,9 +160,19 @@ and reconnect with the new token** (§D) → re-arm timer from the new token's `
 
 - **In-flight dedupe:** concurrent callers (proactive timer + reactive 401 + reactive hello-fail)
   await the same in-flight promise/future rather than firing parallel refreshes.
-- **Rejected-token latch:** record the access token a refresh was attempted for; do not
-  re-attempt for the *same* access token until it actually changes. Reuses the existing
-  `rejectedActivationToken` / `_rejected_activation_token` seam.
+- **Rejected-token latch:** latch an access token rejected by hello or permanent refresh
+  failure. Hermes startup and activation polling must not reload that access token,
+  including access-token-only credentials with no refresh token or revoked marker.
+  Adoption requires a different access token and a refresh token that passes the
+  revoked-fingerprint guard. Clear the access latch only after adopting a different
+  access token; observing a changed activation row does not clear it.
+- **Durable refresh guard (Hermes):** persist the rejected refresh token's SHA-256 hex
+  fingerprint and rejection time to SQLite before clearing either credential store.
+  A present SQLite marker or in-memory fingerprint rejects an empty refresh token
+  or one matching the fingerprint, regardless of its credential source. With no
+  marker, preserve existing credentials, including access-token-only setups. Marker
+  read failures fail open for this guard; the in-memory fingerprint and access-token
+  latch still apply.
 - **Minimum interval:** floor (≥30s) between refresh attempts of the same token, so a
   reconnect storm cannot become a refresh storm.
 
@@ -178,11 +189,12 @@ manual re-pair). If refresh returns PERMANENT → auto-logout immediately (skip 
 
 | Outcome | Detected as | Class | Action |
 |---------|-------------|-------|--------|
-| Success | `code == 0` | — | persist → swap → reconnect |
-| Invalid refresh (not found/revoked/expired/device mismatch) | `code == 10003` | **PERMANENT** | **auto-logout + re-pair prompt** |
-| Bad request | `code == 400` | **PERMANENT (bug)** | log; auto-logout |
-| Internal error | `code == 1` | **TRANSIENT** | retry w/ backoff |
-| HTTP non-200 (500/LB) | transport | **TRANSIENT** | retry w/ backoff |
+| Success | HTTP 200 + integer `code == 0` | — | persist → swap → reconnect |
+| Invalid refresh (not found/revoked/expired/device mismatch) | integer `code == 10003` | **PERMANENT** | **auto-logout + re-pair prompt** |
+| Bad request | HTTP 200 + integer `code == 400` | **PERMANENT (bug)** | log; auto-logout |
+| Internal error | HTTP 200 + integer `code == 1` | **TRANSIENT** | retry w/ backoff |
+| HTTP non-200 + invalid refresh | parseable JSON integer `code == 10003` | **PERMANENT** | auto-logout + re-pair prompt |
+| Other HTTP non-200 (including `code == 400`) | transport | **TRANSIENT** | retry w/ backoff |
 | Network error / timeout / DNS | exception | **TRANSIENT** | retry w/ backoff |
 
 - **Backoff for transient:** `min(30s, 1s * 2^(n-1)) ± jitter`, cap 30s. Retry effectively
@@ -214,9 +226,10 @@ manual re-pair). If refresh returns PERMANENT → auto-logout immediately (skip 
 
 ## C. Auto-logout on permanent expiry
 
-"Logout" = the **refresh token is permanently invalid** (`code:10003`, or persistent `400`
-device-mismatch), so the agent can no longer mint tokens and a human must re-pair with a fresh
-single-use connect code.
+"Logout" follows integer `code:10003` (including a non-200 JSON response), or
+HTTP 200 + integer `code:400` (a bad request/client bug). A non-200 `400` is transient
+and never logs out. A permanent failure requires re-pairing with a fresh single-use
+connect code.
 
 ### C.0 The fork (be explicit)
 
@@ -228,8 +241,10 @@ single-use connect code.
 
 1. **Clear credentials atomically:** blank `token` / `refreshToken` in the config (OpenClaw) —
    in the slot of the affected account (root for `default`, `accounts.<accountId>` otherwise) —
-   or remove `CLAWCHAT_TOKEN` / `CLAWCHAT_REFRESH_TOKEN` from `.env` (Hermes), AND blank the
-   `access_token` / `refresh_token` columns of the `activations` row. **Keep** `user_id` /
+   or write empty `CLAWCHAT_TOKEN` / `CLAWCHAT_REFRESH_TOKEN` tombstones to `.env`
+   (Hermes), AND blank the `access_token` / `refresh_token` activation columns.
+   Hermes first writes the fingerprint/time marker independently of either clear,
+   then reports and logs each store's clear result. **Keep** `user_id` /
    `owner_user_id` / `agent_id` so re-pair reuses the same identity (re-pair mode).
 2. **Status:** set the account to not-connected / not-configured / not-running with
    `lastError` = "token expired — re-pair required", via the existing auth-failure path.
@@ -248,10 +263,22 @@ single-use connect code.
 
 ### C.2 Hermes recovery unification (decision)
 
-On every **successful** refresh, write the rotated token to **both** `.env` and SQLite and set
-`_using_activation_db_credentials = True`. This moves an env-booted process onto the
-SQLite-credentials path, so a future permanent expiry self-recovers via
-`_wait_for_activation_credentials` instead of `_stopping = True` + gateway restart.
+On every **successful** refresh, write the rotated token to **both** `.env` and SQLite
+before adopting it, and set `_using_activation_db_credentials = True`.
+
+On permanent refresh failure, persist the revoked fingerprint/time marker before
+clearing credentials, clear the in-memory pair, set `AUTH_FAILED`, close the WS and
+wait for new activation. This applies equally to startup, proactive, REST-reactive
+and hello-fail paths, including an env-booted process's first failure; no successful
+refresh or gateway restart is required first.
+
+SQLite takes precedence over the `.env`/legacy-config bootstrap copy. Startup load
+and activation polling require both a different access token from the rejected
+access-token latch and a usable refresh token under the fingerprint guard. Only
+adopting a pair that passes both checks clears the access latch and revoked marker.
+Without a marker, an empty refresh token alone does not block credentials. A failed
+marker read preserves credentials while the in-memory guards still apply. Fresh
+installs waiting for activation retain their original state/status.
 
 ---
 
@@ -266,7 +293,7 @@ hot-swapped onto a live WS. Always **close then reconnect** with the new token, 
 | Proactive refresh succeeds while WS healthy | persist → **close WS** gracefully → reconnect with new token in a fresh `connect`. |
 | Reactive refresh after `hello-fail(auth)` | socket already closed by the server; after refresh the supervisor reconnects with the new token. |
 | Refresh in-flight | supervisor must **not** open a socket with the dead token — gate reconnect on the in-flight refresh. On success reconnect immediately (reset backoff); on transient-fail keep backoff with the current token. |
-| Permanent failure → WS stops | OpenClaw: auth-failed latch stops the reconnect loop, runtime flips not-configured. Hermes: SQLite-creds path → WS stops, supervisor falls into wait-for-activation; (with §C.2 the env path is converted to the SQLite path on first refresh). |
+| Permanent refresh failure → WS stops | OpenClaw: auth-failed latch stops reconnects, runtime flips not-configured. Hermes: persist revoked marker → clear creds → `AUTH_FAILED` → close WS → wait for activation, for SQLite and env bootstraps alike. Adoption must pass both the access-token latch and refresh-fingerprint guard (§C.2). |
 
 **Never** refresh/reconnect on non-auth closes (duplicate-session takeover, missed pongs,
 backpressure, handshake-timeout) — backoff-reconnect with the same token + device id. Two of
@@ -303,9 +330,13 @@ to be pinned (document + boot warning if unpinned).
 ## F. Test obligations (per plugin, kept in parity)
 
 - JWT `exp` decode: valid / no-exp / malformed → fallback.
-- Refresh client: `code` matrix (0 rotated / 10003 permanent / 400 permanent / 1 transient /
-  non-200 transient); asserts `X-Device-Id` = stored device id and **no** Authorization header.
+- Refresh client: HTTP 200 `code` matrix (0 rotated / 10003 permanent / 400 permanent /
+  1 transient); non-200 + parseable JSON integer 10003 permanent, every other non-200
+  response (including 400) transient. Assert `X-Device-Id` = stored device id and
+  **no** Authorization header; transient failures keep credentials and write no marker.
 - Single-flight (N concurrent callers → 1 HTTP call), rejected-token latch, min-interval.
+- Hermes access-token-only hello rejection: several activation polls never reconnect
+  with the rejected access token; a different access token is adopted and reconnects.
 - Proactive timer fires at `refresh_at`; startup refresh-if-near.
 - `hello-fail` gating: exact `"authentication failed"` → refresh; every other reason → backoff
   with the same token, no reason-triggered refresh (optional early §A.1 refresh on local `exp`).

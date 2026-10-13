@@ -66,11 +66,18 @@ clear failures are logged separately. The durable marker overrides every
 credential source, including legacy `extra.token` / `extra.refresh_token`.
 When a marker exists, empty refresh tokens and tokens matching that marker
 cannot refresh or connect, including after restart. The connection stays in
-`AUTH_FAILED` waiting for activation; adopting a different refresh token clears
-the marker and resumes connection. Without a marker, access-token-only setups
-continue to connect. Marker read failures preserve existing credentials, while
-an in-memory rejection still applies. Fresh installs waiting for activation
-retain their original state.
+`AUTH_FAILED` waiting for activation. Startup load and activation polling also
+reject the latched access token, including access-token-only credentials rejected
+by hello. Only adopting credentials with a different access token that pass the
+refresh-fingerprint guard clears both latches and resumes connection. Without a
+marker, access-token-only setups continue to connect unless their access token
+is latched. Marker read failures preserve existing credentials, while the
+in-memory fingerprint guard and access latch still apply. Fresh installs waiting
+for activation retain their original state.
+
+A non-200 refresh response is permanent only when its parseable JSON body has
+integer `code:10003`. Every other non-200 response, including `code:400`, remains
+transient and keeps credentials. Integer `code:400` is permanent with HTTP 200.
 
 ## Connection
 

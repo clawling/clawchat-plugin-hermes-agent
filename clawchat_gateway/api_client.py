@@ -875,15 +875,16 @@ class ClawChatApiClient:
         Token-refresh spec §0: ``POST /v1/auth/refresh`` is UNAUTHENTICATED — it
         sends NO Authorization header; the refresh token in the body is the
         credential, and ``X-Device-Id`` must equal the connect-time device id.
-        The endpoint always returns HTTP 200; we branch on the envelope ``code``:
+        The normal envelope arrives with HTTP 200; classification also handles
+        non-200 responses defensively:
 
         - ``0`` → success (rotated tokens).
         - ``10003`` → PERMANENT (kind ``auth``): not found / revoked / expired /
           device mismatch → caller auto-logs-out.
-        - ``400`` → PERMANENT client bug (kind ``validation``) → auto-logout.
+        - HTTP 200 + ``400`` → PERMANENT client bug (kind ``validation``).
         - ``1`` → TRANSIENT (kind ``api``, retryable) → server internal error.
-        - non-200 with integer ``10003`` / ``400`` → PERMANENT; otherwise
-          non-200 / network error → TRANSIENT (kind ``transport``, retryable).
+        - non-200 with integer ``10003`` → PERMANENT; all other non-200
+          responses (including ``400``) / network errors → TRANSIENT.
         - attempt deadline (``REFRESH_ATTEMPT_CEILING_SECONDS``) hit → TRANSIENT
           (kind ``transport``, not ``connect_failed``: the outcome is unknown).
         """
@@ -980,7 +981,7 @@ class ClawChatApiClient:
         msg = ""
         if isinstance(payload, dict):
             msg = str(payload.get("msg") or payload.get("message") or "")
-        if status != 200 and code not in (REFRESH_CODE_INVALID_REFRESH, REFRESH_CODE_BAD_REQUEST):
+        if status != 200 and code != REFRESH_CODE_INVALID_REFRESH:
             raise ClawChatApiError(
                 "transport",
                 f"refresh non-200 status={status}",
@@ -1293,9 +1294,9 @@ class ClawChatApiClient:
 def is_permanent_refresh_error(exc: ClawChatApiError) -> bool:
     """Classify a refresh failure as PERMANENT (auto-logout) vs TRANSIENT (retry).
 
-    Per spec §B, only ``code == 10003`` (invalid refresh) and ``code == 400``
-    (client bug) are permanent, including in a non-200 JSON envelope. Integer
-    codes are required. ``code == 1`` (internal), other non-200 responses, and
+    Per spec §B, integer ``code == 10003`` is permanent even in a non-200 JSON
+    envelope. Integer ``code == 400`` is permanent only with HTTP 200 or local
+    validation (no HTTP status). Other non-200 responses, ``code == 1``, and
     network errors are transient and must keep retrying — a transient failure
     never auto-logs-out. Either no rotation was committed (the old refresh token
     is still valid), or the server rotated but the response was lost, in which
@@ -1303,7 +1304,10 @@ def is_permanent_refresh_error(exc: ClawChatApiError) -> bool:
     again. A ``10003`` after such a timeout is still permanent: it means the
     window has passed or the token was revoked (spec §B escalation).
     """
-    return type(exc.code) is int and exc.code in (REFRESH_CODE_INVALID_REFRESH, REFRESH_CODE_BAD_REQUEST)
+    return type(exc.code) is int and (
+        exc.code == REFRESH_CODE_INVALID_REFRESH
+        or (exc.code == REFRESH_CODE_BAD_REQUEST and exc.status in (None, 200))
+    )
 
 
 def _refresh_outcome_unknown(exc: ClawChatApiError) -> bool:

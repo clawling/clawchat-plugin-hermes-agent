@@ -366,9 +366,10 @@ inside the backend's refresh grace window (requires server grace window
 (member-backend ≥ release TBD)). A `10003` on that retry still logs out. See
 [`./token-refresh.md`](./token-refresh.md) §B.
 
-Integer business codes `10003` and `400` are permanent even in a non-200
-response or urllib HTTPError. HTML, malformed JSON and string codes in non-200
-responses remain transient.
+Integer business code `10003` in parseable JSON is permanent even in a non-200
+response or urllib HTTPError. Every other non-200 response, including integer
+`code:400`, HTML, malformed JSON and string codes, remains transient. Integer
+`code:400` is permanent only with HTTP 200.
 
 ### Auto-logout (permanent refresh failure)
 
@@ -387,9 +388,12 @@ device-mismatch (see
    waits for new activation for startup, proactive, REST and hello-fail failures.
    On restart and during activation polling, an existing marker blocks empty
    refresh tokens and tokens matching its fingerprint. Adopting a different
-   refresh token clears the marker. Without a marker, access-token-only setups
-   still connect, and fresh installs keep their original waiting status. A
-   marker read failure preserves credentials; the in-memory guard still applies.
+   refresh token can be adopted only if its access token also differs from the
+   rejected access-token latch; only then are the latch and marker cleared.
+   Without a marker, access-token-only setups still connect unless that access
+   token has already been rejected by hello. Fresh installs keep their original
+   waiting status. A marker read failure preserves credentials; the in-memory
+   fingerprint guard and access-token latch still apply.
 4. Surfaces a user-visible message (in addition to logs):
 
    > ClawChat token expired and could not be refreshed. Ask your owner to send you the reconnect prompt from the ClawChat app, then follow https://agent-connection.clawling.com/reconnect.md.

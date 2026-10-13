@@ -1036,9 +1036,11 @@ class ClawChatConnection:
             return False
         if credentials is None:
             return False
-        if not self._refresh_credentials_usable(credentials.refresh_token):
+        if (
+            credentials.access_token == self._rejected_activation_token
+            or not self._refresh_credentials_usable(credentials.refresh_token)
+        ):
             return False
-        self._clear_refresh_rejection()
         self._cfg = replace(
             self._cfg,
             token=credentials.access_token,
@@ -1046,6 +1048,8 @@ class ClawChatConnection:
             user_id=credentials.user_id,
             owner_user_id=credentials.owner_user_id,
         )
+        self._rejected_activation_token = None
+        self._clear_refresh_rejection()
         self._using_activation_db_credentials = True
         self._auth_failed = False
         self._activated_at_ms = credentials.activated_at
@@ -1054,7 +1058,7 @@ class ClawChatConnection:
         return True
 
     async def _wait_for_activation_credentials(self) -> bool:
-        if self._auth_failed or self._refresh_rejection_fingerprints():
+        if self._auth_failed or self._rejected_activation_token or self._refresh_rejection_fingerprints():
             await self._set_state(ConnectionState.AUTH_FAILED)
         if not self._activation_wait_logged:
             logger.info(
@@ -1085,7 +1089,10 @@ class ClawChatConnection:
                 except Exception:  # noqa: BLE001
                     logger.warning("clawchat activation credential read failed", exc_info=True)
             if credentials is not None:
-                if not self._refresh_credentials_usable(credentials.refresh_token):
+                if (
+                    credentials.access_token == self._rejected_activation_token
+                    or not self._refresh_credentials_usable(credentials.refresh_token)
+                ):
                     await self._set_state(ConnectionState.AUTH_FAILED)
                     logger.debug(
                         format_ws_log(
@@ -1103,7 +1110,6 @@ class ClawChatConnection:
                     )
                     await asyncio.sleep(ACTIVATION_CREDENTIAL_POLL_INTERVAL_SECONDS)
                     continue
-                self._clear_refresh_rejection()
                 self._cfg = replace(
                     self._cfg,
                     token=credentials.access_token,
@@ -1114,6 +1120,7 @@ class ClawChatConnection:
                 self._using_activation_db_credentials = True
                 self._auth_failed = False
                 self._rejected_activation_token = None
+                self._clear_refresh_rejection()
                 self._activation_wait_logged = False
                 self._activated_at_ms = credentials.activated_at
                 if self._refresh_manager is not None:
@@ -1226,7 +1233,6 @@ class ClawChatConnection:
                 owner_user_id="",
             )
             self._using_activation_db_credentials = False
-            self._rejected_activation_token = None
             if self._ws is not None:
                 await self._ws.close()
             return
@@ -1273,7 +1279,8 @@ class ClawChatConnection:
             )
             # §C.2: move the process onto the SQLite-credentials recovery path.
             self._using_activation_db_credentials = True
-            self._rejected_activation_token = None
+            if outcome.access_token != self._rejected_activation_token:
+                self._rejected_activation_token = None
             self._refresh_pending_reconnect = True
             self._activated_at_ms = int(time.time() * 1000)
             logger.info(
