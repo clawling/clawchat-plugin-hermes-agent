@@ -495,4 +495,12 @@ def test_reply_text_is_kept_when_local_attachment_is_dropped(policy, monkeypatch
     ))
     assert not only_attachment.success
     assert str(policy.home) not in (only_attachment.error or "")
+    sent = len(frames)
+    silent = asyncio.run(a.send(
+        chat_id, "NO_REPLY",
+        metadata={"_clawchat_immediate_media_send": True},
+        media_files=[str(policy.home / "notes.txt")],
+    ))
+    assert not silent.success
+    assert len(frames) == sent
 

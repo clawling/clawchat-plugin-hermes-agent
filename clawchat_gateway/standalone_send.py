@@ -126,7 +126,7 @@ async def standalone_send(
                 return {
                     "error": (
                         "ClawChat standalone send: "
-                        f"{len(media_fragments)}/{len(paths)} attachment(s) sent; "
+                        f"{len(media_fragments)}/{len(paths)} attachment(s) uploaded; "
                         "message not sent."
                     )
                 }

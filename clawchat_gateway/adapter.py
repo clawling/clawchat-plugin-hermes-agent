@@ -6275,7 +6275,11 @@ class ClawChatAdapter(BasePlatformAdapter):
                 if (
                     requested_media < len(media_urls)
                     and not delivered_media
-                    and (not fragments or self._is_empty_text_response(fragments))
+                    and (
+                        not fragments
+                        or self._is_empty_text_response(fragments)
+                        or self._is_pure_silent_response(fragments)
+                    )
                 ):
                     logger.warning(
                         "clawchat outbound local media not sent in this conversation chat_id=%s",
