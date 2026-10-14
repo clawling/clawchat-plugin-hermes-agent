@@ -40,6 +40,7 @@ from clawchat_gateway.memory_scope import resolve_memory_scope
 from clawchat_gateway.connection import CHAT_ID_PREFIX, is_valid_chat_id
 from clawchat_gateway.storage import get_clawchat_store, make_owner_profile_persister
 from clawchat_gateway.media_runtime import derive_base_url, ensure_allowed_local_path
+from clawchat_gateway.local_paths import LOCAL_PATH_REFUSAL, turn_allows_local_paths
 from clawchat_gateway.mention_message import normalize_mention_targets
 from clawchat_gateway.profile import ProfileConfigError, load_clawchat_extra, load_profile_config
 from clawchat_gateway.standalone_send import standalone_send
@@ -248,12 +249,18 @@ def _resolve_memory_root() -> tuple[Path | None, dict[str, Any] | None]:
 
 
 def _validate_upload_path(file_path: str) -> tuple[Path | None, dict[str, Any] | None]:
+    if not turn_allows_local_paths():
+        return None, _validation_error(LOCAL_PATH_REFUSAL)
     if not isinstance(file_path, str) or not file_path:
         return None, _validation_error("filePath is required")
 
     path = Path(file_path)
     if not path.is_absolute():
         return None, _validation_error(f"filePath must be an absolute local path (got {file_path!r})")
+    try:
+        path = ensure_allowed_local_path(str(path))
+    except (ValueError, OSError, RuntimeError):
+        return None, _validation_error("path is denied for delivery")
     if not path.exists():
         return None, _validation_error(f"file does not exist: {path}")
     if not path.is_file():
@@ -900,6 +907,8 @@ async def send_file(
     standalone sender when no gateway runs in this process. The credential /
     system-path denylist applies.
     """
+    if not turn_allows_local_paths():
+        return _validation_error(LOCAL_PATH_REFUSAL)
     if not isinstance(chat_id, str) or not chat_id.strip():
         return _validation_error("chat_id is required")
     target = _tool_chat_id(chat_id)
@@ -916,8 +925,8 @@ async def send_file(
         return _validation_error(f"path must be an absolute local path (got {path!r})")
     try:
         resolved = ensure_allowed_local_path(str(raw))
-    except ValueError as exc:
-        return _validation_error(str(exc))
+    except (ValueError, OSError, RuntimeError):
+        return _validation_error("path is denied for delivery")
     if not resolved.exists():
         return _validation_error(f"file does not exist: {resolved}")
     if not resolved.is_file():
@@ -1011,6 +1020,8 @@ def _classify_moment_images(
         if _is_http_url(item):
             out.append((item, None))
             continue
+        if not turn_allows_local_paths():
+            return None, _validation_error(LOCAL_PATH_REFUSAL)
         path, err = _validate_upload_path(item)
         if err is not None:
             return None, _validation_error(
@@ -1328,11 +1339,17 @@ def _read_liveware_icon(
 ) -> tuple[tuple[bytes, str, str] | None, dict[str, Any] | None]:
     """Read and validate a local icon. Filesystem errors never raise; they come
     back as the same structured validation error as any other bad icon."""
+    if not turn_allows_local_paths():
+        return None, _validation_error(LOCAL_PATH_REFUSAL)
     if not isinstance(icon_path, str) or not icon_path:
         return None, _validation_error("iconPath must be an absolute local path")
     path = Path(icon_path)
     if not path.is_absolute():
         return None, _validation_error(f"iconPath must be an absolute local path (got {icon_path!r})")
+    try:
+        path = ensure_allowed_local_path(str(path))
+    except (ValueError, OSError, RuntimeError):
+        return None, _validation_error("path is denied for delivery")
     try:
         if not path.exists():
             return None, _validation_error(f"icon file does not exist: {path}")

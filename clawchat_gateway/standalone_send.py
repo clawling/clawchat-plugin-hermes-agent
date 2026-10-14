@@ -112,6 +112,7 @@ async def standalone_send(
             cfg = connection.config
             media_fragments = await upload_outbound_media(
                 _media_file_paths(list(media_files)),
+                chat_id=target,
                 base_url=cfg.base_url,
                 websocket_url=cfg.websocket_url,
                 token=cfg.token,

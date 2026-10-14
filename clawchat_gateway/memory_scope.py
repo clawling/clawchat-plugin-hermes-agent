@@ -198,6 +198,15 @@ def _host_session_context_engaged() -> bool:
 _session_context_engaged = _host_session_context_engaged
 
 
+def is_local_surface() -> bool:
+    """Whether the host has no gateway session on a local operator surface."""
+    if _session_value("HERMES_SESSION_PLATFORM"):
+        return False
+    source = _session_value("HERMES_SESSION_SOURCE").lower()
+    host_platform = os.getenv("HERMES_PLATFORM", "").strip().lower()
+    return source in _LOCAL_SURFACES and host_platform in _LOCAL_SURFACES and not _session_context_engaged()
+
+
 def _config_extra() -> dict[str, Any]:
     try:
         from clawchat_gateway._yaml import safe_load
@@ -281,9 +290,7 @@ _NOTHING = MemoryScope(kind="group")
 def resolve_memory_scope(root: Path | str | None) -> MemoryScope:
     platform = _session_value("HERMES_SESSION_PLATFORM").lower()
     if not platform:
-        source = _session_value("HERMES_SESSION_SOURCE").lower()
-        host_platform = os.getenv("HERMES_PLATFORM", "").strip().lower()
-        if source in _LOCAL_SURFACES and host_platform in _LOCAL_SURFACES and not _session_context_engaged():
+        if is_local_surface():
             return MemoryScope(kind="local")
         return _NOTHING
     if platform != "clawchat":

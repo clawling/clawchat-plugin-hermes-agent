@@ -788,8 +788,10 @@ servers the owner configured for ClawChat (a filesystem or database server
 reads the same files the `file` tools do).
 Group turns are narrowed as a whole because a group is one shared session:
 switching its toolset per speaker would rebuild the agent each time the
-owner and someone else alternate. The plugin's own ClawChat tools, web
-search/extract, skills and the rest are unchanged, and so is the owner's direct chat.
+owner and someone else alternate. In turns the owner did not start (including
+every group turn), plugin tools refuse local file paths and replies omit local
+attachments, except attachments delivered to the owner's direct chat. Web
+search/extract, skills and the owner's direct chat keep their existing access.
 
 `session_search` goes because it reads every conversation in Hermes' session
 store — the owner's direct chat, other friends' chats, other groups, other
@@ -1007,7 +1009,7 @@ actual backstop against a leaked keepalive that never sends a
 uploaded from. It is still parsed and still threaded through to
 `media_runtime.ensure_allowed_local_path`, but that function accepts the value
 for backward compatibility only and **does not restrict delivery** any more —
-outbound files may be sent from any directory (parity with the openclaw plugin).
+eligible local files may be sent from any directory.
 
 What is actually enforced is a fixed **credential / system-path denylist** in
 `clawchat_gateway/media_runtime.py`, applied after symlinks are resolved so it
@@ -1016,12 +1018,16 @@ cannot be bypassed via a symlink:
 - absolute prefixes `/etc`, `/proc`, `/sys`, `/dev`, `/root`;
 - paths under the user's home: `.ssh`, `.aws`, `.gnupg`, `.kube`,
   `.config/gcloud`, `.hermes/.env`;
+- each resolved Hermes home and its named profiles: the `clawchat/` plugin data
+  directory, `.env`, `config.yaml`, `auth.json`, and plugin database files
+  (including SQLite sidecars and existing stores at custom paths);
 - the Windows equivalents resolved from the environment (`%SystemRoot%` /
   `%WINDIR%`, and the Credential Manager / DPAPI / Vault directories under
   `%APPDATA%` and `%LOCALAPPDATA%`).
 
-A path that matches the denylist is rejected with a `ValueError`; everything
-else is allowed regardless of `media_local_roots`.
+A path that matches the denylist is rejected with a neutral `ValueError` in all
+turns; ordinary local files remain available in the owner's direct chat or on a
+local operator surface, regardless of `media_local_roots`.
 
 ## Debug / diagnostics env vars
 

@@ -739,6 +739,37 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **_: Any) -
     """``pre_tool_call`` hook: host tools in a turn the owner did not start."""
     try:
         tool_name = str(tool_name or "")
+        if tool_name.startswith("clawchat_") and _session_turn() != "owner":
+            from clawchat_gateway.local_paths import LOCAL_PATH_REFUSAL
+            from clawchat_gateway.memory_scope import is_local_surface
+
+            if not is_local_surface():
+                path_fields = {
+                    "path", "filepath", "file_path", "images", "iconpath", "icon_path",
+                    "media", "media_files", "attachments", "avatar", "image",
+                }
+
+                # Free text (a caption, a moment's text) may start with "/" or
+                # "~"; only path-carrying fields, and file: URIs anywhere, count.
+                def has_local_path(value: Any, path_field: bool = False) -> bool:
+                    if isinstance(value, str):
+                        text = value.strip()
+                        if text.lower().startswith(("https://", "http://")):
+                            return False
+                        if path_field:
+                            return bool(text)
+                        return text.lower().startswith("file:")
+                    if isinstance(value, list):
+                        return any(has_local_path(item, path_field) for item in value)
+                    if isinstance(value, dict):
+                        return any(
+                            has_local_path(item, path_field or str(key).lower() in path_fields)
+                            for key, item in value.items()
+                        )
+                    return False
+
+                if has_local_path(args):
+                    return {"action": "block", "message": LOCAL_PATH_REFUSAL}
         if not _guarded_call(tool_name, args):
             if not _strict_unregistered(tool_name) or _session_turn() != "other":
                 return None

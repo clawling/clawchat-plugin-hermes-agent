@@ -86,7 +86,11 @@ owner in a direct chat: `send_message(target="clawchat:cnv_<group>",
 message="caption MEDIA:/abs/path")`. `clawchat_mention_message` stays text
 only: a mention plus a file is two sends (the mention, then `send_message`),
 which keeps one media path, with the host's own `MEDIA:` path checks and the
-plugin's credential denylist, for every chat.
+plugin's credential denylist, for every chat. In turns the owner did not start
+(including every group turn), plugin tools refuse local paths and replies omit
+local attachments unless delivered to the owner's direct chat. The denylist
+also covers the plugin data directory, `.env`, `config.yaml`, `auth.json` and
+plugin databases under resolved Hermes homes and named profiles.
 
 Hermes' `[[as_document]]` arrives as `force_document`; it is passed to the
 adapter (`_clawchat_force_document`) and the standalone sender, and
@@ -116,7 +120,8 @@ the live adapter's `send` as an immediate media send
 (`_clawchat_immediate_media_send`, `_clawchat_media_files_validated`,
 `_clawchat_force_document`) inside `explicit_tool_send()`, or the standalone
 sender when no gateway runs in this process. The path must be absolute, an
-existing regular file, and outside the credential / system-path denylist
+existing regular file, supplied from the owner's direct chat or a local operator
+surface, and outside the credential / system-path denylist
 (`media_runtime.ensure_allowed_local_path`). The `send_message` patch stays
 for hosts that still expose `send_message`.
 

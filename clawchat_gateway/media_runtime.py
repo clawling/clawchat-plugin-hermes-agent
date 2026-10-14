@@ -13,6 +13,12 @@ from dataclasses import dataclass
 from urllib.parse import unquote, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
+from clawchat_gateway.local_paths import (
+    destination_is_owner_direct,
+    is_denied_hermes_path,
+    turn_allows_local_paths,
+)
+
 logger = logging.getLogger("clawchat_gateway.media_runtime")
 
 # The media CDN (Cloudflare) answers 403 to the stdlib default
@@ -97,20 +103,23 @@ def ensure_allowed_local_path(path: str, allowed_roots: Sequence[str] = ()) -> P
     """Resolve ``path`` for outbound delivery, allowing any directory.
 
     Files may be sent from any directory; ``allowed_roots`` is accepted for
-    backward compatibility but no longer restricts delivery. Only a small
-    credential / system-path denylist is enforced. Symlinks are resolved
+    backward compatibility but no longer restricts delivery. The credential /
+    system-path and Hermes data denylist is enforced. Symlinks are resolved
     before the check so the denylist cannot be bypassed via a symlink.
     """
-    resolved = Path(path).expanduser().resolve()
-    for denied in _denied_delivery_paths():
-        try:
-            denied_resolved = denied.expanduser().resolve()
-        except (RuntimeError, OSError):
-            denied_resolved = denied
-        if resolved == denied_resolved or denied_resolved in resolved.parents:
-            raise ValueError(
-                f"path is under a denied credential/system location: {resolved}"
-            )
+    try:
+        resolved = Path(path).expanduser().resolve()
+        for denied in _denied_delivery_paths():
+            try:
+                denied_resolved = denied.expanduser().resolve()
+            except (RuntimeError, OSError):
+                denied_resolved = denied
+            if resolved == denied_resolved or denied_resolved in resolved.parents:
+                raise ValueError("path is denied for delivery")
+        if is_denied_hermes_path(resolved):
+            raise ValueError("path is denied for delivery")
+    except Exception:  # noqa: BLE001 - resolution failures must not expose local details
+        raise ValueError("path is denied for delivery") from None
     return resolved
 
 
@@ -323,6 +332,7 @@ async def upload_outbound_media(
     upload_file=None,
     media_base_url: str = "",
     force_document: bool = False,
+    chat_id: str | None = None,
 ) -> list[dict[str, object]]:
     """Upload each reference; one fragment per successful upload.
 
@@ -338,6 +348,14 @@ async def upload_outbound_media(
     uploader = upload_file or _upload_media
     fragments: list[dict[str, object]] = []
     for raw_url in urls:
+        if not raw_url.strip().lower().startswith(("http://", "https://")) and not (
+            turn_allows_local_paths() or (chat_id and destination_is_owner_direct(chat_id))
+        ):
+            logger.warning(
+                "clawchat outbound local media dropped name=%s",
+                Path(raw_url.replace("\\", "/")).name,
+            )
+            continue
         url = normalize_outbound_media_reference(raw_url)
         try:
             if _is_remote_url(url):
@@ -376,9 +394,9 @@ async def upload_outbound_media(
                 fragments.append(_uploaded_media_fragment(url))
             else:
                 logger.warning(
-                    "clawchat outbound media dropped url=%s error=%s",
-                    url,
-                    exc,
+                    "clawchat outbound media dropped name=%s error=%s",
+                    Path(url.replace("\\", "/")).name,
+                    str(exc) if _is_remote_url(url) else type(exc).__name__,
                 )
             continue
     return fragments

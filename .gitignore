@@ -236,6 +236,7 @@ tests/*
 !tests/test_sticker_hint.py
 !tests/test_group_command_receipt.py
 !tests/test_yaml_compat.py
+!tests/test_local_path_turn_policy.py
 deploy/
 scripts/
 docs/superpowers/

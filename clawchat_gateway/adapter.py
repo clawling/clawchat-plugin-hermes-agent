@@ -6254,7 +6254,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
             return SendResult(success=True)
         if is_send_message_tool_call or is_immediate_media_send or not is_stream_intermediate:
-            fragments = await self._build_fragments(visible_content, metadata, kwargs)
+            fragments = await self._build_fragments(visible_content, metadata, kwargs, chat_id=chat_id)
             fragment_count = len(fragments)
             has_media = self._has_outbound_media(metadata, kwargs)
             if has_media:
@@ -6626,7 +6626,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         final_fragments, context_mentions = self._link_text_mentions(
             run.chat_id,
             run.chat_type,
-            await self._build_fragments(final_content, run.metadata, run.kwargs),
+            await self._build_fragments(final_content, run.metadata, run.kwargs, chat_id=run.chat_id),
             MESSAGE_MODE_NORMAL,
         )
         frame = build_message_reply_event(
@@ -8216,6 +8216,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         content: str = "",
         metadata: Any = None,
         kwargs: dict[str, Any] | None = None,
+        *,
+        chat_id: str | None = None,
     ) -> list[dict[str, Any]]:
         fragments = self._build_non_media_fragments(content, metadata, kwargs)
         if self._is_empty_text_response(fragments):
@@ -8223,6 +8225,7 @@ class ClawChatAdapter(BasePlatformAdapter):
 
         merged_kwargs = kwargs or {}
         uploaded_fragments = await self._build_media_fragments(
+            chat_id=chat_id,
             media_urls=self._extract_media_urls(metadata, merged_kwargs),
             metadata=metadata,
             kwargs=merged_kwargs,
@@ -8353,6 +8356,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         media_urls: list[str],
         metadata: Any,
         kwargs: dict[str, Any],
+        chat_id: str | None = None,
     ) -> list[dict[str, Any]]:
         if not media_urls:
             return []
@@ -8371,6 +8375,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
         return await upload_outbound_media(
             media_urls,
+            chat_id=chat_id,
             base_url=self._clawchat_config.base_url,
             websocket_url=self._clawchat_config.websocket_url,
             token=self._clawchat_config.token,
