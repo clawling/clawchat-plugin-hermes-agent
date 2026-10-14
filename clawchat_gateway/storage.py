@@ -701,6 +701,7 @@ class ClawChatStore:
         seed_owner_user_id: str | None = None,
         seed_conversation_id: str | None = None,
         expected_access_token: str | None = None,
+        expected_refresh_token: str | None = None,
     ) -> bool | None:
         """Rotate just the token columns of an existing activation row.
 
@@ -714,7 +715,7 @@ class ClawChatStore:
         does not return rowcount==0 and brick the agent. The seed INSERT keeps
         ``bootstrap_sent=0`` (the env row was never bootstrapped) and does not
         reset any activation flags. Returns True when the row was updated OR
-        seeded. With ``expected_access_token``, update only the matching row;
+        seeded. With an expected access/refresh pair, update only the matching row;
         a mismatch or missing row returns False without seeding.
         """
         updated = updated_at if updated_at is not None else _now_ms()
@@ -735,10 +736,13 @@ class ClawChatStore:
             if expected_access_token is not None:
                 sql += " AND access_token = ?"
                 params += (expected_access_token,)
+            if expected_refresh_token is not None:
+                sql += " AND COALESCE(refresh_token, '') = ?"
+                params += (expected_refresh_token,)
             cursor = conn.execute(sql, params)
             if cursor.rowcount == 1:
                 return True
-            if expected_access_token is not None:
+            if expected_access_token is not None or expected_refresh_token is not None:
                 return False
             # No pre-existing row → env-only deployment. Seed an identity row so
             # the rotated tokens are durably stored and future refreshes/restart

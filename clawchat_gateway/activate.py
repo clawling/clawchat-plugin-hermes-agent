@@ -694,6 +694,7 @@ def persist_rotated_tokens(
     owner_user_id: str | None = None,
     conversation_id: str | None = None,
     expected_access_token: str | None = None,
+    expected_refresh_token: str | None = None,
 ) -> bool:
     """Durably write a refresh-rotated token pair to BOTH .env and SQLite.
 
@@ -710,7 +711,7 @@ def persist_rotated_tokens(
     ``owner_user_id`` / ``conversation_id`` threaded down from the connection's
     in-memory config) instead of failing — otherwise the very first refresh would
     brick the agent (§C.2). The seed never resets bootstrap/activation flags.
-    With ``expected_access_token``, SQLite's conditional update must succeed
+    With an expected access/refresh pair, SQLite's conditional update must succeed
     before writing .env; a missing or changed row leaves .env untouched.
     """
     def write_env() -> bool:
@@ -738,12 +739,13 @@ def persist_rotated_tokens(
                 seed_owner_user_id=owner_user_id,
                 seed_conversation_id=conversation_id,
                 expected_access_token=expected_access_token,
+                expected_refresh_token=expected_refresh_token,
             ))
         except Exception:  # noqa: BLE001
             logger.warning("clawchat rotated-token database persistence failed", exc_info=True)
             return False
 
-    if expected_access_token is not None:
+    if expected_access_token is not None or expected_refresh_token is not None:
         if not write_db():
             return False
         return write_env()

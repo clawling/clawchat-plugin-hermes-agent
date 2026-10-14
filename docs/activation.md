@@ -467,10 +467,32 @@ suspension, revocation, rotation or stopping invalidates an in-flight connect or
 handshake, the returned socket is closed with a timeout; it cannot send a stale
 connect frame or enter `READY`. Recovery does not revive that old attempt.
 
+An env/extra bootstrap session also suspends immediately if a permanent refresh
+cannot clear a matching SQLite row and strict `.env` reading is unavailable
+(`env_matched is None`). It logs `activation_credentials_unreadable action=suspend`,
+closes the WS and stops refresh/reconnect while retaining its in-memory pair.
+The unconfirmed failure writes no new rejection marker, latches no rejected pair
+and sends no auto-logout message; its rejection marker is deferred until logout
+confirms ownership. Normal bootstrap logout with a matching pair or absent
+`.env` keys still writes tombstones and stops the rejected session.
+
+Bootstrap suspension polls every 2 seconds too. A readable SQLite credential row
+is adopted using the usual token/fingerprint checks. Without a usable row, strict
+`.env` reads must succeed: matching values or absent keys resume connecting and
+log `activation_credentials_readable action=reconnect source=bootstrap_env`.
+If `.env` holds a different pair, the gateway retains suspension and logs
+`activation_credentials_changed action=wait_activation`; tokens alone do not
+establish the replacement identity, so write a new SQLite activation to recover.
+If SQLite cannot be read, or there is no usable row and `.env` remains
+unreadable, suspension continues without connecting or refreshing.
+Outside suspension, a confirmed different `.env` pair (`env_matched is False`)
+keeps the existing late-result discard behavior and does not trigger suspension.
+
 If the row is deleted while a refresh is in flight, the persist callback
 re-checks the credential source and revocation state. For a connection using
 SQLite credentials, persistence conditionally updates the row only if its
-access token still matches the request's original token. A cleared, rotated or
+access and refresh token still match the request's original pair. Even a
+refresh-only change rejects an old successful response. A cleared, rotated or
 deleted row rejects the write without seeding or touching `.env`; a successful
 SQLite update happens **before** the `.env` mirror. A late successful result
 cannot restore discarded in-memory credentials or overwrite a newly adopted

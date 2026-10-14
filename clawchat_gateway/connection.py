@@ -552,9 +552,14 @@ class ClawChatConnection:
         expected_access_token: str | None = None,
         expected_refresh_token: str | None = None,
     ) -> Literal["ok", "changed", "revoked", "unreadable"]:
+        if self._activation_source_suspended:
+            include_bootstrap = True
         if not self._using_activation_db_credentials and not include_bootstrap:
             return "ok"
-        if self._store is None and not self._using_activation_db_credentials:
+        if (
+            self._store is None and not self._using_activation_db_credentials
+            and not self._activation_source_suspended
+        ):
             return "ok"
         try:
             if self._store is None:
@@ -574,6 +579,8 @@ class ClawChatConnection:
             if self._using_activation_db_credentials:
                 await self._revoke_activation_credentials()
                 return "revoked"
+            if self._activation_source_suspended and adopt_changes:
+                return await self._recheck_bootstrap_env_source()
             return "ok"
         if expected_access_token is not None:
             # Permanent callbacks compare the same request pair as logout's CAS.
@@ -613,9 +620,18 @@ class ClawChatConnection:
             if self._ws is not None and not was_suspended:
                 await self._ws.close()
         elif was_suspended and adopt_changes:
-            self._activation_source_suspended = False
-            if self._refresh_manager is not None:
-                self._refresh_manager.reset_latch()
+            if not self._using_activation_db_credentials:
+                if (
+                    credentials.access_token == self._rejected_activation_token
+                    or not self._refresh_credentials_usable(credentials.refresh_token)
+                ):
+                    await self._enter_auth_failed(reason="activation credentials rejected")
+                    return "revoked"
+                self._apply_activation_credentials(credentials)
+            else:
+                self._activation_source_suspended = False
+                if self._refresh_manager is not None:
+                    self._refresh_manager.reset_latch()
         if was_suspended and adopt_changes:
             logger.info(
                 format_ws_log(
@@ -629,6 +645,41 @@ class ClawChatConnection:
             )
             await self._set_state(ConnectionState.DISCONNECTED)
         return "changed" if changed else "ok"
+
+    async def _recheck_bootstrap_env_source(self) -> Literal["ok", "changed", "unreadable"]:
+        from clawchat_gateway.activate import _persisted_env_credentials_match
+
+        matches = _persisted_env_credentials_match(self._cfg.token, self._cfg.refresh_token)
+        if matches is not True:
+            if matches is False:
+                logger.warning(
+                    format_ws_log(
+                        event="activation_credentials_changed",
+                        account_id=self._account_id,
+                        attempt=self._attempt,
+                        reconnect_count=self._reconnect_count,
+                        state=self._state.value,
+                        action="wait_activation",
+                        fields=[("reason", "bootstrap env credentials changed")],
+                    )
+                )
+            return "changed" if matches is False else "unreadable"
+        self._activation_source_suspended = False
+        if self._refresh_manager is not None:
+            self._refresh_manager.reset_latch()
+        logger.info(
+            format_ws_log(
+                event="activation_credentials_readable",
+                account_id=self._account_id,
+                attempt=self._attempt,
+                reconnect_count=self._reconnect_count,
+                state=self._state.value,
+                action="reconnect",
+                fields=[("source", "bootstrap_env")],
+            )
+        )
+        await self._set_state(ConnectionState.DISCONNECTED)
+        return "ok"
 
     async def _wait_for_activation_source(self) -> bool:
         while self._activation_source_suspended and not self._stopping:
@@ -780,6 +831,7 @@ class ClawChatConnection:
             or self._cfg.refresh_token != expected_credentials.refresh_token
         ):
             return False
+        request_credentials = expected_credentials or self._cfg
         using_activation_db_credentials = self._using_activation_db_credentials
         if await self._recheck_activation_source(adopt_changes=False) != "ok":
             return False
@@ -803,7 +855,8 @@ class ClawChatConnection:
                 user_id=user_id,
                 owner_user_id=owner_user_id,
                 conversation_id=conversation_id,
-                expected_access_token=self._cfg.token if using_activation_db_credentials else None,
+                expected_access_token=request_credentials.token if using_activation_db_credentials else None,
+                expected_refresh_token=request_credentials.refresh_token if using_activation_db_credentials else None,
             )
         except Exception:  # noqa: BLE001
             logger.warning("clawchat rotated-token persistence raised", exc_info=True)
@@ -815,24 +868,41 @@ class ClawChatConnection:
     ) -> bool:
         if not await self._permanent_refresh_is_current(expected_credentials):
             return False
+        if expected_credentials is not None and not self._using_activation_db_credentials:
+            from clawchat_gateway.activate import _persisted_env_credentials_match
+
+            if _persisted_env_credentials_match(
+                expected_credentials.token, expected_credentials.refresh_token,
+            ) is None:
+                # An unreadable bootstrap source may suspend rather than adopt
+                # the failure. Defer its marker until logout confirms ownership.
+                return True
+        if expected_credentials is not None:
+            self._record_refresh_rejection(refresh_token)
+            return True
         # Latch locally if the marker write fails. Persist before any clears.
         self._rejected_refresh_fingerprint = refresh_token_fingerprint(refresh_token)
         try:
-            if expected_credentials is not None:
-                # No await between the request guard and its durable marker.
-                written = self._store is not None and self._store.mark_revoked_refresh_token(
-                    platform="hermes", account_id=self._account_id, refresh_token=refresh_token,
-                )
-            else:
-                written = self._store is not None and await asyncio.to_thread(
-                    self._store.mark_revoked_refresh_token,
-                    platform="hermes", account_id=self._account_id, refresh_token=refresh_token,
-                )
+            written = self._store is not None and await asyncio.to_thread(
+                self._store.mark_revoked_refresh_token,
+                platform="hermes", account_id=self._account_id, refresh_token=refresh_token,
+            )
             if not written:
                 logger.warning("clawchat revoked-refresh marker write returned false")
         except Exception:  # noqa: BLE001
             logger.warning("clawchat revoked-refresh marker write failed")
         return True
+
+    def _record_refresh_rejection(self, refresh_token: str) -> None:
+        self._rejected_refresh_fingerprint = refresh_token_fingerprint(refresh_token)
+        try:
+            written = self._store is not None and self._store.mark_revoked_refresh_token(
+                platform="hermes", account_id=self._account_id, refresh_token=refresh_token,
+            )
+            if not written:
+                logger.warning("clawchat revoked-refresh marker write returned false")
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat revoked-refresh marker write failed")
 
     def _log_discarded_refresh(self, reason: str) -> None:
         logger.info(
@@ -885,7 +955,10 @@ class ClawChatConnection:
         if not await self._permanent_refresh_is_current(expected_credentials):
             return False
 
+        bootstrap_unreadable = False
+
         def _clear() -> bool:
+            nonlocal bootstrap_unreadable
             if expected_credentials is not None and self._using_activation_db_credentials:
                 sqlite_cleared = self._store.clear_activation_credentials(
                     platform="hermes", account_id=self._account_id,
@@ -908,8 +981,13 @@ class ClawChatConnection:
                 # Without a cleared SQLite row, only a confirmed .env match
                 # proves the request still owns the persisted credentials.
                 if not result.sqlite_cleared and result.env_matched is not True:
+                    bootstrap_unreadable = result.env_matched is None
                     self._log_discarded_refresh("activation_changed_before_logout")
                     return False
+                if self._rejected_refresh_fingerprint != refresh_token_fingerprint(
+                    expected_credentials.refresh_token,
+                ):
+                    self._record_refresh_rejection(expected_credentials.refresh_token)
             else:
                 result = clear_persisted_credentials(account_id=self._account_id)
             logger.log(
@@ -922,6 +1000,8 @@ class ClawChatConnection:
         try:
             if expected_credentials is not None:
                 if not _clear():
+                    if bootstrap_unreadable:
+                        await self._suspend_activation_source()
                     return False
             else:
                 await asyncio.to_thread(_clear)
