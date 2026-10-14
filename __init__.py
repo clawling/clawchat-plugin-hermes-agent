@@ -294,7 +294,7 @@ def _patch_send_message_media_delivery() -> None:
     for built-in platforms before the generic plugin adapter path. Route
     ClawChat media delivery through the adapter; text-only delivery continues
     through Hermes' original implementation. Non-owner ClawChat turns cannot
-    route local attachments through any platform.
+    route attachments to other platforms or local attachments to ClawChat.
     """
     try:
         from tools import send_message_tool
@@ -318,6 +318,12 @@ def _patch_send_message_media_delivery() -> None:
     ):
         from clawchat_gateway import host_tools_guard, local_paths
 
+        platform_name = getattr(platform, "value", str(platform))
+        if (
+            media_files and platform_name != "clawchat"
+            and host_tools_guard._session_turn() == "other"
+        ):
+            return {"error": local_paths.ATTACHMENT_REFUSAL}
         if (
             media_files
             and host_tools_guard._session_turn() == "other"
@@ -332,7 +338,6 @@ def _patch_send_message_media_delivery() -> None:
                 for ref in references
             ):
                 return {"error": local_paths.LOCAL_PATH_REFUSAL}
-        platform_name = getattr(platform, "value", str(platform))
         if platform_name == "clawchat" and media_files:
             return await _send_clawchat_media_via_live_adapter(
                 platform,

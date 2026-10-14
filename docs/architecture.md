@@ -91,9 +91,11 @@ plugin's credential denylist, for every chat. In turns the owner did not start
 attachments are not sent. Hermes delivers a reply after the turn's session
 context is cleared; such a delivery may carry a local attachment only into the
 owner's direct chat. This is an intentional exception because delivery goes
-only to the owner. In non-owner turns, HTTP(S) attachments are not fetched
-from localhost, private or link-local addresses; each redirect is checked.
-`send_message` cannot carry local attachments to any platform in those turns.
+only to the owner. In non-owner turns, HTTP(S) attachments are fetched only
+from globally routable unicast addresses. Connections use the checked IP
+directly, without proxies, and each redirect is resolved and checked again.
+In non-owner ClawChat turns, `send_message` to other platforms cannot carry
+attachments; ClawChat targets retain the local-file and remote-address policy.
 A ClawChat gateway process is never treated as a local
 operator surface. The denylist
 also covers the plugin data directory, `.env`, `config.yaml`, `auth.json` and

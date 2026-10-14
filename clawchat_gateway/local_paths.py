@@ -12,6 +12,18 @@ LOCAL_PATH_REFUSAL = (
     "Local files can't be sent or uploaded in this conversation. "
     "Only your owner's direct chat can do that."
 )
+ATTACHMENT_REFUSAL = "Attachments can't be sent from this conversation to other platforms."
+
+
+def _public_address(ip: str) -> bool:
+    """Whether an address is globally routable and unicast."""
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    return address.is_global and not address.is_multicast
 
 
 def _session_bound() -> bool:
@@ -83,16 +95,7 @@ def remote_media_allowed(url: str, chat_id: str | None) -> bool:
         )
         if not addresses:
             return False
-        for entry in addresses:
-            address = ipaddress.ip_address(entry[4][0])
-            if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
-                address = address.ipv4_mapped
-            if any((
-                address.is_private, address.is_loopback, address.is_link_local,
-                address.is_reserved, address.is_multicast, address.is_unspecified,
-            )):
-                return False
-        return True
+        return all(_public_address(entry[4][0]) for entry in addresses)
     except (OSError, ValueError):
         return False
 

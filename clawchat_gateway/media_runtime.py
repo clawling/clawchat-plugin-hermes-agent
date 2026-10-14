@@ -1,19 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import http.client
 import json
 import logging
 import mimetypes
 import os
+import socket
+import ssl
 import sys
 import uuid
 from pathlib import Path
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from urllib.parse import unquote, urljoin, urlparse, urlunparse
-from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
+from urllib.request import Request, urlopen
 
-from clawchat_gateway.local_paths import is_denied_hermes_path, local_attachment_allowed, remote_media_allowed
+from clawchat_gateway.local_paths import _public_address, is_denied_hermes_path, local_attachment_allowed, remote_media_allowed
 
 logger = logging.getLogger("clawchat_gateway.media_runtime")
 
@@ -235,24 +238,84 @@ class RemoteMediaRejected(ValueError):
     """A remote attachment or redirect did not satisfy the turn's policy."""
 
 
-def _load_remote_media(url: str, check_url: Callable[[str], bool] | None = None) -> LoadedMedia:
-    open_url = urlopen
-    if check_url is not None:
-        if not check_url(url):
-            raise RemoteMediaRejected("remote attachment address is not allowed")
-
-        class CheckedRedirectHandler(HTTPRedirectHandler):
-            def redirect_request(self, req, fp, code, msg, headers, newurl):
-                if not check_url(newurl):
-                    raise RemoteMediaRejected("remote attachment address is not allowed")
-                return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-        open_url = build_opener(CheckedRedirectHandler()).open
-    with open_url(Request(url, headers={"User-Agent": _USER_AGENT})) as response:
+def _load_remote_media(url: str) -> LoadedMedia:
+    with urlopen(Request(url, headers={"User-Agent": _USER_AGENT})) as response:
         buffer = response.read()
         content_type = response.headers.get_content_type() or _guess_mime(url)
         filename = Path(urlparse(url).path).name or "upload.bin"
     return LoadedMedia(buffer=buffer, filename=filename, mime=content_type)
+
+
+class _PublicHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, host: str, port: int, *, ip: str, timeout: float):
+        super().__init__(host, port, timeout=timeout)
+        self._public_ip = ip
+
+    def connect(self):
+        self.sock = socket.create_connection((self._public_ip, self.port), self.timeout)
+
+
+class _PublicHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, host: str, port: int, *, ip: str, timeout: float):
+        super().__init__(host, port, timeout=timeout, context=ssl.create_default_context())
+        self._public_ip = ip
+
+    def connect(self):
+        sock = socket.create_connection((self._public_ip, self.port), self.timeout)
+        try:
+            self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+        except Exception:
+            sock.close()
+            raise
+
+
+def _fetch_public_media(url: str, *, max_redirects: int = 5, timeout: float = 30) -> LoadedMedia:
+    """Fetch directly from a checked address, checking each redirect afresh."""
+    for hop in range(max_redirects + 1):
+        try:
+            parsed = urlparse(url)
+            host = parsed.hostname or ""
+            if (
+                parsed.scheme not in {"http", "https"} or not host
+                or host.lower().rstrip(".") == "localhost"
+                or host.lower().rstrip(".").endswith(".localhost")
+            ):
+                raise RemoteMediaRejected("remote attachment address is not allowed")
+            default_port = 443 if parsed.scheme == "https" else 80
+            port = parsed.port or default_port
+            addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+            if not addresses or not all(_public_address(entry[4][0]) for entry in addresses):
+                raise RemoteMediaRejected("remote attachment address is not allowed")
+        except (OSError, ValueError):
+            raise RemoteMediaRejected("remote attachment address is not allowed") from None
+        connection_type = _PublicHTTPSConnection if parsed.scheme == "https" else _PublicHTTPConnection
+        connection = connection_type(host, port, ip=addresses[0][4][0], timeout=timeout)
+        host_header = f"[{host}]" if ":" in host else host
+        if port != default_port:
+            host_header = f"{host_header}:{port}"
+        target = parsed.path or "/"
+        if parsed.query:
+            target += f"?{parsed.query}"
+        try:
+            connection.request("GET", target, headers={"Host": host_header, "User-Agent": _USER_AGENT})
+            with connection.getresponse() as response:
+                if response.status in {301, 302, 303, 307, 308}:
+                    if hop == max_redirects:
+                        raise RemoteMediaRejected("remote attachment redirect limit reached")
+                    location = response.headers.get("Location")
+                    if not location:
+                        raise ValueError("remote attachment redirect missing location")
+                    url = urljoin(url, location)
+                    continue
+                if not 200 <= response.status < 300:
+                    raise OSError("remote attachment request failed")
+                return LoadedMedia(
+                    buffer=response.read(),
+                    filename=Path(parsed.path).name or "upload.bin",
+                    mime=response.headers.get_content_type() or _guess_mime(url),
+                )
+        finally:
+            connection.close()
 
 
 def _media_log_name(url: str) -> str:
@@ -388,9 +451,7 @@ async def upload_outbound_media(
                 if local_attachment_allowed(chat_id):
                     loaded = await asyncio.to_thread(_load_remote_media, url)
                 else:
-                    loaded = await asyncio.to_thread(
-                        _load_remote_media, url, lambda target: remote_media_allowed(target, chat_id)
-                    )
+                    loaded = await asyncio.to_thread(_fetch_public_media, url)
             else:
                 loaded = await asyncio.to_thread(
                     _load_local_media, url, media_local_roots

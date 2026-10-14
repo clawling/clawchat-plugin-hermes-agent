@@ -792,9 +792,11 @@ owner and someone else alternate. In turns the owner did not start (including
 every group turn), plugin tools refuse local file paths and local attachments
 are not sent (a reply delivered after the turn may carry one only into the
 owner's direct chat, an intentional exception because only the owner receives
-it). In non-owner turns, HTTP(S) attachments are not fetched from localhost,
-private or link-local addresses, and redirects are checked at every hop;
-`send_message` to any platform cannot carry local attachments. Web
+it). In non-owner turns, HTTP(S) attachments are fetched only from globally
+routable unicast addresses. Connections use the checked IP directly, without
+proxies, and each redirect is resolved and checked again. In non-owner ClawChat
+turns, `send_message` to other platforms cannot carry attachments; ClawChat
+targets retain the local-file and remote-address policy. Web
 search/extract, skills and the owner's direct chat keep their existing access.
 
 `session_search` goes because it reads every conversation in Hermes' session

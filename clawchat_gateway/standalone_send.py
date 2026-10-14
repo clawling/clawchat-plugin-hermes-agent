@@ -110,8 +110,11 @@ async def standalone_send(
             # Post-handshake config carries the freshest access token (the
             # connection reloads/refreshes it from SQLite before READY).
             cfg = connection.config
+            paths = _media_file_paths(list(media_files))
+            allowed_paths = [path for path in paths if media_reference_allowed(path, target)]
+            policy_dropped: list[str] = []
             media_fragments = await upload_outbound_media(
-                _media_file_paths(list(media_files)),
+                paths,
                 chat_id=target,
                 base_url=cfg.base_url,
                 websocket_url=cfg.websocket_url,
@@ -119,14 +122,17 @@ async def standalone_send(
                 media_local_roots=cfg.media_local_roots,
                 media_base_url=cfg.media_base_url,
                 force_document=bool(force_document),
+                policy_dropped=policy_dropped,
             )
-            paths = _media_file_paths(list(media_files))
-            allowed = sum(1 for path in paths if media_reference_allowed(path, target))
+            for path in policy_dropped:
+                if path in allowed_paths:
+                    allowed_paths.remove(path)
+            allowed = len(allowed_paths)
             if len(media_fragments) < allowed or not (media_fragments or text):
                 return {
                     "error": (
                         "ClawChat standalone send: "
-                        f"{len(media_fragments)}/{len(paths)} attachment(s) uploaded; "
+                        f"{len(media_fragments)}/{allowed} attachment(s) uploaded; "
                         "message not sent."
                     )
                 }
@@ -155,7 +161,8 @@ async def standalone_send(
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — contract wants {"error": str}
-            return {"error": f"ClawChat standalone send failed: {exc}"}
+            # The type only: a message can carry an attachment path.
+            return {"error": f"ClawChat standalone send failed ({type(exc).__name__})."}
         if not sent:
             return {"error": "ClawChat standalone send was dropped before dispatch."}
         logger.info(

@@ -256,19 +256,19 @@ def _validate_upload_path(file_path: str) -> tuple[Path | None, dict[str, Any] |
 
     path = Path(file_path)
     if not path.is_absolute():
-        return None, _validation_error(f"filePath must be an absolute local path (got {file_path!r})")
+        return None, _validation_error("path must be an absolute local path")
     try:
         path = ensure_allowed_local_path(str(path))
     except (ValueError, OSError, RuntimeError):
         return None, _validation_error("path is denied for delivery")
     if not path.exists():
-        return None, _validation_error(f"file does not exist: {path}")
+        return None, _validation_error("file does not exist")
     if not path.is_file():
-        return None, _validation_error(f"not a regular file: {path}")
+        return None, _validation_error("not a regular file")
 
     size = path.stat().st_size
     if size <= 0:
-        return None, _validation_error(f"file is empty: {path}")
+        return None, _validation_error("file is empty")
     if size > MAX_UPLOAD_BYTES:
         return None, _validation_error(f"file too large ({size} bytes; max {MAX_UPLOAD_BYTES})")
     return path, None
@@ -922,15 +922,15 @@ async def send_file(
         return _validation_error("caption must be a string when provided")
     raw = Path(path.strip())
     if not raw.is_absolute():
-        return _validation_error(f"path must be an absolute local path (got {path!r})")
+        return _validation_error("path must be an absolute local path")
     try:
         resolved = ensure_allowed_local_path(str(raw))
     except (ValueError, OSError, RuntimeError):
         return _validation_error("path is denied for delivery")
     if not resolved.exists():
-        return _validation_error(f"file does not exist: {resolved}")
+        return _validation_error("file does not exist")
     if not resolved.is_file():
-        return _validation_error(f"path is not a regular file: {resolved}")
+        return _validation_error("path is not a regular file")
 
     media_files = [str(resolved)]
     force_document = as_document is True
@@ -1030,7 +1030,7 @@ def _classify_moment_images(
             )
         if not _infer_mime(path).startswith("image/"):
             return None, _validation_error(
-                f"images[{index}] is not an image file: {path}"
+                f"images[{index}] is not an image file"
             )
         out.append(("", path))
     return out, None
@@ -1342,22 +1342,22 @@ def _read_liveware_icon(
     if not turn_allows_local_paths():
         return None, _validation_error(LOCAL_PATH_REFUSAL)
     if not isinstance(icon_path, str) or not icon_path:
-        return None, _validation_error("iconPath must be an absolute local path")
+        return None, _validation_error("path must be an absolute local path")
     path = Path(icon_path)
     if not path.is_absolute():
-        return None, _validation_error(f"iconPath must be an absolute local path (got {icon_path!r})")
+        return None, _validation_error("path must be an absolute local path")
     try:
         path = ensure_allowed_local_path(str(path))
     except (ValueError, OSError, RuntimeError):
         return None, _validation_error("path is denied for delivery")
     try:
         if not path.exists():
-            return None, _validation_error(f"icon file does not exist: {path}")
+            return None, _validation_error("icon file does not exist")
         if not path.is_file():
-            return None, _validation_error(f"icon is not a regular file: {path}")
+            return None, _validation_error("icon is not a regular file")
         size = path.stat().st_size
-    except OSError as exc:
-        return None, _validation_error(f"cannot stat {path}: {exc}")
+    except OSError:
+        return None, _validation_error("cannot stat icon file")
     max_bytes = _liveware_icon_max_bytes(text_field_bytes + len(path.name.encode("utf-8")))
 
     def too_large(n: int) -> dict[str, Any]:
@@ -1370,15 +1370,15 @@ def _read_liveware_icon(
         return None, too_large(size)
     try:
         data = path.read_bytes()
-    except OSError as exc:
-        return None, _validation_error(f"cannot read {path}: {exc}")
+    except OSError:
+        return None, _validation_error("cannot read icon file")
     # The file may have grown between stat and read.
     if len(data) > max_bytes:
         return None, too_large(len(data))
     mime = _sniff_liveware_icon_mime(data[:16])
     if mime is None:
         return None, _validation_error(
-            f"icon must be a PNG, JPEG or WebP image (checked from the file's bytes): {path}"
+            "icon must be a PNG, JPEG or WebP image (checked from the file's bytes)"
         )
     return (data, path.name, mime), None
 

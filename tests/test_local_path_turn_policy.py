@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import ipaddress
+import io
 import socket
 import sys
 from email.message import Message
@@ -326,7 +327,7 @@ def test_non_owner_remote_moment_and_attachment_remain_available(policy, monkeyp
     url = "https://cdn.example/picture.png"
     assert guard.clawchat_pre_tool_call(tool_name="clawchat_create_moment", args={"images": [url]}) is None
     assert asyncio.run(tools.create_moment(images=[url])) == {"id": 1}
-    monkeypatch.setattr(media_runtime, "_load_remote_media", lambda _, check_url=None: media_runtime.LoadedMedia(b"image", "remote.png", "image/png"))
+    monkeypatch.setattr(media_runtime, "_fetch_public_media", lambda _: media_runtime.LoadedMedia(b"image", "remote.png", "image/png"))
     fragments = asyncio.run(outbound(policy, [str(policy.home / "notes.txt"), url], GROUP))
     assert [fragment["name"] for fragment in fragments] == ["remote.png"]
     assert [call[0] for call in policy.calls] == ["moment", "outbound"]
@@ -527,6 +528,10 @@ def public_dns(host, port, **_kw):
 def remote_transport(monkeypatch):
     requests = []
     redirects = {}
+    connections = []
+    server_names = []
+    request_headers = []
+    statuses = {}
     headers = Message()
     headers["Content-Type"] = "image/png"
 
@@ -552,12 +557,43 @@ def remote_transport(monkeypatch):
             return open_request(redirected, handler)
         return Response()
 
-    def build_opener(handler):
-        return SimpleNamespace(open=lambda request: open_request(request, handler))
+    class Socket:
+        scheme = "http"
 
-    monkeypatch.setattr(media_runtime, "build_opener", build_opener)
+        def sendall(self, data):
+            lines = data.decode("ascii").split("\r\n")
+            target = lines[0].split()[1]
+            fields = dict(line.split(": ", 1) for line in lines[1:] if ": " in line)
+            self.url = f"{self.scheme}://{fields['Host']}{target}"
+            requests.append(self.url)
+            request_headers.append(fields)
+
+        def makefile(self, *_a, **_kw):
+            location = redirects.get(self.url)
+            status = statuses.get(self.url, 302 if location else 200)
+            fields = f"Location: {location}\r\n" if location else ""
+            return io.BytesIO((
+                f"HTTP/1.1 {status} Response\r\n{fields}"
+                "Content-Type: image/png\r\nContent-Length: 5\r\n\r\nimage"
+            ).encode())
+
+        def close(self):
+            pass
+
+    def connect(address, timeout):
+        connections.append((address, timeout))
+        return Socket()
+
+    def wrap_socket(sock, *, server_hostname):
+        server_names.append(server_hostname)
+        sock.scheme = "https"
+        return sock
+
+    monkeypatch.setattr(media_runtime.socket, "create_connection", connect)
+    monkeypatch.setattr(media_runtime.ssl, "create_default_context", lambda: SimpleNamespace(wrap_socket=wrap_socket))
     monkeypatch.setattr(media_runtime, "urlopen", open_request)
-    return SimpleNamespace(requests=requests, redirects=redirects)
+    return SimpleNamespace(requests=requests, redirects=redirects, connections=connections,
+                           server_names=server_names, request_headers=request_headers, statuses=statuses)
 
 
 def failing_session(monkeypatch):
@@ -598,7 +634,7 @@ def test_session_reader_failure_uses_restricted_scope(policy, monkeypatch):
 @pytest.mark.parametrize("url", (
     "http://127.0.0.1/x", "http://localhost/x", "http://10.0.0.5/x",  # redact-allow:private-ip (test address)
     "http://169.254.169.254/x", "http://[::1]/x", "http://[::ffff:127.0.0.1]/x",
-    "http://app.localhost/x", "http://127.0.0.1/media/x?secret=value",
+    "http://app.localhost/x", "http://127.0.0.1/media/x?secret=value", "http://100.64.0.1/x",
 ))
 def test_non_owner_remote_addresses_are_filtered(policy, remote_transport, caplog, turn, url):
     set_turn(policy, turn)
@@ -672,22 +708,24 @@ def test_remote_resolution_failure_drops_attachment(policy, monkeypatch, remote_
 
 
 @pytest.mark.parametrize("turn", NON_OWNER_TURNS + ("owner_direct",))
+@pytest.mark.parametrize("target", ("telegram:123", f"clawchat:{FRIEND_DM}"))
 @pytest.mark.parametrize("args", (
     {"message": "MEDIA:/tmp/x.txt"}, {"message": "media: '/tmp/x.txt'"},
     {"message": 'MEDIA:  "/tmp/x.txt"'}, {"media_files": ["/tmp/x"]},
     {"attachments": ["/tmp/x"]},
 ))
-def test_send_message_local_references_follow_turn_policy(policy, turn, args):
+def test_send_message_local_references_follow_turn_policy(policy, turn, target, args):
     set_turn(policy, turn)
-    result = guard.clawchat_pre_tool_call(tool_name="send_message", args={"target": "telegram:123", **args})
-    assert result == (None if turn == "owner_direct" else {"action": "block", "message": local_paths.LOCAL_PATH_REFUSAL})
+    result = guard.clawchat_pre_tool_call(tool_name="send_message", args={"target": target, **args})
+    refusal = local_paths.LOCAL_PATH_REFUSAL if target.startswith("clawchat:") else local_paths.ATTACHMENT_REFUSAL
+    assert result == (None if turn == "owner_direct" else {"action": "block", "message": refusal})
 
 
 @pytest.mark.parametrize("turn", NON_OWNER_TURNS)
 def test_send_message_remote_marker_is_available(policy, turn):
     set_turn(policy, turn)
     assert guard.clawchat_pre_tool_call(tool_name="send_message", args={
-        "target": "telegram:123", "message": "MEDIA:https://cdn.example/x",
+        "target": f"clawchat:{FRIEND_DM}", "message": "MEDIA:https://cdn.example/x",
     }) is None
 
 
@@ -724,7 +762,7 @@ def test_platform_sender_local_attachments_follow_source_turn(policy, monkeypatc
         failing_session(monkeypatch)
     result = asyncio.run(patched_sender.send("telegram", None, "123", "caption", media_files=descriptor))
     blocked = turn in NON_OWNER_TURNS or turn == "unavailable"
-    assert result == ({"error": local_paths.LOCAL_PATH_REFUSAL} if blocked else {"success": True})
+    assert result == ({"error": local_paths.ATTACHMENT_REFUSAL} if blocked else {"success": True})
     assert len(patched_sender.calls) == (0 if blocked else 1)
 
 
@@ -816,11 +854,7 @@ def test_public_uploaded_reference_keeps_reuse_on_fetch_failure(policy, monkeypa
     set_turn(policy, "friend_direct")
     url = "https://cdn.example/media/picture.png?signature=value"
 
-    def open_request(request):
-        remote_transport.requests.append(request.full_url)
-        raise OSError("fetch unavailable")
-
-    monkeypatch.setattr(media_runtime, "build_opener", lambda _handler: SimpleNamespace(open=open_request))
+    remote_transport.statuses[url] = 503
     fragments = asyncio.run(outbound(policy, [url], FRIEND_DM))
     assert fragments[0]["url"] == url
     assert remote_transport.requests == [url]
@@ -832,3 +866,230 @@ def test_send_message_hook_leaves_other_platform_sessions_alone(policy):
     policy.session["HERMES_SESSION_CHAT_ID"] = "123"
     args = {"target": "telegram:123", "message": "MEDIA:/tmp/notes.txt"}
     assert guard.clawchat_pre_tool_call(tool_name="send_message", args=args) is None
+
+
+@pytest.mark.parametrize("address, expected", (
+    ("100.64.0.1", False), ("198.18.0.1", False), ("192.0.0.1", False),
+    ("::ffff:127.0.0.1", False), ("fc00::1", False), ("fe80::1", False),
+    ("2001:db8::1", False), ("224.0.0.1", False), ("ff02::1", False),
+    ("8.8.8.8", True), ("2606:4700::1", True), ("::ffff:8.8.8.8", True),
+    ("invalid", False),
+))
+def test_public_address_requires_global_unicast(address, expected):
+    assert local_paths._public_address(address) is expected
+
+
+@pytest.mark.parametrize("scheme", ("http", "https"))
+def test_remote_connection_uses_checked_address_once_per_hop(policy, monkeypatch, remote_transport, scheme):
+    set_turn(policy, "friend_direct")
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:8080")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:8080")
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:8080")
+    monkeypatch.setenv("https_proxy", "http://127.0.0.1:8080")
+    lookups = []
+
+    def resolve(host, port, **kw):
+        lookups.append((host, port))
+        return public_dns("8.8.8.8" if len(lookups) == 1 else "127.0.0.1", port, **kw)
+
+    monkeypatch.setattr(local_paths.socket, "getaddrinfo", resolve)
+    monkeypatch.setattr(media_runtime, "urlopen", forbid_filesystem)
+    port = 8443 if scheme == "https" else 8081
+    url = f"{scheme}://cdn.example:{port}/picture.png"
+    assert asyncio.run(outbound(policy, [url], FRIEND_DM))[0]["name"] == "picture.png"
+    assert lookups == [("cdn.example", port)]
+    assert remote_transport.connections == [(("8.8.8.8", port), 30)]
+    assert remote_transport.request_headers == [{
+        "Host": f"cdn.example:{port}", "User-Agent": media_runtime._USER_AGENT,
+        "Accept-Encoding": "identity",
+    }]
+    assert remote_transport.server_names == (["cdn.example"] if scheme == "https" else [])
+    assert len(policy.calls) == 1
+
+
+@pytest.mark.parametrize("status", (301, 302, 303, 307, 308))
+def test_public_redirect_to_non_public_address_is_dropped(policy, remote_transport, status):
+    set_turn(policy, "friend_direct")
+    url = "http://cdn.example/picture.png"
+    remote_transport.redirects[url] = "http://127.0.0.1/private.png"
+    remote_transport.statuses[url] = status
+    dropped = []
+    assert asyncio.run(media_runtime.upload_outbound_media(
+        [url], chat_id=FRIEND_DM, base_url="https://api.example", websocket_url="",
+        token="", media_local_roots=(), upload_file=policy.uploader, policy_dropped=dropped,
+    )) == []
+    assert dropped == [url] and policy.calls == []
+    assert remote_transport.connections == [(("8.8.8.8", 80), 30)]
+
+
+def test_public_redirect_limit_is_a_policy_drop(policy, monkeypatch, remote_transport):
+    set_turn(policy, "friend_direct")
+    urls = [f"https://cdn.example/{index}.png" for index in range(7)]
+    for source, target in zip(urls, urls[1:]):
+        remote_transport.redirects[source] = target
+    lookups = []
+
+    def resolve(host, port, **kw):
+        lookups.append(host)
+        return public_dns(host, port, **kw)
+
+    monkeypatch.setattr(local_paths.socket, "getaddrinfo", resolve)
+    dropped = []
+    assert asyncio.run(media_runtime.upload_outbound_media(
+        [urls[0]], chat_id=FRIEND_DM, base_url="https://api.example", websocket_url="",
+        token="", media_local_roots=(), upload_file=policy.uploader, policy_dropped=dropped,
+    )) == []
+    assert dropped == [urls[0]] and policy.calls == []
+    assert remote_transport.requests == urls[:6]
+    assert lookups == ["cdn.example"] * 6
+
+
+@pytest.mark.parametrize("location", ("/final.png", "file:///tmp/picture.png"))
+def test_remote_redirect_resolves_relative_urls_and_rejects_other_schemes(policy, remote_transport, location):
+    set_turn(policy, "friend_direct")
+    url = "https://cdn.example/first.png"
+    remote_transport.redirects[url] = location
+    fragments = asyncio.run(outbound(policy, [url], FRIEND_DM))
+    if location.startswith("/"):
+        assert fragments[0]["name"] == "final.png"
+        assert policy.calls[0][1]["mime"] == "image/png"
+        assert remote_transport.requests == [url, "https://cdn.example/final.png"]
+    else:
+        assert fragments == [] and policy.calls == []
+        assert remote_transport.requests == [url]
+
+
+@pytest.mark.parametrize("text", ("hello", ""))
+@pytest.mark.parametrize("redirect", (True, False))
+def test_standalone_keeps_text_after_remote_policy_drop(policy, monkeypatch, remote_transport, text, redirect):
+    from clawchat_gateway import standalone_send as standalone
+
+    set_turn(policy, "friend_direct")
+    cfg = SimpleNamespace(media_local_roots=(), base_url="https://api.example", websocket_url="wss://ws.example",
+                          token="", media_base_url="")
+    frames = []
+    stopped = []
+
+    class Connection:
+        config = cfg
+
+        def __init__(self, *_a, **_kw):
+            pass
+
+        def use_sibling_connect_device_id(self, _suffix):
+            return "test-device"
+
+        async def start(self):
+            pass
+
+        async def wait_until_ready(self, **_kw):
+            return True
+
+        async def send_frame(self, frame, **_kw):
+            frames.append(frame)
+            return True
+
+        async def stop(self):
+            stopped.append(True)
+
+    async def upload(urls, **kw):
+        return await media_runtime.upload_outbound_media(urls, upload_file=policy.uploader, **kw)
+
+    monkeypatch.setattr(standalone, "ClawChatConfig", SimpleNamespace(from_platform_config=lambda _: cfg))
+    monkeypatch.setattr(standalone, "ClawChatConnection", Connection)
+    monkeypatch.setattr(standalone, "upload_outbound_media", upload)
+    url = "https://cdn.example/picture.png" if redirect else "http://100.64.0.1/private.png"
+    if redirect:
+        remote_transport.redirects[url] = "http://127.0.0.1/private.png"
+    result = asyncio.run(standalone.standalone_send({}, FRIEND_DM, text, media_files=[url]))
+    assert result.get("success", False) == bool(text)
+    assert policy.calls == [] and stopped == [True]
+    if text:
+        assert frames[0]["payload"]["message"]["body"]["fragments"] == [{"kind": "text", "text": text}]
+    else:
+        assert frames == []
+        assert "0/0 attachment(s)" in result["error"]
+        assert url not in result["error"] and str(policy.home) not in result["error"]
+
+
+def test_owner_missing_send_file_has_neutral_error(policy):
+    set_turn(policy, "owner_direct")
+    path = str(policy.home / "missing.png")
+    result = asyncio.run(tools.send_file(FRIEND_DM, path))
+    assert result == {"error": "validation", "message": "file does not exist"}
+    assert path not in str(result) and policy.calls == []
+
+
+@pytest.mark.parametrize("turn", NON_OWNER_TURNS)
+@pytest.mark.parametrize("args", (
+    {"message": "MEDIA:https://cdn.example/a.png"},
+    {"message": "MEDIA:http://cdn.example/a.png"},
+    {"media_files": ["https://cdn.example/a.png"]},
+))
+def test_send_message_cross_platform_attachments_are_blocked(policy, turn, args):
+    set_turn(policy, turn)
+    assert guard.clawchat_pre_tool_call(tool_name="send_message", args={"target": "telegram:123", **args}) == {
+        "action": "block", "message": local_paths.ATTACHMENT_REFUSAL,
+    }
+
+
+@pytest.mark.parametrize("turn", NON_OWNER_TURNS + ("owner_direct", "telegram"))
+def test_platform_sender_remote_attachments_follow_source_turn(policy, patched_sender, turn):
+    if turn == "telegram":
+        policy.session["HERMES_SESSION_PLATFORM"] = "telegram"
+    else:
+        set_turn(policy, turn)
+    result = asyncio.run(patched_sender.send(SimpleNamespace(value="telegram"), None, "123", "caption",
+                                             media_files=["https://cdn.example/a.png"]))
+    blocked = turn in NON_OWNER_TURNS
+    assert result == ({"error": local_paths.ATTACHMENT_REFUSAL} if blocked else {"success": True})
+    assert len(patched_sender.calls) == (0 if blocked else 1)
+
+
+def test_send_message_hook_allows_remote_attachments_in_other_platform_session(policy):
+    policy.session["HERMES_SESSION_PLATFORM"] = "telegram"
+    assert guard.clawchat_pre_tool_call(tool_name="send_message", args={
+        "target": "telegram:123", "message": "MEDIA:https://cdn.example/a.png",
+        "media_files": ["https://cdn.example/a.png"],
+    }) is None
+
+
+def test_standalone_reports_a_failed_allowed_upload(policy, monkeypatch):
+    from clawchat_gateway import standalone_send as standalone
+
+    set_turn(policy, "owner_direct")
+    cfg = SimpleNamespace(media_local_roots=(), base_url="https://api.example", websocket_url="wss://ws.example",
+                          token="", media_base_url="")
+    frames = []
+
+    class Connection:
+        config = cfg
+
+        def __init__(self, *_a, **_kw):
+            pass
+
+        def use_sibling_connect_device_id(self, _suffix):
+            return "test-device"
+
+        async def start(self):
+            pass
+
+        async def wait_until_ready(self, **_kw):
+            return True
+
+        async def send_frame(self, frame, **_kw):
+            frames.append(frame)
+            return True
+
+        async def stop(self):
+            pass
+
+    async def failing_upload(urls, **_kw):
+        return []
+
+    monkeypatch.setattr(standalone, "ClawChatConfig", SimpleNamespace(from_platform_config=lambda _: cfg))
+    monkeypatch.setattr(standalone, "ClawChatConnection", Connection)
+    monkeypatch.setattr(standalone, "upload_outbound_media", failing_upload)
+    result = asyncio.run(standalone.standalone_send({}, OWNER_DM, "hello", media_files=[str(policy.home / "notes.txt")]))
+    assert "error" in result and frames == []
+    assert str(policy.home) not in result["error"]

@@ -751,9 +751,16 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **_: Any) -
         if (tool_name.startswith("clawchat_") and turn != "owner") or (
             tool_name == "send_message" and turn == "other"
         ):
-            from clawchat_gateway.local_paths import LOCAL_PATH_REFUSAL
+            from clawchat_gateway.local_paths import ATTACHMENT_REFUSAL, LOCAL_PATH_REFUSAL
             from clawchat_gateway.memory_scope import is_local_surface
 
+            if tool_name == "send_message" and isinstance(args, dict):
+                target = str(args.get("target", "") or "").strip().lower()
+                if not target.startswith("clawchat:") and (
+                    re.search(r"\bMEDIA:", str(args.get("message", "")), re.IGNORECASE)
+                    or args.get("media_files") or args.get("attachments")
+                ):
+                    return {"action": "block", "message": ATTACHMENT_REFUSAL}
             if not is_local_surface():
                 path_fields = {
                     "path", "filepath", "file_path", "images", "iconpath", "icon_path",
