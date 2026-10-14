@@ -2254,6 +2254,12 @@ class ClawChatConnection:
                 self._hello_wait.set_result(True)
             return
         if frame.get("event") == "hello-fail":
+            if not self._connection_credentials_current():
+                # A late hello-fail for a superseded attempt must not reject or
+                # clear the credentials that replaced it; just drop the socket.
+                if self._ws is not None:
+                    await self._close_stale_connection(self._ws)
+                return
             payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
             raw_reason = payload.get("reason") if isinstance(payload.get("reason"), str) else None
             # Classify on the RAW reason and log the sanitized one. The redactor

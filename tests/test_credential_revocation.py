@@ -1316,3 +1316,32 @@ async def test_conditional_logout_preserves_row_rotated_after_guard(stores, monk
     assert stores.get_activation_credentials(platform="hermes", account_id="default").access_token == fresh.token
     assert conn.config == cfg and not writes
     logout.assert_not_called()
+
+
+async def test_late_hello_fail_for_superseded_attempt_keeps_new_activation(stores, monkeypatch):
+    cfg, fresh = _cfg(), _cfg(fresh=True)
+    _seed(stores, cfg)
+    conn = _conn(monkeypatch, cfg)
+    assert conn._load_startup_activation_credentials()
+    refresh = _no_refresh(monkeypatch, conn)
+    # An attempt with the old pair is still handshaking.
+    conn._connection_credential_generation = conn._credential_generation
+    conn._connection_token = cfg.token
+    conn._state = ConnectionState.HANDSHAKING
+    conn._pending_connect_id = "req-old"
+    conn._hello_wait = asyncio.get_running_loop().create_future()
+    socket = conn._ws = _Socket()
+
+    _seed(stores, fresh)
+    assert await conn._recheck_activation_source() == "changed"
+    await conn._maybe_finish_handshake({
+        "event": "hello-fail",
+        "trace_id": "req-old",
+        "payload": {"reason": "authentication failed"},
+    })
+
+    assert socket.closes >= 1
+    assert conn.config == fresh and not conn._auth_failed
+    assert conn._rejected_activation_token is None
+    assert conn._load_startup_activation_credentials() and conn.config == fresh
+    refresh.assert_not_called()
