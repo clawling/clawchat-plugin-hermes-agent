@@ -276,6 +276,9 @@ async def test_db_read_failures_suspend_then_poll_and_recover(stores, monkeypatc
         elif conn._state == ConnectionState.SUSPENDED:
             suspended_polls.append(delay)
             assert len(sockets) == 1 and sockets[0].closes >= 1
+            with sqlite3.connect(stores.db_path) as db:
+                row = db.execute("SELECT state, ready_at, disconnected_at FROM connections ORDER BY id LIMIT 1").fetchone()
+            assert row == ("suspended", NOW * 1000, NOW * 1000)
             assert conn.config == cfg and conn._using_activation_db_credentials
             assert not conn._auth_failed and conn._rejected_activation_token is None
             assert conn._rejected_refresh_fingerprint is None
@@ -314,6 +317,9 @@ async def test_db_read_failures_suspend_then_poll_and_recover(stores, monkeypatc
     assert stores.get_revoked_refresh_fingerprint(platform="hermes", account_id="default") is None
     refresh.assert_not_called()
     logout.assert_not_called()
+    with sqlite3.connect(stores.db_path) as db:
+        row = db.execute("SELECT state, disconnected_at FROM connections ORDER BY id LIMIT 1").fetchone()
+    assert row == ("suspended", NOW * 1000)
     if recovery == "deleted":
         assert conn._state == ConnectionState.AUTH_FAILED and conn._rejected_activation_token == cfg.token
     else:
@@ -408,6 +414,141 @@ async def test_suspension_ends_pending_handshake_without_rejecting_token(stores,
     assert conn._hello_wait.result() is False and socket.closes >= 1
     assert conn.config == cfg and conn._state == ConnectionState.SUSPENDED
     assert not conn._auth_failed and conn._rejected_activation_token is None
+
+
+@pytest.mark.parametrize("phase", ["connect", "handshaking", "challenge", "hello", "resolved_hello"])
+@pytest.mark.parametrize("change", ["suspended", "revoked", "rotated"])
+async def test_inflight_connection_discards_invalidated_credentials(stores, monkeypatch, phase, change):
+    cfg, fresh = _cfg(), _cfg(fresh=True)
+    _seed(stores, cfg)
+    conn = _conn(monkeypatch, cfg)
+    assert conn._load_startup_activation_credentials()
+    started, release = asyncio.Event(), asyncio.Event()
+    sockets, states = [], []
+    refresh = _no_refresh(monkeypatch, conn)
+
+    async def connect(*_args, **_kwargs):
+        socket = _Socket()
+        sockets.append(socket)
+        if phase == "connect" and len(sockets) == 1:
+            started.set()
+            await release.wait()
+        return socket
+
+    async def state_changed(state):
+        states.append(state)
+        if phase == "handshaking" and state == ConnectionState.HANDSHAKING and len(sockets) == 1:
+            started.set()
+            await release.wait()
+        if state == ConnectionState.READY:
+            await sockets[-1].close()
+
+    handler_name = "_handle_challenge" if phase == "challenge" else "_maybe_finish_handshake"
+    original_handler = getattr(conn, handler_name)
+
+    async def handle(frame):
+        if len(sockets) == 1:
+            started.set()
+            await release.wait()
+            if phase == "resolved_hello":
+                # Signal success without the hello handler's guard to pin the
+                # run loop's independent check before its READY transition.
+                if not conn._hello_wait.done():
+                    conn._hello_wait.set_result(True)
+                return
+        await original_handler(frame)
+
+    if phase in ("challenge", "hello", "resolved_hello"):
+        monkeypatch.setattr(conn, handler_name, handle)
+    monkeypatch.setattr(connection, "_ws_connect", connect)
+    conn._on_state_change = state_changed
+    task = asyncio.create_task(conn._run_one_connection())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        if change == "suspended":
+            def fail_read(**_kwargs):
+                raise RuntimeError("test credential source unavailable")
+
+            monkeypatch.setattr(stores, "get_activation_credentials", fail_read)
+            for _ in range(connection.CREDENTIAL_READ_FAILURE_LIMIT):
+                assert await conn._recheck_activation_source() == "unreadable"
+            assert conn._activation_source_suspended
+        elif change == "revoked":
+            _delete(stores)
+            assert await conn._recheck_activation_source() == "revoked"
+        else:
+            _seed(stores, fresh)
+            assert await conn._recheck_activation_source() == "changed"
+        release.set()
+        assert not await asyncio.wait_for(task, timeout=2)
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert len(sockets) == 1 and sockets[0].closes >= 1
+    assert sockets[0].tokens == ([cfg.token] if phase in ("hello", "resolved_hello") else [])
+    assert ConnectionState.READY not in states and not conn.is_ready
+    with sqlite3.connect(stores.db_path) as db:
+        row = db.execute("SELECT state, ready_at, disconnected_at FROM connections ORDER BY id LIMIT 1").fetchone()
+    expected_state = {"rotated": "disconnected", "revoked": "auth_failed", "suspended": "suspended"}[change]
+    assert row == (expected_state, None, NOW * 1000)
+    refresh.assert_not_called()
+    if change == "rotated":
+        await asyncio.wait_for(conn._run_one_connection(), timeout=2)
+        assert len(sockets) == 2 and sockets[1].tokens == [fresh.token]
+        assert conn.config == fresh and ConnectionState.READY in states
+
+
+@pytest.mark.parametrize("change", ["stop", "auth_failed", "suspend_recover"])
+async def test_pending_connect_remains_invalid_after_state_recovers(stores, monkeypatch, change):
+    cfg = _cfg()
+    _seed(stores, cfg)
+    conn = _conn(monkeypatch, cfg)
+    assert conn._load_startup_activation_credentials()
+    socket = _Socket()
+    started, release = asyncio.Event(), asyncio.Event()
+    states = []
+
+    async def connect(*_args, **_kwargs):
+        started.set()
+        await release.wait()
+        return socket
+
+    async def state_changed(state):
+        states.append(state)
+
+    monkeypatch.setattr(connection, "_ws_connect", connect)
+    conn._on_state_change = state_changed
+    task = asyncio.create_task(conn._run_one_connection())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        if change == "stop":
+            await conn._stop_in_context()
+        elif change == "auth_failed":
+            await conn._enter_auth_failed()
+        else:
+            reader = stores.get_activation_credentials
+
+            def fail_read(**_kwargs):
+                raise RuntimeError("test credential source unavailable")
+
+            monkeypatch.setattr(stores, "get_activation_credentials", fail_read)
+            for _ in range(connection.CREDENTIAL_READ_FAILURE_LIMIT):
+                await conn._recheck_activation_source()
+            monkeypatch.setattr(stores, "get_activation_credentials", reader)
+            assert await conn._recheck_activation_source() == "ok"
+            assert not conn._activation_source_suspended
+            assert conn.config == cfg
+        release.set()
+        assert not await asyncio.wait_for(task, timeout=2)
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert socket.closes >= 1 and not socket.tokens
+    assert ConnectionState.READY not in states and not conn.is_ready
 
 
 async def test_existing_row_rotation_closes_and_reconnects_with_new_token(stores, monkeypatch, caplog):

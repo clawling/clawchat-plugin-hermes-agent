@@ -452,6 +452,8 @@ WS and stop reconnecting and refreshing. Suspension retains the in-memory
 credentials, writes no credential stores or revoked marker, latches no rejected
 token and sends no auto-logout message. Env/extra bootstrap connections and
 never-activated polling are unaffected by this counter.
+The disconnected connection record is finalized as `suspended`, including its
+disconnect timestamp, before recovery starts a new connection record.
 
 While suspended, the supervisor checks SQLite every 2 seconds. A readable row
 matching the retained credentials resumes connecting; a changed row is adopted
@@ -460,6 +462,10 @@ and connected with its new token. Recovery logs
 takes the deletion/revocation path above. The same source check runs immediately
 before every `CONNECTING` transition and every refresh request: deletion stops
 both, and rotation adopts the new pair for connect or skips the old refresh.
+Each connection attempt retains its credential generation and token. If
+suspension, revocation, rotation or stopping invalidates an in-flight connect or
+handshake, the returned socket is closed with a timeout; it cannot send a stale
+connect frame or enter `READY`. Recovery does not revive that old attempt.
 
 If the row is deleted while a refresh is in flight, the persist callback
 re-checks the credential source and revocation state. For a connection using

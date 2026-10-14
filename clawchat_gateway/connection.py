@@ -375,6 +375,9 @@ class ClawChatConnection:
         self._ws: Any = None
         self._stopping = False
         self._auth_failed = False
+        self._credential_generation = 0
+        self._connection_credential_generation: int | None = None
+        self._connection_token: str | None = None
         self._tracker = ReconnectTracker()
         self._attempt = 0
         self._reconnect_count = 0
@@ -502,6 +505,7 @@ class ClawChatConnection:
         return status in ("ok", "unreadable") and not self._activation_source_suspended
 
     def _apply_activation_credentials(self, credentials: ActivationCredentials) -> None:
+        self._credential_generation += 1
         self._cfg = replace(
             self._cfg, token=credentials.access_token,
             refresh_token=credentials.refresh_token or "",
@@ -520,6 +524,7 @@ class ClawChatConnection:
     async def _suspend_activation_source(self) -> None:
         if self._activation_source_suspended:
             return
+        self._credential_generation += 1
         self._activation_source_suspended = True
         self._refresh_pending_reconnect = False
         logger.warning(
@@ -914,6 +919,7 @@ class ClawChatConnection:
 
     @_in_connection_context
     async def _stop_in_context(self) -> None:
+        self._credential_generation += 1
         self._stopping = True
         self._cancel_stable_ready_reset()
         await self._set_state(ConnectionState.CLOSED)
@@ -1261,6 +1267,7 @@ class ClawChatConnection:
 
     async def _enter_auth_failed(self, *, reason: str = AUTO_LOGOUT_LAST_ERROR) -> None:
         """Revocation and permanent refresh paths wait for a fresh activation."""
+        self._credential_generation += 1
         self._rejected_activation_token = self._cfg.token or self._rejected_activation_token
         self._cfg = replace(self._cfg, token="", refresh_token="", user_id="", owner_user_id="")
         self._using_activation_db_credentials = False
@@ -1527,6 +1534,7 @@ class ClawChatConnection:
             return RefreshOutcome(status="skipped", error="refresh credentials changed")
         if outcome.status == "success":
             # Persist already succeeded (§0). Swap in-memory token only now.
+            self._credential_generation += 1
             self._cfg = replace(
                 self._cfg,
                 token=outcome.access_token,
@@ -1579,7 +1587,29 @@ class ClawChatConnection:
             return
         await self._attempt_refresh(close_ws_on_success=True)
 
+    def _connection_credentials_current(self) -> bool:
+        return (
+            not self._stopping
+            and not self._auth_failed
+            and not self._activation_source_suspended
+            and (
+                self._connection_credential_generation is None
+                or self._connection_credential_generation == self._credential_generation
+            )
+        )
+
+    async def _close_stale_connection(self, ws: Any) -> None:
+        if self._hello_wait is not None and not self._hello_wait.done():
+            self._hello_wait.set_result(False)
+        try:
+            await asyncio.wait_for(ws.close(), timeout=_WS_CLOSE_TIMEOUT_SECONDS)
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat stale socket close failed")
+
     async def _run_one_connection(self) -> bool:
+        # A source check can invalidate this attempt while connect/hello awaits.
+        self._connection_credential_generation = self._credential_generation
+        self._connection_token = self._cfg.token
         attempt, reconnect_count = self._tracker.next_connect()
         self._attempt = attempt
         self._reconnect_count = reconnect_count
@@ -1618,22 +1648,28 @@ class ClawChatConnection:
                 error=self._safe_error_text(exc),
             )
             raise
-        self._ws = ws
-        self._pending_connect_id = None
-        self._hello_resolved_device_id = None
-        self._hello_delivery_mode = None
-        await self._set_state(ConnectionState.HANDSHAKING)
-
-        self._hello_wait = loop.create_future()
-        self._read_task = asyncio.create_task(self._read_loop(ws), name="clawchat-read")
         try:
+            if not self._connection_credentials_current():
+                return False
+            self._ws = ws
+            self._pending_connect_id = None
+            self._hello_resolved_device_id = None
+            self._hello_delivery_mode = None
+            await self._set_state(ConnectionState.HANDSHAKING)
+            if not self._connection_credentials_current():
+                return False
+
+            self._hello_wait = loop.create_future()
+            self._read_task = asyncio.create_task(self._read_loop(ws), name="clawchat-read")
             hello_ok = await asyncio.wait_for(
                 self._hello_wait,
                 timeout=HANDSHAKE_TIMEOUT_SECONDS,
             )
-            if not hello_ok or self._auth_failed:
+            if not hello_ok or not self._connection_credentials_current():
                 return False
             await self._set_state(ConnectionState.READY)
+            if not self._connection_credentials_current():
+                return False
             self._record_connection(
                 "mark_connection_ready",
                 self._connection_row_id,
@@ -1683,7 +1719,7 @@ class ClawChatConnection:
                 except (asyncio.CancelledError, Exception):  # noqa: BLE001
                     pass
             try:
-                await ws.close()
+                await asyncio.wait_for(ws.close(), timeout=_WS_CLOSE_TIMEOUT_SECONDS)
             except Exception:  # noqa: BLE001
                 pass
             # Read AFTER close() so the code is settled. This is what tells a
@@ -1692,6 +1728,8 @@ class ClawChatConnection:
             self._last_close_reason = getattr(ws, "close_reason", None)
             self._ws = None
             self._read_task = None
+            self._connection_credential_generation = None
+            self._connection_token = None
             if not self._stopping and not self._auth_failed and not self._activation_source_suspended:
                 await self._set_state(ConnectionState.DISCONNECTED)
                 self._reject_pending_acks(RuntimeError("connection disconnected"))
@@ -1699,7 +1737,9 @@ class ClawChatConnection:
                 self._finish_current_connection(ConnectionState.AUTH_FAILED.value)
             elif self._stopping:
                 self._finish_current_connection(ConnectionState.CLOSED.value)
-            elif not self._activation_source_suspended:
+            elif self._activation_source_suspended:
+                self._finish_current_connection(ConnectionState.SUSPENDED.value)
+            else:
                 self._finish_current_connection(ConnectionState.DISCONNECTED.value)
         if not self._stopping and not self._auth_failed and not self._activation_source_suspended:
             logger.info(
@@ -2127,6 +2167,10 @@ class ClawChatConnection:
             await asyncio.wait(tasks, timeout=_WS_CLOSE_TIMEOUT_SECONDS)
 
     async def _handle_challenge(self, frame: dict[str, Any]) -> None:
+        if not self._connection_credentials_current():
+            if self._ws is not None:
+                await self._close_stale_connection(self._ws)
+            return
         nonce = extract_nonce(frame)
         if not nonce:
             logger.warning("clawchat ws challenge missing nonce")
@@ -2164,7 +2208,7 @@ class ClawChatConnection:
                 logger.debug("clawchat device id backfill failed")
         connect_req = build_connect_request(
             frame_id=req_id,
-            token=self._cfg.token,
+            token=self._connection_token if self._connection_token is not None else self._cfg.token,
             nonce=nonce,
             device_id=device_id,
             capabilities=build_connect_capabilities(),
@@ -2192,12 +2236,20 @@ class ClawChatConnection:
 
     async def _maybe_finish_handshake(self, frame: dict[str, Any]) -> None:
         if self._pending_connect_id and is_hello_ok(frame, self._pending_connect_id):
+            if not self._connection_credentials_current():
+                if self._ws is not None:
+                    await self._close_stale_connection(self._ws)
+                return
             payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
             device_id = payload.get("device_id")
             delivery_mode = payload.get("delivery_mode")
             self._hello_resolved_device_id = device_id if isinstance(device_id, str) else None
             self._hello_delivery_mode = delivery_mode if isinstance(delivery_mode, str) else None
             await self._set_state(ConnectionState.READY)
+            if not self._connection_credentials_current():
+                if self._ws is not None:
+                    await self._close_stale_connection(self._ws)
+                return
             if self._hello_wait is not None and not self._hello_wait.done():
                 self._hello_wait.set_result(True)
             return
@@ -2344,6 +2396,7 @@ class ClawChatConnection:
                         pass
                 return
             using_activation_db_credentials = self._using_activation_db_credentials
+            self._credential_generation += 1
             self._auth_failed = True
             if not using_activation_db_credentials:
                 self._stopping = True
