@@ -313,6 +313,21 @@ def test_read_descriptions_say_owner_md_is_readable_here():
     )
 
 
+@pytest.mark.parametrize("name", ["clawchat_memory_write", "clawchat_memory_edit"])
+def test_owner_write_descriptions_keep_facts_from_the_owner_in_owner_md(name):
+    text = _descriptions()[name]
+    sentence = (
+        "owner.md holds what your owner told you themselves; what someone else says about your owner goes in that person's note."
+    )
+    assert text.count(sentence) == 1
+    assert "who said" not in text.lower()
+    assert "source" not in text.lower()
+    if name == "clawchat_memory_write":
+        assert f"add only what is new. {sentence} Where a note cannot be read" in text
+    else:
+        assert f"Only works on notes this conversation may read (see clawchat_memory_read). {sentence}" in text
+
+
 def test_platform_prompt_keeps_the_owner_memory_privacy_line():
     from clawchat_gateway.plugin_prompts import platform_prompt
 
@@ -320,6 +335,14 @@ def test_platform_prompt_keeps_the_owner_memory_privacy_line():
     assert "what is in the owner's memory does not belong in front of their friends" in text
     assert "can only be written (append included)" not in text
     assert "`owner.md` only in your owner's direct chat" not in text
+    assert (
+        "When you decline, do not name what you are declining — saying a topic is private already tells them it exists."
+        in text
+    )
+    assert (
+        "`owner.md` holds what your owner told you themselves; what someone else says about your owner goes in that person's note."
+        in text
+    )
 
 
 def test_group_sediment_targets_owner_md_again(adapter):
