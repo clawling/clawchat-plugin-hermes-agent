@@ -467,13 +467,35 @@ class ClawChatConnection:
                 access_token, refresh_token, expected_credentials=refresh_config,
             )
 
+        async def should_continue() -> bool:
+            return await self._refresh_should_continue(refresh_config)
+
         return RefreshManager(
             build_client=build_client,
             persist_tokens=persist_tokens,
             persist_logout=self._persist_auth_logout,
             persist_rejection=self._persist_refresh_rejection,
             device_id_provider=self._refresh_device_id,
+            should_continue=should_continue,
         )
+
+    async def _refresh_should_continue(self, refresh_config: ClawChatConfig | None) -> bool:
+        if self._auth_failed or refresh_config is None:
+            return False
+        if self._cfg.refresh_token != refresh_config.refresh_token:
+            return False
+        if self._using_activation_db_credentials and self._store is not None:
+            try:
+                credentials = self._store.get_activation_credentials(
+                    platform="hermes", account_id=self._account_id,
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning("clawchat activation credential watch failed", exc_info=True)
+                return True
+            if credentials is None:
+                await self._revoke_activation_credentials()
+                return False
+        return True
 
     def _build_refresh_client(self) -> Any:
         from clawchat_gateway.api_client import ClawChatApiClient
@@ -654,6 +676,7 @@ class ClawChatConnection:
                 user_id=user_id,
                 owner_user_id=owner_user_id,
                 conversation_id=conversation_id,
+                expected_access_token=self._cfg.token if using_activation_db_credentials else None,
             )
         except Exception:  # noqa: BLE001
             logger.warning("clawchat rotated-token persistence raised", exc_info=True)
@@ -892,8 +915,12 @@ class ClawChatConnection:
                     and is_token_near_expiry(self._cfg.token, self._activated_at_ms)
                 ):
                     outcome = await self._attempt_refresh(close_ws_on_success=False)
-                    if outcome.status == "permanent":
-                        # Auto-logout already done; drop to wait-for-activation.
+                    if (
+                        outcome.status == "permanent"
+                        or self._auth_failed
+                        or not self._has_connect_credentials()
+                    ):
+                        # Refresh may have observed revocation; keep waiting.
                         self._refresh_pending_reconnect = False
                         continue
                     self._refresh_pending_reconnect = False
@@ -1204,8 +1231,12 @@ class ClawChatConnection:
                     and is_token_near_expiry(self._cfg.token, self._activated_at_ms)
                 ):
                     outcome = await self._attempt_refresh(close_ws_on_success=False)
-                    if outcome.status == "permanent":
-                        # Creds cleared + user notified; keep polling for re-pair.
+                    if (
+                        outcome.status == "permanent"
+                        or self._auth_failed
+                        or not self._has_connect_credentials()
+                    ):
+                        # Refresh may have observed revocation; keep polling.
                         self._refresh_pending_reconnect = False
                         continue
                     # success/transient/skipped: connect with whatever token we
@@ -1334,6 +1365,12 @@ class ClawChatConnection:
             and self._cfg.refresh_token == outcome.refresh_token
         ):
             # Another single-flight waiter already adopted this result.
+            self._refresh_pending_reconnect = True
+            if close_ws_on_success and self._ws is not None:
+                try:
+                    await self._ws.close()
+                except Exception:  # noqa: BLE001
+                    pass
             return outcome
         if (
             self._auth_failed

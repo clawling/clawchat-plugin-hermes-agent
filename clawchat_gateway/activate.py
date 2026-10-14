@@ -693,6 +693,7 @@ def persist_rotated_tokens(
     user_id: str | None = None,
     owner_user_id: str | None = None,
     conversation_id: str | None = None,
+    expected_access_token: str | None = None,
 ) -> bool:
     """Durably write a refresh-rotated token pair to BOTH .env and SQLite.
 
@@ -709,33 +710,45 @@ def persist_rotated_tokens(
     ``owner_user_id`` / ``conversation_id`` threaded down from the connection's
     in-memory config) instead of failing — otherwise the very first refresh would
     brick the agent (§C.2). The seed never resets bootstrap/activation flags.
+    With ``expected_access_token``, SQLite's conditional update must succeed
+    before writing .env; a missing or changed row leaves .env untouched.
     """
-    env_ok = False
-    try:
-        _write_env_values(
-            {
-                "CLAWCHAT_TOKEN": access_token,
-                "CLAWCHAT_REFRESH_TOKEN": refresh_token or None,
-            }
-        )
-        env_ok = True
-    except Exception:  # noqa: BLE001
-        logger.warning("clawchat rotated-token .env persistence failed", exc_info=True)
-    db_ok = False
-    try:
-        result = get_clawchat_store().update_activation_tokens(
-            platform="hermes",
-            account_id=account_id,
-            access_token=access_token,
-            refresh_token=refresh_token,
-            device_id=device_id,
-            seed_user_id=user_id,
-            seed_owner_user_id=owner_user_id,
-            seed_conversation_id=conversation_id,
-        )
-        db_ok = bool(result)
-    except Exception:  # noqa: BLE001
-        logger.warning("clawchat rotated-token database persistence failed", exc_info=True)
+    def write_env() -> bool:
+        try:
+            _write_env_values(
+                {
+                    "CLAWCHAT_TOKEN": access_token,
+                    "CLAWCHAT_REFRESH_TOKEN": refresh_token or None,
+                }
+            )
+            return True
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat rotated-token .env persistence failed", exc_info=True)
+            return False
+
+    def write_db() -> bool:
+        try:
+            return bool(get_clawchat_store().update_activation_tokens(
+                platform="hermes",
+                account_id=account_id,
+                access_token=access_token,
+                refresh_token=refresh_token,
+                device_id=device_id,
+                seed_user_id=user_id,
+                seed_owner_user_id=owner_user_id,
+                seed_conversation_id=conversation_id,
+                expected_access_token=expected_access_token,
+            ))
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat rotated-token database persistence failed", exc_info=True)
+            return False
+
+    if expected_access_token is not None:
+        if not write_db():
+            return False
+        return write_env()
+    env_ok = write_env()
+    db_ok = write_db()
     return env_ok and db_ok
 
 

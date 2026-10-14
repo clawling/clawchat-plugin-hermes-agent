@@ -444,11 +444,29 @@ exists but its token changed, the watcher keeps logging
 token (§D); that is not the revocation path.
 
 If the row is deleted while a refresh is in flight, the persist callback
-re-checks the credential source and revocation state: a connection using the
-SQLite row only updates an existing row and never re-seeds a deleted one, and a
-late successful result cannot restore the discarded in-memory credentials. For
-env/extra bootstrap without a row yet, a missing row is normal and the watcher
-keeps the socket; the first refresh still seeds the row per §C.2.
+re-checks the credential source and revocation state. For a connection using
+SQLite credentials, persistence conditionally updates the row only if its
+access token still matches the request's original token. A cleared, rotated or
+deleted row rejects the write without seeding or touching `.env`; a successful
+SQLite update happens **before** the `.env` mirror. A late successful result
+cannot restore discarded in-memory credentials or overwrite a newly adopted
+activation. For env/extra bootstrap without a row yet, a missing row is normal
+and the watcher keeps the socket; the first refresh still writes `.env` first
+and seeds the row per §C.2.
+
+An in-flight transient refresh also checks the credential source after each
+transient failure and before and after its backoff sleep. Even with unbounded
+retries, a deletion observed at those checks closes the WS and stops the next
+HTTP attempt, then the supervisor waits for activation. The last HTTP error
+remains transient, so this does not send a permanent-failure auto-logout
+message. A store read exception preserves the existing retry behavior rather
+than treating an unavailable database as deletion.
+
+Two boundaries remain: persistence runs synchronously on the event loop,
+intentionally keeping the credential guard and write in the same task without
+an intervening `await`; slow storage can delay other tasks. Also, a late
+permanent response from an older request can still clear current credentials
+inside `RefreshManager` before the connection's stale-result guard runs.
 
 Deleting only the SQLite row does not remove env/extra bootstrap tokens (for
 example `CLAWCHAT_TOKEN` / `CLAWCHAT_REFRESH_TOKEN` in the Hermes `.env`). If

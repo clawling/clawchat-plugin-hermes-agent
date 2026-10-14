@@ -1340,6 +1340,7 @@ async def auth_refresh_with_retry(
     max_transient_retries: int | None = None,
     sleep: Callable[[float], Awaitable[None]] | None = None,
     monotonic: Callable[[], float] | None = None,
+    should_continue: Callable[[], bool | Awaitable[bool]] | None = None,
 ) -> RefreshResult:
     """Call ``auth_refresh`` and retry ONLY transient failures with exp backoff.
 
@@ -1354,9 +1355,22 @@ async def auth_refresh_with_retry(
     attempt began, so replays of the same refresh token land inside the backend
     grace window without exceeding its replay cap (spec §B "Retry within the
     grace window").
+
+    ``should_continue`` may stop retries after a transient failure, including
+    while sleeping. The last transient error propagates without becoming a
+    permanent failure. Async callbacks are awaited in this same task.
     """
     sleeper = sleep if sleep is not None else asyncio.sleep
     clock = monotonic if monotonic is not None else time.monotonic
+
+    async def can_continue() -> bool:
+        if should_continue is None:
+            return True
+        result = should_continue()
+        if isinstance(result, Awaitable):
+            return await result
+        return result
+
     attempt = 0
     while True:
         attempt_started = clock()
@@ -1367,6 +1381,8 @@ async def auth_refresh_with_retry(
             )
         except ClawChatApiError as exc:
             if is_permanent_refresh_error(exc):
+                raise
+            if not await can_continue():
                 raise
             attempt += 1
             if max_transient_retries is not None and attempt > max_transient_retries:
@@ -1382,8 +1398,12 @@ async def auth_refresh_with_retry(
                 delay,
                 exc,
             )
+            if not await can_continue():
+                raise
             if delay:
                 await sleeper(delay)
+            if not await can_continue():
+                raise
 
 
 async def agents_connect_with_retry(

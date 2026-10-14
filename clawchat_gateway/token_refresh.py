@@ -135,8 +135,10 @@ class RefreshManager:
         monotonic: Callable[[], float] | None = None,
         max_transient_retries: int | None = None,
         sleep: Callable[[float], Awaitable[None]] | None = None,
+        should_continue: Callable[[], bool | Awaitable[bool]] | None = None,
     ) -> None:
         self._sleep = sleep
+        self._should_continue = should_continue
         self._build_client = build_client
         self._persist_tokens = persist_tokens
         self._persist_logout = persist_logout
@@ -236,6 +238,7 @@ class RefreshManager:
                 device_id=device_id,
                 max_transient_retries=self._max_transient_retries,
                 sleep=self._sleep,
+                should_continue=self._should_continue,
             )
         except ClawChatApiError as exc:
             if is_permanent_refresh_error(exc):
@@ -257,7 +260,7 @@ class RefreshManager:
                 except Exception:  # noqa: BLE001
                     logger.warning("clawchat logout persistence failed", exc_info=True)
                 return RefreshOutcome(status="permanent", error=str(exc))
-            # Transient retries were exhausted (only possible under a test bound).
+            # Retries were exhausted or stopped by the credential-source guard.
             logger.warning("clawchat token refresh transient failure: %s", exc)
             return RefreshOutcome(status="transient", error=str(exc))
 
