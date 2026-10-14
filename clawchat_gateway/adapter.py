@@ -5876,7 +5876,7 @@ class ClawChatAdapter(BasePlatformAdapter):
     def _format_note_memory_section(self, inbound: InboundMessage) -> str | None:
         """The agent's own notes for the people / group in this turn, capped.
 
-        Every turn starts with ``owner.md``. Direct chat with anyone else:
+        Every turn with a chat id starts with ``owner.md``. Direct chat with anyone else:
         then ``users/<sender>.md``. Group: then ``groups/<chat>.md`` plus
         ``users/<id>.md`` of each speaker in the batch (the owner's note is
         ``owner.md``, so the owner is not listed again).
@@ -5887,7 +5887,9 @@ class ClawChatAdapter(BasePlatformAdapter):
         # (title, body, per-note cap, read hint)
         entries: list[tuple[str, str, int, str]] = []
         owner_id = self._owner_user_id()
-        owner_body = self._read_memory_body("owner", "owner")
+        # A turn with no conversation to place it in gets no owner.md, as the
+        # memory tools refuse it there (memory_scope fails closed).
+        owner_body = self._read_memory_body("owner", "owner") if inbound.chat_id else ""
         if owner_body:
             entries.append(
                 (
