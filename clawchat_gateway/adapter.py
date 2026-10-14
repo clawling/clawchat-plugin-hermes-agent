@@ -1167,11 +1167,29 @@ class ClawChatAdapter(BasePlatformAdapter):
         # host's own active-session guard this tells the coalescer to hold the
         # next batch until the running group turn is over.
         self._group_dispatching: set[str] = set()
+        self._grant_dispatching: dict[str, int] = {}
+        self._grant_dispatching_grants: dict[str, bool] = {}
+        self._grant_group_grants: dict[str, bool] = {}
+        self._grant_sessions: set[str] = set()
+        self._grant_timeout_tasks: set[asyncio.Task[Any]] = set()
+        self._grant_dispatch_started: dict[str, str] = {}
+        self._grant_reply_anchors: OrderedDict[str, str] = OrderedDict()
+        self._grant_admission_queue = GroupMessageCoalescer(
+            idle_seconds=0.0,
+            max_wait_seconds=30.0,
+            dispatch=self._dispatch_grant_admission_batch,
+            is_busy=self._grant_session_busy,
+            key_for_message=self._grant_session_key,
+            busy_timeout_seconds=TURN_TRIGGER_TTL_SECONDS,
+            on_busy_timeout=self._grant_admission_timed_out,
+        )
         self._group_message_coalescer = GroupMessageCoalescer(
             idle_seconds=10.0,
             max_wait_seconds=30.0,
             dispatch=self._dispatch_group_batch,
             is_busy=self._group_turn_in_flight,
+            busy_timeout_seconds=TURN_TRIGGER_TTL_SECONDS,
+            on_busy_timeout=self._grant_group_timed_out,
         )
         self._group_settings_cache = GroupSettingsCache()
         # Monotonic fetch sequence assigned per dispatched settings pull. Passed
@@ -1271,6 +1289,13 @@ class ClawChatAdapter(BasePlatformAdapter):
         await self._clear_lit_typing()
         await self._connection.stop()
         await self._group_message_coalescer.cancel()
+        await self._grant_admission_queue.cancel()
+        from clawchat_gateway.turn_grants import release_session
+
+        for key in list(self._grant_sessions):
+            release_session(self._account_id(), key)
+        self._grant_dispatch_started.clear()
+        self._grant_sessions.clear()
         clear_clawchat_mention_sender(self)
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
@@ -2656,7 +2681,10 @@ class ClawChatAdapter(BasePlatformAdapter):
         from clawchat_gateway.memory_scope import OWNER_NOTE_WRITE_HINT
 
         lines = [OWNER_NOTE_WRITE_HINT]
-        for hint in (blocked_tools_hint(), limited_tools_hint()):
+        from clawchat_gateway.tool_grants import NON_OWNER_GRANTS_HINT
+
+        grants_hint = NON_OWNER_GRANTS_HINT if self._clawchat_config.tool_grants == "on" else None
+        for hint in (grants_hint or blocked_tools_hint(), limited_tools_hint()):
             if hint:
                 lines.append(hint)
         return "\n".join(lines)
@@ -3407,6 +3435,13 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
             if protocol_message_id:
                 self._last_inbound_message_id_by_chat[inbound.chat_id] = protocol_message_id
+        if await self._consume_grant_confirmation(inbound):
+            return
+        if self._hold_granted_inbound(inbound):
+            return
+        await self._route_inbound(inbound)
+
+    async def _route_inbound(self, inbound: InboundMessage) -> None:
         if inbound.chat_type == "group":
             # Gate ONLY group dispatch on the first per-(re)connect settings refresh
             # so a muted / mention-only group is not answered from a stale/empty
@@ -4004,16 +4039,21 @@ class ClawChatAdapter(BasePlatformAdapter):
         """Hold the next batch of a shared-session group while a turn runs."""
         if effective_group_sessions_per_user(self._clawchat_config, chat_id):
             return False
-        return chat_id in self._group_dispatching or self._chat_session_active(chat_id)
+        busy = chat_id in self._group_dispatching or self._chat_session_active(chat_id)
+        if not busy:
+            self._expire_group_grants(chat_id)
+        return busy
 
     async def _dispatch_group_batch(self, inbound: InboundMessage) -> None:
         # Marked busy from the first line (no await before it) until the host
         # has taken the event and installed its own active-session guard.
+        self._grant_group_grants[inbound.chat_id] = bool(self._turn_grant_values(inbound)[1])
         self._group_dispatching.add(inbound.chat_id)
         try:
             await self._dispatch_group_batch_now(inbound)
         finally:
             self._group_dispatching.discard(inbound.chat_id)
+            self._grant_group_grants.pop(inbound.chat_id, None)
 
     async def _dispatch_group_batch_now(self, inbound: InboundMessage) -> None:
         """Coalescer dispatch: re-check mute / reply mode at FLUSH time.
@@ -4296,7 +4336,199 @@ class ClawChatAdapter(BasePlatformAdapter):
             lines.append(GROUP_UNSEEN_LEFT_OUT.format(count=count))
         return "\n".join(lines)
 
+    async def _dispatch_grant_admission_batch(self, inbound: InboundMessage) -> None:
+        if inbound.chat_type == "group":
+            await self._dispatch_group_batch(inbound)
+        else:
+            await self._route_inbound(inbound)
+
+    def _turn_grant_values(self, inbound: InboundMessage) -> tuple[tuple[str, ...], dict[str, str], frozenset[str]]:
+        from clawchat_gateway.tool_grants import resolve_turn_grants
+
+        speakers = ()
+        try:
+            raw = inbound.raw_message
+            def batch_speakers(message: Any) -> list[str]:
+                if not isinstance(message, dict) or message.get("synthetic"):
+                    return [""]
+                if "messages" in message:
+                    items = message["messages"]
+                    if not isinstance(items, list) or not items:
+                        return [""]
+                    return [speaker for item in items for speaker in batch_speakers(item)]
+                sender = message.get("sender")
+                return [sender.get("id", "") if isinstance(sender, dict) else ""]
+
+            if not raw.get("synthetic"):
+                speakers = tuple(dict.fromkeys(batch_speakers(raw))) if "messages" in raw else (inbound.sender_id,)
+            if (self._clawchat_config.tool_grants != "on" or not speakers
+                    or not all(isinstance(speaker, str) and speaker.strip() for speaker in speakers)):
+                return speakers, {}, frozenset()
+            now = int(time.time() * 1000)
+            owner = self._owner_user_id()
+            rows = self._store.load_grants_for_users(
+                account_id=self._account_id(), user_ids=list(speakers), now=now,
+            )
+            grants = resolve_turn_grants(list(speakers), owner, rows, now)
+            any_tools = frozenset(tool for speaker in speakers for tool in
+                                  resolve_turn_grants([speaker], owner, rows, now))
+            return speakers, grants, any_tools
+        except Exception:  # noqa: BLE001 - an unreadable grant list adds no authority
+            logger.warning("clawchat turn grants: lookup failed", exc_info=True)
+            return speakers, {}, frozenset()
+
+    def _grant_session_key(self, inbound: InboundMessage) -> str:
+        # Hermes DMs are keyed by chat, including plugin-started messages with
+        # a synthetic sender. Groups follow the configured per-speaker choice.
+        user_id = "__direct__" if inbound.chat_type == "direct" else self._session_user_id_for_inbound(inbound)
+        return inbound.chat_id + ":" + user_id
+
+    def _grant_admission_timed_out(self, key: str) -> None:
+        self._expire_grant_session(key)
+        task = asyncio.current_task()
+        if task is not None:
+            self._grant_timeout_tasks.add(task)
+            task.add_done_callback(self._grant_timeout_tasks.discard)
+
+    def _grant_group_timed_out(self, chat_id: str) -> bool | None:
+        from clawchat_gateway.turn_grants import active_snapshot
+
+        active_grants = any(
+            snapshot is not None and snapshot.grants
+            for key in self._grant_sessions if key.split(":", 1)[0] == chat_id
+            for snapshot in [active_snapshot(self._account_id(), key)]
+        )
+        pending_grants = any(self._turn_grant_values(message)[1] for message in
+                             self._group_message_coalescer._pending.get(chat_id, []))
+        # The existing ungranted shared-group queue keeps its original wait.
+        # Only the additional grant admission has a revocation deadline.
+        if self._clawchat_config.tool_grants != "on" or not (
+            active_grants or pending_grants or self._grant_group_grants.get(chat_id)
+        ):
+            return False
+        self._expire_group_grants(chat_id)
+        task = asyncio.current_task()
+        if task is not None:
+            self._grant_timeout_tasks.add(task)
+            task.add_done_callback(self._grant_timeout_tasks.discard)
+
+    def _expire_grant_session(self, key: str) -> None:
+        from clawchat_gateway.turn_grants import release_session
+
+        release_session(self._account_id(), key)
+        self._grant_dispatch_started.pop(key, None)
+        self._grant_sessions.discard(key)
+
+    def _expire_group_grants(self, chat_id: str) -> None:
+        from clawchat_gateway.turn_grants import release_session
+
+        for key in list(self._grant_sessions):
+            if key.split(":", 1)[0] == chat_id:
+                release_session(self._account_id(), key)
+                self._grant_dispatch_started.pop(key, None)
+                self._grant_sessions.discard(key)
+
+    def _grant_session_busy(self, key: str, *, ignore_dispatch: bool = False) -> bool:
+        chat_id, user_id = key.split(":", 1)
+        if self._grant_dispatching.get(key, 0) > (1 if ignore_dispatch else 0):
+            return True
+        active = getattr(self, "_active_sessions", {})
+        if isinstance(active, dict):
+            if any(chat_id in str(host_key).split(":") and (
+                user_id in str(host_key).split(":") or user_id in ("__direct__", GROUP_SHARED_SESSION_USER_ID)
+            ) for host_key in list(active)):
+                return True
+        # If a host deferred processing without a guard, revoke its snapshot
+        # before admitting another event. A pending merge then has no authority.
+        self._expire_grant_session(key)
+        return False
+
+    def _hold_granted_inbound(self, inbound: InboundMessage, *, from_dispatch: bool = False,
+                              ignore_dispatch: bool = False, new_grants: dict[str, str] | None = None) -> bool:
+        if (self._is_owner_turn(inbound) or self._clawchat_config.tool_grants != "on"
+                or asyncio.current_task() in self._grant_timeout_tasks):
+            return False
+        from clawchat_gateway.turn_grants import active_snapshot
+
+        key = self._grant_session_key(inbound)
+        snapshot = active_snapshot(self._account_id(), key)
+        busy = self._grant_session_busy(key, ignore_dispatch=ignore_dispatch)
+        if not from_dispatch and inbound.chat_id in self._group_dispatching:
+            busy = True
+        if not busy:
+            return False
+        if not (snapshot and snapshot.grants) and not self._grant_dispatching_grants.get(key) and not (
+            self._grant_group_grants.get(inbound.chat_id)
+        ) and not (self._turn_grant_values(inbound)[1] if new_grants is None else new_grants):
+            return False
+        if inbound.chat_type == "group" and not effective_group_sessions_per_user(
+            self._clawchat_config, inbound.chat_id,
+        ):
+            self._group_message_coalescer.enqueue(inbound, idle_seconds_override=0.0)
+        else:
+            self._grant_admission_queue.enqueue(inbound)
+        return True
+
+    async def _consume_grant_confirmation(self, inbound: InboundMessage) -> bool:
+        from clawchat_gateway.tool_grants import (
+            GRANT_CONFIRM_COMMAND, GRANT_INVALID_CODE_MESSAGE, GRANT_WRITE_FAILED_MESSAGE,
+            build_grant_receipt,
+        )
+
+        match = GRANT_CONFIRM_COMMAND.fullmatch(inbound.text.strip().strip("`").strip())
+        if match is None:
+            return False
+        if (inbound.chat_type != "direct" or not inbound.sender_id
+                or inbound.sender_id != self._owner_user_id()
+                or inbound.chat_id != self._owner_direct_chat_id()
+                or inbound.raw_message.get("synthetic")
+                or self._clawchat_config.tool_grants != "on"):
+            return True
+        from clawchat_gateway.owner_language import resolve_owner_language
+
+        try:
+            lang = resolve_owner_language(self._owner_locale())
+        except Exception:  # noqa: BLE001 - cold owner metadata uses English
+            lang = "en"
+        lang = lang if lang in ("zh", "zh_Hant") else "en"
+        try:
+            rows = self._store.confirm_pending_grant(account_id=self._account_id(), code=match[1])
+            text = build_grant_receipt(
+                lang=lang,
+                names=list(dict.fromkeys(row["grantee_name"] for row in rows)),
+                tools=list(dict.fromkeys(row["tool"] for row in rows)),
+            ) if rows else GRANT_INVALID_CODE_MESSAGE[lang]
+        except Exception:  # noqa: BLE001 - never acknowledge a failed write as active
+            text = GRANT_WRITE_FAILED_MESSAGE[lang]
+        await self._send_owner_text(inbound.chat_id, text)
+        return True
+
     async def _handle_inbound(self, inbound: InboundMessage) -> None:
+        if await self._consume_grant_confirmation(inbound):
+            return
+        if self._refuses_turn(inbound):
+            return
+        if self._is_owner_turn(inbound):
+            await self._handle_inbound_now(inbound)
+            return
+        if self._hold_granted_inbound(inbound, from_dispatch=True):
+            return
+        key = self._grant_session_key(inbound)
+        self._grant_dispatching[key] = self._grant_dispatching.get(key, 0) + 1
+        self._grant_dispatching_grants[key] = (
+            self._grant_dispatching_grants.get(key, False) or bool(self._turn_grant_values(inbound)[1])
+        )
+        try:
+            await self._handle_inbound_now(inbound)
+        finally:
+            remaining = self._grant_dispatching[key] - 1
+            if remaining:
+                self._grant_dispatching[key] = remaining
+            else:
+                self._grant_dispatching.pop(key, None)
+                self._grant_dispatching_grants.pop(key, None)
+
+    async def _handle_inbound_now(self, inbound: InboundMessage) -> None:
         if self._refuses_turn(inbound):
             return
         if inbound.chat_id and not self._inbound_trigger_id(inbound.raw_message):
@@ -4342,14 +4574,46 @@ class ClawChatAdapter(BasePlatformAdapter):
             inbound.reply_preview
         )
         chat_name, user_name = self._session_names(inbound)
+        downloaded_media = await self._download_inbound_media(inbound)
+        owner_turn = self._is_owner_turn(inbound)
+        speakers, grants, any_tools = ((), {}, frozenset()) if owner_turn else self._turn_grant_values(inbound)
+        # Recheck after all preparation awaits, using exactly the grants that
+        # will enter the snapshot. A grant added during download must not get
+        # into the host's already running turn through steer or text merging.
+        if self._hold_granted_inbound(
+            inbound, from_dispatch=True, ignore_dispatch=True, new_grants=grants,
+        ):
+            return
+        source_kwargs: dict[str, Any] = {}
+        snapshot = None
+        if not owner_turn:
+            from clawchat_gateway.turn_grants import get_snapshot, register_turn
+
+            key = self._grant_session_key(inbound)
+            snapshot = register_turn(
+                account_id=self._account_id(), chat_id=inbound.chat_id,
+                speakers=speakers, grants=grants, any_granted_tools=any_tools, session_key=key,
+            )
+            self._grant_dispatch_started[key] = snapshot.nonce
+            self._grant_sessions.add(key)
+            source_kwargs["message_id"] = snapshot.nonce
+            self._grant_reply_anchors[snapshot.nonce] = self._inbound_trigger_id(inbound.raw_message)
+            # Retain every live turn's anchor. Completed turns keep a bounded
+            # tail too, since the host may deliver an error after completion.
+            if len(self._grant_reply_anchors) > 4096:
+                for old_nonce in list(self._grant_reply_anchors):
+                    if len(self._grant_reply_anchors) <= 4096:
+                        break
+                    if get_snapshot(old_nonce) is None:
+                        self._grant_reply_anchors.pop(old_nonce, None)
         source = self.build_source(
+            **source_kwargs,
             chat_id=inbound.chat_id,
             user_id=self._session_user_id_for_inbound(inbound),
             chat_name=chat_name,
             user_name=user_name,
             chat_type=self._map_source_chat_type(inbound.chat_type),
         )
-        downloaded_media = await self._download_inbound_media(inbound)
         media_urls = [str(item.local_path) for item in downloaded_media]
         media_types = [item.mime for item in downloaded_media]
         # Prepend prior group context when the agent is @-mentioned.
@@ -4449,7 +4713,16 @@ class ClawChatAdapter(BasePlatformAdapter):
             len(media_urls),
             reply_to_message_id,
         )
-        await self.handle_message(event)
+        try:
+            await self.handle_message(event)
+        except BaseException:
+            if snapshot is not None:
+                from clawchat_gateway.turn_grants import release_turn
+
+                release_turn(snapshot.nonce)
+                if self._grant_dispatch_started.get(key) == snapshot.nonce:
+                    self._grant_dispatch_started.pop(key, None)
+            raise
         if reset_command:
             self._reset_clean_chats.add(inbound.chat_id)
             session_sediment.forget_usage(inbound.chat_id)
@@ -4608,6 +4881,10 @@ class ClawChatAdapter(BasePlatformAdapter):
         return max(1, point - config.sediment_margin_tokens)
 
     async def on_processing_start(self, event: Any) -> None:
+        nonce = str(getattr(getattr(event, "source", None), "message_id", "") or "")
+        for key, pending_nonce in list(self._grant_dispatch_started.items()):
+            if pending_nonce == nonce:
+                self._grant_dispatch_started.pop(key, None)
         parent = getattr(super(), "on_processing_start", None)
         if callable(parent):
             try:
@@ -4641,10 +4918,12 @@ class ClawChatAdapter(BasePlatformAdapter):
         """The protocol message id an inbound's raw_message carries, or ""."""
         if not isinstance(inner, dict):
             return ""
-        if inner.get("clawchat_group_batch"):
+        for _ in range(32):
+            if not inner.get("clawchat_group_batch"):
+                return self._extract_protocol_message_id(inner) or ""
             messages = [m for m in inner.get("messages") or [] if isinstance(m, dict)]
             inner = messages[-1] if messages else {}
-        return self._extract_protocol_message_id(inner) or ""
+        return ""
 
     def _open_turns(self, chat_id: str) -> list[tuple[Any, str, float]]:
         turns = self._turn_triggers_by_chat.get(chat_id) or []
@@ -4712,6 +4991,13 @@ class ClawChatAdapter(BasePlatformAdapter):
         return trigger
 
     async def on_processing_complete(self, event: Any, outcome: Any) -> None:
+        from clawchat_gateway.turn_grants import release_turn
+
+        nonce = str(getattr(getattr(event, "source", None), "message_id", "") or "")
+        release_turn(nonce)
+        for key, pending_nonce in list(self._grant_dispatch_started.items()):
+            if pending_nonce == nonce:
+                self._grant_dispatch_started.pop(key, None)
         receipt = current_receipt()
         if (
             receipt is not None
@@ -6166,6 +6452,10 @@ class ClawChatAdapter(BasePlatformAdapter):
         metadata: Any = None,
         **kwargs: Any,
     ) -> SendResult:
+        from clawchat_gateway.turn_grants import NONCE_PREFIX
+
+        if isinstance(reply_to, str) and reply_to.startswith(NONCE_PREFIX):
+            reply_to = self._grant_reply_anchors.get(reply_to) or None
         # Read the caller first: the host frames are only on the stack until
         # the first await.
         message_mode = kwargs.pop("_clawchat_message_mode", None) or (

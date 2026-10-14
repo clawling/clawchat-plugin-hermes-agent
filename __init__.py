@@ -846,8 +846,7 @@ def _register_session_usage_hook(ctx) -> None:
 
 
 def _register_host_tools_guard(ctx) -> None:
-    """Host terminal/file/code tools only in the owner's own direct chat
-    (clawchat_gateway.host_tools_guard)."""
+    """Register host tool checks and the optional pre_llm_call turn binding."""
     try:
         from clawchat_gateway.host_tools_guard import register_host_tools_guard
 
