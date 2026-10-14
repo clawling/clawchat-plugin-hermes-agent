@@ -550,6 +550,7 @@ class ClawChatConnection:
     async def _recheck_activation_source(
         self, *, adopt_changes: bool = True, include_bootstrap: bool = False,
         expected_access_token: str | None = None,
+        expected_refresh_token: str | None = None,
     ) -> Literal["ok", "changed", "revoked", "unreadable"]:
         if not self._using_activation_db_credentials and not include_bootstrap:
             return "ok"
@@ -575,8 +576,11 @@ class ClawChatConnection:
                 return "revoked"
             return "ok"
         if expected_access_token is not None:
-            # Permanent callbacks use the same access-token condition as logout's CAS.
-            changed = credentials.access_token != expected_access_token
+            # Permanent callbacks compare the same request pair as logout's CAS.
+            changed = (
+                credentials.access_token != expected_access_token
+                or (credentials.refresh_token or "") != expected_refresh_token
+            )
         else:
             changed = (
                 credentials.access_token != self._cfg.token
@@ -857,6 +861,7 @@ class ClawChatConnection:
             return False
         status = await self._recheck_activation_source(
             adopt_changes=False, include_bootstrap=True, expected_access_token=expected.token,
+            expected_refresh_token=expected.refresh_token,
         )
         if (
             self._auth_failed
@@ -874,7 +879,7 @@ class ClawChatConnection:
         self, reason: str, *, expected_credentials: ClawChatConfig | None = None,
     ) -> bool:
         from clawchat_gateway.activate import (
-            CredentialClearResult, _write_env_values, clear_persisted_credentials,
+            CredentialClearResult, _clear_persisted_env_credentials, clear_persisted_credentials,
         )
 
         if not await self._permanent_refresh_is_current(expected_credentials):
@@ -885,18 +890,24 @@ class ClawChatConnection:
                 sqlite_cleared = self._store.clear_activation_credentials(
                     platform="hermes", account_id=self._account_id,
                     expected_access_token=expected_credentials.token,
+                    expected_refresh_token=expected_credentials.refresh_token,
                 )
                 if sqlite_cleared is False:
                     self._log_discarded_refresh("activation_changed_before_logout")
                     return False
-                env_cleared = False
-                try:
-                    env_cleared = bool(_write_env_values({
-                        "CLAWCHAT_TOKEN": "", "CLAWCHAT_REFRESH_TOKEN": "",
-                    }))
-                except Exception:  # noqa: BLE001
-                    logger.warning("clawchat logout .env clear failed")
+                env_cleared = _clear_persisted_env_credentials(
+                    expected_access_token=expected_credentials.token,
+                    expected_refresh_token=expected_credentials.refresh_token,
+                )
                 result = CredentialClearResult(env_cleared, bool(sqlite_cleared))
+            elif expected_credentials is not None:
+                result = clear_persisted_credentials(
+                    account_id=self._account_id, expected_access_token=expected_credentials.token,
+                    expected_refresh_token=expected_credentials.refresh_token,
+                )
+                if not result.sqlite_cleared and result.env_matched is False:
+                    self._log_discarded_refresh("activation_changed_before_logout")
+                    return False
             else:
                 result = clear_persisted_credentials(account_id=self._account_id)
             logger.log(

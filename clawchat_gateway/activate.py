@@ -756,9 +756,51 @@ def persist_rotated_tokens(
 class CredentialClearResult:
     env_cleared: bool
     sqlite_cleared: bool
+    # None means an unreadable .env or an unconditional clear.
+    env_matched: bool | None = None
 
 
-def clear_persisted_credentials(*, account_id: str = "default") -> CredentialClearResult:
+def _persisted_env_credentials_match(
+    expected_access_token: str | None, expected_refresh_token: str | None,
+) -> bool | None:
+    from clawchat_gateway.config import _read_env_file_entry
+
+    try:
+        access_present, access_token = _read_env_file_entry("CLAWCHAT_TOKEN")
+        refresh_present, refresh_token = _read_env_file_entry("CLAWCHAT_REFRESH_TOKEN")
+    except Exception:  # noqa: BLE001
+        logger.warning("clawchat logout .env credential read failed")
+        return None
+    # An absent key does not contradict the request pair: the credentials came
+    # from os.environ/extra, and the tombstone must still be written (§C.1).
+    return (
+        (not access_present or access_token == expected_access_token)
+        and (not refresh_present or refresh_token == expected_refresh_token)
+    )
+
+
+def _clear_persisted_env_credentials(
+    *, expected_access_token: str | None = None, expected_refresh_token: str | None = None,
+) -> bool:
+    if expected_access_token is not None or expected_refresh_token is not None:
+        if _persisted_env_credentials_match(expected_access_token, expected_refresh_token) is not True:
+            return False
+    try:
+        cleared = bool(_write_env_values({
+            "CLAWCHAT_TOKEN": "", "CLAWCHAT_REFRESH_TOKEN": "",
+        }))
+        if not cleared:
+            logger.warning("clawchat logout .env clear returned false")
+        return cleared
+    except Exception:  # noqa: BLE001
+        logger.warning("clawchat logout .env clear failed")
+        return False
+
+
+def clear_persisted_credentials(
+    *, account_id: str = "default", expected_access_token: str | None = None,
+    expected_refresh_token: str | None = None,
+) -> CredentialClearResult:
     """Clear ClawChat credentials in BOTH .env and SQLite, keeping identity.
 
     Token-refresh spec §C.1: auto-logout on permanent refresh failure clears
@@ -772,30 +814,32 @@ def clear_persisted_credentials(*, account_id: str = "default") -> CredentialCle
     ``os.environ`` value) as the surviving copy of the token we just revoked —
     the next adapter would read it straight back and keep retrying auth. An
     empty value is a tombstone ``config._env_tombstoned`` resolves to "".
+
+    When a request pair is provided, each store clears only that pair. An unreadable or
+    different .env pair is preserved (absent keys still get the tombstone); SQLite uses a conditional UPDATE.
     """
+    env_matched = None
+    conditional = expected_access_token is not None or expected_refresh_token is not None
+    if conditional:
+        env_matched = _persisted_env_credentials_match(expected_access_token, expected_refresh_token)
     env_cleared = False
+    if not conditional or env_matched is True:
+        env_cleared = _clear_persisted_env_credentials()
     sqlite_cleared = False
-    try:
-        env_cleared = bool(_write_env_values(
-            {
-                "CLAWCHAT_TOKEN": "",
-                "CLAWCHAT_REFRESH_TOKEN": "",
-            }
-        ))
-        if not env_cleared:
-            logger.warning("clawchat logout .env clear returned false")
-    except Exception:  # noqa: BLE001
-        logger.warning("clawchat logout .env clear failed")
     try:
         sqlite_cleared = bool(get_clawchat_store().clear_activation_credentials(
             platform="hermes",
             account_id=account_id,
+            expected_access_token=expected_access_token,
+            expected_refresh_token=expected_refresh_token,
         ))
         if not sqlite_cleared:
             logger.warning("clawchat logout database clear returned false")
     except Exception:  # noqa: BLE001
         logger.warning("clawchat logout database clear failed")
-    return CredentialClearResult(env_cleared=env_cleared, sqlite_cleared=sqlite_cleared)
+    return CredentialClearResult(
+        env_cleared=env_cleared, sqlite_cleared=sqlite_cleared, env_matched=env_matched,
+    )
 
 
 async def activate(

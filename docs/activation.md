@@ -490,14 +490,21 @@ retained credentials.
 Permanent-failure rejection and logout callbacks are bound to the pair that
 started the request, just like successful token persistence. If that pair no
 longer matches memory, the connection is already auth-failed/suspended, or the
-SQLite row's access token has changed, the callbacks discard the late result and log INFO
-`refresh_result_discarded action=ignore`. They do not clear the newer row or
-memory, write a revoked marker or send auto-logout. Logout's SQLite clear also
-requires the expected access token, preserving a row whose access token changes
-before that write. A credential read failure below the suspension limit still permits
-permanent-failure handling when the request's pair matches memory; the SQLite
-clear remains conditional on its expected access token. Read failures still
-count toward the same suspension limit. The refresh manager latches the
+SQLite row's access/refresh pair has changed, the callbacks discard the late
+result and log INFO `refresh_result_discarded action=ignore`. They do not clear
+the newer row or memory, write a revoked marker or send auto-logout. Logout's SQLite clear also
+requires both the expected access and refresh token, preserving a row whose
+pair changes before that write. A credential read failure below the suspension
+limit still permits permanent-failure handling when the request's pair matches
+memory; the SQLite
+clear remains conditional on the complete request pair, including env/extra
+bootstrap requests. The `.env` clear also requires the stored values to match
+that pair: an unreadable `.env` or a different stored value is preserved, while
+absent keys (credentials supplied via the process environment or extra config)
+still receive the empty tombstone so a restart does not re-read the dead token. Read failures
+still count toward the same suspension limit. When a bootstrap request clears
+no SQLite row and `.env` contains a different pair, its permanent result is
+discarded, allowing a refresh-only replacement to load. The refresh manager latches the
 `(access_token, refresh_token)` pair only after both permanent-failure callbacks
 accept the result. A discarded result leaves no new rejection latch or logout
 flag, and a replacement refresh token is not rejected merely because its
@@ -509,6 +516,8 @@ failure's continuation.
 Persistence still runs synchronously on the event loop,
 intentionally keeping the credential guard and write in the same task without
 an intervening `await`; slow storage can delay other tasks.
+The `.env` comparison and helper write are separate steps; another process can
+still change the file between them.
 The SQLite-then-`.env` order narrows but does not close the cross-process
 window: if another process clears both stores after the SQLite commit and
 before the `.env` mirror is written, the mirror can still receive the rotated

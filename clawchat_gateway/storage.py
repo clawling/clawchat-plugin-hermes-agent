@@ -871,13 +871,14 @@ class ClawChatStore:
         account_id: str,
         updated_at: int | None = None,
         expected_access_token: str | None = None,
+        expected_refresh_token: str | None = None,
     ) -> bool | None:
         """Blank the token columns but KEEP identity (re-pair mode).
 
         Token-refresh spec §C.1: on permanent logout, clear access_token /
         refresh_token but keep user_id / owner_user_id / conversation_id /
         device_id so a fresh connect code re-pairs the same identity. An expected
-        access token restricts the clear to the row that owned the request.
+        access/refresh pair restricts the clear to the row that owned the request.
         """
         updated = updated_at if updated_at is not None else _now_ms()
 
@@ -891,6 +892,9 @@ class ClawChatStore:
             if expected_access_token is not None:
                 sql += " AND access_token = ?"
                 params += (expected_access_token,)
+            if expected_refresh_token is not None:
+                sql += " AND COALESCE(refresh_token, '') = ?"
+                params += (expected_refresh_token,)
             cursor = conn.execute(sql, params)
             return cursor.rowcount == 1
 
