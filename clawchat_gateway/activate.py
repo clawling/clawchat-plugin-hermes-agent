@@ -766,8 +766,8 @@ def _persisted_env_credentials_match(
     from clawchat_gateway.config import _read_env_file_entry
 
     try:
-        access_present, access_token = _read_env_file_entry("CLAWCHAT_TOKEN")
-        refresh_present, refresh_token = _read_env_file_entry("CLAWCHAT_REFRESH_TOKEN")
+        access_present, access_token = _read_env_file_entry("CLAWCHAT_TOKEN", strict=True)
+        refresh_present, refresh_token = _read_env_file_entry("CLAWCHAT_REFRESH_TOKEN", strict=True)
     except Exception:  # noqa: BLE001
         logger.warning("clawchat logout .env credential read failed")
         return None

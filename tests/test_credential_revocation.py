@@ -1585,7 +1585,9 @@ def test_conditional_env_clear_requires_readable_matching_pair(stores, monkeypat
     if env_pair == "refresh":
         actual = replace(cfg, refresh_token=fresh.refresh_token)
     content = f'export CLAWCHAT_TOKEN="{actual.token}"\nCLAWCHAT_REFRESH_TOKEN={actual.refresh_token}\n'
-    if env_pair != "missing":
+    if env_pair == "unreadable":
+        path.mkdir()  # a real read error that is not FileNotFoundError
+    elif env_pair != "missing":
         path.write_text(content)
     writes = []
 
@@ -1594,11 +1596,6 @@ def test_conditional_env_clear_requires_readable_matching_pair(stores, monkeypat
         path.write_text("".join(f"{key}={value}\n" for key, value in values.items()))
         return str(path)
 
-    if env_pair == "unreadable":
-        def fail_read(_name):
-            raise OSError("test .env unavailable")
-
-        monkeypatch.setattr(config, "_read_env_file_entry", fail_read)
     monkeypatch.setattr(activate, "_write_env_values", write)
     result = activate.clear_persisted_credentials(
         expected_access_token=cfg.token, expected_refresh_token=cfg.refresh_token,
@@ -1613,11 +1610,14 @@ def test_conditional_env_clear_requires_readable_matching_pair(stores, monkeypat
         assert config._read_env_file_entry("CLAWCHAT_REFRESH_TOKEN") == (True, "")
     else:
         assert not writes
-        assert path.read_text() == content
+        assert path.is_dir() if env_pair == "unreadable" else path.read_text() == content
 
 
 @pytest.mark.parametrize("rotation", ["pair", "refresh"])
-async def test_env_permanent_with_unreadable_source_preserves_new_activation(stores, monkeypatch, rotation):
+@pytest.mark.parametrize("env_state", ["readable", "unreadable"])
+async def test_env_permanent_with_unreadable_source_preserves_new_activation(
+    stores, monkeypatch, rotation, env_state,
+):
     cfg, fresh = _cfg(), _cfg(fresh=True)
     if rotation == "refresh":
         fresh = replace(cfg, refresh_token=fresh.refresh_token)
@@ -1649,7 +1649,11 @@ async def test_env_permanent_with_unreadable_source_preserves_new_activation(sto
         await asyncio.wait_for(started.wait(), timeout=2)
         _seed(stores, fresh)
         content = f"CLAWCHAT_TOKEN={fresh.token}\nCLAWCHAT_REFRESH_TOKEN={fresh.refresh_token}\n"
-        path.write_text(content)
+        if env_state == "unreadable":
+            path.unlink()
+            path.mkdir()
+        else:
+            path.write_text(content)
         monkeypatch.setattr(stores, "get_activation_credentials", fail_read)
         release.set()
         assert (await asyncio.wait_for(task, timeout=2)).status == "skipped"
@@ -1660,7 +1664,8 @@ async def test_env_permanent_with_unreadable_source_preserves_new_activation(sto
         await asyncio.gather(task, return_exceptions=True)
     credentials = reader(platform="hermes", account_id="default")
     assert credentials.access_token == fresh.token and credentials.refresh_token == fresh.refresh_token
-    assert path.read_text() == content and not writes
+    assert (path.is_dir() if env_state == "unreadable" else path.read_text() == content)
+    assert not writes
     assert reads == [True, True] and calls == [True]
     assert socket.closes == 0 and conn._state == ConnectionState.READY
     assert conn.config == cfg and conn._rejected_activation_token is None

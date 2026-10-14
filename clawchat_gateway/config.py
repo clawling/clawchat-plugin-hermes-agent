@@ -13,16 +13,22 @@ from clawchat_gateway.tool_grants import TOOL_GRANTS_CONFIG_KEY
 logger = logging.getLogger("clawchat_gateway.config")
 
 
-def _read_env_file_entry(name: str) -> tuple[bool, str]:
+def _read_env_file_entry(name: str, *, strict: bool = False) -> tuple[bool, str]:
     """``(present, value)`` for ``name`` in this profile's ``.env``.
 
     Presence is reported separately because an EMPTY managed value is a
-    tombstone, not an absence — see ``_env_tombstoned``.
+    tombstone, not an absence — see ``_env_tombstoned``. With ``strict``, a
+    missing file still reads as absent but any other read error is raised, so
+    callers can tell "no key" from "could not read".
     """
     env_path = hermes_home().expanduser() / ".env"
     try:
         lines = env_path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return False, ""
     except OSError:
+        if strict:
+            raise
         return False, ""
 
     for line in lines:

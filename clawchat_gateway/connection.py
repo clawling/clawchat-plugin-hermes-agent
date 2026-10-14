@@ -905,7 +905,9 @@ class ClawChatConnection:
                     account_id=self._account_id, expected_access_token=expected_credentials.token,
                     expected_refresh_token=expected_credentials.refresh_token,
                 )
-                if not result.sqlite_cleared and result.env_matched is False:
+                # Without a cleared SQLite row, only a confirmed .env match
+                # proves the request still owns the persisted credentials.
+                if not result.sqlite_cleared and result.env_matched is not True:
                     self._log_discarded_refresh("activation_changed_before_logout")
                     return False
             else:
