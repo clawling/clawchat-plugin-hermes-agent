@@ -189,6 +189,9 @@ def _extract_request_id(err: ClawChatApiError) -> str | None:
 
 
 def _unknown_error(exc: BaseException) -> dict[str, Any]:
+    if isinstance(exc, OSError):
+        # str(OSError) carries the file name; keep only the reason.
+        return {"error": "unknown", "message": exc.strerror or type(exc).__name__}
     return {"error": "unknown", "message": str(exc)}
 
 

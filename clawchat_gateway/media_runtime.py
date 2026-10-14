@@ -294,6 +294,8 @@ def _fetch_public_media(url: str, *, max_redirects: int = 5, timeout: float = 30
         if port != default_port:
             host_header = f"{host_header}:{port}"
         target = parsed.path or "/"
+        if parsed.params:
+            target += f";{parsed.params}"
         if parsed.query:
             target += f"?{parsed.query}"
         try:

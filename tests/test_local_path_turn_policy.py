@@ -1093,3 +1093,17 @@ def test_standalone_reports_a_failed_allowed_upload(policy, monkeypatch):
     result = asyncio.run(standalone.standalone_send({}, OWNER_DM, "hello", media_files=[str(policy.home / "notes.txt")]))
     assert "error" in result and frames == []
     assert str(policy.home) not in result["error"]
+
+
+def test_pinned_fetch_keeps_path_parameters_and_query(policy, remote_transport):
+    set_turn(policy, "friend_direct")
+    url = "https://cdn.example/file.png;v=1?sig=x"
+    fragments = asyncio.run(outbound(policy, [url], FRIEND_DM))
+    assert len(fragments) == 1
+    assert remote_transport.requests[-1] == url
+
+
+def test_tool_os_errors_omit_the_file_name():
+    error = tools._unknown_error(PermissionError(13, "Permission denied", "/private/notes.png"))
+    assert error["message"] == "Permission denied"
+    assert "/private" not in str(error)
