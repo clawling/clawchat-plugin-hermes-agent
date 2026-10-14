@@ -157,6 +157,13 @@ def test_group_with_only_owner_md_still_gets_a_section(adapter):
     assert OWNER_FACT in content
 
 
+def test_turn_without_a_chat_id_gets_no_owner_md(adapter):
+    _note(adapter, "owner", "owner", OWNER_FACT)
+    inbound = replace(_direct(FRIEND), chat_id="")
+    section = adapter._format_note_memory_section(inbound) or ""
+    assert OWNER_FACT not in section
+
+
 def test_owner_dm_shape_is_unchanged(adapter):
     _note(adapter, "owner", "owner", OWNER_FACT)
     _note(adapter, "user", OWNER, "should not be used for the owner DM")
