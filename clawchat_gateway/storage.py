@@ -13,6 +13,9 @@ from pathlib import Path
 from typing import Any, Callable, TypeVar
 
 from clawchat_gateway.hermes_home import hermes_home
+from clawchat_gateway.tool_grants import (
+    PENDING_TTL_MS, _finite, is_baseline_tool, is_pending_tool_grant_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +206,29 @@ CREATE TABLE IF NOT EXISTS revoked_refresh_tokens (
 );
 """
 
+TOOL_GRANTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS tool_grants (
+  account_id TEXT NOT NULL,
+  grantee_user_id TEXT NOT NULL,
+  grantee_name TEXT NOT NULL,
+  tool TEXT NOT NULL,
+  mode TEXT NOT NULL CHECK (mode IN ('direct', 'ask')),
+  label TEXT,
+  expires_at INTEGER,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (account_id, grantee_user_id, tool)
+);
+CREATE TABLE IF NOT EXISTS tool_grant_pending (
+  account_id TEXT NOT NULL,
+  code TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  consumed_at INTEGER,
+  PRIMARY KEY (account_id, code)
+);
+"""
+
 
 def refresh_token_fingerprint(refresh_token: str) -> str:
     """Fingerprint the credential as submitted to the refresh endpoint."""
@@ -222,6 +248,7 @@ MIGRATIONS = [
     (10, "group_shared_sessions", GROUP_SHARED_SESSIONS_SCHEMA),
     (11, "message_target_nocase_indexes", MESSAGE_TARGET_NOCASE_SCHEMA),
     (12, "revoked_refresh_tokens", REVOKED_REFRESH_SCHEMA),
+    (13, "tool_grants", TOOL_GRANTS_SCHEMA),
 ]
 
 # Lookup behind ClawChatStore.find_seen_message_in_chat: a real chat message
@@ -465,6 +492,142 @@ class ClawChatStore:
                     "clawchat database initialization failed; disabling writes",
                     exc_info=True,
                 )
+
+    def _tool_grants_connection(self) -> sqlite3.Connection:
+        # Grant APIs propagate errors; a failed write must never look successful.
+        self.initialize()
+        if self._disabled:
+            raise RuntimeError("clawchat sqlite database is unavailable")
+        return sqlite3.connect(self.db_path)
+
+    def _tool_grants_transaction(self, callback: Callable[[sqlite3.Connection], _T]) -> _T:
+        conn = self._tool_grants_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            result = callback(conn)
+            conn.commit()
+            return result
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def create_pending_grant(
+        self, *, account_id: str, code: str, payload: dict[str, Any], now: int | None = None,
+    ) -> None:
+        now = _now_ms() if now is None else now
+        if (not isinstance(account_id, str) or not account_id.strip()
+                or not isinstance(code, str) or not re.fullmatch(r"[0-9]{6}", code)
+                or not _finite(now) or not is_pending_tool_grant_payload(payload)):
+            raise ValueError("Invalid pending tool grant")
+
+        def write(conn: sqlite3.Connection) -> None:
+            # A collision must not replace an existing or already consumed code.
+            conn.execute(
+                """INSERT INTO tool_grant_pending
+                (account_id, code, payload_json, created_at, expires_at, consumed_at)
+                VALUES (?, ?, ?, ?, ?, NULL)""",
+                (account_id, code, json.dumps(payload, ensure_ascii=False), now, now + PENDING_TTL_MS),
+            )
+
+        self._tool_grants_transaction(write)
+
+    @staticmethod
+    def _upsert_tool_grant(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
+        conn.execute(
+            """INSERT INTO tool_grants
+            (account_id, grantee_user_id, grantee_name, tool, mode, label, expires_at, created_at)
+            VALUES (:account_id, :grantee_user_id, :grantee_name, :tool, :mode, :label, :expires_at, :created_at)
+            ON CONFLICT(account_id, grantee_user_id, tool) DO UPDATE SET
+              grantee_name = excluded.grantee_name, mode = excluded.mode, label = excluded.label,
+              expires_at = excluded.expires_at, created_at = excluded.created_at""",
+            row,
+        )
+
+    def confirm_pending_grant(
+        self, *, account_id: str, code: str, now: int | None = None,
+    ) -> list[dict[str, Any]] | None:
+        """Consume once atomically; invalid/expired codes return None, write errors raise."""
+        now = _now_ms() if now is None else now
+        if not _finite(now):
+            raise ValueError("Invalid tool grant time")
+
+        def write(conn: sqlite3.Connection) -> list[dict[str, Any]] | None:
+            pending = conn.execute(
+                """SELECT payload_json FROM tool_grant_pending
+                WHERE account_id = ? AND code = ? AND consumed_at IS NULL AND expires_at > ?""",
+                (account_id, code, now),
+            ).fetchone()
+            try:
+                payload = json.loads(pending[0]) if pending else None
+            except (TypeError, ValueError):
+                payload = None
+            if (not is_pending_tool_grant_payload(payload)
+                    or (payload.get("expires_at") is not None and payload["expires_at"] <= now)):
+                # Explicit rollback also covers malformed or expired grant payloads.
+                conn.rollback()
+                return None
+            rows = []
+            for grantee in payload["grantees"]:
+                for tool in payload["tools"]:
+                    row = {
+                        "account_id": account_id, "grantee_user_id": grantee["id"],
+                        "grantee_name": grantee["name"], "tool": tool,
+                        "mode": "ask" if is_baseline_tool(tool) else payload["mode"],
+                        "label": payload.get("label"), "expires_at": payload.get("expires_at"),
+                        "created_at": now,
+                    }
+                    self._upsert_tool_grant(conn, row)
+                    rows.append(row)
+            conn.execute(
+                "UPDATE tool_grant_pending SET consumed_at = ? WHERE account_id = ? AND code = ?",
+                (now, account_id, code),
+            )
+            return rows
+
+        return self._tool_grants_transaction(write)
+
+    def revoke_grants(self, *, account_id: str, user_id: str, tools: list[str] | None = None) -> int:
+        if tools == []:
+            return 0
+        clause = " AND tool IN (" + ", ".join("?" for _ in tools) + ")" if tools is not None else ""
+
+        def write(conn: sqlite3.Connection) -> int:
+            return conn.execute(
+                "DELETE FROM tool_grants WHERE account_id = ? AND grantee_user_id = ?" + clause,
+                (account_id, user_id, *(tools or [])),
+            ).rowcount
+
+        return self._tool_grants_transaction(write)
+
+    def list_grants(self, *, account_id: str, now: int | None = None) -> list[dict[str, Any]]:
+        return self._select_tool_grants(account_id=account_id, now=now)
+
+    def load_grants_for_users(
+        self, *, account_id: str, user_ids: list[str], now: int | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._select_tool_grants(account_id=account_id, user_ids=user_ids, now=now)
+
+    def _select_tool_grants(
+        self, *, account_id: str, now: int | None, user_ids: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        now = _now_ms() if now is None else now
+        if not _finite(now):
+            raise ValueError("Invalid tool grant time")
+        if user_ids == []:
+            return []
+        clause = " AND grantee_user_id IN (" + ", ".join("?" for _ in user_ids) + ")" if user_ids is not None else ""
+        conn = self._tool_grants_connection()
+        try:
+            conn.row_factory = sqlite3.Row
+            return [dict(row) for row in conn.execute(
+                "SELECT * FROM tool_grants WHERE account_id = ? AND (expires_at IS NULL OR expires_at > ?)"
+                + clause + " ORDER BY grantee_user_id, tool",
+                (account_id, now, *(user_ids or [])),
+            ).fetchall()]
+        finally:
+            conn.close()
 
     def upsert_activation(
         self,
