@@ -2278,3 +2278,151 @@ async def test_bootstrap_checks_env_again_after_sqlite_commit(stores, monkeypatc
     assert not writes and path.read_text() == replacement_env and conn.config == cfg
     credentials = stores.get_activation_credentials(platform="hermes", account_id="default")
     assert (credentials.access_token, credentials.refresh_token) == (fresh.token, fresh.refresh_token)
+
+
+@pytest.mark.parametrize("suspend_at", ["rejection", "logout"])
+@pytest.mark.parametrize("recovery", ["same", "new", "deleted"])
+async def test_sqlite_permanent_callback_suspension_retains_pending_failure(
+    stores, monkeypatch, suspend_at, recovery,
+):
+    cfg, fresh = _cfg(), _cfg(fresh=True)
+    _seed(stores, cfg)
+    conn = _conn(monkeypatch, cfg)
+    assert conn._load_startup_activation_credentials()
+    conn._state = ConnectionState.READY
+    old_socket = conn._ws = _Socket()
+    logout = conn._on_auth_logout = AsyncMock()
+    path = stores.db_path.parent / ".env"
+    original_env = f"CLAWCHAT_TOKEN={cfg.token}\nCLAWCHAT_REFRESH_TOKEN={cfg.refresh_token}\n"
+    path.write_text(original_env)
+    reader = stores.get_activation_credentials
+    clear = stores.clear_activation_credentials
+    mark = stores.mark_revoked_refresh_token
+    started, release = asyncio.Event(), asyncio.Event()
+    calls, reads, writes, clears, markers, sockets, suspension_snapshots = [], [], [], [], [], [], []
+
+    def fail_read(**_kwargs):
+        reads.append(True)
+        raise RuntimeError("test activation read unavailable")
+
+    def clear_credentials(**kwargs):
+        clears.append(kwargs)
+        return clear(**kwargs)
+
+    def mark_rejected(**kwargs):
+        markers.append(kwargs)
+        return mark(**kwargs)
+
+    def write(values):
+        writes.append(values)
+        path.write_text("".join(f"{key}={value}\n" for key, value in values.items()))
+        return str(path)
+
+    class Client:
+        async def auth_refresh(self, **_kwargs):
+            calls.append(True)
+            started.set()
+            await release.wait()
+            raise ClawChatApiError("auth", "test revoked", status=401, code=10003)
+
+    async def state_changed(state):
+        if state == ConnectionState.SUSPENDED:
+            suspension_snapshots.append(conn._pending_permanent_credentials)
+        elif state == ConnectionState.READY:
+            assert recovery == "new"
+            conn._stopping = True
+            await conn._ws.close()
+
+    async def connect(*_args, **_kwargs):
+        assert recovery == "new", "pending permanent pair must not reconnect"
+        assert not sockets and conn.config == fresh and calls == [True]
+        socket = _Socket()
+        sockets.append(socket)
+        return socket
+
+    async def poll(delay):
+        assert delay == connection.ACTIVATION_CREDENTIAL_POLL_INTERVAL_SECONDS
+        if conn._state == ConnectionState.AUTH_FAILED:
+            raise _PollReached
+        assert conn._state == ConnectionState.SUSPENDED and not sockets
+        assert conn._pending_permanent_credentials == (cfg.token, cfg.refresh_token)
+        assert calls == [True] and not clears and not writes
+        logout.assert_not_called()
+        assert (await conn.reactive_refresh()).status == "skipped"
+        monkeypatch.setattr(stores, "get_activation_credentials", reader)
+        if recovery == "new":
+            _seed(stores, fresh)
+            path.write_text(f"CLAWCHAT_TOKEN={fresh.token}\nCLAWCHAT_REFRESH_TOKEN={fresh.refresh_token}\n")
+        elif recovery == "deleted":
+            _delete(stores)
+
+    conn._on_state_change = state_changed
+    monkeypatch.setattr(conn, "_build_refresh_client", Client)
+    monkeypatch.setattr(stores, "clear_activation_credentials", clear_credentials)
+    monkeypatch.setattr(stores, "mark_revoked_refresh_token", mark_rejected)
+    monkeypatch.setattr(activate, "_write_env_values", write)
+    task = asyncio.create_task(conn.reactive_refresh())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        monkeypatch.setattr(stores, "get_activation_credentials", fail_read)
+        # READY watcher reads accumulate before the permanent callbacks. The
+        # rejection or logout recheck itself must be the third failed read.
+        for _ in range(2 if suspend_at == "rejection" else 1):
+            assert await conn._recheck_activation_source(adopt_changes=False) == "unreadable"
+            assert conn._state == ConnectionState.READY and old_socket.closes == 0
+        release.set()
+        assert (await asyncio.wait_for(task, timeout=2)).status == "skipped"
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert reads == [True, True, True] and conn._credential_read_failures == 3
+    assert suspension_snapshots == [(cfg.token, cfg.refresh_token)]
+    assert conn._state == ConnectionState.SUSPENDED and old_socket.closes >= 1
+    assert conn._using_activation_db_credentials and conn.config == cfg and not conn._auth_failed
+    assert conn._pending_permanent_reason == (
+        connection.AUTO_LOGOUT_LAST_ERROR if suspend_at == "rejection" else "test revoked"
+    )
+    assert not clears and not writes and path.read_text() == original_env
+    assert conn._refresh_manager._rejected_credentials is None and not conn._refresh_manager.logged_out
+    assert len(markers) == (1 if suspend_at == "logout" else 0)
+    logout.assert_not_called()
+    monkeypatch.setattr(connection, "_ws_connect", connect)
+    monkeypatch.setattr(connection.asyncio, "sleep", poll)
+    if recovery == "new":
+        await asyncio.wait_for(conn._supervisor(), timeout=2)
+    else:
+        with pytest.raises(_PollReached):
+            await asyncio.wait_for(conn._supervisor(), timeout=2)
+    assert calls == [True] and conn._pending_permanent_credentials is None
+    assert conn._pending_permanent_reason is None and not conn._activation_source_suspended
+    if recovery == "same":
+        assert not sockets and conn._auth_failed and conn._state == ConnectionState.AUTH_FAILED
+        assert not conn.config.token and not conn.config.refresh_token
+        assert conn._refresh_manager._rejected_credentials == (cfg.token, cfg.refresh_token)
+        assert conn._refresh_manager.logged_out and len(markers) == 1
+        assert stores.get_revoked_refresh_fingerprint(platform="hermes", account_id="default") == storage.refresh_token_fingerprint(cfg.refresh_token)
+        assert clears == [{
+            "platform": "hermes", "account_id": "default",
+            "expected_access_token": cfg.token, "expected_refresh_token": cfg.refresh_token,
+        }]
+        with sqlite3.connect(stores.db_path) as db:
+            assert db.execute("SELECT access_token, refresh_token FROM activations").fetchone() == (None, None)
+        assert writes == [{"CLAWCHAT_TOKEN": "", "CLAWCHAT_REFRESH_TOKEN": ""}]
+        logout.assert_awaited_once()
+    elif recovery == "new":
+        assert sockets[0].tokens == [fresh.token] and conn.config == fresh and not conn._auth_failed
+        credentials = reader(platform="hermes", account_id="default")
+        assert (credentials.access_token, credentials.refresh_token) == (fresh.token, fresh.refresh_token)
+        assert stores.get_revoked_refresh_fingerprint(platform="hermes", account_id="default") is None
+        assert not clears and not writes and not conn._refresh_manager.logged_out
+        assert conn._refresh_manager._rejected_credentials is None
+        assert path.read_text() == f"CLAWCHAT_TOKEN={fresh.token}\nCLAWCHAT_REFRESH_TOKEN={fresh.refresh_token}\n"
+        logout.assert_not_called()
+    else:
+        assert not sockets and conn._auth_failed and conn._state == ConnectionState.AUTH_FAILED
+        assert not conn.config.token and reader(platform="hermes", account_id="default") is None
+        assert not clears and not writes and path.read_text() == original_env
+        assert not conn._refresh_manager.logged_out and conn._refresh_manager._rejected_credentials is None
+        logout.assert_not_called()

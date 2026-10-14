@@ -478,7 +478,9 @@ callback. Normal bootstrap logout with a matching pair or absent
 `.env` keys still writes tombstones and stops the rejected session.
 
 Bootstrap suspension polls every 2 seconds too, retaining the pending permanent
-failure's credential pair and reason. Once SQLite or strict `.env` reads confirm
+failure's credential pair and reason. SQLite sessions also retain pending permanent
+failures when callback source checks reach the read-failure suspension limit,
+using the same recovery rules. Once SQLite or strict `.env` reads confirm
 that same pair (absent `.env` keys also confirm ownership), the gateway completes
 conditional logout, writes the revoked marker and latches the rejected pair,
 then enters `AUTH_FAILED` with auto-logout notification. It sends no connect frame

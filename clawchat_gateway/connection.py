@@ -558,6 +558,7 @@ class ClawChatConnection:
         self, *, adopt_changes: bool = True, include_bootstrap: bool = False,
         expected_access_token: str | None = None,
         expected_refresh_token: str | None = None,
+        permanent_failure_reason: str | None = None,
     ) -> Literal["ok", "changed", "revoked", "unreadable"]:
         if self._activation_source_suspended:
             include_bootstrap = True
@@ -579,6 +580,18 @@ class ClawChatConnection:
             if self._using_activation_db_credentials:
                 self._credential_read_failures += 1
                 if self._credential_read_failures >= CREDENTIAL_READ_FAILURE_LIMIT:
+                    if (
+                        permanent_failure_reason is not None
+                        and not self._auth_failed and not self._stopping
+                        and expected_access_token == self._cfg.token
+                        and expected_refresh_token == self._cfg.refresh_token
+                    ):
+                        # Preserve the failure before suspension's state await
+                        # can let another task recover the same SQLite pair.
+                        self._pending_permanent_credentials = (
+                            self._cfg.token, self._cfg.refresh_token,
+                        )
+                        self._pending_permanent_reason = permanent_failure_reason
                     await self._suspend_activation_source()
             return "unreadable"
         self._credential_read_failures = 0
@@ -934,6 +947,7 @@ class ClawChatConnection:
 
     async def _permanent_refresh_is_current(
         self, expected: ClawChatConfig | None, *, completing_pending: bool = False,
+        reason: str = AUTO_LOGOUT_LAST_ERROR,
     ) -> bool:
         if self._auth_failed or (self._activation_source_suspended and not completing_pending):
             self._log_discarded_refresh("credentials_unavailable")
@@ -954,7 +968,7 @@ class ClawChatConnection:
             return False
         status = await self._recheck_activation_source(
             adopt_changes=False, include_bootstrap=True, expected_access_token=expected.token,
-            expected_refresh_token=expected.refresh_token,
+            expected_refresh_token=expected.refresh_token, permanent_failure_reason=reason,
         )
         if (
             self._auth_failed
@@ -982,7 +996,7 @@ class ClawChatConnection:
         )
 
         if not await self._permanent_refresh_is_current(
-            expected_credentials, completing_pending=completing_pending,
+            expected_credentials, completing_pending=completing_pending, reason=reason,
         ):
             return False
 
@@ -999,6 +1013,10 @@ class ClawChatConnection:
                 if sqlite_cleared is False:
                     self._log_discarded_refresh("activation_changed_before_logout")
                     return False
+                if completing_pending and self._rejected_refresh_fingerprint != refresh_token_fingerprint(
+                    expected_credentials.refresh_token,
+                ):
+                    self._record_refresh_rejection(expected_credentials.refresh_token)
                 env_cleared = _clear_persisted_env_credentials(
                     expected_access_token=expected_credentials.token,
                     expected_refresh_token=expected_credentials.refresh_token,
