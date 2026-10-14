@@ -1035,6 +1035,23 @@ A path that matches the denylist is rejected with a neutral `ValueError` in all
 turns; ordinary local files remain available in the owner's direct chat or on a
 local operator surface, regardless of `media_local_roots`.
 
+### Known limits of the attachment policy
+
+The plugin judges attachments by the ClawChat turn they come from. Where no
+ClawChat turn is in play, it does not restrict further:
+
+- A delivery made with no session context (Hermes sends a turn's reply after
+  clearing the turn's context; cron delivery) may carry attachments into the
+  owner's direct chat, local files and http(s) URLs alike, fetched the ordinary
+  way. The only recipient there is the owner. Into any other chat it carries
+  no local file.
+- A `send_message` call from another platform's own session, or with no session
+  context, to a non-ClawChat target is left to Hermes and that platform: the
+  plugin does not decide what another platform's turns may send.
+- Hermes itself checks that a `MEDIA:` path exists before the plugin sees the
+  call. The plugin refuses the attachment afterwards, so nothing is read or
+  sent, but that existence check has already happened.
+
 ## Debug / diagnostics env vars
 
 These are **not** part of the profile-first resolution chain above: they are
