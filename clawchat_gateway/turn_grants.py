@@ -6,7 +6,7 @@ import secrets
 import threading
 import time
 from contextvars import copy_context
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Mapping
 
@@ -59,6 +59,15 @@ def get_snapshot(nonce: str) -> TurnSnapshot | None:
 def active_snapshot(account_id: str, session_key: str) -> TurnSnapshot | None:
     with _lock:
         return _snapshots.get(_active.get((account_id, session_key), ""))
+
+
+def revoke_owner_verification(account_id: str, session_key: str) -> None:
+    """Revoke every live nonce that the host could retain for this session."""
+    with _lock:
+        for nonce in _session_nonces.get((account_id, session_key), ()):
+            snapshot = _snapshots.get(nonce)
+            if snapshot is not None and snapshot.owner_verified:
+                _snapshots[nonce] = replace(snapshot, owner_verified=False)
 
 
 def release_turn(nonce: str) -> None:

@@ -797,7 +797,7 @@ _PATH_FIELDS = {
 
 
 def has_local_path(value: Any, path_field: bool = False, *, any_string: bool = False) -> bool:
-    """T100 path fields, or every nested argument string for a direct grant."""
+    """Check attachment path fields, or all nested strings for a direct grant."""
     if isinstance(value, str):
         text = value.strip()
         if not any_string and text.lower().startswith(("https://", "http://")):
@@ -849,6 +849,13 @@ def _approval_config_read() -> dict[str, Any]:
     from hermes_cli.config import load_config_readonly
 
     config = load_config_readonly()
+    # Recent hosts return a dict subclass containing defaults or a last-known
+    # good fallback after a failed read. Do not require that newer host class
+    # to be importable on older hosts.
+    if (any(cls.__name__ == "FailedConfigRead" for cls in type(config).__mro__)
+            or hasattr(config, "read_error")
+            or (isinstance(config, dict) and "read_error" in config)):
+        raise ValueError("Unreadable approval policy")
     if not isinstance(config, dict) or not isinstance(config.get("approvals", {}), dict):
         raise ValueError("Unreadable approval policy")
     allowlist = config.get("command_allowlist", [])
