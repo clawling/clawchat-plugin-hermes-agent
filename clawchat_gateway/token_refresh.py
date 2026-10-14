@@ -115,9 +115,10 @@ BuildClient = Callable[[], ClawChatApiClient]
 # persist(access_token, refresh_token) -> bool: durable write to BOTH stores;
 # MUST return True only after both .env and SQLite are written (§0 ordering).
 PersistTokens = Callable[[str, str], Awaitable[bool]]
-# persist_logout(reason) -> None: clear creds in both stores, keep identity (§C.1).
-PersistLogout = Callable[[str], Awaitable[None]]
-PersistRejection = Callable[[str], Awaitable[None]]
+# Clear creds in both stores, keep identity (§C.1). False discards a result for
+# credentials that no longer own the request; legacy None callbacks still work.
+PersistLogout = Callable[[str], Awaitable[bool | None]]
+PersistRejection = Callable[[str], Awaitable[bool | None]]
 
 
 class RefreshManager:
@@ -217,7 +218,10 @@ class RefreshManager:
             return outcome
         except BaseException as exc:  # noqa: BLE001
             if not future.done():
-                future.set_exception(exc)
+                if isinstance(exc, asyncio.CancelledError):
+                    future.cancel()
+                else:
+                    future.set_exception(exc)
             raise
         finally:
             self._in_flight = None
@@ -244,7 +248,6 @@ class RefreshManager:
             if is_permanent_refresh_error(exc):
                 # §B / §C: permanent → latch + auto-logout (keep identity).
                 self._rejected_token = access_token or None
-                self._logged_out = True
                 logger.warning(
                     "clawchat token refresh permanent failure code=%s: %s",
                     exc.code,
@@ -252,13 +255,16 @@ class RefreshManager:
                 )
                 try:
                     if self._persist_rejection is not None:
-                        await self._persist_rejection(refresh_token)
+                        if await self._persist_rejection(refresh_token) is False:
+                            return RefreshOutcome(status="skipped", error="permanent refresh discarded")
                 except Exception:  # noqa: BLE001
                     logger.warning("clawchat revoked-refresh marker persistence failed")
                 try:
-                    await self._persist_logout(str(exc))
+                    if await self._persist_logout(str(exc)) is False:
+                        return RefreshOutcome(status="skipped", error="permanent refresh discarded")
                 except Exception:  # noqa: BLE001
                     logger.warning("clawchat logout persistence failed", exc_info=True)
+                self._logged_out = True
                 return RefreshOutcome(status="permanent", error=str(exc))
             # Retries were exhausted or stopped by the credential-source guard.
             logger.warning("clawchat token refresh transient failure: %s", exc)

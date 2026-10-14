@@ -207,16 +207,13 @@ async def test_first_activation_wait_never_connects_or_refreshes(stores, monkeyp
 
 
 @pytest.mark.parametrize("read_fails", [False, True])
-async def test_env_bootstrap_without_row_and_db_read_errors_keep_socket(stores, monkeypatch, caplog, read_fails):
+async def test_env_bootstrap_is_not_suspended_by_missing_row_or_read_errors(stores, monkeypatch, caplog, read_fails):
     cfg = _cfg()
     conn = _conn(monkeypatch, cfg)
     conn._state = ConnectionState.READY
     socket = conn._ws = _Socket()
     refresh = _no_refresh(monkeypatch, conn)
     if read_fails:
-        _seed(stores, cfg)
-        assert conn._load_startup_activation_credentials()
-
         def fail_read(**_kwargs):
             raise RuntimeError("test database unavailable")
 
@@ -226,7 +223,7 @@ async def test_env_bootstrap_without_row_and_db_read_errors_keep_socket(stores, 
     async def poll(delay):
         assert delay == 2.0
         polls.append(delay)
-        if len(polls) == 3:
+        if len(polls) == connection.CREDENTIAL_READ_FAILURE_LIMIT + 2:
             raise _PollReached
 
     monkeypatch.setattr(connection.asyncio, "sleep", poll)
@@ -234,8 +231,183 @@ async def test_env_bootstrap_without_row_and_db_read_errors_keep_socket(stores, 
         await conn._watch_activation_credentials()
     assert conn._state == ConnectionState.READY and socket.closes == 0
     assert conn.config == cfg and not conn._auth_failed
+    assert not conn._activation_source_suspended and conn._credential_read_failures == 0
     assert "activation_credentials_revoked" not in caplog.text
     refresh.assert_not_called()
+
+
+@pytest.mark.parametrize("recovery", ["same", "changed", "deleted"])
+async def test_db_read_failures_suspend_then_poll_and_recover(stores, monkeypatch, caplog, recovery):
+    cfg, fresh = _cfg(), _cfg(fresh=True)
+    _seed(stores, cfg)
+    conn = _conn(monkeypatch, cfg)
+    assert conn._load_startup_activation_credentials()
+    refresh = _no_refresh(monkeypatch, conn)
+    logout = conn._on_auth_logout = AsyncMock()
+    reader = stores.get_activation_credentials
+    control = {"fail": True}
+    sockets, ready_polls, suspended_polls, activation_polls, writes = [], [], [], [], []
+    real_sleep = asyncio.sleep
+
+    def read(**kwargs):
+        if control["fail"]:
+            raise RuntimeError("test credential source unavailable")
+        return reader(**kwargs)
+
+    async def connect(*_args, **_kwargs):
+        assert len(sockets) < 2
+        if sockets:
+            assert not conn._activation_source_suspended
+            assert conn.config.token == (fresh.token if recovery == "changed" else cfg.token)
+        socket = _Socket()
+        sockets.append(socket)
+        return socket
+
+    async def poll(delay):
+        assert delay == 2.0
+        if conn._state == ConnectionState.READY:
+            if len(sockets) == 2:
+                conn._stopping = True
+                await sockets[-1].close()
+            else:
+                ready_polls.append(delay)
+                assert conn._credential_read_failures < connection.CREDENTIAL_READ_FAILURE_LIMIT
+                assert sockets[0].closes == 0
+        elif conn._state == ConnectionState.SUSPENDED:
+            suspended_polls.append(delay)
+            assert len(sockets) == 1 and sockets[0].closes >= 1
+            assert conn.config == cfg and conn._using_activation_db_credentials
+            assert not conn._auth_failed and conn._rejected_activation_token is None
+            assert conn._rejected_refresh_fingerprint is None
+            assert (await conn.reactive_refresh()).status == "skipped"
+            await conn._maybe_proactive_refresh()
+            assert not writes
+            if len(suspended_polls) == 2:
+                control["fail"] = False
+                if recovery == "changed":
+                    _seed(stores, fresh)
+                elif recovery == "deleted":
+                    _delete(stores)
+        elif conn._state == ConnectionState.AUTH_FAILED:
+            assert recovery == "deleted" and len(sockets) == 1
+            activation_polls.append(delay)
+            if len(activation_polls) == 2:
+                raise _PollReached
+        else:
+            pytest.fail(f"unexpected poll state {conn._state}")
+        await real_sleep(0)
+
+    monkeypatch.setattr(stores, "get_activation_credentials", read)
+    monkeypatch.setattr(activate, "_write_env_values", lambda values: writes.append(values) or "test.env")
+    monkeypatch.setattr(connection, "_ws_connect", connect)
+    monkeypatch.setattr(connection.asyncio, "sleep", poll)
+    with caplog.at_level("INFO", logger="clawchat_gateway.connection"):
+        if recovery == "deleted":
+            with pytest.raises(_PollReached):
+                await asyncio.wait_for(conn._supervisor(), timeout=2)
+        else:
+            await asyncio.wait_for(conn._supervisor(), timeout=2)
+    assert len(ready_polls) == connection.CREDENTIAL_READ_FAILURE_LIMIT - 1
+    assert suspended_polls == [2.0, 2.0] and conn._credential_read_failures == 0
+    assert "activation_credentials_unreadable" in caplog.text and "action=suspend" in caplog.text
+    assert not writes
+    assert stores.get_revoked_refresh_fingerprint(platform="hermes", account_id="default") is None
+    refresh.assert_not_called()
+    logout.assert_not_called()
+    if recovery == "deleted":
+        assert conn._state == ConnectionState.AUTH_FAILED and conn._rejected_activation_token == cfg.token
+    else:
+        assert "activation_credentials_readable" in caplog.text
+        assert [socket.tokens for socket in sockets] == [[cfg.token], [fresh.token if recovery == "changed" else cfg.token]]
+
+
+@pytest.mark.parametrize("path", ["retry", "persist", "refresh"])
+async def test_shared_read_failure_limit_stops_refresh_and_preserves_credentials(stores, monkeypatch, path):
+    cfg, fresh = _cfg(), _cfg(fresh=True)
+    _seed(stores, cfg)
+    conn = _conn(monkeypatch, cfg)
+    assert conn._load_startup_activation_credentials()
+    conn._state = ConnectionState.READY
+    socket = conn._ws = _Socket()
+    writes = []
+    refresh = AsyncMock(return_value=RefreshOutcome("transient", error="test transient"))
+    monkeypatch.setattr(conn._refresh_manager, "refresh", refresh)
+
+    def fail_read(**_kwargs):
+        raise RuntimeError("test credential source unavailable")
+
+    monkeypatch.setattr(stores, "get_activation_credentials", fail_read)
+    monkeypatch.setattr(activate, "_write_env_values", lambda values: writes.append(values) or "test.env")
+    for failure in range(1, connection.CREDENTIAL_READ_FAILURE_LIMIT + 1):
+        if path == "retry":
+            assert await conn._refresh_should_continue(cfg) is (failure < connection.CREDENTIAL_READ_FAILURE_LIMIT)
+        elif path == "persist":
+            assert not await conn._persist_rotated_tokens(fresh.token, fresh.refresh_token)
+        else:
+            outcome = await conn.reactive_refresh()
+            assert outcome.status == ("transient" if failure < connection.CREDENTIAL_READ_FAILURE_LIMIT else "skipped")
+        assert conn._credential_read_failures == failure
+        if failure < connection.CREDENTIAL_READ_FAILURE_LIMIT:
+            assert conn._state == ConnectionState.READY and socket.closes == 0
+    assert conn._state == ConnectionState.SUSPENDED and socket.closes >= 1
+    assert conn.config == cfg and not conn._auth_failed and not writes
+    assert conn._rejected_activation_token is None and conn._rejected_refresh_fingerprint is None
+    assert not await conn._persist_refresh_rejection(cfg.refresh_token, expected_credentials=cfg)
+    assert not await conn._persist_auth_logout("test revoked", expected_credentials=cfg)
+    assert not writes
+    assert stores.get_revoked_refresh_fingerprint(platform="hermes", account_id="default") is None
+    assert (await conn.reactive_refresh()).status == "skipped"
+    if path == "refresh":
+        assert refresh.await_count == connection.CREDENTIAL_READ_FAILURE_LIMIT - 1
+    else:
+        refresh.assert_not_called()
+
+
+async def test_successful_read_resets_shared_failure_count(stores, monkeypatch):
+    cfg = _cfg()
+    _seed(stores, cfg)
+    conn = _conn(monkeypatch, cfg)
+    assert conn._load_startup_activation_credentials()
+    reader = stores.get_activation_credentials
+
+    def fail_read(**_kwargs):
+        raise RuntimeError("test credential source unavailable")
+
+    monkeypatch.setattr(stores, "get_activation_credentials", fail_read)
+    assert await conn._refresh_should_continue(cfg)
+    assert not await conn._persist_rotated_tokens("test-access", "test-refresh")
+    assert conn._credential_read_failures == 2
+    monkeypatch.setattr(stores, "get_activation_credentials", reader)
+    assert await conn._recheck_activation_source() == "ok"
+    assert conn._credential_read_failures == 0
+    monkeypatch.setattr(stores, "get_activation_credentials", fail_read)
+    for _ in range(connection.CREDENTIAL_READ_FAILURE_LIMIT - 1):
+        assert await conn._refresh_should_continue(cfg)
+    assert not conn._activation_source_suspended
+    assert not await conn._refresh_should_continue(cfg)
+    assert conn._activation_source_suspended
+
+
+async def test_suspension_ends_pending_handshake_without_rejecting_token(stores, monkeypatch):
+    cfg = _cfg()
+    _seed(stores, cfg)
+    conn = _conn(monkeypatch, cfg)
+    assert conn._load_startup_activation_credentials()
+    conn._state = ConnectionState.HANDSHAKING
+    conn._hello_wait = asyncio.get_running_loop().create_future()
+    socket = conn._ws = _Socket()
+
+    def fail_read(**_kwargs):
+        raise RuntimeError("test credential source unavailable")
+
+    monkeypatch.setattr(stores, "get_activation_credentials", fail_read)
+    for _ in range(connection.CREDENTIAL_READ_FAILURE_LIMIT - 1):
+        assert await conn._refresh_should_continue(cfg)
+        assert not conn._hello_wait.done()
+    assert not await conn._refresh_should_continue(cfg)
+    assert conn._hello_wait.result() is False and socket.closes >= 1
+    assert conn.config == cfg and conn._state == ConnectionState.SUSPENDED
+    assert not conn._auth_failed and conn._rejected_activation_token is None
 
 
 async def test_existing_row_rotation_closes_and_reconnects_with_new_token(stores, monkeypatch, caplog):
@@ -788,6 +960,218 @@ async def test_refresh_retry_source_guard_preserves_read_errors(stores, monkeypa
         conn._auth_failed = True
     else:
         conn._cfg = replace(cfg, refresh_token="different-refresh")
-    assert await conn._refresh_should_continue(cfg) is allowed
-    assert socket.closes == 0
+    if condition == "read_error":
+        for _ in range(connection.CREDENTIAL_READ_FAILURE_LIMIT - 1):
+            assert await conn._refresh_should_continue(cfg)
+            assert socket.closes == 0
+        assert not await conn._refresh_should_continue(cfg)
+        assert socket.closes >= 1 and conn._state == ConnectionState.SUSPENDED
+        assert conn.config == cfg and not conn._auth_failed
+        assert conn._rejected_activation_token is None
+    else:
+        assert await conn._refresh_should_continue(cfg) is allowed
+        assert socket.closes == 0
     assert "activation_credentials_revoked" not in caplog.text
+
+
+@pytest.mark.parametrize("change", ["delete", "rotate"])
+async def test_reconnect_rechecks_credentials_changed_during_backoff(stores, monkeypatch, change):
+    cfg, fresh = _cfg(), _cfg(fresh=True)
+    _seed(stores, cfg)
+    conn = _conn(monkeypatch, cfg)
+    refresh = _no_refresh(monkeypatch, conn)
+    connected, backoffs, polls = [], [], []
+
+    async def connect():
+        connected.append(conn.config.token)
+        if len(connected) == 1:
+            await conn._set_state(ConnectionState.DISCONNECTED)
+        else:
+            assert change == "rotate" and conn.config.token == fresh.token
+            conn._stopping = True
+
+    async def sleep(delay):
+        if conn._state == ConnectionState.RECONNECTING:
+            assert delay == 0.5 and connected == [cfg.token]
+            backoffs.append(delay)
+            if change == "delete":
+                _delete(stores)
+            else:
+                _seed(stores, fresh)
+        else:
+            assert change == "delete" and delay == 2.0
+            assert conn._state == ConnectionState.AUTH_FAILED and connected == [cfg.token]
+            polls.append(delay)
+            if len(polls) == 3:
+                raise _PollReached
+
+    monkeypatch.setattr(conn, "_run_one_connection", connect)
+    monkeypatch.setattr(connection.asyncio, "sleep", sleep)
+    if change == "delete":
+        with pytest.raises(_PollReached):
+            await conn._supervisor()
+    else:
+        await conn._supervisor()
+    assert backoffs == [0.5]
+    assert connected == ([cfg.token] if change == "delete" else [cfg.token, fresh.token])
+    refresh.assert_not_called()
+
+
+@pytest.mark.parametrize("change", ["delete", "rotate"])
+async def test_refresh_rechecks_source_before_issuing_http(stores, monkeypatch, change):
+    cfg, fresh = _cfg(), _cfg(fresh=True)
+    _seed(stores, cfg)
+    conn = _conn(monkeypatch, cfg)
+    assert conn._load_startup_activation_credentials()
+    conn._state = ConnectionState.READY
+    socket = conn._ws = _Socket()
+    refresh = _no_refresh(monkeypatch, conn)
+    if change == "delete":
+        _delete(stores)
+    else:
+        _seed(stores, fresh)
+    assert (await conn.reactive_refresh()).status == "skipped"
+    refresh.assert_not_called()
+    assert socket.closes >= 1
+    if change == "delete":
+        assert conn._state == ConnectionState.AUTH_FAILED and not conn.config.token
+    else:
+        assert conn.config.token == fresh.token and not conn._auth_failed
+
+
+async def test_unbounded_refresh_retry_suspends_when_source_stays_unreadable(stores, monkeypatch):
+    cfg = _cfg()
+    _seed(stores, cfg)
+    conn = _conn(monkeypatch, cfg)
+    assert conn._load_startup_activation_credentials()
+    conn._state = ConnectionState.READY
+    socket = conn._ws = _Socket()
+    conn._refresh_manager._max_transient_retries = None
+    logout = conn._on_auth_logout = AsyncMock()
+    http_calls, sleeps, writes = [], [], []
+
+    def fail_read(**_kwargs):
+        raise RuntimeError("test credential source unavailable")
+
+    class Client:
+        async def auth_refresh(self, **_kwargs):
+            http_calls.append(True)
+            monkeypatch.setattr(stores, "get_activation_credentials", fail_read)
+            raise ClawChatApiError("transport", "test transient", connect_failed=True)
+
+    async def sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(conn, "_build_refresh_client", Client)
+    monkeypatch.setattr(conn._refresh_manager, "_sleep", sleep)
+    monkeypatch.setattr(activate, "_write_env_values", lambda values: writes.append(values) or "test.env")
+    assert (await conn.reactive_refresh()).status == "skipped"
+    assert http_calls == [True] and len(sleeps) == 1
+    assert conn._activation_source_suspended and conn._state == ConnectionState.SUSPENDED
+    assert socket.closes >= 1 and conn.config == cfg and not writes
+    assert conn._rejected_activation_token is None and conn._rejected_refresh_fingerprint is None
+    logout.assert_not_called()
+
+
+@pytest.mark.parametrize("adopted", [False, True])
+async def test_late_permanent_preserves_new_activation_and_session(stores, monkeypatch, caplog, adopted):
+    cfg, fresh = _cfg(), _cfg(fresh=True)
+    _seed(stores, cfg)
+    conn = _conn(monkeypatch, cfg)
+    assert conn._load_startup_activation_credentials()
+    conn._state = ConnectionState.READY
+    old_socket = conn._ws = _Socket()
+    started, release = asyncio.Event(), asyncio.Event()
+    writes, calls = [], []
+    logout = conn._on_auth_logout = AsyncMock()
+    monkeypatch.setattr(activate, "_write_env_values", lambda values: writes.append(values) or "test.env")
+
+    class Client:
+        async def auth_refresh(self, *, refresh_token, device_id):
+            calls.append(refresh_token)
+            if len(calls) == 1:
+                started.set()
+                await release.wait()
+                raise ClawChatApiError("auth", "test revoked", status=401, code=10003)
+            return RefreshResult("next-access", "next-refresh")
+
+    monkeypatch.setattr(conn, "_build_refresh_client", Client)
+    task = asyncio.create_task(conn.reactive_refresh())
+    with caplog.at_level("INFO", logger="clawchat_gateway.connection"):
+        try:
+            await asyncio.wait_for(started.wait(), timeout=2)
+            if adopted:
+                _delete(stores)
+                assert await conn._recheck_activation_source() == "revoked"
+            _seed(stores, fresh)
+            if adopted:
+                assert await conn._wait_for_activation_credentials()
+                await conn._set_state(ConnectionState.READY)
+                conn._ws = _Socket()
+            socket = conn._ws
+            release.set()
+            assert (await asyncio.wait_for(task, timeout=2)).status == "skipped"
+        finally:
+            release.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    credentials = stores.get_activation_credentials(platform="hermes", account_id="default")
+    assert credentials.access_token == fresh.token and credentials.refresh_token == fresh.refresh_token
+    assert conn.config == (fresh if adopted else cfg)
+    assert conn._state == ConnectionState.READY and socket.closes == 0
+    assert not conn._auth_failed and not conn._refresh_manager.logged_out and not writes
+    assert conn._rejected_refresh_fingerprint is None
+    assert stores.get_revoked_refresh_fingerprint(platform="hermes", account_id="default") is None
+    assert "refresh_result_discarded" in caplog.text and "auth_logout" not in caplog.text
+    logout.assert_not_called()
+    if adopted:
+        assert old_socket.closes >= 1
+        # The manager's old-token latch must not block a request for the new token.
+        assert (await conn.reactive_refresh()).status == "success"
+        assert calls == [cfg.refresh_token, fresh.refresh_token]
+
+
+@pytest.mark.parametrize("change", ["access", "refresh", "auth_failed"])
+async def test_permanent_callbacks_are_bound_to_request_credentials(stores, monkeypatch, change):
+    cfg = _cfg()
+    _seed(stores, cfg)
+    conn = _conn(monkeypatch, cfg)
+    assert conn._load_startup_activation_credentials()
+    if change == "access":
+        conn._cfg = replace(cfg, token="different-access")
+    elif change == "refresh":
+        conn._cfg = replace(cfg, refresh_token="different-refresh")
+    else:
+        conn._auth_failed = True
+    writes = []
+    logout = conn._on_auth_logout = AsyncMock()
+    monkeypatch.setattr(activate, "_write_env_values", lambda values: writes.append(values) or "test.env")
+    assert not await conn._persist_refresh_rejection(cfg.refresh_token, expected_credentials=cfg)
+    assert not await conn._persist_auth_logout("test revoked", expected_credentials=cfg)
+    assert not writes and conn._rejected_refresh_fingerprint is None
+    assert stores.get_revoked_refresh_fingerprint(platform="hermes", account_id="default") is None
+    assert stores.get_activation_credentials(platform="hermes", account_id="default").access_token == cfg.token
+    logout.assert_not_called()
+
+
+async def test_conditional_logout_preserves_row_rotated_after_guard(stores, monkeypatch):
+    cfg, fresh = _cfg(), _cfg(fresh=True)
+    _seed(stores, cfg)
+    conn = _conn(monkeypatch, cfg)
+    assert conn._load_startup_activation_credentials()
+    clear = stores.clear_activation_credentials
+    writes = []
+    logout = conn._on_auth_logout = AsyncMock()
+
+    def rotate_then_clear(**kwargs):
+        assert kwargs["expected_access_token"] == cfg.token
+        _seed(stores, fresh)
+        return clear(**kwargs)
+
+    monkeypatch.setattr(stores, "clear_activation_credentials", rotate_then_clear)
+    monkeypatch.setattr(activate, "_write_env_values", lambda values: writes.append(values) or "test.env")
+    assert not await conn._persist_auth_logout("test revoked", expected_credentials=cfg)
+    assert stores.get_activation_credentials(platform="hermes", account_id="default").access_token == fresh.token
+    assert conn.config == cfg and not writes
+    logout.assert_not_called()

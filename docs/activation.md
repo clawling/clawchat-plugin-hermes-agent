@@ -425,7 +425,7 @@ still follow [`token-refresh.md`](./token-refresh.md) §A / §C / §D.
 | Case | Behavior and log events |
 |---|---|
 | Never activated: no SQLite row and no complete env/extra credentials | Poll for an activation every 2 seconds without connecting or refreshing (unchanged). Logs `activation_wait`; DEBUG `activation_poll`. |
-| Activated from the SQLite row, then the watcher reads the row as `None` (row deleted or credentials cleared) | Detected before any proactive refresh. Logs WARNING `activation_credentials_revoked action=wait_activation reason="activation credentials deleted"`, clears the in-memory access/refresh token and identity, latches the old access token, enters `AUTH_FAILED`, closes the WS and ends the watcher. The supervisor then waits for a new activation: no reconnect with the old credentials and no proactive, hello-fail or REST reactive refresh. The refresh-permanent auto-logout message is not sent. A SQLite read error is logged and retried; it is never treated as deletion. |
+| Activated from the SQLite row, then a source check reads `None` (row deleted or credentials cleared) | Checked by the watcher, before every connect (including after backoff), before refresh and during transient retry. Logs WARNING `activation_credentials_revoked action=wait_activation reason="activation credentials deleted"`, clears the in-memory access/refresh token and identity, latches the old access token, enters `AUTH_FAILED` and closes the WS. The supervisor then waits for a new activation: no reconnect with the old credentials and no proactive, hello-fail or REST reactive refresh. The refresh-permanent auto-logout message is not sent. Read errors use the bounded suspension policy below rather than being treated as deletion. |
 | Server-side revocation (session revoked and socket kicked) | The kick is an ordinary close (no status / `1005`), so the first reconnect uses normal backoff; a close code alone never proves revocation. The reconnect gets `hello-fail` `authentication failed`, triggers a refresh, and a permanent refresh failure (e.g. HTTP 401 with integer `code:10003`) takes the §C auto-logout path: logs `hello_fail_refresh` and `auth_logout action=re_pair_required`, clears credentials, closes the WS, enters `AUTH_FAILED` and waits for activation. The old token is not reconnected. |
 
 When the server rejects the token and there is no refresh token, the existing
@@ -443,6 +443,24 @@ exists but its token changed, the watcher keeps logging
 `activation_credentials_changed`, closes the old WS and reconnects with the new
 token (§D); that is not the revocation path.
 
+For SQLite-sourced connections, credential reads share one consecutive-failure
+counter; any successful credential read resets it. The first two failures keep
+the existing connection/retry behavior, while a failed persistence read always
+refuses its write. At `CREDENTIAL_READ_FAILURE_LIMIT` (currently 3), log WARNING
+`activation_credentials_unreadable action=suspend`, enter `SUSPENDED`, close the
+WS and stop reconnecting and refreshing. Suspension retains the in-memory
+credentials, writes no credential stores or revoked marker, latches no rejected
+token and sends no auto-logout message. Env/extra bootstrap connections and
+never-activated polling are unaffected by this counter.
+
+While suspended, the supervisor checks SQLite every 2 seconds. A readable row
+matching the retained credentials resumes connecting; a changed row is adopted
+and connected with its new token. Recovery logs
+`activation_credentials_readable action=reconnect`. A readable `None` instead
+takes the deletion/revocation path above. The same source check runs immediately
+before every `CONNECTING` transition and every refresh request: deletion stops
+both, and rotation adopts the new pair for connect or skips the old refresh.
+
 If the row is deleted while a refresh is in flight, the persist callback
 re-checks the credential source and revocation state. For a connection using
 SQLite credentials, persistence conditionally updates the row only if its
@@ -459,14 +477,23 @@ transient failure and before and after its backoff sleep. Even with unbounded
 retries, a deletion observed at those checks closes the WS and stops the next
 HTTP attempt, then the supervisor waits for activation. The last HTTP error
 remains transient, so this does not send a permanent-failure auto-logout
-message. A store read exception preserves the existing retry behavior rather
-than treating an unavailable database as deletion.
+message. Repeated store read failures reach the same suspension limit, stopping
+the in-flight retry loop before another HTTP attempt without clearing the
+retained credentials.
 
-Two boundaries remain: persistence runs synchronously on the event loop,
+Permanent-failure rejection and logout callbacks are bound to the pair that
+started the request, just like successful token persistence. If that pair no
+longer matches memory, the connection is already auth-failed/suspended, or the
+SQLite row has changed, the callbacks discard the late result and log INFO
+`refresh_result_discarded action=ignore`. They do not clear the newer row or
+memory, write a revoked marker or send auto-logout. Logout's SQLite clear also
+requires the expected access token, so a row changed before that write is
+preserved. The refresh manager's rejected-token latch applies to the old token;
+the new activation can still refresh and connect.
+
+Persistence still runs synchronously on the event loop,
 intentionally keeping the credential guard and write in the same task without
-an intervening `await`; slow storage can delay other tasks. Also, a late
-permanent response from an older request can still clear current credentials
-inside `RefreshManager` before the connection's stale-result guard runs.
+an intervening `await`; slow storage can delay other tasks.
 The SQLite-then-`.env` order narrows but does not close the cross-process
 window: if another process clears both stores after the SQLite commit and
 before the `.env` mirror is written, the mirror can still receive the rotated
