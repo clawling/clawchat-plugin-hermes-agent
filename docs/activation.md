@@ -467,6 +467,13 @@ intentionally keeping the credential guard and write in the same task without
 an intervening `await`; slow storage can delay other tasks. Also, a late
 permanent response from an older request can still clear current credentials
 inside `RefreshManager` before the connection's stale-result guard runs.
+The SQLite-then-`.env` order narrows but does not close the cross-process
+window: if another process clears both stores after the SQLite commit and
+before the `.env` mirror is written, the mirror can still receive the rotated
+pair (the next watcher poll still revokes the live connection, but a restart
+could bootstrap from `.env`). If the SQLite update succeeds and the `.env`
+write fails, the in-memory pair is not swapped; the watcher or a restart adopts
+the SQLite pair, and `.env` is not retried on its own.
 
 Deleting only the SQLite row does not remove env/extra bootstrap tokens (for
 example `CLAWCHAT_TOKEN` / `CLAWCHAT_REFRESH_TOKEN` in the Hermes `.env`). If
