@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
+import socket
 from pathlib import Path
+from urllib.parse import urlparse
 
 LOCAL_PATH_REFUSAL = (
     "Local files can't be sent or uploaded in this conversation. "
@@ -14,10 +17,13 @@ LOCAL_PATH_REFUSAL = (
 def _session_bound() -> bool:
     from clawchat_gateway import memory_scope
 
-    return any(
-        memory_scope._session_value(f"HERMES_SESSION_{key}")
-        for key in ("PLATFORM", "CHAT_ID", "CHAT_TYPE", "USER_ID")
-    )
+    try:
+        return any(
+            memory_scope._session_value(f"HERMES_SESSION_{key}")
+            for key in ("PLATFORM", "CHAT_ID", "CHAT_TYPE", "USER_ID")
+        )
+    except memory_scope.SessionContextUnavailable:
+        return True
 
 
 def _gateway_in_process() -> bool:
@@ -57,6 +63,37 @@ def local_attachment_allowed(chat_id: str | None) -> bool:
             return False
         return bool(chat_id) and destination_is_owner_direct(str(chat_id))
     except Exception:  # noqa: BLE001 - fail closed
+        return False
+
+
+def remote_media_allowed(url: str, chat_id: str | None) -> bool:
+    """Non-owner attachments may only be fetched from public addresses."""
+    if local_attachment_allowed(chat_id):
+        return True
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        if parsed.scheme not in {"http", "https"} or not host:
+            return False
+        if host == "localhost" or host.endswith(".localhost"):
+            return False
+        addresses = socket.getaddrinfo(
+            host, parsed.port or (443 if parsed.scheme == "https" else 80),
+            type=socket.SOCK_STREAM,
+        )
+        if not addresses:
+            return False
+        for entry in addresses:
+            address = ipaddress.ip_address(entry[4][0])
+            if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+                address = address.ipv4_mapped
+            if any((
+                address.is_private, address.is_loopback, address.is_link_local,
+                address.is_reserved, address.is_multicast, address.is_unspecified,
+            )):
+                return False
+        return True
+    except (OSError, ValueError):
         return False
 
 

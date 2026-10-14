@@ -4693,9 +4693,12 @@ class ClawChatAdapter(BasePlatformAdapter):
         that triggers nothing) arrives; a validation error beats a reaction on
         the wrong message.
         """
-        from clawchat_gateway.memory_scope import _session_value, same_chat_id
+        from clawchat_gateway.memory_scope import SessionContextUnavailable, _session_value, same_chat_id
 
-        session_chat = _session_value("HERMES_SESSION_CHAT_ID")
+        try:
+            session_chat = _session_value("HERMES_SESSION_CHAT_ID")
+        except SessionContextUnavailable:
+            return None
         if not same_chat_id(session_chat, chat_id):
             return None
         turns = self._open_turns(chat_id)
@@ -6255,7 +6258,10 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
             return SendResult(success=True)
         if is_send_message_tool_call or is_immediate_media_send or not is_stream_intermediate:
-            fragments = await self._build_fragments(visible_content, metadata, kwargs, chat_id=chat_id)
+            policy_dropped: list[str] = []
+            fragments = await self._build_fragments(
+                visible_content, metadata, kwargs, chat_id=chat_id, policy_dropped=policy_dropped
+            )
             fragment_count = len(fragments)
             has_media = self._has_outbound_media(metadata, kwargs)
             if has_media:
@@ -6266,7 +6272,10 @@ class ClawChatAdapter(BasePlatformAdapter):
                 # A local attachment this conversation may not receive is
                 # dropped by policy, not a failed upload: the text still goes.
                 media_urls = self._extract_media_urls(metadata, kwargs)
-                requested_media = sum(1 for url in media_urls if media_reference_allowed(url, chat_id))
+                requested_media = sum(
+                    1 for url in media_urls
+                    if url not in policy_dropped and media_reference_allowed(url, chat_id)
+                )
                 delivered_media = sum(
                     1
                     for fragment in fragments
@@ -6644,12 +6653,24 @@ class ClawChatAdapter(BasePlatformAdapter):
                 run.message_id,
             )
             return SendResult(success=True, message_id=run.message_id)
+        policy_dropped: list[str] = []
         final_fragments, context_mentions = self._link_text_mentions(
             run.chat_id,
             run.chat_type,
-            await self._build_fragments(final_content, run.metadata, run.kwargs, chat_id=run.chat_id),
+            await self._build_fragments(
+                final_content, run.metadata, run.kwargs,
+                chat_id=run.chat_id, policy_dropped=policy_dropped,
+            ),
             MESSAGE_MODE_NORMAL,
         )
+        if policy_dropped and (
+            not final_fragments
+            or self._is_empty_text_response(final_fragments)
+            or self._is_pure_silent_response(final_fragments)
+        ):
+            await self._retire_run(run)
+            logger.info("clawchat filtered attachment response suppressed chat_id=%s", run.chat_id)
+            return SendResult(success=True, message_id=run.message_id)
         frame = build_message_reply_event(
             chat_id=run.chat_id,
             chat_type=run.chat_type,
@@ -8239,6 +8260,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         kwargs: dict[str, Any] | None = None,
         *,
         chat_id: str | None = None,
+        policy_dropped: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         fragments = self._build_non_media_fragments(content, metadata, kwargs)
         if self._is_empty_text_response(fragments):
@@ -8250,6 +8272,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             media_urls=self._extract_media_urls(metadata, merged_kwargs),
             metadata=metadata,
             kwargs=merged_kwargs,
+            **({"policy_dropped": policy_dropped} if policy_dropped is not None else {}),
         )
         fragments.extend(uploaded_fragments)
 
@@ -8378,6 +8401,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         metadata: Any,
         kwargs: dict[str, Any],
         chat_id: str | None = None,
+        policy_dropped: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         if not media_urls:
             return []
@@ -8396,6 +8420,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             media_local_roots=media_local_roots,
             media_base_url=self._clawchat_config.media_base_url,
             force_document=force_document,
+            **({"policy_dropped": policy_dropped} if policy_dropped is not None else {}),
         )
 
     def _infer_media_kind(

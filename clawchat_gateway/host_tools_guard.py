@@ -724,22 +724,33 @@ def toolsets_for_source(
 
 def _session_turn() -> str:
     """``outside`` (not a ClawChat session), ``owner`` or ``other``."""
-    platform = _session_value("HERMES_SESSION_PLATFORM").lower()
-    if platform != _PLATFORM:
-        return "outside"
-    chat_id = _session_value("HERMES_SESSION_CHAT_ID")
-    chat_type = _session_value("HERMES_SESSION_CHAT_TYPE")
-    user_id = _session_value("HERMES_SESSION_USER_ID")
-    if chat_id and _is_owner_direct(chat_id, chat_type, user_id, _owner_user_id()):
-        return "owner"
-    return "other"
+    from clawchat_gateway.memory_scope import SessionContextUnavailable
+
+    try:
+        platform = _session_value("HERMES_SESSION_PLATFORM").lower()
+        if platform != _PLATFORM:
+            return "outside"
+        chat_id = _session_value("HERMES_SESSION_CHAT_ID")
+        chat_type = _session_value("HERMES_SESSION_CHAT_TYPE")
+        user_id = _session_value("HERMES_SESSION_USER_ID")
+        if chat_id and _is_owner_direct(chat_id, chat_type, user_id, _owner_user_id()):
+            return "owner"
+        return "other"
+    except SessionContextUnavailable:
+        return "other"
 
 
 def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **_: Any) -> Optional[dict[str, Any]]:
     """``pre_tool_call`` hook: host tools in a turn the owner did not start."""
     try:
         tool_name = str(tool_name or "")
-        if tool_name.startswith("clawchat_") and _session_turn() != "owner":
+        # The plugin's own tools: any turn that is not the owner's. The host's
+        # send_message: only ClawChat turns the owner did not start, so another
+        # platform's own sessions keep the host's behaviour.
+        turn = _session_turn() if tool_name.startswith("clawchat_") or tool_name == "send_message" else ""
+        if (tool_name.startswith("clawchat_") and turn != "owner") or (
+            tool_name == "send_message" and turn == "other"
+        ):
             from clawchat_gateway.local_paths import LOCAL_PATH_REFUSAL
             from clawchat_gateway.memory_scope import is_local_surface
 
@@ -768,7 +779,12 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **_: Any) -
                         )
                     return False
 
-                if has_local_path(args):
+                message = args.get("message", "") if isinstance(args, dict) else ""
+                local_marker = tool_name == "send_message" and any(
+                    not match.group(1).lower().startswith(("http://", "https://"))
+                    for match in re.finditer(r"\bMEDIA:\s*[\"']?([^\s\"']+)", str(message), re.IGNORECASE)
+                )
+                if has_local_path(args) or local_marker:
                     return {"action": "block", "message": LOCAL_PATH_REFUSAL}
         if not _guarded_call(tool_name, args):
             if not _strict_unregistered(tool_name) or _session_turn() != "other":

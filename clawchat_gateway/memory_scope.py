@@ -173,13 +173,20 @@ class MemoryScope:
         return None
 
 
+class SessionContextUnavailable(RuntimeError):
+    """The host session reader exists but could not read this turn."""
+
+
 def _session_value(name: str) -> str:
     try:
         from gateway.session_context import get_session_env
-
-        value = get_session_env(name, "")
-    except Exception:  # noqa: BLE001 - older/absent host module: plain env
+    except (ImportError, AttributeError):
         value = os.getenv(name, "")
+    else:
+        try:
+            value = get_session_env(name, "")
+        except Exception as exc:  # noqa: BLE001 - never borrow global identity
+            raise SessionContextUnavailable("session context unavailable") from exc
     return str(value or "").strip()
 
 
@@ -200,11 +207,14 @@ _session_context_engaged = _host_session_context_engaged
 
 def is_local_surface() -> bool:
     """Whether the host has no gateway session on a local operator surface."""
-    if _session_value("HERMES_SESSION_PLATFORM"):
+    try:
+        if _session_value("HERMES_SESSION_PLATFORM"):
+            return False
+        source = _session_value("HERMES_SESSION_SOURCE").lower()
+        host_platform = os.getenv("HERMES_PLATFORM", "").strip().lower()
+        return source in _LOCAL_SURFACES and host_platform in _LOCAL_SURFACES and not _session_context_engaged()
+    except SessionContextUnavailable:
         return False
-    source = _session_value("HERMES_SESSION_SOURCE").lower()
-    host_platform = os.getenv("HERMES_PLATFORM", "").strip().lower()
-    return source in _LOCAL_SURFACES and host_platform in _LOCAL_SURFACES and not _session_context_engaged()
 
 
 def _config_extra() -> dict[str, Any]:
@@ -288,32 +298,35 @@ _NOTHING = MemoryScope(kind="group")
 
 
 def resolve_memory_scope(root: Path | str | None) -> MemoryScope:
-    platform = _session_value("HERMES_SESSION_PLATFORM").lower()
-    if not platform:
-        if is_local_surface():
-            return MemoryScope(kind="local")
-        return _NOTHING
-    if platform != "clawchat":
-        return _NOTHING
-    chat_id = _session_value("HERMES_SESSION_CHAT_ID")
-    chat_type = _session_value("HERMES_SESSION_CHAT_TYPE").lower()
-    if not chat_id or root is None:
-        return _NOTHING
-    known_group, participants = _group_participants(Path(root), chat_id)
-    if not chat_type and not known_group and _is_owner_chat(chat_id):
-        return MemoryScope(kind="owner_direct", chat_id=chat_id)
-    if chat_type in DIRECT_CHAT_TYPES and not known_group:
-        owner = _owner_user_id()
-        user_id = _session_value("HERMES_SESSION_USER_ID")
-        if owner and user_id == owner:
+    try:
+        platform = _session_value("HERMES_SESSION_PLATFORM").lower()
+        if not platform:
+            if is_local_surface():
+                return MemoryScope(kind="local")
+            return _NOTHING
+        if platform != "clawchat":
+            return _NOTHING
+        chat_id = _session_value("HERMES_SESSION_CHAT_ID")
+        chat_type = _session_value("HERMES_SESSION_CHAT_TYPE").lower()
+        if not chat_id or root is None:
+            return _NOTHING
+        known_group, participants = _group_participants(Path(root), chat_id)
+        if not chat_type and not known_group and _is_owner_chat(chat_id):
             return MemoryScope(kind="owner_direct", chat_id=chat_id)
-        return MemoryScope(
-            kind="direct",
-            chat_id=chat_id,
-            members=frozenset({user_id}) if user_id else frozenset(),
-            owner_chat=_is_owner_chat(chat_id),
-        )
-    if chat_type != "group" and not known_group:
+        if chat_type in DIRECT_CHAT_TYPES and not known_group:
+            owner = _owner_user_id()
+            user_id = _session_value("HERMES_SESSION_USER_ID")
+            if owner and user_id == owner:
+                return MemoryScope(kind="owner_direct", chat_id=chat_id)
+            return MemoryScope(
+                kind="direct",
+                chat_id=chat_id,
+                members=frozenset({user_id}) if user_id else frozenset(),
+                owner_chat=_is_owner_chat(chat_id),
+            )
+        if chat_type != "group" and not known_group:
+            return _NOTHING
+        members = participants or _recent_speakers(chat_id)
+        return MemoryScope(kind="group", chat_id=chat_id, members=members)
+    except SessionContextUnavailable:
         return _NOTHING
-    members = participants or _recent_speakers(chat_id)
-    return MemoryScope(kind="group", chat_id=chat_id, members=members)

@@ -8,12 +8,12 @@ import os
 import sys
 import uuid
 from pathlib import Path
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from urllib.parse import unquote, urljoin, urlparse, urlunparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
-from clawchat_gateway.local_paths import is_denied_hermes_path, local_attachment_allowed
+from clawchat_gateway.local_paths import is_denied_hermes_path, local_attachment_allowed, remote_media_allowed
 
 logger = logging.getLogger("clawchat_gateway.media_runtime")
 
@@ -183,9 +183,10 @@ def normalize_outbound_media_reference(value: str) -> str:
 
 
 def media_reference_allowed(value: str, chat_id: str | None) -> bool:
-    """A remote reference always; a local one per :func:`local_attachment_allowed`."""
-    if _is_remote_url(normalize_outbound_media_reference(str(value or ""))):
-        return True
+    """Check the turn's policy for a local or remote reference."""
+    normalized = normalize_outbound_media_reference(str(value or ""))
+    if _is_remote_url(normalized):
+        return remote_media_allowed(normalized, chat_id)
     return local_attachment_allowed(chat_id)
 
 
@@ -230,12 +231,34 @@ def _load_local_media(path: str, media_local_roots: Sequence[str]) -> LoadedMedi
     )
 
 
-def _load_remote_media(url: str) -> LoadedMedia:
-    with urlopen(Request(url, headers={"User-Agent": _USER_AGENT})) as response:
+class RemoteMediaRejected(ValueError):
+    """A remote attachment or redirect did not satisfy the turn's policy."""
+
+
+def _load_remote_media(url: str, check_url: Callable[[str], bool] | None = None) -> LoadedMedia:
+    open_url = urlopen
+    if check_url is not None:
+        if not check_url(url):
+            raise RemoteMediaRejected("remote attachment address is not allowed")
+
+        class CheckedRedirectHandler(HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                if not check_url(newurl):
+                    raise RemoteMediaRejected("remote attachment address is not allowed")
+                return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+        open_url = build_opener(CheckedRedirectHandler()).open
+    with open_url(Request(url, headers={"User-Agent": _USER_AGENT})) as response:
         buffer = response.read()
         content_type = response.headers.get_content_type() or _guess_mime(url)
         filename = Path(urlparse(url).path).name or "upload.bin"
     return LoadedMedia(buffer=buffer, filename=filename, mime=content_type)
+
+
+def _media_log_name(url: str) -> str:
+    # Only a basename; remote queries and fragments can contain private values.
+    value = urlparse(url).path if _is_remote_url(url) else url
+    return Path(unquote(value).replace("\\", "/")).name
 
 
 def _safe_download_filename(url: str, mime: str) -> str:
@@ -336,11 +359,14 @@ async def upload_outbound_media(
     media_base_url: str = "",
     force_document: bool = False,
     chat_id: str | None = None,
+    policy_dropped: list[str] | None = None,
 ) -> list[dict[str, object]]:
     """Upload each reference; one fragment per successful upload.
 
     ``force_document`` (Hermes' ``[[as_document]]``) sends every file as a
     ``file`` fragment, so an image arrives as a download, not inline.
+    ``policy_dropped`` records references rejected by policy, including redirects,
+    so callers can distinguish them from upload failures.
     """
     if not urls:
         return []
@@ -352,15 +378,19 @@ async def upload_outbound_media(
     fragments: list[dict[str, object]] = []
     for raw_url in urls:
         url = normalize_outbound_media_reference(raw_url)
-        if not media_reference_allowed(raw_url, chat_id):
-            logger.warning(
-                "clawchat outbound local media dropped name=%s",
-                Path(unquote(url).replace("\\", "/")).name,
-            )
+        if not _is_remote_url(url) and not local_attachment_allowed(chat_id):
+            if policy_dropped is not None:
+                policy_dropped.append(raw_url)
+            logger.warning("clawchat outbound local media dropped name=%s", _media_log_name(url))
             continue
         try:
             if _is_remote_url(url):
-                loaded = await asyncio.to_thread(_load_remote_media, url)
+                if local_attachment_allowed(chat_id):
+                    loaded = await asyncio.to_thread(_load_remote_media, url)
+                else:
+                    loaded = await asyncio.to_thread(
+                        _load_remote_media, url, lambda target: remote_media_allowed(target, chat_id)
+                    )
             else:
                 loaded = await asyncio.to_thread(
                     _load_local_media, url, media_local_roots
@@ -383,21 +413,26 @@ async def upload_outbound_media(
                     "name": loaded.filename,
                 }
             )
+        except RemoteMediaRejected:
+            if policy_dropped is not None:
+                policy_dropped.append(raw_url)
+            logger.warning("clawchat outbound remote media dropped name=%s", _media_log_name(url))
+            continue
         except Exception as exc:  # noqa: BLE001
             # Do not drop media silently — surface the failure so an operator
             # can see why a referenced attachment never made it onto the wire.
             if _is_uploaded_media_url(url):
                 logger.warning(
                     "clawchat outbound media upload failed; reusing existing url=%s error=%s",
-                    url,
-                    exc,
+                    urlunparse(urlparse(url)._replace(query="", fragment="")),
+                    type(exc).__name__,
                 )
                 fragments.append(_uploaded_media_fragment(url))
             else:
                 logger.warning(
                     "clawchat outbound media dropped name=%s error=%s",
-                    Path(unquote(url).replace("\\", "/")).name,
-                    str(exc) if _is_remote_url(url) else type(exc).__name__,
+                    _media_log_name(url),
+                    type(exc).__name__,
                 )
             continue
     return fragments

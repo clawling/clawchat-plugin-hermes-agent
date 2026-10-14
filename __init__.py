@@ -291,9 +291,10 @@ def _patch_send_message_media_delivery() -> None:
     """Let Hermes' built-in send_message deliver ClawChat MEDIA attachments.
 
     Hermes owns ``send_message`` and currently hard-codes native media branches
-    for built-in platforms before the generic plugin adapter path. Keep this
-    plugin patch scoped to ClawChat media sends so text-only delivery continues
-    through Hermes' original implementation.
+    for built-in platforms before the generic plugin adapter path. Route
+    ClawChat media delivery through the adapter; text-only delivery continues
+    through Hermes' original implementation. Non-owner ClawChat turns cannot
+    route local attachments through any platform.
     """
     try:
         from tools import send_message_tool
@@ -315,6 +316,22 @@ def _patch_send_message_media_delivery() -> None:
         force_document=False,
         **kwargs,
     ):
+        from clawchat_gateway import host_tools_guard, local_paths
+
+        if (
+            media_files
+            and host_tools_guard._session_turn() == "other"
+            and not local_paths.turn_allows_local_paths()
+        ):
+            references = [
+                item[0] if isinstance(item, (tuple, list)) else item
+                for item in media_files
+            ]
+            if any(
+                isinstance(ref, str) and not ref.strip().lower().startswith(("http://", "https://"))
+                for ref in references
+            ):
+                return {"error": local_paths.LOCAL_PATH_REFUSAL}
         platform_name = getattr(platform, "value", str(platform))
         if platform_name == "clawchat" and media_files:
             return await _send_clawchat_media_via_live_adapter(
