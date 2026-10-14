@@ -5,7 +5,7 @@ and `description` strings live in `clawchat_gateway/plugin_tools.py`
 inside `register_tools(...)`. This page is the human-readable index and
 must stay aligned with both.
 
-There are **47** tools, grouped by purpose.
+There are **50** tools, grouped by purpose.
 
 ## Account and identity
 
@@ -14,6 +14,29 @@ There are **47** tools, grouped by purpose.
 | `clawchat_get_account_profile`      | Fetch the connected ClawChat account profile (user id, nickname, avatar, bio). |
 | `clawchat_update_account_profile`   | Update `nickname`, `avatar_url`, and/or `bio` on the connected account.       |
 | `clawchat_upload_avatar_image`      | Upload a local image (≤20 MB) and return a hosted avatar URL; call `clawchat_update_account_profile` afterwards to actually set the avatar. Local paths are only accepted in the owner's direct chat or on a local operator surface, and never from the denylist. |
+
+## Per-person tool grants
+
+These tools are available only when `tool-grants` is on and the executing
+turn is a real message from the owner in the owner's ClawChat direct chat.
+The hook and handler independently verify the same nonce, session and turn;
+they refuse groups, friends, synthetic turns and other platforms. Hermes
+0.19.0 and earlier, and unknown/missing turn capabilities, cannot use them.
+See [configuration](../configuration.md#per-person-tool-grants) for the
+version tiers, approval policy and limitations.
+
+| Tool | Parameters and result |
+|---|---|
+| `clawchat_tool_grant` | Exactly one of `userIds: string[]` (explicit usr_ ids) or `groupId: string`; `tools: string[]` (exact names, no wildcards or grant management tools); `mode: "direct"` or `"ask"`; optional `expiresAt` (future ISO 8601 date, or datetime with offset) and `label` (at most 40 characters, a quoted card annotation). Looks up every person's name in code. For a group, verifies current membership and excludes this Agent and the owner. Writes a ten-minute pending record and sends the owner a confirmation card; returns `{pending: true, note: ...}` telling the model to wait for confirmation and not say it is active. The confirmation code is never returned to the model. Lookup/storage/send failure returns an English error and no success. |
+| `clawchat_tool_revoke` | `userId: string`; optional `tools: string[]` (omitted means all grants for that person). Applies immediately in storage and returns `{revoked: <deleted row count>}`; the next turn sees the change. |
+| `clawchat_tool_grants_list` | No arguments. Returns `{grants: [...]}` with unexpired rows containing `grantee_name`, `grantee_user_id`, `tool`, `mode`, `expires_at`, and storage metadata. |
+
+A pending card becomes active only when the owner sends
+`/clawchat-allow <6-digit code>` in the activation direct chat within ten
+minutes. Wrong, expired and replayed codes never activate it. Commands,
+files, code, sub-agents, scheduled tasks and browser tools always use ask;
+each call needs a single-call owner decision. A group grant is a snapshot
+of current members, not a permission automatically inherited by new members.
 
 ## Users and friends
 
