@@ -1214,9 +1214,11 @@ async def test_unbounded_refresh_retry_suspends_when_source_stays_unreadable(sto
     logout.assert_not_called()
 
 
-@pytest.mark.parametrize("adopted", [False, True])
-async def test_late_permanent_preserves_new_activation_and_session(stores, monkeypatch, caplog, adopted):
+@pytest.mark.parametrize("adopted,rotation", [(False, "pair"), (True, "pair"), (True, "refresh")])
+async def test_late_permanent_preserves_new_activation_and_session(stores, monkeypatch, caplog, adopted, rotation):
     cfg, fresh = _cfg(), _cfg(fresh=True)
+    if rotation == "refresh":
+        fresh = replace(cfg, refresh_token=fresh.refresh_token)
     _seed(stores, cfg)
     conn = _conn(monkeypatch, cfg)
     assert conn._load_startup_activation_credentials()
@@ -1241,12 +1243,15 @@ async def test_late_permanent_preserves_new_activation_and_session(stores, monke
     with caplog.at_level("INFO", logger="clawchat_gateway.connection"):
         try:
             await asyncio.wait_for(started.wait(), timeout=2)
-            if adopted:
+            if adopted and rotation == "pair":
                 _delete(stores)
                 assert await conn._recheck_activation_source() == "revoked"
             _seed(stores, fresh)
             if adopted:
-                assert await conn._wait_for_activation_credentials()
+                if rotation == "pair":
+                    assert await conn._wait_for_activation_credentials()
+                else:
+                    assert await conn._recheck_activation_source() == "changed"
                 await conn._set_state(ConnectionState.READY)
                 conn._ws = _Socket()
             socket = conn._ws
@@ -1266,9 +1271,11 @@ async def test_late_permanent_preserves_new_activation_and_session(stores, monke
     assert stores.get_revoked_refresh_fingerprint(platform="hermes", account_id="default") is None
     assert "refresh_result_discarded" in caplog.text and "auth_logout" not in caplog.text
     logout.assert_not_called()
+    assert conn._refresh_manager._rejected_credentials is None
     if adopted:
         assert old_socket.closes >= 1
-        # The manager's old-token latch must not block a request for the new token.
+        # Isolate the rejected-pair latch from the unchanged interval floor.
+        conn._refresh_manager._min_interval = 0
         assert (await conn.reactive_refresh()).status == "success"
         assert calls == [cfg.refresh_token, fresh.refresh_token]
 
@@ -1344,4 +1351,196 @@ async def test_late_hello_fail_for_superseded_attempt_keeps_new_activation(store
     assert conn.config == fresh and not conn._auth_failed
     assert conn._rejected_activation_token is None
     assert conn._load_startup_activation_credentials() and conn.config == fresh
+    refresh.assert_not_called()
+
+
+@pytest.mark.parametrize("fail_at", [1, 2])
+async def test_permanent_with_one_callback_read_failure_stops_reconnect(stores, monkeypatch, fail_at):
+    cfg = _cfg()
+    _seed(stores, cfg)
+    conn = _conn(monkeypatch, cfg)
+    reader = stores.get_activation_credentials
+    reads, calls, sockets = [], [], []
+    logout = conn._on_auth_logout = AsyncMock()
+
+    def read(**kwargs):
+        reads.append(True)
+        if len(reads) == fail_at:
+            raise RuntimeError("test one credential read failure")
+        return reader(**kwargs)
+
+    class Client:
+        async def auth_refresh(self, **_kwargs):
+            calls.append(True)
+            monkeypatch.setattr(stores, "get_activation_credentials", read)
+            raise ClawChatApiError("auth", "test revoked", status=401, code=10003)
+
+    async def connect(*_args, **_kwargs):
+        assert not sockets, "adopted permanent must stop stale-token reconnects"
+        socket = _Socket(reason="authentication failed")
+        sockets.append(socket)
+        return socket
+
+    async def poll(delay):
+        assert delay == connection.ACTIVATION_CREDENTIAL_POLL_INTERVAL_SECONDS
+        assert conn._state == ConnectionState.AUTH_FAILED and conn._auth_failed
+        raise _PollReached
+
+    monkeypatch.setattr(conn, "_build_refresh_client", Client)
+    monkeypatch.setattr(connection, "_ws_connect", connect)
+    monkeypatch.setattr(connection.asyncio, "sleep", poll)
+    with pytest.raises(_PollReached):
+        await asyncio.wait_for(conn._supervisor(), timeout=2)
+    assert calls == [True] and len(sockets) == 1 and sockets[0].closes >= 1
+    assert not conn.config.token and not conn.config.refresh_token
+    assert conn._rejected_activation_token == cfg.token
+    assert conn._refresh_manager._rejected_credentials == (cfg.token, cfg.refresh_token)
+    assert conn._refresh_manager.logged_out and conn._credential_read_failures == 0
+    assert not conn._activation_source_suspended
+    assert reader(platform="hermes", account_id="default") is None
+    logout.assert_awaited_once()
+
+
+@pytest.mark.parametrize("discard_at", ["rejection", "logout"])
+async def test_discarded_permanent_leaves_no_pair_latch(discard_at):
+    calls = []
+
+    class Client:
+        async def auth_refresh(self, **_kwargs):
+            calls.append(True)
+            if len(calls) == 1:
+                raise ClawChatApiError("auth", "test revoked", status=401, code=10003)
+            return RefreshResult("next-access", "next-refresh")
+
+    rejection = AsyncMock(return_value=discard_at != "rejection")
+    logout = AsyncMock(return_value=discard_at != "logout")
+    persist = AsyncMock(return_value=True)
+    manager = token_refresh.RefreshManager(
+        build_client=Client, persist_tokens=persist, persist_logout=logout,
+        persist_rejection=rejection, device_id_provider=lambda: "hermes-test-device",
+        min_interval_seconds=0, max_transient_retries=0,
+    )
+    assert (await manager.refresh(access_token="same-access", refresh_token="same-refresh")).status == "skipped"
+    assert manager._rejected_credentials is None and not manager.logged_out
+    if discard_at == "rejection":
+        logout.assert_not_awaited()
+    else:
+        logout.assert_awaited_once()
+    # No reset_latch: the rejected result must leave the same pair retryable.
+    assert (await manager.refresh(access_token="same-access", refresh_token="same-refresh")).status == "success"
+    assert calls == [True, True]
+    persist.assert_awaited_once_with("next-access", "next-refresh")
+
+
+@pytest.mark.parametrize("replacement", ["access", "refresh", "reset"])
+async def test_adopted_permanent_latches_only_its_pair(replacement):
+    calls = []
+
+    class Client:
+        async def auth_refresh(self, **kwargs):
+            calls.append(kwargs["refresh_token"])
+            if len(calls) == 1:
+                raise ClawChatApiError("auth", "test revoked", status=401, code=10003)
+            return RefreshResult("next-access", "next-refresh")
+
+    manager = token_refresh.RefreshManager(
+        build_client=Client, persist_tokens=AsyncMock(return_value=True),
+        persist_logout=AsyncMock(return_value=True), persist_rejection=AsyncMock(return_value=True),
+        device_id_provider=lambda: "hermes-test-device",
+        min_interval_seconds=0, max_transient_retries=0,
+    )
+    assert (await manager.refresh(access_token="same-access", refresh_token="old-refresh")).status == "permanent"
+    assert manager._rejected_credentials == ("same-access", "old-refresh") and manager.logged_out
+    assert (await manager.refresh(access_token="same-access", refresh_token="old-refresh")).status == "skipped"
+    assert calls == ["old-refresh"]
+    access, refresh = "same-access", "old-refresh"
+    if replacement == "access":
+        access = "new-access"
+    elif replacement == "refresh":
+        refresh = "new-refresh"
+    else:
+        manager.reset_latch()
+        assert manager._rejected_credentials is None and not manager.logged_out
+    assert (await manager.refresh(access_token=access, refresh_token=refresh)).status == "success"
+    assert calls == ["old-refresh", refresh] and manager._rejected_credentials is None
+
+
+async def test_read_recovery_does_not_retain_discarded_permanent_latch(stores, monkeypatch):
+    cfg, fresh = _cfg(), _cfg(fresh=True)
+    _seed(stores, cfg)
+    conn = _conn(monkeypatch, cfg)
+    assert conn._load_startup_activation_credentials()
+    conn._refresh_manager._min_interval = 0
+    reader = stores.get_activation_credentials
+    calls = []
+
+    class Client:
+        async def auth_refresh(self, **_kwargs):
+            calls.append(True)
+            if len(calls) == 1:
+                _seed(stores, fresh)
+                raise ClawChatApiError("auth", "test revoked", status=401, code=10003)
+            return RefreshResult("next-access", "next-refresh")
+
+    monkeypatch.setattr(conn, "_build_refresh_client", Client)
+    assert (await conn.reactive_refresh()).status == "skipped"
+    assert conn.config == cfg and not conn._refresh_manager.logged_out
+    assert conn._refresh_manager._rejected_credentials is None
+
+    def fail_read(**_kwargs):
+        raise RuntimeError("test one credential read failure")
+
+    monkeypatch.setattr(stores, "get_activation_credentials", fail_read)
+    assert await conn._recheck_activation_source() == "unreadable"
+    assert conn._credential_read_failures == 1
+    _seed(stores, cfg)
+    monkeypatch.setattr(stores, "get_activation_credentials", reader)
+    # The row matches memory, so a successful read does not call reset_latch.
+    assert await conn._recheck_activation_source() == "ok" and conn._credential_read_failures == 0
+    assert (await conn.reactive_refresh()).status == "success" and calls == [True, True]
+
+
+@pytest.mark.parametrize("recovery", ["adopt", "generation"])
+async def test_terminal_hello_fail_does_not_clear_activation_adopted_in_state_callback(stores, monkeypatch, recovery):
+    cfg, fresh = replace(_cfg(), refresh_token=""), _cfg(fresh=True)
+    _seed(stores, cfg)
+    conn = _conn(monkeypatch, cfg)
+    assert conn._load_startup_activation_credentials()
+    refresh = _no_refresh(monkeypatch, conn)
+    conn._connection_credential_generation = conn._credential_generation
+    conn._connection_token = cfg.token
+    conn._state = ConnectionState.HANDSHAKING
+    conn._pending_connect_id = "req-old"
+    old_wait = conn._hello_wait = asyncio.get_running_loop().create_future()
+    old_socket = conn._ws = _Socket()
+    new_wait, new_socket = asyncio.get_running_loop().create_future(), _Socket()
+    callbacks = []
+
+    async def state_changed(state):
+        if state != ConnectionState.AUTH_FAILED:
+            return
+        callbacks.append(state)
+        assert not conn.config.token and not conn.config.refresh_token
+        assert conn._rejected_activation_token == cfg.token
+        _seed(stores, fresh)
+        if recovery == "adopt":
+            assert conn._load_startup_activation_credentials()
+            conn._hello_wait, conn._ws = new_wait, new_socket
+            await conn._set_state(ConnectionState.READY)
+        else:
+            conn._credential_generation += 1
+
+    conn._on_state_change = state_changed
+    await conn._maybe_finish_handshake({
+        "event": "hello-fail", "trace_id": "req-old",
+        "payload": {"reason": "authentication failed"},
+    })
+    assert callbacks == [ConnectionState.AUTH_FAILED]
+    assert old_wait.result() is False and old_socket.closes >= 1
+    if recovery == "adopt":
+        assert conn.config == fresh and conn._state == ConnectionState.READY
+        assert not new_wait.done() and new_socket.closes == 0
+    assert conn._rejected_activation_token != fresh.token and not conn._stopping
+    assert conn._load_startup_activation_credentials() and conn.config == fresh
+    assert conn._using_activation_db_credentials and not conn._auth_failed
     refresh.assert_not_called()

@@ -549,6 +549,7 @@ class ClawChatConnection:
 
     async def _recheck_activation_source(
         self, *, adopt_changes: bool = True, include_bootstrap: bool = False,
+        expected_access_token: str | None = None,
     ) -> Literal["ok", "changed", "revoked", "unreadable"]:
         if not self._using_activation_db_credentials and not include_bootstrap:
             return "ok"
@@ -573,12 +574,16 @@ class ClawChatConnection:
                 await self._revoke_activation_credentials()
                 return "revoked"
             return "ok"
-        changed = (
-            credentials.access_token != self._cfg.token
-            or (credentials.refresh_token or "") != self._cfg.refresh_token
-            or credentials.user_id != self._cfg.user_id
-            or credentials.owner_user_id != self._cfg.owner_user_id
-        )
+        if expected_access_token is not None:
+            # Permanent callbacks use the same access-token condition as logout's CAS.
+            changed = credentials.access_token != expected_access_token
+        else:
+            changed = (
+                credentials.access_token != self._cfg.token
+                or (credentials.refresh_token or "") != self._cfg.refresh_token
+                or credentials.user_id != self._cfg.user_id
+                or credentials.owner_user_id != self._cfg.owner_user_id
+            )
         was_suspended = self._activation_source_suspended
         if changed:
             if not adopt_changes:
@@ -850,8 +855,16 @@ class ClawChatConnection:
         ):
             self._log_discarded_refresh("credentials_changed")
             return False
-        status = await self._recheck_activation_source(adopt_changes=False, include_bootstrap=True)
-        if status != "ok":
+        status = await self._recheck_activation_source(
+            adopt_changes=False, include_bootstrap=True, expected_access_token=expected.token,
+        )
+        if (
+            self._auth_failed
+            or self._activation_source_suspended
+            or self._cfg.token != expected.token
+            or self._cfg.refresh_token != expected.refresh_token
+            or status not in ("ok", "unreadable")
+        ):
             self._log_discarded_refresh(f"activation_source_{status}")
             return False
         return True
@@ -2406,11 +2419,6 @@ class ClawChatConnection:
             self._auth_failed = True
             if not using_activation_db_credentials:
                 self._stopping = True
-            await self._set_state(ConnectionState.AUTH_FAILED)
-            self._finish_current_connection(
-                ConnectionState.AUTH_FAILED.value,
-                error=reason,
-            )
             if using_activation_db_credentials:
                 self._rejected_activation_token = self._cfg.token or None
                 self._cfg = replace(
@@ -2422,6 +2430,12 @@ class ClawChatConnection:
                 )
                 self._using_activation_db_credentials = False
                 self._auth_failed = False
+            self._finish_current_connection(
+                ConnectionState.AUTH_FAILED.value,
+                error=reason,
+            )
+            hello_wait, ws = self._hello_wait, self._ws
+            await self._set_state(ConnectionState.AUTH_FAILED)
             logger.info(
                 format_ws_log(
                     event="auth_failed",
@@ -2442,11 +2456,11 @@ class ClawChatConnection:
                     ],
                 )
             )
-            if self._hello_wait is not None and not self._hello_wait.done():
-                self._hello_wait.set_result(False)
-            if self._ws is not None:
+            if hello_wait is not None and not hello_wait.done():
+                hello_wait.set_result(False)
+            if ws is not None:
                 try:
-                    await self._ws.close()
+                    await ws.close()
                 except Exception:  # noqa: BLE001
                     pass
             return

@@ -1,7 +1,7 @@
 """ClawChat access-token refresh state machine (token-refresh spec §A/§B/§C).
 
 This module owns the *policy* of refreshing the ClawChat access token: when to
-fire (proactive expiry margin), single-flight de-duplication, the rejected-token
+fire (proactive expiry margin), single-flight de-duplication, the rejected-pair
 latch, the minimum-interval floor, transient-vs-permanent classification, and
 the strict persist-before-swap ordering mandated by the rotation hazard (§0).
 
@@ -150,9 +150,9 @@ class RefreshManager:
         self._max_transient_retries = max_transient_retries
         self._lock = asyncio.Lock()
         self._in_flight: asyncio.Future[RefreshOutcome] | None = None
-        # §A.3 rejected-token latch: the access token a *permanent* refresh was
-        # already attempted for; never re-attempt for the same dead token.
-        self._rejected_token: str | None = None
+        # §A.3 latch only an adopted permanent failure's credential pair.
+        # A replacement refresh token can be used with the same access token.
+        self._rejected_credentials: tuple[str, str] | None = None
         # §A.3 minimum-interval floor: the access token of the LAST attempt and
         # the monotonic time it ran. The floor applies only between attempts of
         # the SAME token, so a first attempt on a newly-rotated/different token
@@ -166,8 +166,8 @@ class RefreshManager:
         return self._logged_out
 
     def reset_latch(self) -> None:
-        """Clear the rejected-token latch (call when a *new* token is loaded)."""
-        self._rejected_token = None
+        """Clear the rejected-pair latch when new credentials are loaded."""
+        self._rejected_credentials = None
         self._logged_out = False
 
     async def refresh(
@@ -183,8 +183,8 @@ class RefreshManager:
         """
         if not refresh_token:
             return RefreshOutcome(status="skipped", error="no refresh token")
-        # Rejected-token latch: do not re-attempt for a token already proven dead.
-        if access_token and access_token == self._rejected_token:
+        # Do not re-attempt for the same pair already proven dead.
+        if (access_token, refresh_token) == self._rejected_credentials:
             return RefreshOutcome(status="skipped", error="rejected token unchanged")
         # In-flight dedupe.
         in_flight = self._in_flight
@@ -194,7 +194,7 @@ class RefreshManager:
             in_flight = self._in_flight
             if in_flight is not None and not in_flight.done():
                 return await asyncio.shield(in_flight)
-            if access_token and access_token == self._rejected_token:
+            if (access_token, refresh_token) == self._rejected_credentials:
                 return RefreshOutcome(status="skipped", error="rejected token unchanged")
             # Minimum-interval floor: a reconnect storm must not become a refresh
             # storm. Honor it only between attempts of the SAME token — a first
@@ -246,8 +246,7 @@ class RefreshManager:
             )
         except ClawChatApiError as exc:
             if is_permanent_refresh_error(exc):
-                # §B / §C: permanent → latch + auto-logout (keep identity).
-                self._rejected_token = access_token or None
+                # §B / §C: adopted permanent → latch + auto-logout (keep identity).
                 logger.warning(
                     "clawchat token refresh permanent failure code=%s: %s",
                     exc.code,
@@ -264,6 +263,7 @@ class RefreshManager:
                         return RefreshOutcome(status="skipped", error="permanent refresh discarded")
                 except Exception:  # noqa: BLE001
                     logger.warning("clawchat logout persistence failed", exc_info=True)
+                self._rejected_credentials = (access_token, refresh_token)
                 self._logged_out = True
                 return RefreshOutcome(status="permanent", error=str(exc))
             # Retries were exhausted or stopped by the credential-source guard.
@@ -281,7 +281,7 @@ class RefreshManager:
             # escalates to permanent, per §B transient→permanent rule.
             logger.error("clawchat token refresh persisted=False after rotation")
             return RefreshOutcome(status="transient", error="persist failed")
-        self._rejected_token = None
+        self._rejected_credentials = None
         logger.info("clawchat token refresh success (rotated, persisted)")
         return RefreshOutcome(
             status="success",

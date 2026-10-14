@@ -490,12 +490,21 @@ retained credentials.
 Permanent-failure rejection and logout callbacks are bound to the pair that
 started the request, just like successful token persistence. If that pair no
 longer matches memory, the connection is already auth-failed/suspended, or the
-SQLite row has changed, the callbacks discard the late result and log INFO
+SQLite row's access token has changed, the callbacks discard the late result and log INFO
 `refresh_result_discarded action=ignore`. They do not clear the newer row or
 memory, write a revoked marker or send auto-logout. Logout's SQLite clear also
-requires the expected access token, so a row changed before that write is
-preserved. The refresh manager's rejected-token latch applies to the old token;
-the new activation can still refresh and connect.
+requires the expected access token, preserving a row whose access token changes
+before that write. A credential read failure below the suspension limit still permits
+permanent-failure handling when the request's pair matches memory; the SQLite
+clear remains conditional on its expected access token. Read failures still
+count toward the same suspension limit. The refresh manager latches the
+`(access_token, refresh_token)` pair only after both permanent-failure callbacks
+accept the result. A discarded result leaves no new rejection latch or logout
+flag, and a replacement refresh token is not rejected merely because its
+access token is unchanged. The existing refresh interval floor still applies.
+Terminal `hello-fail` credential changes finish before awaiting state observers,
+so an observer adopting a new activation cannot have it cleared by the old
+failure's continuation.
 
 Persistence still runs synchronously on the event loop,
 intentionally keeping the credential guard and write in the same task without
