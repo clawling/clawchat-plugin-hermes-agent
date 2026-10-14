@@ -854,6 +854,12 @@ async def handle_clawchat_tool_grants_list(args, **kw):
     return _tool_result(await manage_tool_grants("list", args, session_id=kw.get("session_id", "")))
 
 def register_tools(ctx) -> None:
+    from clawchat_gateway.host_tools_guard import GRANT_MANAGEMENT_TOOLSET, _tool_grants_enabled
+
+    try:
+        grants_enabled = _tool_grants_enabled()
+    except Exception:  # noqa: BLE001 - retain owner discovery; execution still checks policy
+        grants_enabled = True
     grant_tools = {
         "type": "array", "items": {"type": "string"}, "minItems": 1,
         "description": "Exact tool names; no wildcards or grant management tools.",
@@ -872,9 +878,9 @@ def register_tools(ctx) -> None:
         ("clawchat_tool_grants_list", handle_clawchat_tool_grants_list,
          "List unexpired tool grants by person, including names, ids, tools, modes and expiry.", {}, []),
     ]
-    for name, handler, description, properties, required in schemas:
+    for name, handler, description, properties, required in (schemas if grants_enabled else []):
         ctx.register_tool(
-            name, "clawchat",
+            name, GRANT_MANAGEMENT_TOOLSET,
             {"name": name, "description": "Only available on a real owner message in the owner's ClawChat direct chat. " + description,
              "parameters": {"type": "object", "additionalProperties": False,
                             "properties": properties, "required": required}},

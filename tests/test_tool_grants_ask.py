@@ -1,5 +1,8 @@
 """Ask grants require a delivered owner card and consent for this call only."""
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from inspect import getclosurevars
+from threading import Barrier, Event, Lock
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -63,6 +66,98 @@ def ask(host):
         directive = call(turn_id="t", args={"path": "/tmp/visible-only-to-owner"})
     turns.release_turn(s.nonce)
     return directive
+
+
+@pytest.mark.parametrize("supports_approve", [False, True], ids=["pre-0.21", "0.21+"])
+@pytest.mark.parametrize("policy", ["off", "approve"])
+@pytest.mark.parametrize("mode", [None, "direct", "ask"])
+def test_open_tool_ask_precedes_ordinary_access(host, approval, monkeypatch, supports_approve, policy, mode):
+    monkeypatch.setattr(guard, "_config_extra", lambda: {"non-owner-host-tools": policy})
+    monkeypatch.setattr(guard, "_host_supports_approve", lambda: supports_approve)
+    monkeypatch.setattr(guard, "_registry_toolset", lambda _: "web")
+    s = snapshot(grants={"web_search": mode} if mode else {})
+    turns.bind_turn(s.nonce, "s", "t")
+    try:
+        with host(**context(s)):
+            result = call("web_search", turn_id="t", args={"query": "weather"})
+        if mode != "ask":
+            assert result is None
+        elif supports_approve:
+            assert result["action"] == "approve"
+            assert result["rule_key"].startswith("clawchat-grant-ask:")
+            assert "web_search" in result["message"]
+        else:
+            assert result == {"action": "block", "message": GRANT_ASK_DENIED_MESSAGE}
+    finally:
+        turns.release_turn(s.nonce)
+
+
+@pytest.mark.parametrize("failure", ["bypass", "directive_error", "gate_unavailable"])
+def test_open_tool_unreliable_ask_fails_closed(host, approval, monkeypatch, failure):
+    monkeypatch.setattr(guard, "_registry_toolset", lambda _: "web")
+    if failure == "bypass":
+        approval._yolo_active = lambda: True
+    elif failure == "directive_error":
+        monkeypatch.setattr(guard, "_ask_directive", lambda *_: (_ for _ in ()).throw(RuntimeError()))
+    else:
+        del approval.list_gateway_approvals
+    s = snapshot(grants={"web_search": "ask"})
+    turns.bind_turn(s.nonce, "s", "t")
+    try:
+        with host(**context(s)):
+            assert call("web_search", turn_id="t") == {"action": "block", "message": GRANT_ASK_DENIED_MESSAGE}
+    finally:
+        turns.release_turn(s.nonce)
+
+
+def test_concurrent_first_gate_install_has_one_layer_and_one_consent(approval, monkeypatch):
+    start = Barrier(2)
+    second_attempt = Event()
+
+    class ContendedLock:
+        def __init__(self):
+            self.lock = Lock()
+            self.counter_lock = Lock()
+            self.attempts = 0
+
+        def __enter__(self):
+            with self.counter_lock:
+                self.attempts += 1
+                if self.attempts == 2:
+                    second_attempt.set()
+            self.lock.acquire()
+            if not second_attempt.wait(5):
+                self.lock.release()
+                raise AssertionError("Both installers must reach the installation lock")
+
+        def __exit__(self, *_):
+            self.lock.release()
+
+    lock = ContendedLock()
+    monkeypatch.setattr(guard, "_GRANT_APPROVAL_GATE_LOCK", lock)
+    originals = {name: getattr(approval, name) for name in
+                 ("request_tool_approval", "_persist_choice", "approve_session", "approve_permanent")}
+
+    def install():
+        start.wait(timeout=5)
+        return guard._install_grant_approval_gate()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: install(), range(2)))
+    assert results == [True, True] and lock.attempts == 2
+    for name, captured in (("request_tool_approval", "original"), ("_persist_choice", "persist"),
+                           ("approve_session", "approve_session"), ("approve_permanent", "approve_permanent")):
+        assert getclosurevars(getattr(approval, name)).nonlocals[captured] is originals[name]
+    gate = approval.request_tool_approval
+    assert guard._install_grant_approval_gate() and approval.request_tool_approval is gate
+    record = turns.register_approval("sk", CHAT, TOOL, "one call", 600)
+    assert turns.route_approval("sk", CHAT, record.description) is record
+    turns.mark_approval_delivered(record.nonce)
+    assert turns.approval_decision("sk", "once") == "once"
+    approval.outcome = {"approved": True}
+    kwargs = {"rule_key": "clawchat-grant-ask:" + record.nonce}
+    assert gate(TOOL, record.description, **kwargs)["approved"]
+    assert not gate(TOOL, record.description, **kwargs)["approved"]
 
 
 @pytest.mark.parametrize("bypass", ["yolo", "off", "session_allowlist", "permanent_allowlist", "unreadable", "config_read_error"])
