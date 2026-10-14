@@ -4452,14 +4452,26 @@ class ClawChatAdapter(BasePlatformAdapter):
         if self._grant_dispatching.get(key, 0) > (1 if ignore_dispatch else 0):
             return True
         active = getattr(self, "_active_sessions", {})
+        # Input the host still holds in its pending or busy-text debounce
+        # buffers can merge into the next event, so it is not idle either.
+        held = [
+            store for store in (getattr(self, "_pending_messages", None), getattr(self, "_text_debounce", None))
+            if isinstance(store, dict)
+        ]
         if isinstance(active, dict):
             if any(chat_id in str(host_key).split(":") and (
                 user_id in str(host_key).split(":") or user_id in ("__direct__", GROUP_SHARED_SESSION_USER_ID)
-            ) for host_key in list(active)):
+            ) for store in (active, *held) for host_key in list(store)):
                 return True
         # If a host deferred processing without a guard, revoke its snapshot
         # before admitting another event. A pending merge then has no authority.
         self._expire_grant_session(key)
+        if isinstance(active, dict) and not self._grant_dispatching.get(key, 0):
+            from clawchat_gateway.turn_grants import clear_unverified_input
+
+            # Ignoring this dispatch for admission is not proof of idle.
+            # Timeouts and nonce release alone never clear an in-flight input.
+            clear_unverified_input(self._account_id(), key)
         return False
 
     def _verified_owner_inbound(self, inbound: InboundMessage) -> bool:
@@ -4544,17 +4556,23 @@ class ClawChatAdapter(BasePlatformAdapter):
         return True
 
     async def _handle_inbound(self, inbound: InboundMessage) -> None:
+        key = self._grant_session_key(inbound)
+        if self._verified_owner_inbound(inbound):
+            # Owner input stays immediate; idle only determines verification.
+            self._grant_session_busy(key)
         self._admit_owner_direct_inbound(inbound)
         if await self._consume_grant_confirmation(inbound):
             return
         if self._refuses_turn(inbound):
             return
-        if self._is_owner_turn(inbound):
-            await self._handle_inbound_now(inbound)
+        if not self._is_owner_turn(inbound) and self._hold_granted_inbound(inbound, from_dispatch=True):
             return
-        if self._hold_granted_inbound(inbound, from_dispatch=True):
-            return
-        key = self._grant_session_key(inbound)
+        if not self._verified_owner_inbound(inbound):
+            from clawchat_gateway.turn_grants import mark_unverified_input
+
+            # The host can await before installing its guard, then merge this
+            # input into another nonce without ever completing its own event.
+            mark_unverified_input(self._account_id(), key)
         self._grant_dispatching[key] = self._grant_dispatching.get(key, 0) + 1
         self._grant_dispatching_grants[key] = (
             self._grant_dispatching_grants.get(key, False) or bool(self._turn_grant_values(inbound)[1])
@@ -5070,6 +5088,9 @@ class ClawChatAdapter(BasePlatformAdapter):
                 await self._settle_held_status_sends(chat_id)
             except Exception:  # noqa: BLE001
                 logger.warning("clawchat held status settle failed chat_id=%s", chat_id, exc_info=True)
+            for key in list(self._grant_sessions):
+                if key.split(":", 1)[0] == chat_id:
+                    self._grant_session_busy(key)
 
     def _after_host_turn(self, event: Any) -> None:
         raw = getattr(event, "raw_message", None)

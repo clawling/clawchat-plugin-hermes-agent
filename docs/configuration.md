@@ -998,8 +998,13 @@ turn in a non-owner conversation, then recomputes the intersection for the
 queued batch. The owner's direct chat admits messages immediately, including
 approvals and control commands. Any synthetic input or input with a missing
 or different sender revokes owner verification for all live snapshots in that
-session; subsequent management calls in those turns are refused. Real owner
-messages preserve their existing verification. Missing snapshots, read errors
+session and marks unverified input in flight before handing it to the host.
+New snapshots in that session also lack owner verification until an idle check
+finds no active host turn and no plugin dispatch in progress. Completing or
+expiring a nonce alone cannot clear the marker: merged input may never have its
+own completion callback. Real owner messages still reach the host immediately;
+management calls are refused during this interval, and later owner messages
+regain verification after the session is idle. Missing snapshots, read errors
 and expired grants add no authority.
 
 Known limits:

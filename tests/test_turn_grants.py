@@ -99,3 +99,30 @@ def test_context_reader_never_uses_environment(monkeypatch):
     with bind(HERMES_SESSION_MESSAGE_ID="bound-nonce"):
         assert turns.session_context_value("HERMES_SESSION_MESSAGE_ID") == "bound-nonce"
     assert turns.session_context_value("HERMES_SESSION_MESSAGE_ID") == ""
+
+
+def test_unverified_input_revokes_all_nonces_and_blocks_registration_until_cleared():
+    account, key = "usr_agent", "unverified-session"
+    def owner_turn():
+        return turns.register_turn(account_id=account, chat_id="cnv_owner", speakers=(), grants={},
+                                   session_key=key, owner_verified=True)
+    try:
+        first, second = owner_turn(), owner_turn()
+        turns.mark_unverified_input(account, key)
+        assert not turns.get_snapshot(first.nonce).owner_verified
+        assert not turns.get_snapshot(second.nonce).owner_verified
+        assert not owner_turn().owner_verified
+        # Releasing a nonce/session (including admission timeout) cannot prove
+        # that the unverified input retained by the host has been processed.
+        turns.release_turn(first.nonce)
+        turns.release_session(account, key)
+        assert not owner_turn().owner_verified
+        unrelated = turns.register_turn(account_id="another-account", chat_id="cnv_owner", speakers=(),
+                                        grants={}, session_key=key, owner_verified=True)
+        assert unrelated.owner_verified
+        turns.release_turn(unrelated.nonce)
+        turns.clear_unverified_input(account, key)
+        assert owner_turn().owner_verified
+    finally:
+        turns.release_session(account, key)
+        turns.clear_unverified_input(account, key)
