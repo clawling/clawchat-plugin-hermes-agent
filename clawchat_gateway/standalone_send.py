@@ -24,7 +24,7 @@ from clawchat_gateway.connection import (
     HANDSHAKE_TIMEOUT_SECONDS,
     ClawChatConnection,
 )
-from clawchat_gateway.media_runtime import upload_outbound_media
+from clawchat_gateway.media_runtime import media_reference_allowed, upload_outbound_media
 from clawchat_gateway.protocol import build_message_send_event, new_message_id
 
 logger = logging.getLogger(__name__)
@@ -120,11 +120,14 @@ async def standalone_send(
                 media_base_url=cfg.media_base_url,
                 force_document=bool(force_document),
             )
-            if not media_fragments:
+            paths = _media_file_paths(list(media_files))
+            allowed = sum(1 for path in paths if media_reference_allowed(path, target))
+            if len(media_fragments) < allowed or not (media_fragments or text):
                 return {
                     "error": (
-                        "ClawChat standalone send: media upload failed for "
-                        f"{list(media_files)}; message not sent."
+                        "ClawChat standalone send: "
+                        f"{len(media_fragments)}/{len(paths)} attachment(s) sent; "
+                        "message not sent."
                     )
                 }
             fragments.extend(media_fragments)

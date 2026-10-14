@@ -789,8 +789,9 @@ reads the same files the `file` tools do).
 Group turns are narrowed as a whole because a group is one shared session:
 switching its toolset per speaker would rebuild the agent each time the
 owner and someone else alternate. In turns the owner did not start (including
-every group turn), plugin tools refuse local file paths and replies omit local
-attachments, except attachments delivered to the owner's direct chat. Web
+every group turn), plugin tools refuse local file paths and local attachments
+are not sent (a reply delivered after the turn may carry one only into the
+owner's direct chat). Web
 search/extract, skills and the owner's direct chat keep their existing access.
 
 `session_search` goes because it reads every conversation in Hermes' session

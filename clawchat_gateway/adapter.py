@@ -93,6 +93,7 @@ from clawchat_gateway.media_runtime import (
     download_inbound_media,
     infer_media_kind_from_mime,
     normalize_outbound_media_reference,
+    media_reference_allowed,
     upload_outbound_media,
 )
 from clawchat_gateway.mention_autolink import autolink_mentions, has_mention_candidate, mentions_in
@@ -6262,12 +6263,28 @@ class ClawChatAdapter(BasePlatformAdapter):
                 # the media was uploaded synchronously, so a shortfall means the
                 # attachment never reached the media service. Surface it instead
                 # of sending a text-only frame the caller would read as success.
-                requested_media = len(self._extract_media_urls(metadata, kwargs))
+                # A local attachment this conversation may not receive is
+                # dropped by policy, not a failed upload: the text still goes.
+                media_urls = self._extract_media_urls(metadata, kwargs)
+                requested_media = sum(1 for url in media_urls if media_reference_allowed(url, chat_id))
                 delivered_media = sum(
                     1
                     for fragment in fragments
                     if fragment.get("kind") in OUTBOUND_MEDIA_FRAGMENT_KINDS
                 )
+                if (
+                    requested_media < len(media_urls)
+                    and not delivered_media
+                    and (not fragments or self._is_empty_text_response(fragments))
+                ):
+                    logger.warning(
+                        "clawchat outbound local media not sent in this conversation chat_id=%s",
+                        chat_id,
+                    )
+                    return SendResult(
+                        success=False,
+                        error="local attachments are not sent in this conversation",
+                    )
                 if delivered_media < requested_media:
                     logger.warning(
                         "clawchat outbound media upload failed chat_id=%s "
@@ -8361,13 +8378,6 @@ class ClawChatAdapter(BasePlatformAdapter):
         if not media_urls:
             return []
         media_local_roots = self._clawchat_config.media_local_roots
-        if kwargs.get("_clawchat_media_files_validated") is True:
-            local_roots = {
-                str(Path(url).expanduser().resolve().parent)
-                for url in media_urls
-                if urlparse(url).scheme not in {"http", "https"}
-            }
-            media_local_roots = tuple(sorted(local_roots)) or media_local_roots
 
         force_document = any(
             isinstance(carrier, dict) and carrier.get(FORCE_DOCUMENT_METADATA_KEY) is True

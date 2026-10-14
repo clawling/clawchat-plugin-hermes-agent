@@ -185,18 +185,40 @@ def test_owner_tools_accept_ordinary_image(policy, tool):
     assert policy.calls
 
 
-@pytest.mark.parametrize("turn", tuple(TURNS) + ("unbound",))
 @pytest.mark.parametrize("file_url", (False, True), ids=("bare", "file_url"))
-def test_owner_destination_allows_ordinary_attachments_but_drops_denied(policy, turn, file_url):
-    if turn == "unbound":
-        policy.session["HERMES_SESSION_PLATFORM"] = "other_platform"
-    else:
-        set_turn(policy, turn)
+def test_unbound_delivery_to_owner_direct_drops_only_denied(policy, monkeypatch, file_url):
+    monkeypatch.setattr(memory_scope, "_session_context_engaged", lambda: True)
     paths = [policy.home / name for name in ("notes.txt", *FILES[:4])]
     references = [path.as_uri() if file_url else str(path) for path in paths]
     fragments = asyncio.run(outbound(policy, references, OWNER_DM))
     assert [fragment["name"] for fragment in fragments] == ["notes.txt"]
     assert len(policy.calls) == 1
+
+
+@pytest.mark.parametrize("turn", NON_OWNER_TURNS + ("other_platform",))
+@pytest.mark.parametrize("file_url", (False, True), ids=("bare", "file_url"))
+def test_non_owner_turn_cannot_route_attachments_to_owner_direct(policy, turn, file_url):
+    if turn == "other_platform":
+        policy.session["HERMES_SESSION_PLATFORM"] = "other_platform"
+    else:
+        set_turn(policy, turn)
+    path = policy.home / "notes.txt"
+    reference = path.as_uri() if file_url else str(path)
+    assert asyncio.run(outbound(policy, [reference], OWNER_DM)) == []
+    assert policy.calls == []
+    assert local_paths.turn_allows_local_paths() is False
+    assert guard.clawchat_pre_tool_call(tool_name="clawchat_send_file", args={"path": "notes.txt"})["action"] == "block"
+
+
+def test_gateway_in_process_is_not_a_local_surface(policy, monkeypatch):
+    from clawchat_gateway import terminal_send
+
+    assert local_paths.turn_allows_local_paths() is True
+    monkeypatch.setattr(terminal_send, "get_clawchat_sender", lambda: object())
+    assert local_paths.turn_allows_local_paths() is False
+    result = asyncio.run(tools.send_file(OWNER_DM, str(policy.home / "notes.txt")))
+    assert result["message"] == local_paths.LOCAL_PATH_REFUSAL
+    assert policy.calls == []
 
 
 @pytest.mark.parametrize("filename", (
@@ -352,7 +374,7 @@ def test_adapter_passes_delivery_destination(policy, monkeypatch, target):
     from types import MethodType
     from clawchat_gateway import adapter
 
-    set_turn(policy, "group_owner")
+    monkeypatch.setattr(memory_scope, "_session_context_engaged", lambda: True)
     cfg = SimpleNamespace(
         media_local_roots=(), base_url="https://api.example", websocket_url="wss://ws.example",
         token="", media_base_url="",
@@ -379,7 +401,7 @@ def test_adapter_passes_delivery_destination(policy, monkeypatch, target):
 def test_standalone_passes_delivery_destination(policy, monkeypatch, target):
     from clawchat_gateway import standalone_send as standalone
 
-    set_turn(policy, "friend_direct")
+    monkeypatch.setattr(memory_scope, "_session_context_engaged", lambda: True)
     cfg = SimpleNamespace(
         media_local_roots=(), base_url="https://api.example", websocket_url="wss://ws.example",
         token="", media_base_url="",
@@ -427,3 +449,50 @@ def test_hook_leaves_free_text_alone_but_blocks_file_uris(policy, turn):
         tool_name="clawchat_create_moment", args={"text": "file:///tmp/notes.txt"},
     )
     assert result == {"action": "block", "message": local_paths.LOCAL_PATH_REFUSAL}
+
+
+@pytest.mark.parametrize("turn", NON_OWNER_TURNS)
+def test_reply_text_is_kept_when_local_attachment_is_dropped(policy, monkeypatch, turn):
+    from dataclasses import replace
+
+    from clawchat_gateway import adapter as adapter_mod
+
+    set_turn(policy, turn)
+    (policy.home / "config.yaml").write_text("{}\n")
+    (policy.home / ".env").write_text("")
+    chat_id = TURNS[turn][0]
+    a = adapter_mod.ClawChatAdapter({})
+    a._clawchat_config = replace(a._clawchat_config, user_id="usr_agent", owner_user_id=OWNER)
+    frames = []
+
+    async def send_frame(frame, *, wait_for_ack=False, **_kw):
+        frames.append(frame)
+        return True
+
+    async def upload(urls, **kw):
+        return await media_runtime.upload_outbound_media(urls, **{**kw, "upload_file": policy.uploader})
+
+    monkeypatch.setattr(a._connection, "send_frame", send_frame)
+    monkeypatch.setattr(a, "_claim_outbound_message", lambda **_kw: True)
+    monkeypatch.setattr(adapter_mod, "upload_outbound_media", upload)
+    if chat_id == GROUP:
+        a._known_chat_types[GROUP] = "group"
+
+    result = asyncio.run(a.send(
+        chat_id, "hello",
+        metadata={"_clawchat_immediate_media_send": True},
+        media_files=[str(policy.home / "notes.txt")],
+    ))
+    assert result.success
+    assert policy.calls == []
+    fragments = [f for frame in frames for f in (frame.get("payload", {}).get("message", {}).get("body", {}).get("fragments") or [])]
+    assert fragments and all(f.get("kind") == "text" for f in fragments)
+
+    only_attachment = asyncio.run(a.send(
+        chat_id, "",
+        metadata={"_clawchat_immediate_media_send": True},
+        media_files=[str(policy.home / "notes.txt")],
+    ))
+    assert not only_attachment.success
+    assert str(policy.home) not in (only_attachment.error or "")
+

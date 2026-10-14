@@ -21,7 +21,7 @@ from types import SimpleNamespace
 import pytest
 
 from clawchat_gateway import adapter as adapter_mod
-from clawchat_gateway import terminal_send, tools
+from clawchat_gateway import host_tools_guard, terminal_send, tools
 from clawchat_gateway.adapter import ClawChatAdapter
 from clawchat_gateway.terminal_send import (
     clear_terminal_clawchat_sends_for_test,
@@ -35,6 +35,8 @@ GROUP = "cnv_01J9ZX3K5Q7W2M4N6P8R0T2V4X"
 def adapter(monkeypatch, tmp_path):
     clear_terminal_clawchat_sends_for_test()
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    # These cases are the owner asking from their direct chat.
+    monkeypatch.setattr(host_tools_guard, "_session_turn", lambda: "owner")
     a = ClawChatAdapter({})
     a._clawchat_config = replace(a._clawchat_config, user_id="usr_agent", owner_user_id="usr_owner")
     a.frames = []

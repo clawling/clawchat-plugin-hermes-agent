@@ -13,11 +13,7 @@ from dataclasses import dataclass
 from urllib.parse import unquote, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
-from clawchat_gateway.local_paths import (
-    destination_is_owner_direct,
-    is_denied_hermes_path,
-    turn_allows_local_paths,
-)
+from clawchat_gateway.local_paths import is_denied_hermes_path, local_attachment_allowed
 
 logger = logging.getLogger("clawchat_gateway.media_runtime")
 
@@ -186,6 +182,13 @@ def normalize_outbound_media_reference(value: str) -> str:
     return decoded
 
 
+def media_reference_allowed(value: str, chat_id: str | None) -> bool:
+    """A remote reference always; a local one per :func:`local_attachment_allowed`."""
+    if _is_remote_url(normalize_outbound_media_reference(str(value or ""))):
+        return True
+    return local_attachment_allowed(chat_id)
+
+
 def _is_uploaded_media_url(value: str) -> bool:
     parsed = urlparse(value)
     return parsed.scheme in {"http", "https"} and parsed.path.startswith("/media/")
@@ -348,15 +351,13 @@ async def upload_outbound_media(
     uploader = upload_file or _upload_media
     fragments: list[dict[str, object]] = []
     for raw_url in urls:
-        if not raw_url.strip().lower().startswith(("http://", "https://")) and not (
-            turn_allows_local_paths() or (chat_id and destination_is_owner_direct(chat_id))
-        ):
+        url = normalize_outbound_media_reference(raw_url)
+        if not media_reference_allowed(raw_url, chat_id):
             logger.warning(
                 "clawchat outbound local media dropped name=%s",
-                Path(raw_url.replace("\\", "/")).name,
+                Path(unquote(url).replace("\\", "/")).name,
             )
             continue
-        url = normalize_outbound_media_reference(raw_url)
         try:
             if _is_remote_url(url):
                 loaded = await asyncio.to_thread(_load_remote_media, url)
@@ -395,7 +396,7 @@ async def upload_outbound_media(
             else:
                 logger.warning(
                     "clawchat outbound media dropped name=%s error=%s",
-                    Path(url.replace("\\", "/")).name,
+                    Path(unquote(url).replace("\\", "/")).name,
                     str(exc) if _is_remote_url(url) else type(exc).__name__,
                 )
             continue

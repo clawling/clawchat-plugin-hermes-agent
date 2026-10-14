@@ -11,17 +11,52 @@ LOCAL_PATH_REFUSAL = (
 )
 
 
+def _session_bound() -> bool:
+    from clawchat_gateway import memory_scope
+
+    return any(
+        memory_scope._session_value(f"HERMES_SESSION_{key}")
+        for key in ("PLATFORM", "CHAT_ID", "CHAT_TYPE", "USER_ID")
+    )
+
+
+def _gateway_in_process() -> bool:
+    """A ClawChat adapter runs in this process, so this is not a local CLI."""
+    from clawchat_gateway.terminal_send import get_clawchat_sender
+
+    return get_clawchat_sender() is not None
+
+
 def turn_allows_local_paths() -> bool:
+    """The owner's direct-chat turn, or a local operator surface (no gateway)."""
     try:
         from clawchat_gateway import host_tools_guard, memory_scope
 
         if host_tools_guard._session_turn() == "owner":
             return True
-        return memory_scope.is_local_surface() and not any(
-            memory_scope._session_value(f"HERMES_SESSION_{key}")
-            for key in ("CHAT_ID", "CHAT_TYPE", "USER_ID")
+        return (
+            memory_scope.is_local_surface()
+            and not _session_bound()
+            and not _gateway_in_process()
         )
     except Exception:  # noqa: BLE001 - unknown context is not an owner turn
+        return False
+
+
+def local_attachment_allowed(chat_id: str | None) -> bool:
+    """Whether a local attachment may be delivered into ``chat_id``.
+
+    Hermes delivers a reply after the turn's session context is cleared, so an
+    unbound delivery is judged by its destination: only the owner's direct
+    chat. Inside a bound turn that is not the owner's, never.
+    """
+    try:
+        if turn_allows_local_paths():
+            return True
+        if _session_bound():
+            return False
+        return bool(chat_id) and destination_is_owner_direct(str(chat_id))
+    except Exception:  # noqa: BLE001 - fail closed
         return False
 
 

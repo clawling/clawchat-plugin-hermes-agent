@@ -184,3 +184,15 @@ if _USING_HERMES_CLI_DOUBLE:
 def clawchat_host_is_double() -> bool:
     """True when the Hermes host is the double from this file, not real source."""
     return _USING_DOUBLE
+
+
+@pytest.fixture(autouse=True)
+def _restore_clawchat_senders():
+    """Each ClawChatAdapter registers itself as this process's sender; a test's
+    adapter must not make the next test look like a running gateway."""
+    from clawchat_gateway import terminal_send
+
+    saved = dict(terminal_send._senders)
+    yield
+    terminal_send._senders.clear()
+    terminal_send._senders.update(saved)
