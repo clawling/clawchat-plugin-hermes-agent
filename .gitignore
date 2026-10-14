@@ -177,6 +177,8 @@ tmp
 #     is sent only if the ledger has that message in that chat (stored ids
 #     on the wire, shape check when the store cannot answer, index-backed
 #     lookup); a refused reaction is send_blocked, never reacted:true.
+#   * yaml_compat — YAML reads follow the host: hermes_yaml -> PyYAML -> ruamel;
+#     missing readers give a clear error while plugin modules remain importable.
 tests/*
 !tests/conftest.py
 !tests/test_multiplex_isolation.py
@@ -233,6 +235,7 @@ tests/*
 !tests/test_non_owner_recall_and_connections.py
 !tests/test_sticker_hint.py
 !tests/test_group_command_receipt.py
+!tests/test_yaml_compat.py
 deploy/
 scripts/
 docs/superpowers/

@@ -8,7 +8,11 @@ This is the install and activation guide for Hermes operators.
 |-----------------|----------------------------------------------|
 | Hermes Agent    | `v0.12.0` or newer (uses `ctx.register_platform`) |
 | Python runtime  | `>=3.11` (per `pyproject.toml`)              |
-| Dependencies    | `websockets>=13,<16`, `PyYAML>=6,<7`         |
+| Dependencies    | `websockets>=13,<16`                        |
+
+YAML reads use the parser bundled with Hermes: `hermes_yaml` / `ruamel.yaml`
+on newer versions, or PyYAML on older versions. The plugin does not declare
+a separate YAML runtime dependency.
 
 The plugin advertises itself as `clawchat` (`plugin.yaml: kind: platform`)
 and is loaded directly into `$HERMES_HOME/plugins/clawchat/`.
@@ -475,8 +479,9 @@ HERMES_HOME="$HOME_DIR" PYTHONPATH="$HOME_DIR/plugins/clawchat" \
 ```
 
 Run that last command with the Hermes Python (the interpreter that owns
-`websockets` / `PyYAML` — e.g. `/opt/hermes/.venv/bin/python` in the default
-container layout, or `<root>\hermes-agent\.venv\Scripts\python.exe` on Windows).
+Hermes and its plugin dependencies — e.g. `/opt/hermes/.venv/bin/python` in
+the default container layout, or `<root>\hermes-agent\.venv\Scripts\python.exe`
+on Windows).
 
 The same four checks on native Windows:
 

@@ -8,8 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import yaml
-
+from clawchat_gateway._yaml import safe_load
 from clawchat_gateway.hermes_home import hermes_home
 
 
@@ -102,7 +101,7 @@ def _bool_token(value: Any) -> bool | None:
 
 def _read_yaml(path: Path) -> dict[str, Any]:
     try:
-        loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        loaded = safe_load(path.read_text(encoding="utf-8")) or {}
     except Exception:  # noqa: BLE001 - unreadable config means "unknown", never fatal
         return {}
     return loaded if isinstance(loaded, dict) else {}

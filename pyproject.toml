@@ -16,10 +16,10 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
 ]
-dependencies = ["websockets>=13,<16", "PyYAML>=6,<7"]
+dependencies = ["websockets>=13,<16"]
 
 [project.optional-dependencies]
-test = ["pytest>=8", "pytest-asyncio>=0.23", "pytest-cov>=4"]
+test = ["pytest>=8", "pytest-asyncio>=0.23", "pytest-cov>=4", "PyYAML>=6,<7", "ruamel.yaml>=0.18,<0.19"]
 
 [project.urls]
 Homepage = "https://github.com/clawling/clawchat-plugin-hermes-agent"

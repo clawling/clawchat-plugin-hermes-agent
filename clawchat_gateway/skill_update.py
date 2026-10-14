@@ -146,9 +146,9 @@ def parse_frontmatter(text: str) -> dict[str, Any]:
         return {}
     block = "\n".join(lines[1:end])
     try:
-        import yaml
+        from clawchat_gateway._yaml import safe_load
 
-        data = yaml.safe_load(block) or {}
+        data = safe_load(block) or {}
     except Exception:  # noqa: BLE001 — tolerate malformed frontmatter
         return {}
     return data if isinstance(data, dict) else {}

@@ -144,6 +144,13 @@ install.
 
 ## Packaging caveats
 
+`clawchat_gateway/_yaml.py` reads through `hermes_yaml`, then PyYAML, then
+ruamel.yaml, matching the parser used by new and old Hermes hosts; the ruamel
+fallback follows the host's YAML 1.1 policy. YAML libraries are test extras,
+not plugin runtime dependencies. The plugin does not write YAML itself:
+config writes go through `hermes_cli.config.save_config`, so Hermes owns
+formatting and comments.
+
 `MANIFEST.in` only ships `prompts/*.md`, and `[tool.setuptools.packages.find]`
 in `pyproject.toml` only includes the `clawchat_gateway*` package. The
 top-level `skills/` tree — all four bundled skill directories

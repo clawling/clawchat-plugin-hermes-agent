@@ -200,14 +200,13 @@ _session_context_engaged = _host_session_context_engaged
 
 def _config_extra() -> dict[str, Any]:
     try:
-        import yaml
-
+        from clawchat_gateway._yaml import safe_load
         from clawchat_gateway.hermes_home import hermes_home
 
         path = Path(hermes_home()) / "config.yaml"
         if not path.exists():
             return {}
-        loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        loaded = safe_load(path.read_text(encoding="utf-8")) or {}
         extra = ((loaded.get("platforms") or {}).get("clawchat") or {}).get("extra") or {}
         return extra if isinstance(extra, dict) else {}
     except Exception:  # noqa: BLE001

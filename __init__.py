@@ -37,9 +37,9 @@ def _hermes_home() -> Path:
 def _clawchat_home_extra() -> dict:
     config_path = _hermes_home() / "config.yaml"
     try:
-        import yaml
+        from clawchat_gateway._yaml import safe_load
 
-        data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        data = safe_load(config_path.read_text(encoding="utf-8")) or {}
     except FileNotFoundError:
         return {}
     except Exception as exc:

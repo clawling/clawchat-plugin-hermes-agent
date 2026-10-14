@@ -9,8 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import yaml
-
+from clawchat_gateway._yaml import safe_load
 from clawchat_gateway.api_client import DEFAULT_BASE_URL, DEFAULT_WEBSOCKET_URL
 from clawchat_gateway.config import _get_env, _jwt_claim
 from clawchat_gateway.hermes_home import hermes_home
@@ -52,7 +51,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     if not path.exists():
         raise ProfileConfigError(f"config.yaml not found at {path}; activate ClawChat first")
     try:
-        loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        loaded = safe_load(path.read_text(encoding="utf-8")) or {}
     except Exception as exc:
         raise ProfileConfigError(f"failed to read {path}: {exc}") from exc
     if not isinstance(loaded, dict):
