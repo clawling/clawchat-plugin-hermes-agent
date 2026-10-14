@@ -454,9 +454,22 @@ class ClawChatConnection:
         ClawChatConnection._live_supervisors[self._supervisor_key] = self
 
     def _build_refresh_manager(self) -> RefreshManager:
+        # Bind persistence to the pair used for this single-flight request.
+        refresh_config: ClawChatConfig | None = None
+
+        def build_client() -> Any:
+            nonlocal refresh_config
+            refresh_config = self._cfg
+            return self._build_refresh_client()
+
+        async def persist_tokens(access_token: str, refresh_token: str) -> bool:
+            return await self._persist_rotated_tokens(
+                access_token, refresh_token, expected_credentials=refresh_config,
+            )
+
         return RefreshManager(
-            build_client=self._build_refresh_client,
-            persist_tokens=self._persist_rotated_tokens,
+            build_client=build_client,
+            persist_tokens=persist_tokens,
             persist_logout=self._persist_auth_logout,
             persist_rejection=self._persist_refresh_rejection,
             device_id_provider=self._refresh_device_id,
@@ -593,17 +606,46 @@ class ClawChatConnection:
         return _get_env("CLAWCHAT_HOME_CHANNEL") or None
 
     @_in_connection_context
-    async def _persist_rotated_tokens(self, access_token: str, refresh_token: str) -> bool:
+    async def _persist_rotated_tokens(
+        self, access_token: str, refresh_token: str,
+        *, expected_credentials: ClawChatConfig | None = None,
+    ) -> bool:
         from clawchat_gateway.activate import persist_rotated_tokens
+
+        if self._auth_failed or not self._cfg.refresh_token:
+            return False
+        if expected_credentials is not None and (
+            self._cfg.token != expected_credentials.token
+            or self._cfg.refresh_token != expected_credentials.refresh_token
+        ):
+            return False
+        using_activation_db_credentials = self._using_activation_db_credentials
+        if using_activation_db_credentials and self._store is not None:
+            try:
+                credentials = self._store.get_activation_credentials(
+                    platform="hermes", account_id=self._account_id,
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning("clawchat activation credential watch failed", exc_info=True)
+                return False
+            if credentials is None:
+                await self._revoke_activation_credentials()
+                return False
+            if credentials.access_token != self._cfg.token:
+                # A new activation won while the refresh request was in flight.
+                return False
 
         # §C.2: thread the in-memory identity down so an env-only deployment (no
         # activations row yet) gets its row SEEDED on the first refresh instead of
-        # failing the db write and bricking the agent on first rotation.
-        user_id = self._cfg.user_id or None
-        owner_user_id = self._cfg.owner_user_id or None
+        # failing the db write and bricking the agent on first rotation. An
+        # adopted SQLite row must only be updated, never re-seeded after deletion.
+        user_id = None if using_activation_db_credentials else self._cfg.user_id or None
+        owner_user_id = None if using_activation_db_credentials else self._cfg.owner_user_id or None
         conversation_id = self._refresh_seed_conversation_id()
 
-        def _write() -> bool:
+        try:
+            # Keep the guard and write in this task without an await between
+            # them: a background writer could otherwise outlive revocation.
             return persist_rotated_tokens(
                 access_token=access_token,
                 refresh_token=refresh_token,
@@ -613,9 +655,6 @@ class ClawChatConnection:
                 owner_user_id=owner_user_id,
                 conversation_id=conversation_id,
             )
-
-        try:
-            return await asyncio.to_thread(_write)
         except Exception:  # noqa: BLE001
             logger.warning("clawchat rotated-token persistence raised", exc_info=True)
             return False
@@ -997,15 +1036,15 @@ class ClawChatConnection:
                 logger.warning("clawchat revoked-refresh marker clear failed")
         self._rejected_refresh_fingerprint = None
 
-    async def _enter_auth_failed(self) -> None:
-        """All permanent refresh paths leave the supervisor waiting for activation."""
+    async def _enter_auth_failed(self, *, reason: str = AUTO_LOGOUT_LAST_ERROR) -> None:
+        """Revocation and permanent refresh paths wait for a fresh activation."""
         self._rejected_activation_token = self._cfg.token or self._rejected_activation_token
         self._cfg = replace(self._cfg, token="", refresh_token="", user_id="", owner_user_id="")
         self._using_activation_db_credentials = False
         self._refresh_pending_reconnect = False
         self._auth_failed = True
         await self._set_state(ConnectionState.AUTH_FAILED)
-        self._finish_current_connection(ConnectionState.AUTH_FAILED.value, error=AUTO_LOGOUT_LAST_ERROR)
+        self._finish_current_connection(ConnectionState.AUTH_FAILED.value, error=reason)
         if self._hello_wait is not None and not self._hello_wait.done():
             self._hello_wait.set_result(False)
         if self._ws is not None:
@@ -1013,6 +1052,21 @@ class ClawChatConnection:
                 await asyncio.wait_for(self._ws.close(), timeout=_WS_CLOSE_TIMEOUT_SECONDS)
             except Exception:  # noqa: BLE001
                 logger.warning("clawchat auth-failed socket close failed")
+
+    async def _revoke_activation_credentials(self) -> None:
+        reason = "activation credentials deleted"
+        logger.warning(
+            format_ws_log(
+                event="activation_credentials_revoked",
+                account_id=self._account_id,
+                attempt=self._attempt,
+                reconnect_count=self._reconnect_count,
+                state=self._state.value,
+                action="wait_activation",
+                fields=[("reason", reason)],
+            )
+        )
+        await self._enter_auth_failed(reason=reason)
 
     def _load_startup_activation_credentials(self) -> bool:
         """SQLite-first startup: adopt the activation row when one exists.
@@ -1181,36 +1235,36 @@ class ClawChatConnection:
             await asyncio.sleep(ACTIVATION_CREDENTIAL_POLL_INTERVAL_SECONDS)
             if self._state != ConnectionState.READY:
                 continue
-            # §A.1 proactive refresh: when the live token nears expiry, refresh
-            # and reconnect with the new token. On success this closes the WS,
-            # which ends this watch task (re-armed on the next READY).
-            try:
-                await self._maybe_proactive_refresh()
-            except asyncio.CancelledError:
-                raise
-            except Exception:  # noqa: BLE001
-                logger.warning("clawchat proactive refresh failed", exc_info=True)
-            if self._state != ConnectionState.READY:
-                # A proactive refresh closed the socket; stop watching.
-                return
-            if self._store is None:
-                continue
-            try:
-                credentials = self._store.get_activation_credentials(
-                    platform="hermes",
-                    account_id=self._account_id,
-                )
-            except Exception:  # noqa: BLE001
-                logger.warning("clawchat activation credential watch failed", exc_info=True)
-                continue
-            if credentials is None:
-                continue
-            changed = (
+            # Observe deletion/rotation before refreshing with the old pair.
+            credentials = None
+            if self._store is not None:
+                try:
+                    credentials = self._store.get_activation_credentials(
+                        platform="hermes",
+                        account_id=self._account_id,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.warning("clawchat activation credential watch failed", exc_info=True)
+                    continue
+                if credentials is None and self._using_activation_db_credentials:
+                    await self._revoke_activation_credentials()
+                    return
+            changed = credentials is not None and (
                 credentials.access_token != self._cfg.token
                 or credentials.user_id != self._cfg.user_id
                 or credentials.owner_user_id != self._cfg.owner_user_id
             )
             if not changed:
+                # §A.1: refresh after checking the credential source. No row is
+                # normal for env/extra bootstrap until its first refresh (§C.2).
+                try:
+                    await self._maybe_proactive_refresh()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001
+                    logger.warning("clawchat proactive refresh failed", exc_info=True)
+                if self._state != ConnectionState.READY:
+                    return
                 continue
             logger.info(
                 format_ws_log(
@@ -1267,9 +1321,28 @@ class ClawChatConnection:
             return RefreshOutcome(status="permanent", error="unusable refresh credentials")
         if manager is None:
             return RefreshOutcome(status="skipped", error="no refresh manager")
+        if self._auth_failed or not self._cfg.refresh_token:
+            return RefreshOutcome(status="skipped", error="no refresh credentials")
         token = self._cfg.token
         refresh_token = self._cfg.refresh_token or None
         outcome = await manager.refresh(access_token=token, refresh_token=refresh_token)
+        if (
+            outcome.status == "success"
+            and not self._auth_failed
+            and (self._cfg.token != token or self._cfg.refresh_token != refresh_token)
+            and self._cfg.token == outcome.access_token
+            and self._cfg.refresh_token == outcome.refresh_token
+        ):
+            # Another single-flight waiter already adopted this result.
+            return outcome
+        if (
+            self._auth_failed
+            or self._cfg.token != token
+            or self._cfg.refresh_token != refresh_token
+        ):
+            # Revocation/activation may have happened while awaiting the HTTP
+            # result or a coalesced refresh. Never restore the discarded pair.
+            return RefreshOutcome(status="skipped", error="refresh credentials changed")
         if outcome.status == "success":
             # Persist already succeeded (§0). Swap in-memory token only now.
             self._cfg = replace(

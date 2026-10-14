@@ -181,6 +181,7 @@ tmp
 #     missing readers give a clear error while plugin modules remain importable.
 tests/*
 !tests/conftest.py
+!tests/test_credential_revocation.py
 !tests/test_multiplex_isolation.py
 !tests/test_device_id_scope.py
 !tests/test_activate_device_id.py

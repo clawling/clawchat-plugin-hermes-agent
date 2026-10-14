@@ -751,6 +751,8 @@ class ClawChatStore:
                 if isinstance(seed_owner_user_id, str) and seed_owner_user_id.strip()
                 else None
             )
+            if not seed_user or not seed_owner:
+                return False
             seed_conversation = (
                 seed_conversation_id.strip()
                 if isinstance(seed_conversation_id, str) and seed_conversation_id.strip()

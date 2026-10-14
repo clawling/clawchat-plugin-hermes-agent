@@ -417,6 +417,45 @@ records it in the `activations.device_id` column (migration `6`,
 automatically from the deterministic connect-time device id. Keep
 `CLAWCHAT_DEVICE_ID` pinned so this value stays stable across restarts.
 
+## Credential Deletion And Revocation
+
+The connection distinguishes three cases. Refresh classification and recovery
+still follow [`token-refresh.md`](./token-refresh.md) §A / §C / §D.
+
+| Case | Behavior and log events |
+|---|---|
+| Never activated: no SQLite row and no complete env/extra credentials | Poll for an activation every 2 seconds without connecting or refreshing (unchanged). Logs `activation_wait`; DEBUG `activation_poll`. |
+| Activated from the SQLite row, then the watcher reads the row as `None` (row deleted or credentials cleared) | Detected before any proactive refresh. Logs WARNING `activation_credentials_revoked action=wait_activation reason="activation credentials deleted"`, clears the in-memory access/refresh token and identity, latches the old access token, enters `AUTH_FAILED`, closes the WS and ends the watcher. The supervisor then waits for a new activation: no reconnect with the old credentials and no proactive, hello-fail or REST reactive refresh. The refresh-permanent auto-logout message is not sent. A SQLite read error is logged and retried; it is never treated as deletion. |
+| Server-side revocation (session revoked and socket kicked) | The kick is an ordinary close (no status / `1005`), so the first reconnect uses normal backoff; a close code alone never proves revocation. The reconnect gets `hello-fail` `authentication failed`, triggers a refresh, and a permanent refresh failure (e.g. HTTP 401 with integer `code:10003`) takes the §C auto-logout path: logs `hello_fail_refresh` and `auth_logout action=re_pair_required`, clears credentials, closes the WS, enters `AUTH_FAILED` and waits for activation. The old token is not reconnected. |
+
+When the server rejects the token and there is no refresh token, the existing
+`auth_failed` branch applies: SQLite-sourced credentials log
+`action=wait_activation` and wait for activation; env/extra credentials log
+`action=stop_reconnect` and stop that supervisor. Transient errors
+(`remote auth service unavailable`, 5xx, timeouts) still retry or
+backoff-reconnect per §A / §B and never revoke credentials. `4001` / `4002`
+keep their takeover / duplicate-session meaning.
+
+After the owner re-activates, the poll adopts the new row (its access token
+differs from the latched one and passes the refresh fingerprint check), logs
+`activation_loaded` and reconnects without a process restart. If the row still
+exists but its token changed, the watcher keeps logging
+`activation_credentials_changed`, closes the old WS and reconnects with the new
+token (§D); that is not the revocation path.
+
+If the row is deleted while a refresh is in flight, the persist callback
+re-checks the credential source and revocation state: a connection using the
+SQLite row only updates an existing row and never re-seeds a deleted one, and a
+late successful result cannot restore the discarded in-memory credentials. For
+env/extra bootstrap without a row yet, a missing row is normal and the watcher
+keeps the socket; the first refresh still seeds the row per §C.2.
+
+Deleting only the SQLite row does not remove env/extra bootstrap tokens (for
+example `CLAWCHAT_TOKEN` / `CLAWCHAT_REFRESH_TOKEN` in the Hermes `.env`). If
+they are still present, the next process start bootstraps from them again. To
+take the agent offline for good, stop the gateway or remove the plugin and
+clear those values as well.
+
 ## Restart Or Reload
 
 CLI activation and in-session slash activation request a detached Hermes
