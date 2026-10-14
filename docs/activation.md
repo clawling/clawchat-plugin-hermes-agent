@@ -472,17 +472,26 @@ cannot clear a matching SQLite row and strict `.env` reading is unavailable
 (`env_matched is None`). It logs `activation_credentials_unreadable action=suspend`,
 closes the WS and stops refresh/reconnect while retaining its in-memory pair.
 The unconfirmed failure writes no new rejection marker, latches no rejected pair
-and sends no auto-logout message; its rejection marker is deferred until logout
-confirms ownership. Normal bootstrap logout with a matching pair or absent
+and sends no auto-logout message. Bootstrap rejection markers are always deferred
+until logout confirms ownership, even when `.env` was readable at the rejection
+callback. Normal bootstrap logout with a matching pair or absent
 `.env` keys still writes tombstones and stops the rejected session.
 
-Bootstrap suspension polls every 2 seconds too. A readable SQLite credential row
-is adopted using the usual token/fingerprint checks. Without a usable row, strict
-`.env` reads must succeed: matching values or absent keys resume connecting and
-log `activation_credentials_readable action=reconnect source=bootstrap_env`.
+Bootstrap suspension polls every 2 seconds too, retaining the pending permanent
+failure's credential pair and reason. Once SQLite or strict `.env` reads confirm
+that same pair (absent `.env` keys also confirm ownership), the gateway completes
+conditional logout, writes the revoked marker and latches the rejected pair,
+then enters `AUTH_FAILED` with auto-logout notification. It sends no connect frame
+and makes no additional HTTP refresh request. A new SQLite pair, including a
+refresh-only change, instead discards the pending result and adopts the new
+activation using the usual token/fingerprint checks before reconnecting.
+Adoption, revocation and stopping clear the pending result. Generic source
+suspension without a pending permanent failure can still resume the same pair.
 If `.env` holds a different pair, the gateway retains suspension and logs
 `activation_credentials_changed action=wait_activation`; tokens alone do not
 establish the replacement identity, so write a new SQLite activation to recover.
+The confirmed different `.env` pair discards the pending failure but does not
+alone establish a replacement connection.
 If SQLite cannot be read, or there is no usable row and `.env` remains
 unreadable, suspension continues without connecting or refreshing.
 Outside suspension, a confirmed different `.env` pair (`env_matched is False`)

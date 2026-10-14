@@ -414,6 +414,8 @@ class ClawChatConnection:
         self._using_activation_db_credentials = False
         self._credential_read_failures = 0
         self._activation_source_suspended = False
+        self._pending_permanent_credentials: tuple[str, str] | None = None
+        self._pending_permanent_reason: str | None = None
         self._rejected_activation_token: str | None = None
         self._rejected_refresh_fingerprint: str | None = None
         # Token refresh (token-refresh spec §A/§B/§C). The manager is built on the
@@ -504,7 +506,12 @@ class ClawChatConnection:
         status = await self._recheck_activation_source(adopt_changes=False)
         return status in ("ok", "unreadable") and not self._activation_source_suspended
 
+    def _clear_pending_permanent(self) -> None:
+        self._pending_permanent_credentials = None
+        self._pending_permanent_reason = None
+
     def _apply_activation_credentials(self, credentials: ActivationCredentials) -> None:
+        self._clear_pending_permanent()
         self._credential_generation += 1
         self._cfg = replace(
             self._cfg, token=credentials.access_token,
@@ -596,6 +603,12 @@ class ClawChatConnection:
                 or credentials.owner_user_id != self._cfg.owner_user_id
             )
         was_suspended = self._activation_source_suspended
+        if was_suspended and adopt_changes and self._pending_permanent_credentials is not None:
+            pair = (credentials.access_token, credentials.refresh_token or "")
+            if pair == self._pending_permanent_credentials:
+                completed = await self._finish_pending_permanent()
+                return "revoked" if completed else "unreadable"
+            self._clear_pending_permanent()
         if changed:
             if not adopt_changes:
                 return "changed"
@@ -646,12 +659,13 @@ class ClawChatConnection:
             await self._set_state(ConnectionState.DISCONNECTED)
         return "changed" if changed else "ok"
 
-    async def _recheck_bootstrap_env_source(self) -> Literal["ok", "changed", "unreadable"]:
+    async def _recheck_bootstrap_env_source(self) -> Literal["ok", "changed", "revoked", "unreadable"]:
         from clawchat_gateway.activate import _persisted_env_credentials_match
 
         matches = _persisted_env_credentials_match(self._cfg.token, self._cfg.refresh_token)
         if matches is not True:
             if matches is False:
+                self._clear_pending_permanent()
                 logger.warning(
                     format_ws_log(
                         event="activation_credentials_changed",
@@ -664,6 +678,9 @@ class ClawChatConnection:
                     )
                 )
             return "changed" if matches is False else "unreadable"
+        if self._pending_permanent_credentials is not None:
+            completed = await self._finish_pending_permanent()
+            return "revoked" if completed else "unreadable"
         self._activation_source_suspended = False
         if self._refresh_manager is not None:
             self._refresh_manager.reset_latch()
@@ -869,14 +886,9 @@ class ClawChatConnection:
         if not await self._permanent_refresh_is_current(expected_credentials):
             return False
         if expected_credentials is not None and not self._using_activation_db_credentials:
-            from clawchat_gateway.activate import _persisted_env_credentials_match
-
-            if _persisted_env_credentials_match(
-                expected_credentials.token, expected_credentials.refresh_token,
-            ) is None:
-                # An unreadable bootstrap source may suspend rather than adopt
-                # the failure. Defer its marker until logout confirms ownership.
-                return True
+            # Bootstrap ownership is only confirmed by logout, even if .env
+            # was readable here. It can become unreadable between callbacks.
+            return True
         if expected_credentials is not None:
             self._record_refresh_rejection(refresh_token)
             return True
@@ -917,12 +929,20 @@ class ClawChatConnection:
             )
         )
 
-    async def _permanent_refresh_is_current(self, expected: ClawChatConfig | None) -> bool:
-        if self._auth_failed or self._activation_source_suspended:
+    async def _permanent_refresh_is_current(
+        self, expected: ClawChatConfig | None, *, completing_pending: bool = False,
+    ) -> bool:
+        if self._auth_failed or (self._activation_source_suspended and not completing_pending):
             self._log_discarded_refresh("credentials_unavailable")
             return False
         if expected is None:
-            return True
+            return not completing_pending
+        if completing_pending and (
+            self._stopping
+            or self._pending_permanent_credentials != (expected.token, expected.refresh_token)
+        ):
+            self._log_discarded_refresh("pending_permanent_changed")
+            return False
         if (
             self._cfg.token != expected.token
             or self._cfg.refresh_token != expected.refresh_token
@@ -935,10 +955,14 @@ class ClawChatConnection:
         )
         if (
             self._auth_failed
-            or self._activation_source_suspended
+            or (self._activation_source_suspended and not completing_pending)
             or self._cfg.token != expected.token
             or self._cfg.refresh_token != expected.refresh_token
             or status not in ("ok", "unreadable")
+            or (completing_pending and (
+                self._stopping
+                or self._pending_permanent_credentials != (expected.token, expected.refresh_token)
+            ))
         ):
             self._log_discarded_refresh(f"activation_source_{status}")
             return False
@@ -947,12 +971,16 @@ class ClawChatConnection:
     @_in_connection_context
     async def _persist_auth_logout(
         self, reason: str, *, expected_credentials: ClawChatConfig | None = None,
+        completing_pending: bool = False,
     ) -> bool:
         from clawchat_gateway.activate import (
-            CredentialClearResult, _clear_persisted_env_credentials, clear_persisted_credentials,
+            CredentialClearResult, _clear_persisted_env_credentials,
+            _persisted_env_credentials_match, clear_persisted_credentials,
         )
 
-        if not await self._permanent_refresh_is_current(expected_credentials):
+        if not await self._permanent_refresh_is_current(
+            expected_credentials, completing_pending=completing_pending,
+        ):
             return False
 
         bootstrap_unreadable = False
@@ -974,10 +1002,24 @@ class ClawChatConnection:
                 )
                 result = CredentialClearResult(env_cleared, bool(sqlite_cleared))
             elif expected_credentials is not None:
-                result = clear_persisted_credentials(
-                    account_id=self._account_id, expected_access_token=expected_credentials.token,
-                    expected_refresh_token=expected_credentials.refresh_token,
+                # Read .env once at logout, confirming ownership before its
+                # marker/clear. Missing keys still authorize tombstones (§C.1).
+                env_matched = _persisted_env_credentials_match(
+                    expected_credentials.token, expected_credentials.refresh_token,
                 )
+                if env_matched is True:
+                    self._record_refresh_rejection(expected_credentials.refresh_token)
+                env_cleared = env_matched is True and _clear_persisted_env_credentials()
+                sqlite_cleared = False
+                try:
+                    sqlite_cleared = self._store is not None and self._store.clear_activation_credentials(
+                        platform="hermes", account_id=self._account_id,
+                        expected_access_token=expected_credentials.token,
+                        expected_refresh_token=expected_credentials.refresh_token,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.warning("clawchat logout database clear failed")
+                result = CredentialClearResult(bool(env_cleared), bool(sqlite_cleared), env_matched)
                 # Without a cleared SQLite row, only a confirmed .env match
                 # proves the request still owns the persisted credentials.
                 if not result.sqlite_cleared and result.env_matched is not True:
@@ -1001,6 +1043,10 @@ class ClawChatConnection:
             if expected_credentials is not None:
                 if not _clear():
                     if bootstrap_unreadable:
+                        self._pending_permanent_credentials = (
+                            expected_credentials.token, expected_credentials.refresh_token,
+                        )
+                        self._pending_permanent_reason = reason
                         await self._suspend_activation_source()
                     return False
             else:
@@ -1025,6 +1071,7 @@ class ClawChatConnection:
 
     @_in_connection_context
     async def _stop_in_context(self) -> None:
+        self._clear_pending_permanent()
         self._credential_generation += 1
         self._stopping = True
         self._cancel_stable_ready_reset()
@@ -1373,6 +1420,7 @@ class ClawChatConnection:
 
     async def _enter_auth_failed(self, *, reason: str = AUTO_LOGOUT_LAST_ERROR) -> None:
         """Revocation and permanent refresh paths wait for a fresh activation."""
+        self._clear_pending_permanent()
         self._credential_generation += 1
         self._rejected_activation_token = self._cfg.token or self._rejected_activation_token
         self._cfg = replace(self._cfg, token="", refresh_token="", user_id="", owner_user_id="")
@@ -1671,19 +1719,48 @@ class ClawChatConnection:
         elif outcome.status == "permanent":
             # §C: refresh token permanently invalid → auto-logout. Drop creds and
             # latch the dead token so wait-for-activation does not re-load it.
-            await self._enter_auth_failed()
-            logger.warning(
-                format_ws_log(
-                    event="auth_logout",
-                    account_id=self._account_id,
-                    attempt=self._attempt,
-                    reconnect_count=self._reconnect_count,
-                    state=self._state.value,
-                    action="re_pair_required",
-                    fields=[("reason", AUTO_LOGOUT_LAST_ERROR)],
-                )
-            )
+            await self._complete_permanent_logout()
         return outcome
+
+    async def _finish_pending_permanent(self) -> bool:
+        pair = self._pending_permanent_credentials
+        if pair is None or pair != (self._cfg.token, self._cfg.refresh_token):
+            return False
+        expected = self._cfg
+        generation = self._credential_generation
+        reason = self._pending_permanent_reason or AUTO_LOGOUT_LAST_ERROR
+        if not await self._persist_auth_logout(
+            reason, expected_credentials=expected, completing_pending=True,
+        ):
+            return False
+        # Notification callbacks may adopt a new activation while we await.
+        if (
+            self._stopping or self._auth_failed
+            or self._credential_generation != generation
+            or self._pending_permanent_credentials != pair
+            or (self._cfg.token, self._cfg.refresh_token) != pair
+        ):
+            return False
+        if self._refresh_manager is not None:
+            # The suspended HTTP result was skipped by the manager. Complete
+            # its adopted-permanent latch without issuing another HTTP request.
+            self._refresh_manager.latch_adopted_permanent(*pair)
+        await self._complete_permanent_logout()
+        return True
+
+    async def _complete_permanent_logout(self) -> None:
+        await self._enter_auth_failed()
+        logger.warning(
+            format_ws_log(
+                event="auth_logout",
+                account_id=self._account_id,
+                attempt=self._attempt,
+                reconnect_count=self._reconnect_count,
+                state=self._state.value,
+                action="re_pair_required",
+                fields=[("reason", AUTO_LOGOUT_LAST_ERROR)],
+            )
+        )
 
     async def _maybe_proactive_refresh(self) -> None:
         """§A.1: when the live token nears expiry, refresh + reconnect."""
@@ -2508,6 +2585,7 @@ class ClawChatConnection:
                         pass
                 return
             using_activation_db_credentials = self._using_activation_db_credentials
+            self._clear_pending_permanent()
             self._credential_generation += 1
             self._auth_failed = True
             if not using_activation_db_credentials:

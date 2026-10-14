@@ -165,6 +165,15 @@ class RefreshManager:
     def logged_out(self) -> bool:
         return self._logged_out
 
+    def latch_adopted_permanent(self, access_token: str, refresh_token: str) -> None:
+        """Latch a permanent failure the caller adopted after the manager returned.
+
+        Used when a permanent result was deferred (credential source not
+        confirmable) and is completed later without another HTTP request.
+        """
+        self._rejected_credentials = (access_token, refresh_token)
+        self._logged_out = True
+
     def reset_latch(self) -> None:
         """Clear the rejected-pair latch when new credentials are loaded."""
         self._rejected_credentials = None
