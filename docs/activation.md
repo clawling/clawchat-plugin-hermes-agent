@@ -490,8 +490,10 @@ suspension without a pending permanent failure can still resume the same pair.
 If `.env` holds a different pair, the gateway retains suspension and logs
 `activation_credentials_changed action=wait_activation`; tokens alone do not
 establish the replacement identity, so write a new SQLite activation to recover.
-The confirmed different `.env` pair discards the pending failure but does not
-alone establish a replacement connection.
+Observing a different `.env` pair does not discard the pending failure: only
+actually adopting new activation credentials does. If `.env` returns to the
+original pair before adoption, the pending permanent failure completes logout.
+SQLite observation without adoption also retains the pending result.
 If SQLite cannot be read, or there is no usable row and `.env` remains
 unreadable, suspension continues without connecting or refreshing.
 Outside suspension, a confirmed different `.env` pair (`env_matched is False`)
@@ -506,8 +508,16 @@ deleted row rejects the write without seeding or touching `.env`; a successful
 SQLite update happens **before** the `.env` mirror. A late successful result
 cannot restore discarded in-memory credentials or overwrite a newly adopted
 activation. For env/extra bootstrap without a row yet, a missing row is normal
-and the watcher keeps the socket; the first refresh still writes `.env` first
-and seeds the row per §C.2.
+and the watcher keeps the socket. Bootstrap refresh persistence also rechecks
+SQLite and binds the write to the full request pair. It first conditionally
+updates a matching row; when no row exists it may atomically seed one with
+`INSERT ... ON CONFLICT DO NOTHING`. A different or concurrently inserted row
+rejects the write. Strict `.env` reads must confirm the request pair (or absent
+token keys) before seeding and again before mirroring: unreadable or changed
+`.env` is never overwritten. SQLite succeeds before the `.env` write. A refused
+persist result remains transient and does not swap the in-memory pair. SQLite
+and `.env` are separate writes: a failure or change after the SQLite commit can
+leave that rotated row persisted while the `.env` mirror and memory stay old.
 
 An in-flight transient refresh also checks the credential source after each
 transient failure and before and after its backoff sleep. Even with unbounded

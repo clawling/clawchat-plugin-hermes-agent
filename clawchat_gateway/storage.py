@@ -702,6 +702,7 @@ class ClawChatStore:
         seed_conversation_id: str | None = None,
         expected_access_token: str | None = None,
         expected_refresh_token: str | None = None,
+        seed_if_missing: bool = False,
     ) -> bool | None:
         """Rotate just the token columns of an existing activation row.
 
@@ -716,7 +717,9 @@ class ClawChatStore:
         ``bootstrap_sent=0`` (the env row was never bootstrapped) and does not
         reset any activation flags. Returns True when the row was updated OR
         seeded. With an expected access/refresh pair, update only the matching row;
-        a mismatch or missing row returns False without seeding.
+        a mismatch or missing row returns False without seeding unless bootstrap
+        explicitly permits ``seed_if_missing``. That INSERT uses DO NOTHING on
+        conflict, preserving an existing or concurrently inserted row.
         """
         updated = updated_at if updated_at is not None else _now_ms()
         access = access_token.strip() if access_token and access_token.strip() else None
@@ -742,12 +745,13 @@ class ClawChatStore:
             cursor = conn.execute(sql, params)
             if cursor.rowcount == 1:
                 return True
-            if expected_access_token is not None or expected_refresh_token is not None:
+            if (
+                expected_access_token is not None or expected_refresh_token is not None
+            ) and not seed_if_missing:
                 return False
-            # No pre-existing row → env-only deployment. Seed an identity row so
-            # the rotated tokens are durably stored and future refreshes/restart
-            # recovery work (§C.2). conversation_id may be empty (env path derives
-            # the home channel from env vars, not this row).
+            # Bootstrap may seed only an absent row: DO NOTHING preserves any
+            # existing pair, including a row inserted before this write (§C.2).
+            # conversation_id may be empty (env derives the home channel).
             seed_user = seed_user_id.strip() if isinstance(seed_user_id, str) and seed_user_id.strip() else None
             seed_owner = (
                 seed_owner_user_id.strip()
@@ -768,11 +772,7 @@ class ClawChatStore:
                   activated_at, login_method, updated_at, conversation_id,
                   owner_user_id, device_id, bootstrap_sent, bootstrap_claimed_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
-                ON CONFLICT(platform, account_id) DO UPDATE SET
-                  access_token = excluded.access_token,
-                  refresh_token = excluded.refresh_token,
-                  device_id = COALESCE(excluded.device_id, activations.device_id),
-                  updated_at = excluded.updated_at
+                ON CONFLICT(platform, account_id) DO NOTHING
                 """,
                 (
                     platform,

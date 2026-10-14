@@ -608,7 +608,6 @@ class ClawChatConnection:
             if pair == self._pending_permanent_credentials:
                 completed = await self._finish_pending_permanent()
                 return "revoked" if completed else "unreadable"
-            self._clear_pending_permanent()
         if changed:
             if not adopt_changes:
                 return "changed"
@@ -665,7 +664,6 @@ class ClawChatConnection:
         matches = _persisted_env_credentials_match(self._cfg.token, self._cfg.refresh_token)
         if matches is not True:
             if matches is False:
-                self._clear_pending_permanent()
                 logger.warning(
                     format_ws_log(
                         event="activation_credentials_changed",
@@ -850,7 +848,11 @@ class ClawChatConnection:
             return False
         request_credentials = expected_credentials or self._cfg
         using_activation_db_credentials = self._using_activation_db_credentials
-        if await self._recheck_activation_source(adopt_changes=False) != "ok":
+        if await self._recheck_activation_source(
+            adopt_changes=False, include_bootstrap=True,
+            expected_access_token=request_credentials.token,
+            expected_refresh_token=request_credentials.refresh_token,
+        ) != "ok":
             return False
 
         # §C.2: thread the in-memory identity down so an env-only deployment (no
@@ -872,8 +874,9 @@ class ClawChatConnection:
                 user_id=user_id,
                 owner_user_id=owner_user_id,
                 conversation_id=conversation_id,
-                expected_access_token=request_credentials.token if using_activation_db_credentials else None,
-                expected_refresh_token=request_credentials.refresh_token if using_activation_db_credentials else None,
+                expected_access_token=request_credentials.token,
+                expected_refresh_token=request_credentials.refresh_token,
+                seed_if_missing=not using_activation_db_credentials,
             )
         except Exception:  # noqa: BLE001
             logger.warning("clawchat rotated-token persistence raised", exc_info=True)

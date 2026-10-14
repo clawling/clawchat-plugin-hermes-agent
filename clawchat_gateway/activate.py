@@ -695,6 +695,7 @@ def persist_rotated_tokens(
     conversation_id: str | None = None,
     expected_access_token: str | None = None,
     expected_refresh_token: str | None = None,
+    seed_if_missing: bool = False,
 ) -> bool:
     """Durably write a refresh-rotated token pair to BOTH .env and SQLite.
 
@@ -712,9 +713,19 @@ def persist_rotated_tokens(
     in-memory config) instead of failing — otherwise the very first refresh would
     brick the agent (§C.2). The seed never resets bootstrap/activation flags.
     With an expected access/refresh pair, SQLite's conditional update must succeed
-    before writing .env; a missing or changed row leaves .env untouched.
+    before writing .env; a missing or changed row leaves .env untouched. Bootstrap
+    may explicitly seed a missing row, never overwrite a conflicting row. Its
+    .env must match the request pair (or lack token keys) both before the SQLite
+    write and before mirroring the result; unreadable .env refuses persistence.
     """
+    def bootstrap_env_matches() -> bool:
+        return not seed_if_missing or _persisted_env_credentials_match(
+            expected_access_token, expected_refresh_token,
+        ) is True
+
     def write_env() -> bool:
+        if not bootstrap_env_matches():
+            return False
         try:
             _write_env_values(
                 {
@@ -740,18 +751,18 @@ def persist_rotated_tokens(
                 seed_conversation_id=conversation_id,
                 expected_access_token=expected_access_token,
                 expected_refresh_token=expected_refresh_token,
+                seed_if_missing=seed_if_missing,
             ))
         except Exception:  # noqa: BLE001
             logger.warning("clawchat rotated-token database persistence failed", exc_info=True)
             return False
 
-    if expected_access_token is not None or expected_refresh_token is not None:
-        if not write_db():
-            return False
-        return write_env()
-    env_ok = write_env()
-    db_ok = write_db()
-    return env_ok and db_ok
+    # Check bootstrap .env before seeding as well as after the SQLite commit.
+    if not bootstrap_env_matches():
+        return False
+    if not write_db():
+        return False
+    return write_env()
 
 
 @dataclass(frozen=True)
