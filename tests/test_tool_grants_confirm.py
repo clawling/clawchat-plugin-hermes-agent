@@ -104,3 +104,49 @@ async def test_failed_transaction_never_receipts_as_active(confirmation, monkeyp
     assert h.adapter._send_owner_text.call_args.args[1] == GRANT_WRITE_FAILED_MESSAGE["zh"]
     assert "已生效" not in h.adapter._send_owner_text.call_args.args[1]
     assert h.events == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("locale,lang", [("zh-CN", "zh"), ("zh-TW", "zh_Hant"), ("en", "en")])
+@pytest.mark.parametrize("selector,limited", [("cap:subagent", True), ("cap:schedule", True),
+    ("cap:terminal", False), ("all", True), ("tool:web_search", False),
+    ("tool:delegate_task", True), ("tool:cronjob", True), ("tool:cronjob_manage", True),
+    ("tool:kanban_create", True), ("tool:message_agent", True)])
+async def test_localized_confirmation_uses_canonical_selectors(confirmation, locale, lang, selector, limited):
+    from clawchat_gateway.tool_capabilities import selector_display
+    from clawchat_gateway.tool_grants import HERMES_LIMIT_COPY
+    h = confirmation
+    h.adapter._owner_locale = lambda: locale
+    h.adapter._store.create_pending_grant(account_id="usr_agent", code="482193", now=int(time.time() * 1000),
+        payload=dict(grantees=[dict(id="usr_a", name="Person")], tools=[selector], mode="direct"))
+    await h.adapter._on_message(command().raw_message)
+    rows = h.adapter._store.list_grants(account_id="usr_agent")
+    assert len(rows) == 1
+    text = h.adapter._send_owner_text.call_args.args[1]
+    prefix = "Now active: Person can now use " if lang == "en" else (
+        "已生效：Person 現在可以使用 " if lang == "zh_Hant" else "已生效：Person 现在可以使用 ")
+    expected = prefix + selector_display(selector, lang)
+    if limited:
+        expected += "\n" + HERMES_LIMIT_COPY[lang]
+    assert text == expected
+    assert GRANT_WRITE_FAILED_MESSAGE[lang] not in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("locale,lang", [("zh-CN", "zh"), ("zh-TW", "zh_Hant"), ("en", "en")])
+@pytest.mark.parametrize("failure", ["display", "receipt"])
+async def test_committed_grant_receipt_failure_reports_success(confirmation, monkeypatch, caplog, locale, lang, failure):
+    from clawchat_gateway import tool_capabilities, tool_grants
+    h = confirmation
+    create_pending(h)
+    h.adapter._owner_locale = lambda: locale
+    def broken(*_, **__):
+        raise ValueError("rendering failed")
+    monkeypatch.setattr(tool_capabilities if failure == "display" else tool_grants,
+                        "selector_display" if failure == "display" else "build_grant_receipt", broken)
+    await h.adapter._on_message(command().raw_message)
+    assert len(h.adapter._store.list_grants(account_id="usr_agent")) == 1
+    assert h.adapter._send_owner_text.call_args.args[1] == tool_grants.GRANT_APPLIED_MESSAGE[lang]
+    assert "receipt rendering failed after successful write" in caplog.text
+    await h.adapter._on_message(command().raw_message)
+    assert h.adapter._send_owner_text.call_args.args[1] == GRANT_INVALID_CODE_MESSAGE[lang]

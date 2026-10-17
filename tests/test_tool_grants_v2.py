@@ -1264,6 +1264,9 @@ async def test_coalesced_internal_marker_requires_every_message_to_be_internal(t
             coalescer.enqueue(inbound)
         await coalescer.flush_now(messages[0].chat_id)
         assert dispatched[0].is_internal_synthetic is all(trusted)
+        assert bool(dispatched[0].raw_message.get("synthetic")) is all(trusted)
+        if all(trusted):
+            assert dispatched[0].grant_speakers == ()
     finally:
         await coalescer.cancel()
 
@@ -1434,3 +1437,53 @@ def test_other_capabilities_do_not_claim_worker_limits(lang, selector):
                                    mode="direct", lang=lang, code="000123", now=NOW)
     receipt = grants.build_grant_receipt(lang=lang, names=["Person"], tools=[selector])
     assert LIMIT_COPY[lang] not in card and LIMIT_COPY[lang] not in receipt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["direct", "group"])
+@pytest.mark.parametrize("deny", ["tool", "all"])
+async def test_wire_synthetic_preserves_guest_deny_rows(harness, host, monkeypatch, kind, deny):
+    from unittest.mock import Mock
+    from clawchat_gateway.inbound import parse_inbound_message
+    a = harness.adapter
+    harness.rows.append(row("web_search" if deny == "tool" else "all", "deny", user="usr_guest", kind=deny))
+    load = Mock(wraps=a._store.load_grants_for_users)
+    monkeypatch.setattr(a._store, "load_grants_for_users", load)
+    monkeypatch.setattr(guard, "public_tool_names", lambda _: frozenset({"web_search"}))
+    monkeypatch.setattr(guard, "_config_extra", lambda: {"non-owner-host-tools": "approve"})
+    frame = message("usr_guest", kind=kind).raw_message
+    frame["synthetic"] = True
+    incoming = parse_inbound_message(json.loads(json.dumps(frame)), a._clawchat_config)
+    assert incoming.grant_speakers == ("usr_guest",)
+    await a._handle_inbound(incoming)
+    assert any(call.kwargs["user_ids"] == ["usr_guest"] for call in load.call_args_list)
+    snapshot = turns.get_snapshot(harness.events[-1].source.message_id)
+    assert snapshot.speakers == ("usr_guest",) and snapshot.grants.get("web_search") == "deny"
+    assert guard._filter_grant_definitions([{"function": {"name": "web_search"}}], snapshot) == []
+    turns.bind_turn(snapshot.nonce, "s", "t")
+    with host(**context(snapshot, group=kind == "group")):
+        assert call("web_search", turn_id="t") == guard._grant_block("denied")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flagged", ["usr_owner", "usr_guest"])
+@pytest.mark.parametrize("internal_note", [False, True])
+async def test_wire_synthetic_cannot_erase_coalesced_speakers(harness, host, flagged, internal_note):
+    from clawchat_gateway.inbound import parse_inbound_message
+    incoming = []
+    for sender in ("usr_owner", "usr_guest"):
+        frame = message(sender, kind="group").raw_message
+        frame["synthetic"] = sender == flagged
+        incoming.append(parse_inbound_message(frame, harness.adapter._clawchat_config))
+    if internal_note:
+        incoming.append(message("clawchat-awareness", kind="group", synthetic=True))
+    batch = await coalesced(incoming)
+    assert not batch.is_internal_synthetic and "synthetic" not in batch.raw_message
+    assert batch.grant_speakers == ("usr_owner", "usr_guest")
+    harness.rows.append(row("web_search", "deny", user="usr_guest", kind="tool"))
+    await harness.adapter._handle_inbound(batch)
+    snapshot = turns.get_snapshot(harness.events[-1].source.message_id)
+    assert snapshot.speakers == ("usr_owner", "usr_guest")
+    turns.bind_turn(snapshot.nonce, "s", "t")
+    with host(**context(snapshot, group=True)):
+        assert call("web_search", turn_id="t") == guard._grant_block("denied")

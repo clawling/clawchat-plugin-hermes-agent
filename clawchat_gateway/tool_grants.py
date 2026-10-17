@@ -67,6 +67,9 @@ GRANT_WRITE_FAILED_MESSAGE = {
     "zh": "没写进去，请稍后再说一次。", "zh_Hant": "沒寫進去，請稍後再說一次。",
     "en": "It was not saved. Please ask again later.",
 }
+GRANT_APPLIED_MESSAGE = {
+    "zh": "已生效。", "zh_Hant": "已生效。", "en": "Now active.",
+}
 GRANT_INVALID_CODE_MESSAGE = {
     "zh": "这个确认码无效或已过期。", "zh_Hant": "這個確認碼無效或已過期。",
     "en": "This confirmation code is invalid or has expired.",
@@ -304,11 +307,14 @@ def _card_language(lang: str) -> str:
     return lang if lang in ("zh", "zh_Hant") else "en"
 
 
-def build_grant_receipt(*, lang: str, names: list[str], tools: list[str], mode: str = "direct") -> str:
+def build_grant_receipt(*, lang: str, names: list[str], tools: list[str],
+                        display_tools: list[str] | None = None, mode: str = "direct") -> str:
+    """Use canonical selectors for policy and separate localized display text."""
     lang = _card_language(lang)
     separator = ", " if lang == "en" else "、"
     values = {"names": separator.join(map(_clean_text, names)),
-              "tools": separator.join(_clean_text(tool, identifier=True) for tool in tools)}
+              "tools": separator.join(_clean_text(tool, identifier=True)
+                                      for tool in (tools if display_tools is None else display_tools))}
     text = re.sub(r"\{(names|tools)\}", lambda match: values[match[1]], (GRANT_DENY_RECEIPT if mode == "deny" else GRANT_CONFIRM_RECEIPT)[lang])
     return text + ("\n" + HERMES_LIMIT_COPY[lang] if selectors_have_host_limits(tools) else "")
 

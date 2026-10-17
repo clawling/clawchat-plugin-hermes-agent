@@ -43,7 +43,7 @@ class InboundMessage:
 
     @property
     def grant_speakers(self) -> tuple[str, ...]:
-        if self.is_internal_synthetic or self.raw_message.get("synthetic"):
+        if self.is_internal_synthetic:
             return ()
         return self._batch_speakers if self._batch_speakers is not None else (self.sender_id,)
 

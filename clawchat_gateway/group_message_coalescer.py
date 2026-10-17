@@ -266,7 +266,7 @@ class GroupMessageCoalescer:
             "clawchat_group_batch": True,
             "messages": [message.raw_message for message in batch],
         }
-        if any(bool(message.raw_message.get("synthetic")) for message in batch):
+        if all(message.is_internal_synthetic for message in batch):
             merged_raw["synthetic"] = True
         text = format_coalesced_group_text(
             batch, idle_seconds=self._idle_seconds, max_wait_seconds=self._max_wait_seconds,
@@ -276,7 +276,7 @@ class GroupMessageCoalescer:
         merged = replace(
             latest,
             _batch_speakers=tuple(dict.fromkeys(
-                speaker for message in batch for speaker in (message.grant_speakers or ("",)))),
+                speaker for message in batch for speaker in message.grant_speakers)),
             _batch_speaker_names=tuple(
                 (message.sender_id, message.sender_name) for message in batch),
             _owner_action_origin=(latest._owner_action_origin

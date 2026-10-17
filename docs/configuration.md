@@ -837,6 +837,8 @@ activation greeting retains legacy ordinary tool access, based on the stored
 owner pairing. Contact/comment notifications, permission receipts, memory
 migration hints and sediment turns use defaults. Synthetic turns cannot manage
 grants. Management requires the verified real owner in that direct chat.
+On old hosts without plugin hooks, plugin-generated turns that use defaults
+are refused entirely; all supported host versions provide hooks.
 
 Hermes before 0.19.1 does not pass the turn's chat type to plugins. There the
 plugin falls back to the chat id: a turn is the owner's only in the owner's

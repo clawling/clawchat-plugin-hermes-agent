@@ -4534,7 +4534,7 @@ class ClawChatAdapter(BasePlatformAdapter):
     async def _consume_grant_confirmation(self, inbound: InboundMessage) -> bool:
         from clawchat_gateway.tool_grants import (
             GRANT_CONFIRM_COMMAND, GRANT_INVALID_CODE_MESSAGE, GRANT_WRITE_FAILED_MESSAGE, GRANT_ASK_UNAVAILABLE_RECEIPT,
-            build_grant_receipt,
+            GRANT_APPLIED_MESSAGE, build_grant_receipt,
         )
 
         match = GRANT_CONFIRM_COMMAND.fullmatch(inbound.text.strip().strip("`").strip())
@@ -4555,18 +4555,29 @@ class ClawChatAdapter(BasePlatformAdapter):
         lang = lang if lang in ("zh", "zh_Hant") else "en"
         try:
             from clawchat_gateway.host_tools_guard import ask_grants_available
-            from clawchat_gateway.tool_capabilities import GrantSelector, selector_string, selector_display
             rows = self._store.confirm_pending_grant(account_id=self._account_id(), code=match[1],
                                                       ask_available=ask_grants_available())
-            text = build_grant_receipt(
-                lang=lang,
-                names=list(dict.fromkeys(row["grantee_name"] for row in rows)),
-                tools=list(dict.fromkeys(selector_display(selector_string(GrantSelector(row["what_kind"], row["what"])), lang) for row in rows)),
-            ) if rows else GRANT_INVALID_CODE_MESSAGE[lang]
         except ValueError as exc:
             text = GRANT_ASK_UNAVAILABLE_RECEIPT[lang] if str(exc) == "ask-unavailable" else GRANT_WRITE_FAILED_MESSAGE[lang]
         except Exception:  # noqa: BLE001 - never acknowledge a failed write as active
             text = GRANT_WRITE_FAILED_MESSAGE[lang]
+        else:
+            text = GRANT_INVALID_CODE_MESSAGE[lang]
+            if rows:
+                try:
+                    from clawchat_gateway.tool_capabilities import GrantSelector, selector_string, selector_display
+                    selectors = list(dict.fromkeys(
+                        selector_string(GrantSelector(row["what_kind"], row["what"])) for row in rows))
+                    text = build_grant_receipt(
+                        lang=lang,
+                        names=list(dict.fromkeys(row["grantee_name"] for row in rows)),
+                        tools=selectors,
+                        display_tools=[selector_display(selector, lang) for selector in selectors],
+                        mode=rows[0]["mode"],
+                    )
+                except Exception:  # noqa: BLE001 - the transaction has already committed
+                    logger.warning("clawchat grant receipt rendering failed after successful write", exc_info=True)
+                    text = GRANT_APPLIED_MESSAGE[lang]
         await self._send_owner_text(inbound.chat_id, text)
         return True
 
