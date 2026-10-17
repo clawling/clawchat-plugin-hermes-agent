@@ -426,7 +426,10 @@ def test_hint_exact_terminal_access_keeps_schema_and_execution_per_tool(host, ca
 def search_catalog(host, monkeypatch):
     model_tools = ModuleType("model_tools")
     raw = [{"function": {"name": name}} for name in
-           ("terminal", "process", "process_manage", "read_file", "web_search", "manage_connections", *AUTHORIZATION_TOOLS)]
+           ("terminal", "process", "process_manage", "read_file", "web_search", *AUTHORIZATION_TOOLS)]
+    known, available = guard.host_tool_catalog()
+    monkeypatch.setattr(guard, "host_tool_catalog",
+                        lambda: (known - {"manage_connections"}, available - {"manage_connections"}))
     def definitions(*, skip_tool_search_assembly=False):
         assert skip_tool_search_assembly
         return raw
@@ -436,6 +439,16 @@ def search_catalog(host, monkeypatch):
     monkeypatch.setitem(sys.modules, "model_tools", model_tools)
     monkeypatch.setitem(sys.modules, "tools.tool_search", search)
     return model_tools
+
+
+@pytest.fixture
+def registered_connections(search_catalog, monkeypatch):
+    search_catalog.get_tool_definitions(skip_tool_search_assembly=True).append(
+        {"function": {"name": "manage_connections"}})
+    known, available = guard.host_tool_catalog()
+    monkeypatch.setattr(guard, "host_tool_catalog",
+                        lambda: (known | {"manage_connections"}, available | {"manage_connections"}))
+    return search_catalog
 
 
 @pytest.mark.parametrize("bridge", ["tool_search", "tool_describe"])
@@ -462,21 +475,32 @@ def test_search_bridges_read_only_authorized_bound_catalog(host, search_catalog,
 
 @pytest.mark.parametrize("bridge", ["tool_search", "tool_describe"])
 @pytest.mark.parametrize("policy", ["all-deny-exact", "all-direct", "all-direct-connections-denied"])
-def test_search_bridges_block_remote_connector_catalog(host, search_catalog, bridge, policy):
+def test_search_bridges_block_remote_connector_catalog(host, registered_connections, bridge, policy):
     rows = ([row(mode="deny"), row("manage_connections", kind="tool")]
             if policy == "all-deny-exact" else [row()])
     if policy == "all-direct-connections-denied":
         rows.append(row("manage_connections", "deny", kind="tool"))
     assert guard._install_grant_catalog_filter()
     with bound_rules(rows) as snapshot, host(**context(snapshot)):
-        catalog = search_catalog.get_tool_definitions(skip_tool_search_assembly=True)
+        catalog = registered_connections.get_tool_definitions(skip_tool_search_assembly=True)
         connections_visible = policy != "all-direct-connections-denied"
         assert ("manage_connections" in {item["function"]["name"] for item in catalog}) is connections_visible
+        assert call(bridge, turn_id="t") == guard._grant_block("not-available")
+
+
+@pytest.mark.parametrize("bridge", ["tool_search", "tool_describe"])
+def test_search_bridges_block_connections_across_deny_expiry(host, registered_connections, monkeypatch, bridge):
+    clock = NOW
+    monkeypatch.setattr(guard.time, "time", lambda: clock / 1000)
+    assert guard._install_grant_catalog_filter()
+    with bound_rules([row(), row("manage_connections", "deny", kind="tool", expires_at=NOW + 1000)]) as snapshot, host(**context(snapshot)):
+        before = registered_connections.get_tool_definitions(skip_tool_search_assembly=True)
+        assert "manage_connections" not in {item["function"]["name"] for item in before}
         result = call(bridge, turn_id="t")
-        if connections_visible:
-            assert result is not None and result["reasonCode"] == "not-available"
-        else:
-            assert result is None
+        clock += 2000
+        after = registered_connections.get_tool_definitions(skip_tool_search_assembly=True)
+        assert "manage_connections" in {item["function"]["name"] for item in after}
+        assert result == guard._grant_block("not-available")
 
 
 @pytest.mark.parametrize("bridge", ["tool_search", "tool_describe"])
@@ -490,16 +514,17 @@ def test_search_bridges_allow_all_grant_when_host_has_no_connections(host, searc
 
 
 @pytest.mark.parametrize("bridge", ["tool_search", "tool_describe"])
-def test_search_bridges_block_registered_connections_missing_from_platform_catalog(host, search_catalog, monkeypatch, bridge):
+@pytest.mark.parametrize("mode", ["direct", "deny"])
+def test_search_bridges_block_registered_connections_missing_from_platform_catalog(host, registered_connections, monkeypatch, bridge, mode):
     # Platform settings changed after the session resolved its toolsets: the
     # session catalog can still offer the tool the platform catalog now omits.
     assert guard._install_grant_catalog_filter()
     known, available = guard.host_tool_catalog()
     assert "manage_connections" in known
     monkeypatch.setattr(guard, "host_tool_catalog", lambda: (known, available - {"manage_connections"}))
-    with bound_rules([row(mode="deny"), row("manage_connections", kind="tool")]) as snapshot, host(**context(snapshot)):
-        catalog = search_catalog.get_tool_definitions(skip_tool_search_assembly=True)
-        assert "manage_connections" in {item["function"]["name"] for item in catalog}
+    with bound_rules([row(mode="deny"), row("manage_connections", mode, kind="tool")]) as snapshot, host(**context(snapshot)):
+        catalog = registered_connections.get_tool_definitions(skip_tool_search_assembly=True)
+        assert ("manage_connections" in {item["function"]["name"] for item in catalog}) is (mode == "direct")
         assert call(bridge, turn_id="t")["reasonCode"] == "not-available"
 
 
@@ -534,7 +559,11 @@ def test_search_bridges_fail_closed_without_matching_filtered_catalog(host, sear
             finally:
                 turns.release_turn(overlap.nonce)
         else:
-            assert call(bridge, turn_id="t")["reasonCode"] == "not-available"
+            result = call(bridge, turn_id="t", args={"names": ["terminal"]})
+            if failure == "visibility-error" and bridge == "tool_search":
+                assert result is None  # Search does not inspect requested description names.
+            else:
+                assert result == guard._grant_block("not-available")
 
 
 @pytest.mark.parametrize("bridge", ["tool_search", "tool_describe"])
@@ -545,6 +574,43 @@ def test_search_bridges_accept_equivalent_catalog_snapshot(host, search_catalog,
         assert equivalent is not snapshot and equivalent.grants is not snapshot.grants
         monkeypatch.setattr(turns, "get_snapshot", lambda _: equivalent)
         assert call(bridge, turn_id="t") is None
+
+
+@pytest.mark.parametrize("names", [["terminal"], " terminal ", ["web_search", "terminal"]])
+@pytest.mark.parametrize("policy,reason", [("none", "not-granted"), ("deny", "denied"),
+    ("intersection", "batch-intersection"), ("unavailable", "not-available"), ("expired", "not-granted")])
+def test_tool_describe_blocks_invisible_registered_names(host, search_catalog, monkeypatch, names, policy, reason):
+    rows, speakers = [], ("usr_alice",)
+    if policy in {"deny", "intersection", "expired"}:
+        rows = [row("terminal", "deny" if policy == "deny" else "direct", kind="tool",
+                    **({"expires_at": NOW - 1} if policy == "expired" else {}))]
+    if policy == "intersection":
+        speakers += ("usr_bob",)
+    if policy == "unavailable":
+        known, available = guard.host_tool_catalog()
+        monkeypatch.setattr(guard, "host_tool_catalog", lambda: (known, available - {"terminal"}))
+    assert guard._install_grant_catalog_filter()
+    with bound_rules(rows, speakers=speakers) as snapshot, host(**context(snapshot)):
+        assert call("terminal", turn_id="t")["reasonCode"] == reason
+        assert call("tool_search", turn_id="t", args={"queries": ["terminal"]}) is None
+        assert call("tool_describe", turn_id="t", args={"names": names}) == guard._grant_block(reason)
+
+
+@pytest.mark.parametrize("names", [["terminal"], " terminal ", ["web_search", "terminal"],
+    ["unknown_tool"], ["tool_search", "tool_describe", "tool_call"],
+    None, {}, [], [" "], ["terminal", " "] + [f"unknown_{i}" for i in range(10)]])
+def test_tool_describe_allows_visible_unknown_bridge_or_invalid_names(host, search_catalog, names):
+    assert guard._install_grant_catalog_filter()
+    with bound_rules([row("terminal", kind="tool")]) as snapshot, host(**context(snapshot)):
+        assert call("tool_describe", turn_id="t", args={"names": names}) is None
+
+
+def test_tool_describe_checks_hidden_names_beyond_any_host_limit(host, search_catalog):
+    # A host with a larger per-call limit would otherwise reach its registry fallback.
+    assert guard._install_grant_catalog_filter()
+    with bound_rules([]) as snapshot, host(**context(snapshot)):
+        names = [f"unknown_{i}" for i in range(10)] + ["terminal"]
+        assert call("tool_describe", turn_id="t", args={"names": names}) == guard._grant_block("not-granted")
 
 
 def test_host_catalog_uses_platform_policy_not_last_narrowed_catalog(monkeypatch):

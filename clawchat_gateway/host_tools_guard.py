@@ -454,8 +454,9 @@ def _grant_search_bridge_allowed(tool_name, snapshot):
         # bypass our per-tool grants filter. Refuse both catalog bridges.
         # Any registered tool may be in the session's toolsets, whatever the
         # platform settings say now; only an unregistered one is safely absent.
-        if ("manage_connections" in host_tool_catalog()[0]
-                and _filter_grant_definitions([{"function": {"name": "manage_connections"}}], current)):
+        # A deny can expire before the host rebuilds its catalog, so current
+        # grant visibility cannot safely exclude this entry.
+        if "manage_connections" in host_tool_catalog()[0]:
             return False
         # Compare complete compiled rules: Mapping equality sees only finite
         # candidates and can miss a different all/future-tool policy.
@@ -465,6 +466,35 @@ def _grant_search_bridge_allowed(tool_name, snapshot):
             and current.grants.owner_only == snapshot.grants.owner_only)
     except Exception:  # noqa: BLE001 - old hosts and unreadable catalogs stay closed
         return False
+
+
+def _grant_tool_describe_block(args, snapshot):
+    """Prevent the host's registry fallback from describing hidden tools."""
+    try:
+        from tools.tool_search import BRIDGE_TOOL_NAMES
+        from clawchat_gateway.tool_grants import grant_failure_code
+
+        raw = args.get("names") if isinstance(args, dict) else None
+        raw = [raw] if isinstance(raw, str) else raw
+        if not isinstance(raw, list):
+            return None  # Let the host return its argument error.
+        # Match the host's string coercion, trimming and deduplication. Check
+        # every name whatever the host's per-call limit is.
+        names = list(dict.fromkeys(text for item in raw if (text := str(item or "").strip())))
+        known, available = host_tool_catalog()
+        for name in names:
+            if name not in known or name in BRIDGE_TOOL_NAMES:
+                continue
+            if not _filter_grant_definitions([{"function": {"name": name}}], snapshot):
+                guarded = _guarded_call(name, {})
+                strict = not guarded and _strict_unregistered(name)
+                context = {"chat_id": snapshot.chat_id, "default_allowed": not guarded and not strict}
+                reason = grant_failure_code(snapshot.grants, name, available=name in available,
+                    args={}, context=context, now=time.time() * 1000, speakers=snapshot.non_owner_speakers)
+                return _grant_block(reason or "not-available")
+        return None
+    except Exception:  # noqa: BLE001 - a failed check must not reach the host registry
+        return _grant_block("not-available")
 
 
 def _install_grant_catalog_filter() -> bool:
@@ -1392,6 +1422,8 @@ def _clawchat_pre_tool_decision(*, tool_name: str = "", args: Any = None, **kwar
                 _, available = host_tool_catalog()
                 if tool_name not in available:
                     if can_bind_call and _grant_search_bridge_allowed(tool_name, snapshot):
+                        if tool_name == "tool_describe":
+                            return _grant_tool_describe_block(args, snapshot)
                         return None
                     return _grant_block("not-available")
             if mode == "deny":
