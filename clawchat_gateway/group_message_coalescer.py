@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import Any
@@ -49,6 +50,9 @@ class GroupMessageCoalescer:
         log: logging.Logger = logger,
         is_busy: Callable[[str], bool] | None = None,
         busy_poll_seconds: float = 0.5,
+        busy_timeout_seconds: float | None = None,
+        on_busy_timeout: Callable[[str], bool | None] | None = None,
+        key_for_message: Callable[[InboundMessage], str] | None = None,
     ) -> None:
         self._idle_seconds = idle_seconds
         self._max_wait_seconds = max_wait_seconds
@@ -60,16 +64,20 @@ class GroupMessageCoalescer:
         # free (polled; asyncio.sleep, not the injectable timer sleep).
         self._is_busy = is_busy
         self._busy_poll_seconds = busy_poll_seconds
+        self._busy_timeout_seconds = busy_timeout_seconds
+        self._on_busy_timeout = on_busy_timeout
+        self._key_for_message = key_for_message or (lambda message: message.chat_id)
         self._pending: dict[str, list[InboundMessage]] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._max_wait_tasks: dict[str, asyncio.Task[None]] = {}
         self._busy_waiters: dict[str, asyncio.Task[None]] = {}
 
     def enqueue(self, message: InboundMessage, *, idle_seconds_override: float | None = None) -> None:
-        batch = self._pending.setdefault(message.chat_id, [])
+        key = self._key_for_message(message)
+        batch = self._pending.setdefault(key, [])
         batch.append(message)
-        self._reset_idle_task(message.chat_id, idle_seconds_override=idle_seconds_override)
-        if message.chat_id not in self._max_wait_tasks:
+        self._reset_idle_task(key, idle_seconds_override=idle_seconds_override)
+        if key not in self._max_wait_tasks:
             # max_wait bounds how long a chat that keeps talking can defer its
             # batch; it is NOT a second, shorter deadline competing with the
             # owner's chosen delay. Sleeping self._max_wait_seconds
@@ -80,12 +88,12 @@ class GroupMessageCoalescer:
             idle_seconds = (
                 idle_seconds_override if idle_seconds_override is not None else self._idle_seconds
             )
-            self._max_wait_tasks[message.chat_id] = asyncio.create_task(
+            self._max_wait_tasks[key] = asyncio.create_task(
                 self._flush_after_max_wait(
-                    message.chat_id,
+                    key,
                     max_wait_seconds=max(self._max_wait_seconds, idle_seconds),
                 ),
-                name=f"clawchat-group-coalesce-max-{message.chat_id}",
+                name=f"clawchat-group-coalesce-max-{key}",
             )
 
     def _reset_idle_task(self, chat_id: str, *, idle_seconds_override: float | None = None) -> None:
@@ -191,11 +199,23 @@ class GroupMessageCoalescer:
     async def _flush_when_idle(self, chat_id: str) -> None:
         task = asyncio.current_task()
         try:
+            deadline = (
+                time.monotonic() + self._busy_timeout_seconds
+                if self._busy_timeout_seconds is not None else None
+            )
+            timed_out = False
             while self._chat_busy(chat_id):
+                if deadline is not None and time.monotonic() >= deadline:
+                    if self._on_busy_timeout is not None and self._on_busy_timeout(chat_id) is False:
+                        deadline = time.monotonic() + self._busy_timeout_seconds
+                        await asyncio.sleep(self._busy_poll_seconds)
+                        continue
+                    timed_out = True
+                    break
                 await asyncio.sleep(self._busy_poll_seconds)
             if self._busy_waiters.get(chat_id) is task:
                 self._busy_waiters.pop(chat_id, None)
-            await self.flush(chat_id)
+            await self.flush(chat_id, force=timed_out)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -208,8 +228,8 @@ class GroupMessageCoalescer:
             if self._busy_waiters.get(chat_id) is task:
                 self._busy_waiters.pop(chat_id, None)
 
-    async def flush(self, chat_id: str) -> None:
-        if chat_id in self._pending and self._chat_busy(chat_id):
+    async def flush(self, chat_id: str, *, force: bool = False) -> None:
+        if not force and chat_id in self._pending and self._chat_busy(chat_id):
             self._hold_until_idle(chat_id)
             return
         batch = self._pending.pop(chat_id, [])
@@ -246,13 +266,16 @@ class GroupMessageCoalescer:
             "clawchat_group_batch": True,
             "messages": [message.raw_message for message in batch],
         }
+        if any(bool(message.raw_message.get("synthetic")) for message in batch):
+            merged_raw["synthetic"] = True
+        text = format_coalesced_group_text(
+            batch, idle_seconds=self._idle_seconds, max_wait_seconds=self._max_wait_seconds,
+        )
+        if latest.chat_type != "group":
+            text = text.replace("ClawChat group messages:", "ClawChat messages:", 1)
         merged = replace(
             latest,
-            text=format_coalesced_group_text(
-                batch,
-                idle_seconds=self._idle_seconds,
-                max_wait_seconds=self._max_wait_seconds,
-            ),
+            text=text,
             raw_message=merged_raw,
             media_urls=[url for message in batch for url in message.media_urls],
             media_types=[kind for message in batch for kind in message.media_types],
