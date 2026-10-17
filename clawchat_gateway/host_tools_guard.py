@@ -109,6 +109,7 @@ GRANT_MANAGEMENT_TOOLSET = "clawchat-grants"
 GRANT_REQUEST_TOOLSET = "clawchat-requests"
 _GRANT_APPROVAL_GATE_LOCK = threading.Lock()
 _GRANT_CATALOG_LOCK = threading.Lock()
+_GUEST_SEARCH_ENTRY_POINTS = ("connector_entries_by_group", "remote_schemas_for", "_registry_entry")
 _UNNARROWED_CATALOG = ContextVar("clawchat_unnarrowed_catalog", default=False)
 
 #: Host toolsets (Hermes 0.21 ``toolsets.py`` names) removed by default from
@@ -437,26 +438,73 @@ def _filter_grant_definitions(definitions, snapshot):
     return [item for item in definitions if allowed(item["function"]["name"])]
 
 
+def _guest_catalog_turn():
+    """Only a matching owner snapshot can bypass ClawChat catalog isolation."""
+    try:
+        from clawchat_gateway.turn_grants import get_snapshot, session_context_value
+
+        if session_context_value("HERMES_SESSION_PLATFORM") != "clawchat":
+            return False
+        snapshot = get_snapshot(session_context_value("HERMES_SESSION_MESSAGE_ID"))
+        return not (snapshot and snapshot.chat_id == session_context_value("HERMES_SESSION_CHAT_ID")
+                    and (snapshot.owner_side or snapshot.legacy_owner_tools))
+    except Exception:  # noqa: BLE001 - uncertain authority must not expose extra catalog entries
+        return True
+
+
+def _install_guest_search_guard() -> bool:
+    """Neutralize host search paths that can bypass the filtered guest catalog."""
+    try:
+        import tools.tool_search as ts
+
+        def wrap_entry(original, name):
+            @wraps(original)
+            def entry(*args, **kwargs):
+                if not _guest_catalog_turn():
+                    return original(*args, **kwargs)
+                if name == "connector_entries_by_group":
+                    queries = args[0] if args else kwargs.get("queries", ())
+                    return ([[] for _ in queries], None)
+                if name == "remote_schemas_for":
+                    return ({}, None)
+                return None  # No global registry fallback for guest descriptions.
+            entry._clawchat_guest = True
+            return entry
+
+        with _GRANT_CATALOG_LOCK:
+            for name in _GUEST_SEARCH_ENTRY_POINTS:
+                if not hasattr(ts, name):
+                    continue
+                original = getattr(ts, name)
+                if not callable(original):
+                    return False
+                if not getattr(original, "_clawchat_guest", False):
+                    setattr(ts, name, wrap_entry(original, name))
+        return True
+    except Exception:  # noqa: BLE001 - unknown hosts cannot safely open search bridges
+        return False
+
+
 def _grant_search_bridge_allowed(tool_name, snapshot):
     """Catalog reads are safe only through the filter for this bound authority."""
     try:
         import model_tools
-        from tools.tool_search import BRIDGE_TOOL_NAMES
+        import tools.tool_search as ts
         from clawchat_gateway.turn_grants import get_snapshot, session_context_value
 
-        if (tool_name == "tool_call" or tool_name not in BRIDGE_TOOL_NAMES
+        if (tool_name == "tool_call" or tool_name not in ts.BRIDGE_TOOL_NAMES
                 or not getattr(model_tools.get_tool_definitions, "_clawchat_grants", False)):
+            return False
+        if any(not getattr(getattr(ts, name), "_clawchat_guest", False)
+               for name in _GUEST_SEARCH_ENTRY_POINTS if hasattr(ts, name)):
             return False
         current = get_snapshot(session_context_value("HERMES_SESSION_MESSAGE_ID"))
         if current is None or current.chat_id != session_context_value("HERMES_SESSION_CHAT_ID"):
             return False
-        # This host catalog entry enables extra remote connector results that
-        # bypass our per-tool grants filter. Refuse both catalog bridges.
-        # Any registered tool may be in the session's toolsets, whatever the
-        # platform settings say now; only an unregistered one is safely absent.
-        # A deny can expire before the host rebuilds its catalog, so current
-        # grant visibility cannot safely exclude this entry.
-        if "manage_connections" in host_tool_catalog()[0]:
+        # Connector hosts must expose both known remote entry points so the
+        # guard can neutralize them even if a deny expires before dispatch.
+        if ("manage_connections" in host_tool_catalog()[0]
+                and any(not hasattr(ts, name) for name in _GUEST_SEARCH_ENTRY_POINTS[:2])):
             return False
         # Compare complete compiled rules: Mapping equality sees only finite
         # candidates and can miss a different all/future-tool policy.
@@ -485,7 +533,7 @@ def _grant_tool_describe_block(args, snapshot):
         for name in names:
             if name not in known or name in BRIDGE_TOOL_NAMES:
                 continue
-            if not _filter_grant_definitions([{"function": {"name": name}}], snapshot):
+            if name not in available or not _filter_grant_definitions([{"function": {"name": name}}], snapshot):
                 guarded = _guarded_call(name, {})
                 strict = not guarded and _strict_unregistered(name)
                 context = {"chat_id": snapshot.chat_id, "default_allowed": not guarded and not strict}
@@ -1574,6 +1622,7 @@ def register_host_tools_guard(ctx: Any) -> None:
     except Exception:  # noqa: BLE001 - Files direct still works without artifacts
         logger.warning("clawchat attachments: tool completion hook unavailable; artifacts disabled")
     _install_grant_catalog_filter()
+    _install_guest_search_guard()
     if _host_supports_pre_llm_call():
         try:
             register_hook("pre_llm_call", clawchat_pre_llm_call)

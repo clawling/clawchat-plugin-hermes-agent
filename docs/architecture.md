@@ -185,11 +185,13 @@ reached through search/dispatch. A restored toolset grants no implicit access
 to its other members. In a bound non-owner turn, `tool_search` and `tool_describe`
 can read the filtered catalog only when the grants filter is installed and its
 context snapshot matches the bound grants and non-owner speakers. A mismatch
-keeps the unavailable refusal. When the host registers `manage_connections`,
-the bridges stay `not-available` regardless of grants because the host can add
-remote connector results that the grants filter cannot check. `tool_describe`
-returns the same refusal as a direct call for registered names hidden in this
-turn. `tool_call` still checks the real inner tool.
+keeps the unavailable refusal. In guest turns the plugin neutralizes the host's
+remote connector search/describe and registry fallback, so the bridges only see
+the filtered catalog, even when grants expire between checks and dispatch.
+Bridges stay `not-available` when that guard cannot be installed or verified.
+`tool_describe` returns the same refusal as a direct call for registered names
+hidden in this turn or unavailable on the host. Owner turns and other platforms
+keep the host's original search behavior. `tool_call` still checks the real inner tool.
 Non-owner channel prompts list only installed, available capabilities with no
 available member authorized for this batch, with English display names and IDs;
 refusals expose reason codes without disclosing other speakers' permissions.

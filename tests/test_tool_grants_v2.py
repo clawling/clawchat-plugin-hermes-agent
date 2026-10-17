@@ -436,8 +436,30 @@ def search_catalog(host, monkeypatch):
     model_tools.get_tool_definitions = definitions
     search = ModuleType("tools.tool_search")
     search.BRIDGE_TOOL_NAMES = frozenset({"tool_search", "tool_describe", "tool_call"})
+    search.calls = []
+    def connector_entries(queries, **kwargs):
+        search.calls.append(("search", queries, kwargs))
+        return ([["remote-tool"] for _ in queries], None)
+    def remote_schemas(names, current_tool_defs, connector_describe=None):
+        search.calls.append(("describe", names, current_tool_defs, connector_describe))
+        return ({name: {"description": "remote"} for name in names}, None)
+    def registry_entry(name):
+        search.calls.append(("registry", name))
+        return {"name": name}
+    search.originals = dict(connector_entries_by_group=connector_entries,
+                            remote_schemas_for=remote_schemas, _registry_entry=registry_entry)
+    for name, original in search.originals.items():
+        setattr(search, name, original)
+    package = ModuleType("tools")
+    package.__path__ = []
+    package.tool_search = search
+    monkeypatch.setitem(sys.modules, "tools", package)
     monkeypatch.setitem(sys.modules, "model_tools", model_tools)
     monkeypatch.setitem(sys.modules, "tools.tool_search", search)
+    model_tools.search = search
+    install = getattr(guard, "_install_guest_search_guard", None)
+    if install is not None:
+        assert install()
     return model_tools
 
 
@@ -475,7 +497,7 @@ def test_search_bridges_read_only_authorized_bound_catalog(host, search_catalog,
 
 @pytest.mark.parametrize("bridge", ["tool_search", "tool_describe"])
 @pytest.mark.parametrize("policy", ["all-deny-exact", "all-direct", "all-direct-connections-denied"])
-def test_search_bridges_block_remote_connector_catalog(host, registered_connections, bridge, policy):
+def test_search_bridges_allow_guarded_remote_connector_catalog(host, registered_connections, bridge, policy):
     rows = ([row(mode="deny"), row("manage_connections", kind="tool")]
             if policy == "all-deny-exact" else [row()])
     if policy == "all-direct-connections-denied":
@@ -485,11 +507,16 @@ def test_search_bridges_block_remote_connector_catalog(host, registered_connecti
         catalog = registered_connections.get_tool_definitions(skip_tool_search_assembly=True)
         connections_visible = policy != "all-direct-connections-denied"
         assert ("manage_connections" in {item["function"]["name"] for item in catalog}) is connections_visible
-        assert call(bridge, turn_id="t") == guard._grant_block("not-available")
+        assert call(bridge, turn_id="t") is None
+        search = registered_connections.search
+        assert search.connector_entries_by_group(["query"], connector_search=object()) == ([[]], None)
+        assert search.remote_schemas_for(["connectors__private"], catalog) == ({}, None)
+        assert search._registry_entry("terminal") is None
+        assert search.calls == []
 
 
 @pytest.mark.parametrize("bridge", ["tool_search", "tool_describe"])
-def test_search_bridges_block_connections_across_deny_expiry(host, registered_connections, monkeypatch, bridge):
+def test_search_bridges_neutralize_connections_across_deny_expiry(host, registered_connections, monkeypatch, bridge):
     clock = NOW
     monkeypatch.setattr(guard.time, "time", lambda: clock / 1000)
     assert guard._install_grant_catalog_filter()
@@ -500,7 +527,11 @@ def test_search_bridges_block_connections_across_deny_expiry(host, registered_co
         clock += 2000
         after = registered_connections.get_tool_definitions(skip_tool_search_assembly=True)
         assert "manage_connections" in {item["function"]["name"] for item in after}
-        assert result == guard._grant_block("not-available")
+        assert result is None
+        search = registered_connections.search
+        assert search.connector_entries_by_group(["query"], connector_search=object()) == ([[]], None)
+        assert search.remote_schemas_for(["connectors__private"], after) == ({}, None)
+        assert search.calls == []
 
 
 @pytest.mark.parametrize("bridge", ["tool_search", "tool_describe"])
@@ -515,7 +546,7 @@ def test_search_bridges_allow_all_grant_when_host_has_no_connections(host, searc
 
 @pytest.mark.parametrize("bridge", ["tool_search", "tool_describe"])
 @pytest.mark.parametrize("mode", ["direct", "deny"])
-def test_search_bridges_block_registered_connections_missing_from_platform_catalog(host, registered_connections, monkeypatch, bridge, mode):
+def test_search_bridges_allow_guarded_connections_missing_from_platform_catalog(host, registered_connections, monkeypatch, bridge, mode):
     # Platform settings changed after the session resolved its toolsets: the
     # session catalog can still offer the tool the platform catalog now omits.
     assert guard._install_grant_catalog_filter()
@@ -525,7 +556,85 @@ def test_search_bridges_block_registered_connections_missing_from_platform_catal
     with bound_rules([row(mode="deny"), row("manage_connections", mode, kind="tool")]) as snapshot, host(**context(snapshot)):
         catalog = registered_connections.get_tool_definitions(skip_tool_search_assembly=True)
         assert ("manage_connections" in {item["function"]["name"] for item in catalog}) is (mode == "direct")
-        assert call(bridge, turn_id="t")["reasonCode"] == "not-available"
+        assert call(bridge, turn_id="t") is None
+
+
+@pytest.mark.parametrize("bridge", ["tool_search", "tool_describe"])
+@pytest.mark.parametrize("failure", ["uninstalled", "connector_entries_by_group", "remote_schemas_for", "_registry_entry",
+                                      "missing-search", "missing-describe"])
+def test_search_bridges_require_guest_guard(host, registered_connections, monkeypatch, bridge, failure):
+    search = registered_connections.search
+    if failure.startswith("missing-"):
+        monkeypatch.delattr(search, "connector_entries_by_group" if failure == "missing-search" else "remote_schemas_for")
+    else:
+        for name in search.originals if failure == "uninstalled" else [failure]:
+            monkeypatch.setattr(search, name, search.originals[name])
+    assert guard._install_grant_catalog_filter()
+    with bound_rules([row("terminal", kind="tool")]) as snapshot, host(**context(snapshot)):
+        assert call(bridge, turn_id="t") == guard._grant_block("not-available")
+
+
+def test_guest_search_guard_installation_is_idempotent_and_optional_attributes_are_safe(search_catalog, monkeypatch):
+    install = getattr(guard, "_install_guest_search_guard", lambda: False)
+    assert install()
+    search = search_catalog.search
+    wrapped = {name: getattr(search, name) for name in search.originals}
+    assert all(getattr(fn, "_clawchat_guest", False) for fn in wrapped.values())
+    assert install()
+    assert wrapped == {name: getattr(search, name) for name in search.originals}
+    for name in search.originals:
+        monkeypatch.delattr(search, name)
+    assert install()  # An older host with none of these entry points is safe.
+    monkeypatch.setitem(sys.modules, "tools.tool_search", None)
+    monkeypatch.delattr(sys.modules["tools"], "tool_search")
+    assert not install()
+
+
+@pytest.mark.parametrize("turn", ["guest", "missing", "wrong-chat", "error", "owner", "legacy-owner", "other-platform"])
+def test_guest_search_guard_neutralizes_only_unverified_clawchat_turns(host, search_catalog, monkeypatch, turn):
+    search = search_catalog.search
+    snapshot = turns.register_turn(account_id="usr_agent", chat_id="cnv_search", session_key="search-guard",
+        speakers=("usr_owner",) if turn == "owner" else (), grants={},
+        owner_side=turn == "owner", legacy_owner_tools=turn == "legacy-owner")
+    values = context(snapshot)
+    if turn == "missing":
+        values["HERMES_SESSION_MESSAGE_ID"] = "missing"
+    if turn == "wrong-chat":
+        # An owner snapshot in another chat must not bypass the guard.
+        monkeypatch.setattr(turns, "get_snapshot", lambda _: replace(snapshot, owner_side=True))
+        values["HERMES_SESSION_CHAT_ID"] = "cnv_other"
+    if turn == "error":
+        def broken_snapshot(_):
+            raise RuntimeError("snapshot unavailable")
+        monkeypatch.setattr(turns, "get_snapshot", broken_snapshot)
+    if turn == "other-platform":
+        values["HERMES_SESSION_PLATFORM"] = "telegram"
+    try:
+        with host(**values):
+            entries = search.connector_entries_by_group(queries=["one", "two"], connector_search="callback")
+            schemas = search.remote_schemas_for(["connectors__private"], [], "describe-callback")
+            entry = search._registry_entry("terminal")
+            if turn in {"owner", "legacy-owner", "other-platform"}:
+                assert entries == ([["remote-tool"], ["remote-tool"]], None)
+                assert schemas == ({"connectors__private": {"description": "remote"}}, None)
+                assert entry == {"name": "terminal"}
+                assert search.calls == [("search", ["one", "two"], {"connector_search": "callback"}),
+                    ("describe", ["connectors__private"], [], "describe-callback"), ("registry", "terminal")]
+            else:
+                assert entries == ([[], []], None)
+                assert schemas == ({}, None)
+                assert entry is None
+                assert search.calls == []
+    finally:
+        turns.release_turn(snapshot.nonce)
+
+
+def test_guest_search_guard_installs_with_host_hooks(host, search_catalog, monkeypatch):
+    search = search_catalog.search
+    for name, original in search.originals.items():
+        monkeypatch.setattr(search, name, original)
+    guard.register_host_tools_guard(SimpleNamespace(register_hook=lambda *args: None))
+    assert all(getattr(getattr(search, name), "_clawchat_guest", False) for name in search.originals)
 
 
 @pytest.mark.parametrize("bridge", ["tool_search", "tool_describe"])
@@ -578,15 +687,16 @@ def test_search_bridges_accept_equivalent_catalog_snapshot(host, search_catalog,
 
 @pytest.mark.parametrize("names", [["terminal"], " terminal ", ["web_search", "terminal"]])
 @pytest.mark.parametrize("policy,reason", [("none", "not-granted"), ("deny", "denied"),
-    ("intersection", "batch-intersection"), ("unavailable", "not-available"), ("expired", "not-granted")])
+    ("intersection", "batch-intersection"), ("unavailable", "not-available"),
+    ("granted-unavailable", "not-available"), ("expired", "not-granted")])
 def test_tool_describe_blocks_invisible_registered_names(host, search_catalog, monkeypatch, names, policy, reason):
     rows, speakers = [], ("usr_alice",)
-    if policy in {"deny", "intersection", "expired"}:
+    if policy in {"deny", "intersection", "expired", "granted-unavailable"}:
         rows = [row("terminal", "deny" if policy == "deny" else "direct", kind="tool",
                     **({"expires_at": NOW - 1} if policy == "expired" else {}))]
     if policy == "intersection":
         speakers += ("usr_bob",)
-    if policy == "unavailable":
+    if policy in {"unavailable", "granted-unavailable"}:
         known, available = guard.host_tool_catalog()
         monkeypatch.setattr(guard, "host_tool_catalog", lambda: (known, available - {"terminal"}))
     assert guard._install_grant_catalog_filter()
@@ -594,6 +704,19 @@ def test_tool_describe_blocks_invisible_registered_names(host, search_catalog, m
         assert call("terminal", turn_id="t")["reasonCode"] == reason
         assert call("tool_search", turn_id="t", args={"queries": ["terminal"]}) is None
         assert call("tool_describe", turn_id="t", args={"names": names}) == guard._grant_block(reason)
+
+
+def test_tool_describe_neutralizes_registry_fallback_after_grant_expiry(host, search_catalog, monkeypatch):
+    clock = NOW
+    monkeypatch.setattr(guard.time, "time", lambda: clock / 1000)
+    assert guard._install_grant_catalog_filter()
+    with bound_rules([row("terminal", kind="tool", expires_at=NOW + 1000)]) as snapshot, host(**context(snapshot)):
+        assert call("tool_describe", turn_id="t", args={"names": ["terminal"]}) is None
+        clock += 2000
+        catalog = search_catalog.get_tool_definitions(skip_tool_search_assembly=True)
+        assert "terminal" not in {item["function"]["name"] for item in catalog}
+        assert search_catalog.search._registry_entry("terminal") is None
+        assert search_catalog.search.calls == []
 
 
 @pytest.mark.parametrize("names", [["terminal"], " terminal ", ["web_search", "terminal"],
