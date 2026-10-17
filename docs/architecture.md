@@ -87,7 +87,10 @@ message="caption MEDIA:/abs/path")`. `clawchat_mention_message` stays text
 only: a mention plus a file is two sends (the mention, then `send_message`),
 which keeps one media path, with the host's own `MEDIA:` path checks and the
 plugin's credential denylist, for every chat. In non-owner turns, plugin tools
-refuse local paths and local attachments are not sent. Hermes delivers a reply after the turn's session
+refuse local paths and local attachments are not sent, except through the two
+per-person grant paths (every Files tool granted as direct, or a declared output
+of a tool call allowed in this turn; see
+[Local attachments](configuration.md#local-attachments)). Hermes delivers a reply after the turn's session
 context is cleared; such a delivery may carry a local attachment only into the
 owner's direct chat. This is an intentional exception because delivery goes
 only to the owner. In non-owner turns, HTTP(S) attachments are fetched only
@@ -129,7 +132,8 @@ the live adapter's `send` as an immediate media send
 `_clawchat_force_document`) inside `explicit_tool_send()`, or the standalone
 sender when no gateway runs in this process. The path must be absolute, an
 existing regular file, supplied from the owner's direct chat or a local operator
-surface, and outside the credential / system-path denylist
+surface (or allowed by a per-person grant, see
+[Local attachments](configuration.md#local-attachments)), and outside the credential / system-path denylist
 (`media_runtime.ensure_allowed_local_path`). The `send_message` patch stays
 for hosts that still expose `send_message`.
 
