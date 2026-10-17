@@ -910,7 +910,13 @@ async def send_file(
     standalone sender when no gateway runs in this process. The credential /
     system-path denylist applies.
     """
-    if not turn_allows_local_paths():
+    from clawchat_gateway import turn_attachments
+    snapshot = turn_attachments.current_snapshot()
+    non_owner = bool(snapshot and not (snapshot.owner_side or snapshot.legacy_owner_tools))
+    allowed = (turn_attachments.attachment_allowed(
+        path.strip() if isinstance(path, str) else None,
+        chat_id.strip() if isinstance(chat_id, str) else None) if non_owner else turn_allows_local_paths())
+    if not allowed:
         return _validation_error(LOCAL_PATH_REFUSAL)
     if not isinstance(chat_id, str) or not chat_id.strip():
         return _validation_error("chat_id is required")
@@ -927,6 +933,8 @@ async def send_file(
     if not raw.is_absolute():
         return _validation_error("path must be an absolute local path")
     try:
+        if non_owner:
+            turn_attachments.file_identity(str(raw))
         resolved = ensure_allowed_local_path(str(raw))
     except (ValueError, OSError, RuntimeError):
         return _validation_error("path is denied for delivery")
@@ -935,7 +943,9 @@ async def send_file(
     if not resolved.is_file():
         return _validation_error("path is not a regular file")
 
-    media_files = [str(resolved)]
+    # Preserve the original spelling until the checked read, so resolving here
+    # cannot conceal a symlink from the attachment identity checks.
+    media_files = [str(raw)]
     force_document = as_document is True
     try:
         sender = get_clawchat_sender()

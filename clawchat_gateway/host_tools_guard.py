@@ -1234,6 +1234,13 @@ def _cross_session_decision(tool_name, args, session_id=""):
 
 
 def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: Any) -> Optional[dict[str, Any]]:
+    from clawchat_gateway.turn_attachments import record_call
+    decision = _clawchat_pre_tool_decision(tool_name=tool_name, args=args, **kwargs)
+    record_call(tool_name=tool_name, args=args, decision=decision, **kwargs)
+    return decision
+
+
+def _clawchat_pre_tool_decision(*, tool_name: str = "", args: Any = None, **kwargs: Any) -> Optional[dict[str, Any]]:
     """``pre_tool_call`` hook: host tools in a turn the owner did not start."""
     try:
         tool_name = str(tool_name or "")
@@ -1284,6 +1291,7 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: A
         # send_message: only ClawChat turns the owner did not start, so another
         # platform's own sessions keep the host's behaviour.
         turn = session_turn if tool_name.startswith("clawchat_") or tool_name == "send_message" else ""
+        attachment_permitted = False
         if (tool_name.startswith("clawchat_") and turn != "owner") or (
             tool_name == "send_message" and turn == "other"
         ):
@@ -1303,7 +1311,27 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: A
                     not match.group(1).lower().startswith(("http://", "https://"))
                     for match in re.finditer(r"\bMEDIA:\s*[\"']?([^\s\"']+)", str(message), re.IGNORECASE)
                 )
-                if has_local_path(args) or local_marker:
+                from clawchat_gateway.local_paths import local_attachment_allowed
+                from clawchat_gateway.media_runtime import normalize_outbound_media_reference
+                target_chat = chat_id
+                if tool_name == "clawchat_send_file":
+                    target_chat = args.get("chat_id", "") if isinstance(args, dict) else ""
+                elif tool_name == "send_message" and isinstance(args, dict):
+                    target_chat = str(args.get("target", "")).removeprefix("clawchat:")
+                paths = []
+                if tool_name == "clawchat_send_file" and isinstance(args, dict):
+                    paths = [args.get("path")]
+                elif tool_name == "send_message" and isinstance(args, dict):
+                    paths = [m.group(1) for m in re.finditer(
+                        r"\bMEDIA:\s*[\"']?([^\s\"']+)", str(message), re.IGNORECASE)]
+                    for key in ("media_files", "attachments"):
+                        values = args.get(key, [])
+                        paths.extend(values if isinstance(values, list) else [values])
+                attachment_permitted = bool(paths) and all(
+                    isinstance(path, str) and local_attachment_allowed(
+                        target_chat, normalize_outbound_media_reference(path))
+                    for path in paths)
+                if (has_local_path(args) or local_marker) and not attachment_permitted:
                     return {"action": "block", "message": LOCAL_PATH_REFUSAL}
         guarded = _guarded_call(tool_name, args)
         strict = not guarded and _strict_unregistered(tool_name)
@@ -1351,7 +1379,8 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: A
                 from clawchat_gateway.tool_capabilities import TOOL_CAPABILITIES
                 from clawchat_gateway.local_paths import LOCAL_PATH_REFUSAL
                 local_tools = set().union(*(TOOL_CAPABILITIES[id_]["tools"] for id_ in ("terminal", "files", "code")))
-                if guarded and tool_name not in local_tools and has_local_path(args, any_string=True):
+                if (guarded and tool_name not in local_tools and has_local_path(args, any_string=True)
+                        and not (tool_name in {"clawchat_send_file", "send_message"} and attachment_permitted)):
                     return {"action": "block", "message": LOCAL_PATH_REFUSAL}
                 return None
             if not guarded and not strict:
@@ -1445,6 +1474,8 @@ def refuses_non_owner_turns() -> bool:
 def register_host_tools_guard(ctx: Any) -> None:
     """Register the ``pre_tool_call`` hook and say so when a layer is missing."""
     global _hook_missing
+    from clawchat_gateway import turn_attachments
+    turn_attachments.completion_hook_registered = False
     if not host_supports_toolset_override():
         logger.warning(
             "clawchat host tools: this Hermes has no per-source toolset override "
@@ -1471,6 +1502,13 @@ def register_host_tools_guard(ctx: Any) -> None:
         )
         raise
     _hook_missing = False
+    try:
+        from hermes_cli.plugins import VALID_HOOKS
+        if "post_tool_call" in VALID_HOOKS:
+            register_hook("post_tool_call", turn_attachments.post_tool_call)
+            turn_attachments.completion_hook_registered = True
+    except Exception:  # noqa: BLE001 - Files direct still works without artifacts
+        logger.warning("clawchat attachments: tool completion hook unavailable; artifacts disabled")
     _install_grant_catalog_filter()
     if _host_supports_pre_llm_call():
         try:

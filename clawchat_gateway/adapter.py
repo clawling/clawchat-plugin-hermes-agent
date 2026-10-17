@@ -956,6 +956,7 @@ class _ActiveRun:
     reply_to_message_id: str | None = None
     metadata: Any = None
     kwargs: dict[str, Any] = field(default_factory=dict)
+    attachment_nonce: str = ""
     # Streaming (§8), direct chats only: whether message.created went out, the
     # text streamed so far, the last message.add sequence, and whether the
     # stream was given up (the reply then goes out whole).
@@ -5120,6 +5121,9 @@ class ClawChatAdapter(BasePlatformAdapter):
 
     async def on_processing_start(self, event: Any) -> None:
         nonce = str(getattr(getattr(event, "source", None), "message_id", "") or "")
+        from clawchat_gateway.turn_attachments import start_processing
+        start_processing(nonce, self._account_id(),
+                         str(getattr(getattr(event, "source", None), "chat_id", "") or ""))
         for key, pending_nonce in list(self._grant_dispatch_started.items()):
             if pending_nonce == nonce:
                 self._grant_dispatch_started.pop(key, None)
@@ -5233,6 +5237,8 @@ class ClawChatAdapter(BasePlatformAdapter):
 
         nonce = str(getattr(getattr(event, "source", None), "message_id", "") or "")
         release_turn(nonce)
+        from clawchat_gateway.turn_attachments import finish_processing
+        finish_processing(nonce)
         for key, pending_nonce in list(self._grant_dispatch_started.items()):
             if pending_nonce == nonce:
                 self._grant_dispatch_started.pop(key, None)
@@ -6712,6 +6718,21 @@ class ClawChatAdapter(BasePlatformAdapter):
         metadata: Any = None,
         **kwargs: Any,
     ) -> SendResult:
+        from clawchat_gateway.turn_attachments import delivery_turn
+        from clawchat_gateway.turn_grants import NONCE_PREFIX
+
+        nonce = reply_to if isinstance(reply_to, str) and reply_to.startswith(NONCE_PREFIX) else None
+        with delivery_turn(nonce, self._account_id(), chat_id):
+            return await self._send_with_attachment_turn(chat_id, content, reply_to, metadata, **kwargs)
+
+    async def _send_with_attachment_turn(
+        self,
+        chat_id: str,
+        content: str = "",
+        reply_to: str | None = None,
+        metadata: Any = None,
+        **kwargs: Any,
+    ) -> SendResult:
         from clawchat_gateway.turn_grants import NONCE_PREFIX
 
         if isinstance(reply_to, str) and reply_to.startswith(NONCE_PREFIX):
@@ -6910,6 +6931,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             reply_to,
         )
 
+        from clawchat_gateway.turn_attachments import current_nonce
         run = _ActiveRun(
             chat_id=chat_id,
             chat_type=chat_type,
@@ -6919,6 +6941,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             reply_to_message_id=reply_to,
             metadata=dict(metadata) if isinstance(metadata, dict) else metadata,
             kwargs=dict(kwargs),
+            attachment_nonce=current_nonce(),
         )
         if is_stream_intermediate and not is_send_message_tool_call and not is_immediate_media_send:
             self._active_runs_by_id[message_id] = run
@@ -7099,6 +7122,18 @@ class ClawChatAdapter(BasePlatformAdapter):
         return SendResult(success=True, message_id=run.message_id)
 
     async def on_run_complete(
+        self,
+        chat_id: str,
+        final_text: str,
+        message_id: str | None = None,
+    ) -> SendResult:
+        from clawchat_gateway.turn_attachments import delivery_turn
+
+        run = self._resolve_active_run(chat_id=chat_id, message_id=message_id)
+        with delivery_turn(run.attachment_nonce if run else "", self._account_id(), chat_id):
+            return await self._complete_with_attachment_turn(chat_id, final_text, message_id)
+
+    async def _complete_with_attachment_turn(
         self,
         chat_id: str,
         final_text: str,

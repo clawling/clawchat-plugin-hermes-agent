@@ -169,11 +169,15 @@ def test_hook_registration_checks_pre_llm_capability(host, monkeypatch):
     monkeypatch.setattr(guard, "host_supports_toolset_override", lambda: True)
     monkeypatch.setattr(guard, "_host_supports_pre_llm_call", lambda: False)
     guard.register_host_tools_guard(SimpleNamespace(register_hook=lambda *args: recorded.append(args)))
-    assert [item[0] for item in recorded] == ["pre_tool_call"]
+    hooks = dict(recorded)
+    assert hooks["pre_tool_call"] is guard.clawchat_pre_tool_call
+    assert "pre_llm_call" not in hooks
     recorded.clear()
     monkeypatch.setattr(guard, "_host_supports_pre_llm_call", lambda: True)
     guard.register_host_tools_guard(SimpleNamespace(register_hook=lambda *args: recorded.append(args)))
-    assert [item[0] for item in recorded] == ["pre_tool_call", "pre_llm_call"]
+    hooks = dict(recorded)
+    assert hooks["pre_tool_call"] is guard.clawchat_pre_tool_call
+    assert hooks["pre_llm_call"] is guard.clawchat_pre_llm_call
 
 
 def test_grant_lookup_exception_blocks(host, monkeypatch):

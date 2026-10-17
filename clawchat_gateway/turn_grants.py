@@ -139,15 +139,27 @@ def release_turn(nonce: str) -> None:
                 del _session_nonces[key]
             if _active.get(key) == nonce:
                 del _active[key]
+    from clawchat_gateway.turn_attachments import clear_turn
+    clear_turn(nonce)
 
 
 def release_session(account_id: str, session_key: str) -> None:
     with _lock:
         key = (account_id, session_key)
         _active.pop(key, None)
-        for nonce in _session_nonces.pop(key, set()):
+        nonces = _session_nonces.pop(key, set())
+        for nonce in nonces:
             _snapshots.pop(nonce, None)
             _bindings.pop(nonce, None)
+    from clawchat_gateway.turn_attachments import clear_turn
+    for nonce in nonces:
+        clear_turn(nonce)
+
+
+def bound_snapshot(nonce: str) -> TurnSnapshot | None:
+    """Attachment delivery requires a live execution binding, even after context reset."""
+    with _lock:
+        return _snapshots.get(nonce) if nonce in _bindings else None
 
 
 def bind_turn(nonce: str, session_id: str, turn_id: str) -> None:

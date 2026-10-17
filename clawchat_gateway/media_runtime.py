@@ -16,7 +16,10 @@ from dataclasses import dataclass
 from urllib.parse import unquote, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
-from clawchat_gateway.local_paths import _public_address, is_denied_hermes_path, local_attachment_allowed, remote_media_allowed
+from clawchat_gateway.local_paths import (
+    _public_address, is_denied_hermes_path, local_attachment_allowed,
+    legacy_attachment_allowed, remote_media_allowed,
+)
 
 logger = logging.getLogger("clawchat_gateway.media_runtime")
 
@@ -190,7 +193,7 @@ def media_reference_allowed(value: str, chat_id: str | None) -> bool:
     normalized = normalize_outbound_media_reference(str(value or ""))
     if _is_remote_url(normalized):
         return remote_media_allowed(normalized, chat_id)
-    return local_attachment_allowed(chat_id)
+    return local_attachment_allowed(chat_id, normalized)
 
 
 def _is_uploaded_media_url(value: str) -> bool:
@@ -225,10 +228,14 @@ def _resolve_inbound_media_url(
     return urljoin(f"{resolved_base_url.rstrip('/')}/", url.lstrip("/"))
 
 
-def _load_local_media(path: str, media_local_roots: Sequence[str]) -> LoadedMedia:
+def _load_local_media(path: str, media_local_roots: Sequence[str], chat_id: str | None = None,
+                      checked: bool = False) -> LoadedMedia:
     resolved = ensure_allowed_local_path(path, media_local_roots)
+    from clawchat_gateway import turn_attachments
+    snapshot = turn_attachments.current_snapshot(chat_id)
+    checked = checked or bool(snapshot and not (snapshot.owner_side or snapshot.legacy_owner_tools))
     return LoadedMedia(
-        buffer=resolved.read_bytes(),
+        buffer=(turn_attachments.read_local_attachment(path, chat_id) if checked else resolved.read_bytes()),
         filename=resolved.name,
         mime=_guess_mime(resolved.name),
     )
@@ -443,21 +450,26 @@ async def upload_outbound_media(
     fragments: list[dict[str, object]] = []
     for raw_url in urls:
         url = normalize_outbound_media_reference(raw_url)
-        if not _is_remote_url(url) and not local_attachment_allowed(chat_id):
+        if not _is_remote_url(url) and not local_attachment_allowed(chat_id, url):
             if policy_dropped is not None:
                 policy_dropped.append(raw_url)
             logger.warning("clawchat outbound local media dropped name=%s", _media_log_name(url))
             continue
         try:
             if _is_remote_url(url):
-                if local_attachment_allowed(chat_id):
+                if legacy_attachment_allowed(chat_id):
                     loaded = await asyncio.to_thread(_load_remote_media, url)
                 else:
                     loaded = await asyncio.to_thread(_fetch_public_media, url)
             else:
+                # Losing a guest snapshot between the policy check and loading
+                # must never select the legacy unchecked owner reader.
+                checked = not legacy_attachment_allowed(chat_id)
                 loaded = await asyncio.to_thread(
-                    _load_local_media, url, media_local_roots
+                    _load_local_media, url, media_local_roots, chat_id, checked
                 )
+                if checked and not local_attachment_allowed(chat_id, url):
+                    raise ValueError("attachment turn ended")
             uploaded = await uploader(
                 base_url=resolved_base_url,
                 token=token,

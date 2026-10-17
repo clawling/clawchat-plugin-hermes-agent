@@ -801,10 +801,10 @@ For the same reason the hook also blocks Bot Mode's `message_agent` (the
 receiving agent runs with its own full tools).
 Authority is resolved for the trusted speakers in each batch. Restoring
 toolsets can rebuild Hermes' cached agent; the hook still checks concrete
-calls. In non-owner turns, plugin tools refuse local file paths and local
-attachments are not sent (a reply delivered after the turn may carry one only into the
-owner's direct chat, an intentional exception because only the owner receives
-it). In non-owner turns, HTTP(S) attachments are fetched only from globally
+calls. In non-owner turns, local attachments require direct access to every
+Files tool or a structured artifact from a successful, permitted call in this
+turn (see “Local attachments” below). Other plugin local-path restrictions
+remain. In non-owner turns, HTTP(S) attachments are fetched only from globally
 routable unicast addresses. Connections use the checked IP directly, without
 proxies, and each redirect is resolved and checked again. In non-owner ClawChat
 turns, `send_message` to other platforms cannot carry attachments; ClawChat
@@ -1135,6 +1135,63 @@ and intersects live grants with defaults until the session is idle; finishing
 one nonce alone cannot restore it. Read failures, expired grants and missing
 snapshots add no authority.
 
+#### Local attachments
+
+Replies and `clawchat_send_file` share the same local-file policy. A non-owner
+turn can send a local file into its current conversation when **every caller
+has direct access to every Files tool** (`read_file`, `write_file`, `patch`,
+`search_files`). The ordinary selector priority and group intersection apply:
+`cap:files` with mode `ask` does not open attachments, and an exact-tool ask/deny exception
+to Files or `all:direct` closes this route. Cross-chat access alone does not
+open local attachments.
+
+Alternatively, a successful tool call permitted by `pre_tool_call` can declare
+its own generated files in the structured completion result. These artifacts
+are available only for that live turn, account, session, caller batch and
+conversation. The permit binds the call id (or tool name plus a canonical
+argument fingerprint), also verifies tool name and arguments when an id exists,
+and is consumed once. An approved call under `non-owner-host-tools: approve`
+also qualifies with `tool-grants: off`; that approval never permits another
+call or a later completion. Failed/blocked completions consume without adding
+artifacts. Ending the turn immediately clears pending permits and artifacts.
+
+Guest delivery rejects symlinks (including parent directories), hard links,
+non-regular files, credential/system paths, and files changed since declaration.
+It opens one descriptor, compares device/inode/size/mtime/ctime with `fstat`,
+reads at most the checked size (maximum 100 MiB), rechecks the descriptor and
+pathname, and uploads those bytes. Owner and local-operator delivery keep their
+existing policy. Files direct does not relax public-address checks for remote
+media.
+
+#### Narrow-tool artifact contract
+
+A narrow tool must **declare only files it generated itself** and **construct
+the output path itself**. It must not echo an arbitrary caller-supplied path
+into the artifact result or declare pre-existing owner files. The plugin trusts
+installed tool code to honor this contract; granting a tool that violates it
+can expose local files.
+
+Return a structured object (or its JSON serialization) through the host's
+`post_tool_call` completion hook, for example:
+
+```json
+{"details":{"ok":true,"media":{"path":"/tmp/generated-speech.mp3"}}}
+```
+
+Only `details.media` is recognized: local `media`, `path`, `url`, `mediaUrl`,
+`filePath`, `fileUrl`, strings in `mediaUrls`, or those keys in `attachments`
+objects. `outbound:false`, error/failure/pending results and unknown shapes
+grant nothing. Text in `content`, legacy `details.path`, and Hermes `MEDIA:`
+lines are not artifact declarations. A model can reference an already allowed
+file for delivery, but cannot create its permission by writing a path.
+
+The artifact route requires a registered completion hook, a live nonce snapshot,
+matching session/turn ids and explicit host `status:"ok"`, with no completion
+error. These fields are not available on every supported Hermes release:
+missing hooks/fields close the artifact route. No new host helper import or
+`transform_tool_result` fallback is used; Files direct still works wherever
+the existing execution binding is supported.
+
 #### Non-owner hints and refusal reasons
 
 The dynamic short prompt lists currently available host capabilities whose
@@ -1423,17 +1480,18 @@ local operator surface, regardless of `media_local_roots`.
 The plugin judges attachments by the ClawChat turn they come from. Where no
 ClawChat turn is in play, it does not restrict further:
 
-- A delivery made with no session context (Hermes sends a turn's reply after
+- A delivery made with no session context and no trusted live turn nonce (Hermes sends a turn's reply after
   clearing the turn's context; cron delivery) may carry attachments into the
   owner's direct chat, local files and http(s) URLs alike, fetched the ordinary
   way. The only recipient there is the owner. Into any other chat it carries
-  no local file.
+  no local file. A trusted live reply nonce can retain only that turn's Files
+  or artifact permission; a released nonce cannot recover it.
 - A `send_message` call from another platform's own session, or with no session
   context, to a non-ClawChat target is left to Hermes and that platform: the
   plugin does not decide what another platform's turns may send.
 - Hermes itself checks that a `MEDIA:` path exists before the plugin sees the
-  call. The plugin refuses the attachment afterwards, so nothing is read or
-  sent, but that existence check has already happened.
+  call. The plugin applies its attachment policy afterwards; for a refused
+  attachment nothing is read or sent, but that existence check has already happened.
 
 ## Debug / diagnostics env vars
 

@@ -159,6 +159,7 @@ nonce, chat, session and turn without a latest-session fallback. Overlapping
 snapshots intersect. Synthetic/unidentified input in the owner's direct chat
 removes verification until idle. Grant/revoke writes affect subsequent
 snapshots; expiry is checked again at execution.
+Local attachment policy is shared by replies and file tools: every Files member must be direct, or a successful `post_tool_call` must consume that call's permit and declare a structured artifact bound to the live account/session/turn/callers/target; guest uploads use one checked file descriptor and all artifact authority expires at turn completion.
 Only the one-time activation greeting, constructed from the stored owner pairing,
 retains legacy ordinary tools in the owner's direct chat. Authorization-card
 wakeups use their trusted requester's current grants. Other synthetic turns

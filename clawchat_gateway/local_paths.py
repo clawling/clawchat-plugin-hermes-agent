@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 
 LOCAL_PATH_REFUSAL = (
     "Local files can't be sent or uploaded in this conversation. "
-    "Only your owner's direct chat can do that."
+    "This turn needs direct Files access or an authorized tool artifact."
 )
 ATTACHMENT_REFUSAL = "Attachments can't be sent from this conversation to other platforms."
 
@@ -46,10 +46,27 @@ def _gateway_in_process() -> bool:
 
 
 def turn_allows_local_paths() -> bool:
+    from clawchat_gateway.turn_attachments import files_direct
+    return files_direct() or _legacy_local_paths()
+
+
+def _legacy_local_paths() -> bool:
     """The owner's direct-chat turn, or a local operator surface (no gateway)."""
     try:
         from clawchat_gateway import host_tools_guard, memory_scope
+        from clawchat_gateway import turn_attachments, turn_grants
 
+        nonce = turn_grants.session_context_value("HERMES_SESSION_MESSAGE_ID")
+        pending = turn_grants.get_snapshot(nonce)
+        if pending is not None:
+            snapshot = turn_attachments.current_snapshot()
+            if snapshot is None:
+                # Ordinary owner delivery predates execution bindings. Keep
+                # it on older hosts, without enabling any guest permission.
+                return bool((pending.owner_side or pending.legacy_owner_tools)
+                            and pending.chat_id == turn_grants.session_context_value("HERMES_SESSION_CHAT_ID")
+                            and host_tools_guard._session_turn() == "owner")
+            return bool(snapshot and (snapshot.owner_side or snapshot.legacy_owner_tools))
         if host_tools_guard._session_turn() == "owner":
             return True
         return (
@@ -61,15 +78,30 @@ def turn_allows_local_paths() -> bool:
         return False
 
 
-def local_attachment_allowed(chat_id: str | None) -> bool:
+def local_attachment_allowed(chat_id: str | None, source: str | None = None) -> bool:
     """Whether a local attachment may be delivered into ``chat_id``.
 
-    Hermes delivers a reply after the turn's session context is cleared, so an
-    unbound delivery is judged by its destination: only the owner's direct
-    chat. Inside a bound turn that is not the owner's, never.
+    Reply delivery can carry an explicit, process-local execution nonce after
+    Hermes clears session context. Without that binding only legacy owner
+    delivery remains available.
     """
     try:
-        if turn_allows_local_paths():
+        from clawchat_gateway import turn_attachments
+        if turn_attachments.attachment_allowed(source, chat_id):
+            return True
+        return legacy_attachment_allowed(chat_id)
+    except Exception:  # noqa: BLE001 - fail closed
+        return False
+
+
+def legacy_attachment_allowed(chat_id: str | None) -> bool:
+    """Original owner/local policy, also used for unrestricted remote fetching."""
+    try:
+        from clawchat_gateway import turn_attachments
+        snapshot = turn_attachments.current_snapshot()
+        if snapshot and not (snapshot.owner_side or snapshot.legacy_owner_tools):
+            return False
+        if _legacy_local_paths():
             return True
         if _session_bound():
             return False
@@ -80,7 +112,7 @@ def local_attachment_allowed(chat_id: str | None) -> bool:
 
 def remote_media_allowed(url: str, chat_id: str | None) -> bool:
     """Non-owner attachments may only be fetched from public addresses."""
-    if local_attachment_allowed(chat_id):
+    if legacy_attachment_allowed(chat_id):
         return True
     try:
         parsed = urlparse(url)
