@@ -1727,9 +1727,11 @@ async def manage_tool_grants(operation: str, params: Any, *, session_id: str = "
     import sqlite3
     import time
     from clawchat_gateway.tool_grants import (
-        build_grant_card, generate_grant_code, valid_grant_tools, validate_grant_params,
+        build_grant_card, generate_grant_code, validate_grant_params,
     )
     from clawchat_gateway.owner_language import resolve_owner_language
+    from clawchat_gateway.tool_capabilities import normalize_grant_selectors, GrantSelector, selector_string
+    from clawchat_gateway.host_tools_guard import host_tool_catalog, ask_grants_available
 
     snapshot, sender, error = _grant_management_context(session_id)
     if error:
@@ -1741,18 +1743,31 @@ async def manage_tool_grants(operation: str, params: Any, *, session_id: str = "
         if operation == "list":
             if params:
                 return _validation_error("This tool takes no arguments")
-            return {"grants": store.list_grants(account_id=snapshot.account_id)}
+            return {"grants": [dict(granteeUserId=row["grantee_user_id"], granteeName=row["grantee_name"],
+                                    whatKind=row["what_kind"], what=row["what"], mode=row["mode"],
+                                    expiresAt=row["expires_at"]) for row in store.list_grants(account_id=snapshot.account_id)]}
         if operation == "revoke":
             if (params.keys() - {"userId", "tools"} or not isinstance(params.get("userId"), str)
                     or not re.fullmatch(r"usr_[^\s]+", params["userId"])):
                 return _validation_error("userId must be an explicit usr_ id")
-            if "tools" in params and not valid_grant_tools(params["tools"]):
-                return _validation_error("tools must contain exact tool names")
+            selected = None
+            if "tools" in params:
+                rows = store.list_grants(account_id=snapshot.account_id, include_expired=True)
+                stored = [selector_string(GrantSelector(row["what_kind"], row["what"])) for row in rows
+                          if row["grantee_user_id"] == params["userId"]]
+                known, available = host_tool_catalog()
+                selected = normalize_grant_selectors(params["tools"], known_tools=known,
+                                                     available_tools=available, stored=stored)
             return {"revoked": store.revoke_grants(account_id=snapshot.account_id,
-                                                  user_id=params["userId"], tools=params.get("tools"))}
+                                                  user_id=params["userId"], tools=selected)}
         now = int(time.time() * 1000)
         try:
             values = validate_grant_params(params, now)
+            known, available = host_tool_catalog()
+            values["tools"] = normalize_grant_selectors(values["tools"], known_tools=known, available_tools=available)
+            ask_available = ask_grants_available()
+            if values["mode"] == "ask" and not ask_available:
+                return _validation_error("ask-unavailable")
         except ValueError as exc:
             return _validation_error(str(exc))
         client, error = _build_client()
@@ -1801,10 +1816,16 @@ async def manage_tool_grants(operation: str, params: Any, *, session_id: str = "
             return _validation_error("Could not look up every grantee by id; confirm who they are with the owner first")
         payload = dict(values, grantees=grantees)
         lang = resolve_owner_language(sender._owner_locale())
+        if values["mode"] == "deny":
+            live, current_sender, error = _grant_management_context(session_id)
+            if error or live.nonce != snapshot.nonce or current_sender is not sender:
+                return _config_error("Nothing was saved.")
+            count = store.apply_grant(account_id=snapshot.account_id, payload=payload, now=now)
+            return {"applied": True, "mode": "deny", "count": count}
         # Unique INSERT is the collision check; never replace another card.
         for attempt in range(6):
             code = generate_grant_code()
-            card = build_grant_card(**payload, lang=lang, code=code, now=now)
+            card = build_grant_card(**payload, lang=lang, code=code, now=now, ask_available=ask_available)
             if not card:
                 return _validation_error("Could not build the confirmation card")
             try:
@@ -1822,5 +1843,7 @@ async def manage_tool_grants(operation: str, params: Any, *, session_id: str = "
             # explicitly as inactive; only a real owner command can activate it.
             return {"error": "send", "message": "Confirmation card was not sent. Nothing is active; no grant has taken effect."}
         return {"pending": True, "note": "A confirmation card was sent to the owner. Nothing is granted until the owner taps it; do not say it is active."}
+    except ValueError as exc:
+        return _validation_error(str(exc) if str(exc) in {"invalid-what", "not-available", "confirmation-required"} else "Invalid grant selection")
     except Exception:  # noqa: BLE001 - never echo server details or report success on failure
         return {"error": "grant", "message": "The operation failed. No new grant has taken effect."}

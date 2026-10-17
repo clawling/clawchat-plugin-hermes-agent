@@ -9,7 +9,7 @@ from clawchat_gateway.tool_grants import BASELINE_CATEGORY, PENDING_TTL_MS, reso
 
 NOW = 1791892800000
 PAYLOAD = dict(grantees=[dict(id="usr_u", name="张三"), dict(id="usr_v", name="李四")],
-               tools=["feishu_doc_read", "terminal"], mode="direct", label="文档与命令")
+               tools=["feishu_doc_read", "tool:terminal"], mode="direct", label="文档与命令")
 
 
 @pytest.fixture
@@ -35,21 +35,21 @@ def consumed(store, code="000123"):
 def test_migration_13_upgrades_12_and_is_idempotent(tmp_path):
     path = tmp_path / "old.sqlite"
     with sqlite3.connect(path) as conn:
-        for version, name, sql in MIGRATIONS[:-1]:
+        for version, name, sql in MIGRATIONS[:12]:
             conn.executescript(sql)
             conn.execute("INSERT INTO schema_migrations VALUES (?, ?, ?)", (version, name, NOW))
     ClawChatStore(path).initialize()
     ClawChatStore(path).initialize()
     with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1").fetchone() == (13, "tool_grants")
+        assert conn.execute("SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1").fetchone() == (14, "tool_grants_v2")
         for table, columns, primary in (
-            ("tool_grants", ["account_id", "grantee_user_id", "grantee_name", "tool", "mode", "label", "expires_at", "created_at"], ["account_id", "grantee_user_id", "tool"]),
-            ("tool_grant_pending", ["account_id", "code", "payload_json", "created_at", "expires_at", "consumed_at"], ["account_id", "code"]),
+            ("tool_grants", ["account_id", "grantee_user_id", "grantee_name", "what_kind", "what", "mode", "label", "expires_at", "created_at"], ["account_id", "grantee_user_id", "what_kind", "what"]),
+            ("tool_grant_pending", ["account_id", "code", "payload_json", "created_at", "expires_at", "consumed_at", "purpose", "payload_version"], ["account_id", "code"]),
         ):
             info = conn.execute("PRAGMA table_info(" + table + ")").fetchall()
             assert [item[1] for item in info] == columns
             assert [item[1] for item in sorted(info, key=lambda item: item[5]) if item[5]] == primary
-        assert conn.execute("SELECT count(*) FROM schema_migrations").fetchone()[0] == 13
+        assert conn.execute("SELECT count(*) FROM schema_migrations").fetchone()[0] == 14
 
 
 def test_pending_only_then_confirm_in_one_explicit_transaction(store, monkeypatch):
@@ -57,7 +57,7 @@ def test_pending_only_then_confirm_in_one_explicit_transaction(store, monkeypatc
     assert store.list_grants(account_id="a", now=NOW) == []
     with sqlite3.connect(store.db_path) as conn:
         payload_json, created_at, expires_at, used = conn.execute("SELECT payload_json, created_at, expires_at, consumed_at FROM tool_grant_pending").fetchone()
-    assert json.loads(payload_json) == PAYLOAD
+    assert json.loads(payload_json) == PAYLOAD | dict(tools=["tool:feishu_doc_read", "tool:terminal"])
     assert (created_at, expires_at, used) == (NOW, NOW + PENDING_TTL_MS, None)
     statements = []
     original = store._tool_grants_connection
@@ -70,14 +70,14 @@ def test_pending_only_then_confirm_in_one_explicit_transaction(store, monkeypatc
     monkeypatch.setattr(store, "_tool_grants_connection", connect)
     rows = confirm(store)
     assert len(rows) == 4
-    assert {r["mode"] for r in rows if r["tool"] == "terminal"} == {"ask"}
-    assert {r["mode"] for r in rows if r["tool"] == "feishu_doc_read"} == {"direct"}
+    assert {r["mode"] for r in rows if r["what"] == "terminal"} == {"direct"}
+    assert {r["mode"] for r in rows if r["what"] == "feishu_doc_read"} == {"direct"}
     assert all(r["created_at"] == NOW + 1 and r["label"] == PAYLOAD["label"] for r in rows)
     assert statements[0] == "BEGIN IMMEDIATE" and statements[-1] == "COMMIT"
     assert sum(s.startswith("BEGIN") for s in statements) == 1
     assert consumed(store) == NOW + 1
-    assert store.list_grants(account_id="a", now=NOW + 1) == sorted(rows, key=lambda r: (r["grantee_user_id"], r["tool"]))
-    assert resolve_turn_grants(["owner", "usr_u", "usr_v"], "owner", rows, NOW + 1) == {"feishu_doc_read": "direct", "terminal": "ask"}
+    assert store.list_grants(account_id="a", now=NOW + 1) == sorted(rows, key=lambda r: (r["grantee_user_id"], r["what"]))
+    assert resolve_turn_grants(["owner", "usr_u", "usr_v"], "owner", rows, NOW + 1) == {"feishu_doc_read": "direct", "terminal": "direct"}
 
 
 @pytest.mark.parametrize("code,account,when", [("999999", "a", NOW + 1), ("000123", "b", NOW + 1),
@@ -164,15 +164,15 @@ def test_two_connections_cannot_both_consume(store):
     assert len(store.list_grants(account_id="a", now=NOW + 1)) == 4
 
 
-def test_every_baseline_forced_ask_at_write_and_resolve(store):
-    pending(store, payload=PAYLOAD | dict(tools=list(BASELINE_CATEGORY)))
+def test_every_sensitive_exact_tool_remains_direct_at_write_and_resolve(store):
+    pending(store, payload=PAYLOAD | dict(tools=["tool:" + name for name in BASELINE_CATEGORY]))
     rows = confirm(store)
-    assert all(row["mode"] == "ask" for row in rows)
+    assert all(row["mode"] == "direct" for row in rows)
     # Protect against legacy or manually edited direct rows too.
     with sqlite3.connect(store.db_path) as conn:
         conn.execute("UPDATE tool_grants SET mode = 'direct'")
     rows = store.load_grants_for_users(account_id="a", user_ids=["usr_u"], now=NOW + 1)
-    assert resolve_turn_grants(["usr_u"], "owner", rows, NOW + 1) == dict.fromkeys(BASELINE_CATEGORY, "ask")
+    assert resolve_turn_grants(["usr_u"], "owner", rows, NOW + 1) == dict.fromkeys(BASELINE_CATEGORY, "direct")
 
 
 def test_upsert_updates_all_fields(store):
@@ -181,7 +181,7 @@ def test_upsert_updates_all_fields(store):
     payload = dict(grantees=[dict(id="usr_u", name="新名字")], tools=["feishu_doc_read"], mode="ask", expires_at=NOW + 99)
     pending(store, "000124", payload)
     rows = confirm(store, "000124", now=NOW + 2)
-    assert rows == [dict(account_id="a", grantee_user_id="usr_u", grantee_name="新名字", tool="feishu_doc_read",
+    assert rows == [dict(account_id="a", grantee_user_id="usr_u", grantee_name="新名字", what_kind="tool", what="feishu_doc_read",
                          mode="ask", label=None, expires_at=NOW + 99, created_at=NOW + 2)]
     assert rows[0] in store.list_grants(account_id="a", now=NOW + 2)
 
@@ -191,8 +191,8 @@ def test_revoke_counts_and_account_user_filters(store):
         pending(store, account=account)
         confirm(store, account=account)
     assert store.revoke_grants(account_id="a", user_id="usr_u", tools=[]) == 0
-    assert store.revoke_grants(account_id="a", user_id="usr_u", tools=["terminal", "terminal", "missing"]) == 1
-    assert store.revoke_grants(account_id="a", user_id="usr_u", tools=["terminal"]) == 0
+    assert store.revoke_grants(account_id="a", user_id="usr_u", tools=["tool:terminal", "tool:terminal", "missing"]) == 1
+    assert store.revoke_grants(account_id="a", user_id="usr_u", tools=["tool:terminal"]) == 0
     assert store.revoke_grants(account_id="a", user_id="usr_u") == 1
     assert store.revoke_grants(account_id="a", user_id="usr_v") == 2
     assert store.revoke_grants(account_id="a", user_id="usr_missing") == 0

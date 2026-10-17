@@ -4,7 +4,7 @@ import pytest
 from clawchat_gateway import host_tools_guard as guard, turn_grants as turns
 from clawchat_gateway.tool_grants import (
     GRANT_BLOCK_MESSAGE, GRANT_INTERSECTION_BLOCK_MESSAGE, GRANT_ASK_DENIED_MESSAGE,
-    GRANT_TOOL_NAMES,
+    GRANT_TOOL_NAMES, GRANT_ASK_UNAVAILABLE_MESSAGE,
 )
 from clawchat_gateway.local_paths import LOCAL_PATH_REFUSAL
 from test_turn_grants import install_host_context, snapshot
@@ -15,6 +15,16 @@ TOOL = "mcp__docs__read"
 @pytest.fixture
 def host(monkeypatch):
     bind = install_host_context(monkeypatch)
+    monkeypatch.setattr(guard, "_host_supports_pre_llm_call", lambda: True)
+    from clawchat_gateway.tool_capabilities import CAPABILITY_TOOL_NAMES, AUTHORIZATION_TOOLS
+    catalog = frozenset(CAPABILITY_TOOL_NAMES) | {TOOL, "skill_manage", "clawchat_memory_read", *AUTHORIZATION_TOOLS}
+    monkeypatch.setattr(guard, "host_tool_catalog", lambda: (catalog, catalog))
+    monkeypatch.setattr(guard, "_platform_toolsets", lambda: {"web", "clawchat", "memory", "docs"})
+    monkeypatch.setattr(guard, "_resolve_tools", lambda name: {
+        "web": ["web_search"], "clawchat": ["clawchat_memory_read"], "memory": ["memory"],
+        "docs": [TOOL], "mcp-docs": [TOOL],
+    }.get(name, []))
+
     monkeypatch.setattr(guard, "_owner_user_id", lambda: "usr_owner")
     monkeypatch.setattr(guard, "_owner_direct_chat_id", lambda: "cnv_owner")
     monkeypatch.setattr(guard, "_is_known_group", lambda _: False)
@@ -67,16 +77,17 @@ def test_ask_is_blocked_even_with_legacy_approve(host, monkeypatch):
     try:
         with host(**context(s)):
             guard.clawchat_pre_llm_call(session_id="s", turn_id="t")
-            assert call(turn_id="t") == {"action": "block", "message": GRANT_ASK_DENIED_MESSAGE}
+            assert call(turn_id="t") == {"action": "block", "reasonCode": "ask-unavailable", "message": GRANT_ASK_UNAVAILABLE_MESSAGE}
     finally:
         turns.release_turn(s.nonce)
 
 
 def test_ungranted_and_group_intersection_messages(host):
-    s = snapshot(grants={}, any_tools=frozenset({TOOL}))
+    s = snapshot(grants={}, speakers=("usr_alice", "usr_bob"), any_tools=frozenset({TOOL}))
+    turns.bind_turn(s.nonce, "s", "t")
     try:
         with host(**context(s)):
-            assert call(turn_id="t")["message"] == GRANT_BLOCK_MESSAGE
+            assert call(turn_id="t")["message"] == GRANT_INTERSECTION_BLOCK_MESSAGE
         with host(**context(s, group=True)):
             assert call(turn_id="t")["message"] == GRANT_INTERSECTION_BLOCK_MESSAGE
     finally:
@@ -101,7 +112,10 @@ def test_missing_identity_and_followup_never_borrow_grants(host, failure, monkey
                 tool_name=TOOL, args={}, session_id="other" if failure == "different_session" else "s",
                 **({} if failure == "missing_turn" else {"turn_id": "new-turn" if failure == "followup" else "t"}),
             )
-            assert result == {"action": "block", "message": GRANT_BLOCK_MESSAGE}
+            expected = {"action": "block", "message": GRANT_BLOCK_MESSAGE}
+            if failure != "missing_turn":
+                expected["reasonCode"] = "not-granted"
+            assert result == expected
     finally:
         turns.release_turn(s.nonce)
 
@@ -130,7 +144,7 @@ def test_off_preserves_original_block_and_approve(host, monkeypatch):
 @pytest.mark.parametrize("tool,toolset,expected", [(TOOL, "mcp-docs", {"web", "clawchat", "docs"}),
                                                   ("memory", "memory", {"web", "clawchat", "memory", guard.NO_MCP})])
 def test_first_layer_adds_granted_toolset_and_explicit_mcp_server(host, monkeypatch, tool, toolset, expected):
-    monkeypatch.setattr(guard, "_registry_toolset", lambda _: toolset)
+    monkeypatch.setattr(guard, "_registry_toolset", lambda name: toolset if name == tool else "clawchat" if name.startswith("clawchat_") else "web")
     s = snapshot(grants={tool: "direct"})
     try:
         source = SimpleNamespace(chat_id=s.chat_id, chat_type="dm", user_id="usr_a", message_id=s.nonce)
@@ -178,7 +192,7 @@ def test_direct_grant_keeps_relative_path_field_check(host):
         turns.release_turn(s.nonce)
 
 
-def test_default_on_empty_grants_preserves_legacy_approve(host, monkeypatch):
+def test_empty_private_snapshot_does_not_enable_group_approve(host, monkeypatch):
     monkeypatch.setattr(guard, "_config_extra", lambda: {"non-owner-host-tools": "approve"})
     monkeypatch.setattr(guard, "_host_supports_approve", lambda: True)
     s = snapshot(grants={})
@@ -186,8 +200,7 @@ def test_default_on_empty_grants_preserves_legacy_approve(host, monkeypatch):
         with host(**context(s)):
             guard.clawchat_pre_llm_call(session_id="s", turn_id="t")
             assert call(turn_id="t") == {
-                "action": "approve", "message": guard.APPROVE_MESSAGE,
-                "rule_key": f"clawchat-non-owner:{TOOL}",
+                "action": "block", "reasonCode": "not-granted", "message": GRANT_BLOCK_MESSAGE,
             }
     finally:
         turns.release_turn(s.nonce)
@@ -200,7 +213,7 @@ def test_default_on_empty_grants_preserves_limited_block_message(host, monkeypat
         with host(**context(s)):
             guard.clawchat_pre_llm_call(session_id="s", turn_id="t")
             assert call("skill_manage", turn_id="t", args={"action": "create"}) == {
-                "action": "block", "message": guard.LIMITED_BLOCK_MESSAGE,
+                "action": "block", "reasonCode": "not-granted", "message": guard.LIMITED_BLOCK_MESSAGE,
             }
     finally:
         turns.release_turn(s.nonce)

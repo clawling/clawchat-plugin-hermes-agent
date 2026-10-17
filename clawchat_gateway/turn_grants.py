@@ -7,8 +7,9 @@ import threading
 import time
 from contextvars import copy_context
 from dataclasses import dataclass, replace
-from types import MappingProxyType
 from typing import Mapping
+
+from clawchat_gateway.tool_grants import CompiledGrants, freeze_turn_grants, intersect_turn_grants
 
 NONCE_PREFIX = "clawchat-turn-"
 
@@ -24,6 +25,8 @@ class TurnSnapshot:
     any_granted_tools: frozenset[str]
     speaker_names: tuple[str, ...] = ()
     owner_verified: bool = False
+    non_owner_speakers: frozenset[str] = frozenset()
+    owner_side: bool = False
 
 
 _lock = threading.Lock()
@@ -38,13 +41,26 @@ _approvals: dict[str, GrantApproval] = {}
 def register_turn(*, account_id: str, chat_id: str, speakers: tuple[str, ...],
                   grants: Mapping[str, str], session_key: str,
                   any_granted_tools: frozenset[str] = frozenset(),
-                  speaker_names: tuple[str, ...] = (), owner_verified: bool = False) -> TurnSnapshot:
+                  speaker_names: tuple[str, ...] = (), owner_verified: bool = False,
+                  owner_side: bool = False, non_owner_speakers: frozenset[str] | None = None) -> TurnSnapshot:
     with _lock:
         nonce = NONCE_PREFIX + secrets.token_urlsafe(24)
+        frozen = CompiledGrants(owner_only=True) if owner_side else freeze_turn_grants(grants)
+        ids = (frozenset(non_owner_speakers) if non_owner_speakers is not None else
+               frozen.non_owner_speakers or (frozenset() if owner_side else frozenset(speakers)))
+        overlaps = [_snapshots[value] for value in _session_nonces.get((account_id, session_key), ())
+                    if value in _snapshots]
+        if overlaps:
+            frozen = intersect_turn_grants([frozen, *(item.grants for item in overlaps)])
+            ids |= frozenset(id_ for item in overlaps for id_ in item.non_owner_speakers)
+            for item in overlaps:
+                _snapshots[item.nonce] = replace(item, grants=frozen, non_owner_speakers=ids,
+                                                owner_side=item.owner_side and owner_side)
         snapshot = TurnSnapshot(
             nonce, account_id, chat_id, tuple(speakers),
-            MappingProxyType(dict(grants)), time.monotonic(), frozenset(any_granted_tools),
+            frozen, time.monotonic(), frozenset(any_granted_tools),
             tuple(speaker_names), owner_verified is True and (account_id, session_key) not in _unverified_inputs,
+            ids, owner_side and all(item.owner_side for item in overlaps),
         )
         _snapshots[nonce] = snapshot
         _active[account_id, session_key] = nonce
@@ -115,13 +131,13 @@ def bind_turn(nonce: str, session_id: str, turn_id: str) -> None:
             _bindings.setdefault(nonce, (session_id, turn_id))
 
 
-def lookup_for_tool_call(nonce: str, chat_id: str, session_id: str, turn_id: str) -> dict[str, str]:
+def lookup_for_tool_call(nonce: str, chat_id: str, session_id: str, turn_id: str) -> Mapping[str, str]:
     with _lock:
         snapshot = _snapshots.get(nonce)
         if (not turn_id or not session_id or snapshot is None or snapshot.chat_id != chat_id
                 or _bindings.get(nonce) != (session_id, turn_id)):
             return {}
-        return dict(snapshot.grants)
+        return snapshot.grants
 
 
 def session_context_value(name: str) -> str:

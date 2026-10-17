@@ -2682,9 +2682,21 @@ class ClawChatAdapter(BasePlatformAdapter):
         from clawchat_gateway.memory_scope import OWNER_NOTE_WRITE_HINT
 
         lines = [OWNER_NOTE_WRITE_HINT]
-        from clawchat_gateway.tool_grants import NON_OWNER_GRANTS_HINT
-
-        grants_hint = NON_OWNER_GRANTS_HINT if self._clawchat_config.tool_grants == "on" else None
+        from clawchat_gateway.tool_grants import NON_OWNER_GRANTS_HINT, build_non_owner_grants_hint
+        from clawchat_gateway.host_tools_guard import host_tool_catalog
+        grants_hint = None
+        if self._clawchat_config.tool_grants == "on":
+            try:
+                from clawchat_gateway.turn_grants import active_snapshot
+                snapshot = active_snapshot(self._account_id(), self._grant_session_key(inbound))
+                if snapshot is not None:
+                    grants = snapshot.grants
+                else:
+                    _, grants, _ = self._turn_grant_values(inbound)
+                _, available = host_tool_catalog()
+                grants_hint = build_non_owner_grants_hint(grants, available)
+            except Exception:  # noqa: BLE001 - no catalog evidence means no capability list
+                grants_hint = NON_OWNER_GRANTS_HINT
         for hint in (grants_hint or blocked_tools_hint(), limited_tools_hint()):
             if hint:
                 lines.append(hint)
@@ -4363,8 +4375,12 @@ class ClawChatAdapter(BasePlatformAdapter):
 
     def _turn_grant_values(self, inbound: InboundMessage) -> tuple[tuple[str, ...], dict[str, str], frozenset[str]]:
         from clawchat_gateway.tool_grants import resolve_turn_grants
+        from clawchat_gateway.host_tools_guard import host_tool_catalog, public_tool_names, non_owner_host_tools
 
         speakers = ()
+        public = frozenset()
+        owner = self._owner_user_id()
+        now = int(time.time() * 1000)
         try:
             raw = inbound.raw_message
             def batch_speakers(message: Any) -> list[str]:
@@ -4383,18 +4399,22 @@ class ClawChatAdapter(BasePlatformAdapter):
             if (self._clawchat_config.tool_grants != "on" or not speakers
                     or not all(isinstance(speaker, str) and speaker.strip() for speaker in speakers)):
                 return speakers, {}, frozenset()
-            now = int(time.time() * 1000)
-            owner = self._owner_user_id()
+            if owner and all(speaker == owner for speaker in speakers):
+                return speakers, resolve_turn_grants(list(speakers), owner, [], now), frozenset()
+            _, available = host_tool_catalog()
+            public = public_tool_names(available)
             rows = self._store.load_grants_for_users(
                 account_id=self._account_id(), user_ids=list(speakers), now=now,
             )
-            grants = resolve_turn_grants(list(speakers), owner, rows, now)
-            any_tools = frozenset(tool for speaker in speakers for tool in
-                                  resolve_turn_grants([speaker], owner, rows, now))
+            defaults = dict(public_tools=public, available_tools=available,
+                            unmatched="ask" if inbound.chat_type == "group" and non_owner_host_tools() == "approve" else "none")
+            grants = resolve_turn_grants(list(speakers), owner, rows, now, **defaults)
+            any_tools = frozenset(tool for speaker in speakers if speaker != owner for tool in
+                                  resolve_turn_grants([speaker], owner, rows, now, **defaults))
             return speakers, grants, any_tools
         except Exception:  # noqa: BLE001 - an unreadable grant list adds no authority
             logger.warning("clawchat turn grants: lookup failed", exc_info=True)
-            return speakers, {}, frozenset()
+            return speakers, resolve_turn_grants([], owner, [], now, public_tools=public), frozenset()
 
     def _grant_session_key(self, inbound: InboundMessage) -> str:
         # Hermes DMs are keyed by chat, including plugin-started messages with
@@ -4523,7 +4543,7 @@ class ClawChatAdapter(BasePlatformAdapter):
 
     async def _consume_grant_confirmation(self, inbound: InboundMessage) -> bool:
         from clawchat_gateway.tool_grants import (
-            GRANT_CONFIRM_COMMAND, GRANT_INVALID_CODE_MESSAGE, GRANT_WRITE_FAILED_MESSAGE,
+            GRANT_CONFIRM_COMMAND, GRANT_INVALID_CODE_MESSAGE, GRANT_WRITE_FAILED_MESSAGE, GRANT_ASK_UNAVAILABLE_RECEIPT,
             build_grant_receipt,
         )
 
@@ -4544,12 +4564,17 @@ class ClawChatAdapter(BasePlatformAdapter):
             lang = "en"
         lang = lang if lang in ("zh", "zh_Hant") else "en"
         try:
-            rows = self._store.confirm_pending_grant(account_id=self._account_id(), code=match[1])
+            from clawchat_gateway.host_tools_guard import ask_grants_available
+            from clawchat_gateway.tool_capabilities import GrantSelector, selector_string, selector_display
+            rows = self._store.confirm_pending_grant(account_id=self._account_id(), code=match[1],
+                                                      ask_available=ask_grants_available())
             text = build_grant_receipt(
                 lang=lang,
                 names=list(dict.fromkeys(row["grantee_name"] for row in rows)),
-                tools=list(dict.fromkeys(row["tool"] for row in rows)),
+                tools=list(dict.fromkeys(selector_display(selector_string(GrantSelector(row["what_kind"], row["what"])), lang) for row in rows)),
             ) if rows else GRANT_INVALID_CODE_MESSAGE[lang]
+        except ValueError as exc:
+            text = GRANT_ASK_UNAVAILABLE_RECEIPT[lang] if str(exc) == "ask-unavailable" else GRANT_WRITE_FAILED_MESSAGE[lang]
         except Exception:  # noqa: BLE001 - never acknowledge a failed write as active
             text = GRANT_WRITE_FAILED_MESSAGE[lang]
         await self._send_owner_text(inbound.chat_id, text)
@@ -4654,6 +4679,9 @@ class ClawChatAdapter(BasePlatformAdapter):
                 speakers=speakers, grants=grants, any_granted_tools=any_tools, session_key=key,
                 speaker_names=self._grant_speaker_names(inbound, speakers),
                 owner_verified=self._verified_owner_inbound(inbound),
+                owner_side=owner_turn or getattr(grants, "owner_only", False),
+                non_owner_speakers=frozenset(speaker for speaker in speakers if isinstance(speaker, str)
+                                             and speaker.strip() and speaker != self._owner_user_id()),
             )
             self._grant_dispatch_started[key] = snapshot.nonce
             self._grant_sessions.add(key)

@@ -14,7 +14,11 @@ from typing import Any, Callable, TypeVar
 
 from clawchat_gateway.hermes_home import hermes_home
 from clawchat_gateway.tool_grants import (
-    PENDING_TTL_MS, _finite, is_baseline_tool, is_pending_tool_grant_payload,
+    PENDING_TTL_MS, _finite, is_pending_tool_grant_payload,
+)
+
+from clawchat_gateway.tool_capabilities import (
+    GrantSelector, parse_grant_selector, normalize_grant_selectors, selector_string, plan_deny_removal,
 )
 
 logger = logging.getLogger(__name__)
@@ -230,6 +234,36 @@ CREATE TABLE IF NOT EXISTS tool_grant_pending (
 """
 
 
+TOOL_GRANTS_V2_SCHEMA = """
+CREATE TABLE tool_grants_v2 (
+  account_id TEXT NOT NULL, grantee_user_id TEXT NOT NULL,
+  grantee_name TEXT NOT NULL,
+  what_kind TEXT NOT NULL CHECK (what_kind IN ('tool','capability','all')),
+  what TEXT NOT NULL CHECK (length(what) > 0),
+  mode TEXT NOT NULL CHECK (mode IN ('direct','ask','deny')),
+  label TEXT, expires_at INTEGER, created_at INTEGER NOT NULL,
+  CHECK (what_kind <> 'all' OR what = 'all'),
+  CHECK (what_kind <> 'tool' OR what NOT IN
+    ('clawchat_tool_grant','clawchat_tool_revoke','clawchat_tool_grants_list','clawchat_tool_request')),
+  PRIMARY KEY (account_id, grantee_user_id, what_kind, what)
+);
+INSERT INTO tool_grants_v2
+  (account_id, grantee_user_id, grantee_name, what_kind, what, mode, label, expires_at, created_at)
+  SELECT account_id, grantee_user_id, grantee_name, 'tool', tool, mode, label, expires_at, created_at
+  FROM tool_grants;
+CREATE TEMP TABLE tool_grants_copy_check (valid INTEGER NOT NULL CHECK (valid = 1));
+INSERT INTO tool_grants_copy_check VALUES
+  ((SELECT count(*) FROM tool_grants_v2) = (SELECT count(*) FROM tool_grants));
+DROP TABLE tool_grants_copy_check;
+DROP TABLE tool_grants;
+ALTER TABLE tool_grants_v2 RENAME TO tool_grants;
+ALTER TABLE tool_grant_pending ADD COLUMN purpose TEXT NOT NULL DEFAULT 'grant'
+  CHECK (purpose IN ('grant', 'request'));
+ALTER TABLE tool_grant_pending ADD COLUMN payload_version INTEGER NOT NULL DEFAULT 1
+  CHECK (payload_version IN (1, 2));
+"""
+
+
 def refresh_token_fingerprint(refresh_token: str) -> str:
     """Fingerprint the credential as submitted to the refresh endpoint."""
     return hashlib.sha256(refresh_token.strip().encode("utf-8")).hexdigest()
@@ -249,6 +283,7 @@ MIGRATIONS = [
     (11, "message_target_nocase_indexes", MESSAGE_TARGET_NOCASE_SCHEMA),
     (12, "revoked_refresh_tokens", REVOKED_REFRESH_SCHEMA),
     (13, "tool_grants", TOOL_GRANTS_SCHEMA),
+    (14, "tool_grants_v2", TOOL_GRANTS_V2_SCHEMA),
 ]
 
 # Lookup behind ClawChatStore.find_seen_message_in_chat: a real chat message
@@ -514,21 +549,23 @@ class ClawChatStore:
             conn.close()
 
     def create_pending_grant(
-        self, *, account_id: str, code: str, payload: dict[str, Any], now: int | None = None,
+        self, *, account_id: str, code: str, payload: dict[str, Any], now: int | None = None, payload_version: int = 2,
     ) -> None:
         now = _now_ms() if now is None else now
         if (not isinstance(account_id, str) or not account_id.strip()
                 or not isinstance(code, str) or not re.fullmatch(r"[0-9]{6}", code)
-                or not _finite(now) or not is_pending_tool_grant_payload(payload)):
+                or not _finite(now) or not is_pending_tool_grant_payload(payload, payload_version)):
             raise ValueError("Invalid pending tool grant")
+        if payload_version == 2:
+            payload = {**payload, "tools": normalize_grant_selectors(payload["tools"])}
 
         def write(conn: sqlite3.Connection) -> None:
             # A collision must not replace an existing or already consumed code.
             conn.execute(
                 """INSERT INTO tool_grant_pending
-                (account_id, code, payload_json, created_at, expires_at, consumed_at)
-                VALUES (?, ?, ?, ?, ?, NULL)""",
-                (account_id, code, json.dumps(payload, ensure_ascii=False), now, now + PENDING_TTL_MS),
+                (account_id, code, payload_json, created_at, expires_at, consumed_at, purpose, payload_version)
+                VALUES (?, ?, ?, ?, ?, NULL, 'grant', ?)""",
+                (account_id, code, json.dumps(payload, ensure_ascii=False), now, now + PENDING_TTL_MS, payload_version),
             )
 
         self._tool_grants_transaction(write)
@@ -537,16 +574,16 @@ class ClawChatStore:
     def _upsert_tool_grant(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
         conn.execute(
             """INSERT INTO tool_grants
-            (account_id, grantee_user_id, grantee_name, tool, mode, label, expires_at, created_at)
-            VALUES (:account_id, :grantee_user_id, :grantee_name, :tool, :mode, :label, :expires_at, :created_at)
-            ON CONFLICT(account_id, grantee_user_id, tool) DO UPDATE SET
+            (account_id, grantee_user_id, grantee_name, what_kind, what, mode, label, expires_at, created_at)
+            VALUES (:account_id, :grantee_user_id, :grantee_name, :what_kind, :what, :mode, :label, :expires_at, :created_at)
+            ON CONFLICT(account_id, grantee_user_id, what_kind, what) DO UPDATE SET
               grantee_name = excluded.grantee_name, mode = excluded.mode, label = excluded.label,
               expires_at = excluded.expires_at, created_at = excluded.created_at""",
             row,
         )
 
     def confirm_pending_grant(
-        self, *, account_id: str, code: str, now: int | None = None,
+        self, *, account_id: str, code: str, now: int | None = None, ask_available: bool = True,
     ) -> list[dict[str, Any]] | None:
         """Consume once atomically; invalid/expired codes return None, write errors raise."""
         now = _now_ms() if now is None else now
@@ -555,31 +592,22 @@ class ClawChatStore:
 
         def write(conn: sqlite3.Connection) -> list[dict[str, Any]] | None:
             pending = conn.execute(
-                """SELECT payload_json FROM tool_grant_pending
-                WHERE account_id = ? AND code = ? AND consumed_at IS NULL AND expires_at > ?""",
+                """SELECT payload_json, payload_version FROM tool_grant_pending
+                WHERE account_id = ? AND code = ? AND consumed_at IS NULL AND expires_at > ? AND purpose = 'grant'""",
                 (account_id, code, now),
             ).fetchone()
             try:
                 payload = json.loads(pending[0]) if pending else None
             except (TypeError, ValueError):
                 payload = None
-            if (not is_pending_tool_grant_payload(payload)
+            if (not is_pending_tool_grant_payload(payload, pending[1] if pending else 2)
                     or (payload.get("expires_at") is not None and payload["expires_at"] <= now)):
                 # Explicit rollback also covers malformed or expired grant payloads.
                 conn.rollback()
                 return None
-            rows = []
-            for grantee in payload["grantees"]:
-                for tool in payload["tools"]:
-                    row = {
-                        "account_id": account_id, "grantee_user_id": grantee["id"],
-                        "grantee_name": grantee["name"], "tool": tool,
-                        "mode": "ask" if is_baseline_tool(tool) else payload["mode"],
-                        "label": payload.get("label"), "expires_at": payload.get("expires_at"),
-                        "created_at": now,
-                    }
-                    self._upsert_tool_grant(conn, row)
-                    rows.append(row)
+            if payload["mode"] == "ask" and not ask_available:
+                raise ValueError("ask-unavailable")
+            rows = self._write_grant_payload(conn, account_id, payload, now, pending[1])
             conn.execute(
                 "UPDATE tool_grant_pending SET consumed_at = ? WHERE account_id = ? AND code = ?",
                 (now, account_id, code),
@@ -588,21 +616,45 @@ class ClawChatStore:
 
         return self._tool_grants_transaction(write)
 
+    def _write_grant_payload(self, conn, account_id, payload, now, version=2):
+        rows = []
+        selectors = ([GrantSelector("tool", value) for value in dict.fromkeys(payload["tools"])] if version == 1 else
+                     [parse_grant_selector(value) for value in normalize_grant_selectors(payload["tools"])])
+        for grantee in payload["grantees"]:
+            for selector in selectors:
+                row = dict(account_id=account_id, grantee_user_id=grantee["id"],
+                           grantee_name=grantee["name"], what_kind=selector.what_kind, what=selector.what,
+                           mode=payload["mode"], label=payload.get("label"),
+                           expires_at=payload.get("expires_at"), created_at=now)
+                self._upsert_tool_grant(conn, row)
+                rows.append(row)
+        return rows
+
+    def apply_grant(self, *, account_id: str, payload: dict, now: int | None = None) -> int:
+        """Owner's explicit deny is immediate; direct/ask require a confirmation code."""
+        now = _now_ms() if now is None else now
+        if (not account_id or not _finite(now) or not is_pending_tool_grant_payload(payload)
+                or payload["mode"] != "deny" or payload.get("expires_at") is not None and payload["expires_at"] <= now):
+            raise ValueError("Invalid deny grant")
+        return self._tool_grants_transaction(lambda conn: len(self._write_grant_payload(conn, account_id, payload, now)))
+
     def revoke_grants(self, *, account_id: str, user_id: str, tools: list[str] | None = None) -> int:
         if tools == []:
             return 0
-        clause = " AND tool IN (" + ", ".join("?" for _ in tools) + ")" if tools is not None else ""
-
-        def write(conn: sqlite3.Connection) -> int:
-            return conn.execute(
-                "DELETE FROM tool_grants WHERE account_id = ? AND grantee_user_id = ?" + clause,
-                (account_id, user_id, *(tools or [])),
-            ).rowcount
-
+        selectors = [parse_grant_selector(tool) for tool in normalize_grant_selectors(tools)] if tools is not None else []
+        clause = " AND (" + " OR ".join("(what_kind = ? AND what = ?)" for _ in selectors) + ")" if selectors else ""
+        values = (account_id, user_id, *(value for selector in selectors for value in selector))
+        def write(conn):
+            conn.row_factory = sqlite3.Row
+            rows = [dict(row) for row in conn.execute(
+                "SELECT * FROM tool_grants WHERE account_id = ? AND grantee_user_id = ?" + clause, values)]
+            if any(row["mode"] == "deny" for row in rows) and plan_deny_removal(rows) != "immediate":
+                raise ValueError("confirmation-required")
+            return conn.execute("DELETE FROM tool_grants WHERE account_id = ? AND grantee_user_id = ?" + clause, values).rowcount
         return self._tool_grants_transaction(write)
 
-    def list_grants(self, *, account_id: str, now: int | None = None) -> list[dict[str, Any]]:
-        return self._select_tool_grants(account_id=account_id, now=now)
+    def list_grants(self, *, account_id: str, now: int | None = None, include_expired: bool = False) -> list[dict[str, Any]]:
+        return self._select_tool_grants(account_id=account_id, now=now, include_expired=include_expired)
 
     def load_grants_for_users(
         self, *, account_id: str, user_ids: list[str], now: int | None = None,
@@ -610,7 +662,7 @@ class ClawChatStore:
         return self._select_tool_grants(account_id=account_id, user_ids=user_ids, now=now)
 
     def _select_tool_grants(
-        self, *, account_id: str, now: int | None, user_ids: list[str] | None = None,
+        self, *, account_id: str, now: int | None, user_ids: list[str] | None = None, include_expired: bool = False,
     ) -> list[dict[str, Any]]:
         now = _now_ms() if now is None else now
         if not _finite(now):
@@ -622,9 +674,10 @@ class ClawChatStore:
         try:
             conn.row_factory = sqlite3.Row
             return [dict(row) for row in conn.execute(
-                "SELECT * FROM tool_grants WHERE account_id = ? AND (expires_at IS NULL OR expires_at > ?)"
-                + clause + " ORDER BY grantee_user_id, tool",
-                (account_id, now, *(user_ids or [])),
+                "SELECT * FROM tool_grants WHERE account_id = ?"
+                + ("" if include_expired else " AND (expires_at IS NULL OR expires_at > ?)")
+                + clause + " ORDER BY grantee_user_id, what_kind, what",
+                (account_id, *((now,) if not include_expired else ()), *(user_ids or [])),
             ).fetchall()]
         finally:
             conn.close()

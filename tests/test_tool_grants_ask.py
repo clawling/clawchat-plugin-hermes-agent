@@ -10,7 +10,7 @@ import pytest
 
 from clawchat_gateway import host_tools_guard as guard, turn_grants as turns
 from clawchat_gateway.adapter import ClawChatAdapter
-from clawchat_gateway.tool_grants import GRANT_ASK_DENIED_MESSAGE
+from clawchat_gateway.tool_grants import GRANT_ASK_DENIED_MESSAGE, GRANT_ASK_UNAVAILABLE_MESSAGE
 from test_tool_grants_hook import host, context, call, TOOL
 from test_turn_grants import snapshot
 from test_tool_grants_admission import harness, message, OWNER_CHAT, CHAT
@@ -89,7 +89,7 @@ def test_open_tool_ask_precedes_ordinary_access(host, approval, monkeypatch, sup
             assert result["rule_key"].startswith("clawchat-grant-ask:")
             assert "web_search" in result["message"]
         else:
-            assert result == {"action": "block", "message": GRANT_ASK_DENIED_MESSAGE}
+            assert result == {"action": "block", "reasonCode": "ask-unavailable", "message": GRANT_ASK_UNAVAILABLE_MESSAGE}
     finally:
         turns.release_turn(s.nonce)
 
@@ -107,7 +107,7 @@ def test_open_tool_unreliable_ask_fails_closed(host, approval, monkeypatch, fail
     turns.bind_turn(s.nonce, "s", "t")
     try:
         with host(**context(s)):
-            assert call("web_search", turn_id="t") == {"action": "block", "message": GRANT_ASK_DENIED_MESSAGE}
+            assert call("web_search", turn_id="t") == {"action": "block", "reasonCode": "ask-unavailable", "message": GRANT_ASK_UNAVAILABLE_MESSAGE}
     finally:
         turns.release_turn(s.nonce)
 
@@ -174,7 +174,7 @@ def test_ask_bypass_is_denied(host, approval, bypass, monkeypatch):
         monkeypatch.setattr(guard, "_approval_config_read", lambda: (_ for _ in ()).throw(OSError()))
     else:
         approval.is_approved = lambda *_: (_ for _ in ()).throw(RuntimeError())
-    assert ask(host) == {"action": "block", "message": GRANT_ASK_DENIED_MESSAGE}
+    assert ask(host) == {"action": "block", "reasonCode": "ask-unavailable", "message": GRANT_ASK_UNAVAILABLE_MESSAGE}
 
 
 @pytest.mark.parametrize("marker", ["host_fallback", "class_name", "attribute", "key"])
@@ -203,7 +203,7 @@ def test_failed_config_read_fallback_denies_ask(host, approval, monkeypatch, mar
     monkeypatch.setattr(guard, "_approval_config_read", _READ_APPROVAL_CONFIG)
     with pytest.raises(ValueError, match="Unreadable approval policy"):
         guard._approval_config_read()
-    assert ask(host) == {"action": "block", "message": GRANT_ASK_DENIED_MESSAGE}
+    assert ask(host) == {"action": "block", "reasonCode": "ask-unavailable", "message": GRANT_ASK_UNAVAILABLE_MESSAGE}
 
 
 def test_readable_config_without_new_host_class_allows_ask(host, approval, monkeypatch):
@@ -236,19 +236,23 @@ def test_old_approval_layout_has_no_extracted_context_or_persist_helper(host, ap
     approval._get_approval_mode = lambda: "manual"
     assert ask(host)["action"] == "approve"
     approval.is_current_session_yolo_enabled = lambda: True
-    assert ask(host)["message"] == GRANT_ASK_DENIED_MESSAGE
+    assert ask(host)["message"] == GRANT_ASK_UNAVAILABLE_MESSAGE
 
 
 @pytest.mark.parametrize("outcome", ["deny", "timeout", "error", "silent_bypass"])
 def test_host_denial_timeout_and_unconfirmed_autoapproval_use_ask_message(host, approval, outcome):
     directive = ask(host)
+    if outcome in {"deny", "timeout"}:
+        record = turns.route_approval("sk", CHAT, directive["message"])
+        turns.mark_approval_delivered(record.nonce)
     if outcome == "silent_bypass":
         approval.outcome = {"approved": True}
     if outcome == "error":
-        # The original callable reads this property in the fixture.
         del approval.outcome
     result = approval.request_tool_approval(TOOL, directive["message"], rule_key=directive["rule_key"])
-    assert result == {"approved": False, "message": GRANT_ASK_DENIED_MESSAGE}
+    reason = "ask-declined" if outcome in {"deny", "timeout"} else "ask-unavailable"
+    expected = GRANT_ASK_DENIED_MESSAGE if reason == "ask-declined" else GRANT_ASK_UNAVAILABLE_MESSAGE
+    assert result == {"approved": False, "reasonCode": reason, "message": expected}
 
 
 def test_single_call_consent_and_no_persistence_even_external_scope_choice(host, approval):
@@ -449,6 +453,6 @@ async def test_ask_interaction_carries_nonce_and_stale_ordinary_card_cannot_appr
 
 
 def test_new_ask_denial_prose_does_not_disclose_private_details():
-    assert GRANT_ASK_DENIED_MESSAGE == "Your owner did not approve this call (or has not answered yet), so it did not run. Do not call it again for this request; say the owner did not approve it this time and they can try later or ask the owner directly."
+    assert GRANT_ASK_DENIED_MESSAGE == "The owner did not approve this call or has not answered yet, so it did not run. Do not retry this request. They can try later or ask the owner directly."
     for forbidden in ("Ada", "usr_", "tool-grants", "approvals.mode", "/tmp", "0.21", TOOL, "terminal"):
         assert forbidden not in GRANT_ASK_DENIED_MESSAGE

@@ -252,3 +252,5 @@ scripts/
 docs/superpowers/
 AGENTS.md
 CLAUDE.md
+
+!tests/test_tool_grants_v2.py

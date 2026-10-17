@@ -862,14 +862,14 @@ def register_tools(ctx) -> None:
         grants_enabled = True
     grant_tools = {
         "type": "array", "items": {"type": "string"}, "minItems": 1,
-        "description": "Exact tool names; no wildcards or grant management tools.",
+        "description": "Selectors: tool:<exact name>, cap:<capability ID>, bare capability or exact name, or all. No wildcards or authorization tools.",
     }
     schemas = [
         ("clawchat_tool_grant", handle_clawchat_tool_grant,
-         "Prepare a tool grant confirmation card for the owner. Wait for confirmation; do not say it is active. Commands, files, code, sub-agents, scheduled tasks and browser tools always ask each time.",
+         "Prepare a direct/ask confirmation card for the owner; wait before saying it is active. Deny is saved immediately. Sensitive tools can be direct.",
          {"userIds": {"type": "array", "items": {"type": "string"}, "minItems": 1},
           "groupId": {"type": "string", "description": "Grant to the current group members, excluding this Agent and the owner; use either userIds or groupId."},
-          "tools": grant_tools, "mode": {"type": "string", "enum": ["direct", "ask"]},
+          "tools": grant_tools, "mode": {"type": "string", "enum": ["direct", "ask", "deny"]},
           "expiresAt": {"type": "string", "description": "Optional future ISO 8601 expiry."},
           "label": {"type": "string", "maxLength": 40}}, ["tools", "mode"]),
         ("clawchat_tool_revoke", handle_clawchat_tool_revoke,

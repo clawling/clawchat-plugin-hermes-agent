@@ -43,7 +43,7 @@ async def test_real_owner_dm_confirms_and_receipts_in_owner_language(confirmatio
         incoming.raw_message["payload"]["message"]["fragments"][0]["text"] = "`/clawchat-allow 482193`"
     await h.adapter._on_message(incoming.raw_message)
     rows = h.adapter._store.list_grants(account_id="usr_agent")
-    assert len(rows) == 1 and rows[0]["tool"] == TOOL
+    assert len(rows) == 1 and rows[0]["what"] == TOOL
     h.adapter._send_owner_text.assert_awaited_once()
     assert h.adapter._send_owner_text.call_args.args[0] == OWNER_CHAT
     text = h.adapter._send_owner_text.call_args.args[1]

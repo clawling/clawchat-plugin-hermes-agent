@@ -60,7 +60,7 @@ def test_exact_baseline_names_and_reserved_tools():
     }
     assert grants.BASELINE_CATEGORY == {tool: category for category, tools in expected.items() for tool in tools}
     names = list(grants.BASELINE_CATEGORY)
-    assert resolve(["u"], [row(tool=t) for t in names + list(grants.GRANT_TOOL_NAMES)]) == dict.fromkeys(names, "ask")
+    assert resolve(["u"], [row(tool=t) for t in names + list(grants.GRANT_TOOL_NAMES)]) == dict.fromkeys(names, "direct")
     for tool in names:
         assert grants.is_baseline_tool(tool)
     for tool in ("browser_unknown", "browser_vault_fill"):
@@ -86,7 +86,7 @@ def test_errors_fail_closed():
 
 def test_snapshot_intersection():
     assert grants.intersect_turn_grants([]) == {}
-    assert grants.intersect_turn_grants([{"x": "direct", "terminal": "direct"}, {"x": "ask", "terminal": "direct"}]) == {"x": "ask", "terminal": "ask"}
+    assert grants.intersect_turn_grants([{"x": "direct", "terminal": "direct"}, {"x": "ask", "terminal": "direct"}]) == {"x": "ask", "terminal": "direct"}
     assert grants.intersect_turn_grants([{"x": "direct"}, {}]) == {}
     assert grants.intersect_turn_grants([{"x": "invalid"}]) == {}
     assert grants.intersect_turn_grants([{"x": "direct"}, {"x": "invalid"}]) == {}
@@ -100,20 +100,23 @@ CARD = dict(code="482193", grantees=[dict(id="usr_zhang", name="张三")],
 
 ZH = "\n".join([
     "授权确认（码 482193）", "允许：张三（usr_zhang）",
-    "使用：feishu_doc_read、feishu_bitable_list（你说的「飞书文档」）", "方式：每次先问你", "期限：不限",
+    "使用：feishu_doc_read、feishu_bitable_list（你说的「飞书文档」）", "方式：每次问我", "到期：不限", "想设期限就说「……到周五」。",
     "这意味着：张三能让我代为调用这些工具，你用这些工具能看到、能做到的，张三都能。",
+    "这次按工具授权，不保证只限某份文档或某个资源。",
     "这类操作每次都会先问你。", "确认请点：`/clawchat-allow 482193`（10 分钟内有效；不确认就不会生效）",
 ])
 ZH_HANT = "\n".join([
     "授權確認（碼 482193）", "允許：张三（usr_zhang）",
-    "使用：feishu_doc_read、feishu_bitable_list（你說的「飞书文档」）", "方式：每次先問你", "期限：不限",
+    "使用：feishu_doc_read、feishu_bitable_list（你說的「飞书文档」）", "方式：每次問我", "到期：不限", "想設期限就說「……到週五」。",
     "這意味著：张三能讓我代為呼叫這些工具，你用這些工具能看到、能做到的，张三都能。",
+    "這次按工具授權，不保證只限某份文件或某個資源。",
     "這類操作每次都會先問你。", "確認請點：`/clawchat-allow 482193`（10 分鐘內有效；不確認就不會生效）",
 ])
 EN = "\n".join([
     "Grant confirmation (code 482193)", "Allow: 张三 (usr_zhang)",
-    "Use: feishu_doc_read, feishu_bitable_list (you called it “飞书文档”)", "Mode: Ask you each time", "Expires: No limit",
+    "Use: feishu_doc_read, feishu_bitable_list (you called it “飞书文档”)", "Mode: Ask me each time", "Expires: No limit", 'To set an expiry, say “…until Friday.”',
     "This means: 张三 can have me call these tools for them. Whatever you can see or do with these tools, they can too.",
+    "This grants access by tool; it does not guarantee access is limited to one document or resource.",
     "These operations will ask you first every time.",
     "Click to confirm: `/clawchat-allow 482193` (valid for 10 minutes; it will not take effect without confirmation)",
 ])
@@ -130,13 +133,15 @@ def test_card_copy(lang, expected):
     ("en", "Use: ", "Use directly: ", "Ask you each time: ", ", "),
 ])
 def test_mixed_modes_list_actual_tools(lang, use, direct, ask, separator):
-    tools = ["feishu_doc_read", "read_file", "feishu_bitable_list", "terminal"]
+    tools = ["feishu_doc_read", "read_file", "feishu_bitable_list", "tool:terminal"]
     card = grants.build_grant_card(**(CARD | dict(tools=tools, mode="direct", label=None)), lang=lang)
-    assert use + separator.join(tools) + "\n" in card
-    assert direct + separator.join([tools[0], tools[2]]) + "\n" + ask + separator.join([tools[1], tools[3]]) + "\n" in card
-    assert "方式：" not in card and "Mode:" not in card
+    assert use + separator.join([*tools[:3], "terminal"]) + "\n" in card
+    assert ("Mode: Use directly" if lang == "en" else "方式：直接用") in card
+    assert ("Only allow people you trust completely." if lang == "en" else
+            "只給你完全信任的人。" if lang == "zh_Hant" else "只给你完全信任的人。") in card
+    assert "每次都会先问你" not in card and "Ask me each time" not in card
     all_ask = grants.build_grant_card(**(CARD | dict(tools=tools)), lang=lang)
-    assert direct not in all_ask
+    assert "Only allow people you trust completely." not in all_ask
 
 
 def test_direct_baseline_people_and_expiry():
@@ -146,10 +151,10 @@ def test_direct_baseline_people_and_expiry():
     baseline = grants.build_grant_card(**(CARD | dict(tools=["terminal"], mode="direct", expires_at=expiry,
         grantees=CARD["grantees"] + [dict(id="usr_agent", name="另一个 Agent")])), lang="zh")
     assert "允许：张三（usr_zhang）、另一个 Agent（usr_agent）" in baseline
-    assert "方式：每次先问你" in baseline and "这类操作每次都会先问你。" in baseline
-    assert "期限：到 2026-10-21 06:59 (UTC)" in baseline
+    assert "方式：直接用" in baseline and "只给你完全信任的人。" in baseline
+    assert "到期：2026-10-21 06:59 (UTC)" in baseline
     zoned = grants.build_grant_card(**CARD, lang="zh", expires_at=expiry, time_zone="America/Los_Angeles")
-    assert "期限：到 2026-10-20 23:59\n" in zoned
+    assert "到期：2026-10-20 23:59\n" in zoned
 
 
 @pytest.mark.parametrize("name", [None, "", " ", "\u200b\u202e", "\n\t"])
@@ -168,8 +173,8 @@ def test_invalid_card(changes):
 
 def test_clean_text_and_receipt_substitution():
     dirty = grants.build_grant_card(**(CARD | dict(grantees=[dict(id="usr_\u202ex", name="张\n三\u200b")],
-        label="飞书\0\t文档", tools=["feishu_\u202edoc_read"])), lang="zh")
-    assert "张 三（usr_ x）" in dirty and "feishu_ doc_read（你说的「飞书 文档」）" in dirty
+        label="飞书\0\t文档", tools=["feishu_doc_read"])), lang="zh")
+    assert "张 三（usr_ x）" in dirty and "feishu_doc_read（你说的「飞书 文档」）" in dirty
     assert not any(c in dirty for c in "\0\u200b\u202e")
     assert grants.build_grant_receipt(lang="zh", names=["张三"], tools=["x", "y"]) == "已生效：张三 现在可以使用 x、y"
     assert grants.build_grant_receipt(lang="zh_Hant", names=["{tools}"], tools=["x"]) == "已生效：{tools} 現在可以使用 x"
@@ -181,12 +186,7 @@ def test_clean_text_and_receipt_substitution():
 def test_approved_hints_verbatim_and_no_disclosure():
     messages = [grants.NON_OWNER_GRANTS_HINT, grants.GRANT_BLOCK_MESSAGE,
                 grants.GRANT_INTERSECTION_BLOCK_MESSAGE, grants.GRANT_ASK_DENIED_MESSAGE]
-    assert messages == [
-        'Some abilities here are the owner\'s only: running commands, reading or writing files, running code, sub-agents, scheduled tasks, the browser, and other tools or apps the owner connected. If someone asks for one, do not try it. Tell them, in this conversation\'s language, that you can\'t use it now, and that the owner can allow it by telling you in their direct chat: "Allow <their name> to use <ability>" — for commands, files, code, sub-agents, scheduled tasks or the browser add ", ask me each time". If this turn has several people and one of them is not allowed, say an allowed person can call you again alone. If the ability does not exist here at all, just say you can\'t. Never mention who else has access, settings, file paths, versions or other tools.',
-        'This tool is not available to the person asking. Do not try it another way. Tell them you can\'t use it now and that the owner can allow it by telling you in their direct chat: "Allow <their name> to use <ability>". Do not mention other tools, settings or paths.',
-        "Someone in this turn is not allowed to use this tool, so it did not run. Do not retry. Say that an allowed person can call you again alone.",
-        "Your owner did not approve this call (or has not answered yet), so it did not run. Do not call it again for this request; say the owner did not approve it this time and they can try later or ask the owner directly.",
-    ]
+    assert messages == ["Explain only the requested ability in the conversation's language. For missing access, tell them the owner can allow it in their direct chat. For a mixed-turn block, an allowed person can ask again alone. Do not invent reasons or reveal others' access, settings, paths, or versions.", 'This tool is not available to the caller yet. Do not try another way. Explain that the owner can allow this ability in their direct chat.', 'Someone in this turn is not allowed to use this tool, so it did not run. Do not retry. Say that an allowed person can call you again alone.', 'The owner did not approve this call or has not answered yet, so it did not run. Do not retry this request. They can try later or ask the owner directly.']
     for message in messages + list(grants.GRANT_WRITE_FAILED_MESSAGE.values()) + list(grants.GRANT_INVALID_CODE_MESSAGE.values()):
         for forbidden in ("张三", "李四", "Alice", "Bob", "tool-grants", "non-owner-host-tools", "approvals.plugin",
                           "/home/", "/tmp/", "config.yaml", "clawchat.sqlite", "0.21.0", "2026.9.8",
@@ -219,7 +219,7 @@ PARAMS = dict(userIds=["usr_u"], tools=["feishu_doc_read"], mode="direct")
 
 
 def test_grant_params_normalize_without_profile_lookup():
-    assert grants.validate_grant_params(PARAMS | dict(userIds=["usr_u", "usr_u"], tools=["x", "x"]), NOW) == dict(user_ids=["usr_u"], tools=["x"], mode="direct")
+    assert grants.validate_grant_params(PARAMS | dict(userIds=["usr_u", "usr_u"], tools=["x", "x"]), NOW) == dict(user_ids=["usr_u"], tools=["tool:x"], mode="direct")
     for body in ("0" * 26, "a" * 26, "A" * 26):
         assert grants.validate_grant_params(dict(groupId="cnv_" + body, tools=["x"], mode="ask"), NOW)["group_id"] == "cnv_" + body
     result = grants.validate_grant_params(PARAMS | dict(expiresAt="2026-10-20T23:59:00+08:00", label="文" * 40), NOW)
@@ -286,4 +286,4 @@ def test_logic_module_has_only_standard_library_imports():
         if isinstance(node, ast.Import):
             assert all(alias.name.split(".")[0] in {"math", "re", "secrets"} for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
-            assert node.level == 0 and node.module in {"__future__", "datetime", "typing", "zoneinfo"}
+            assert node.level == 0 and node.module in {"__future__", "datetime", "typing", "zoneinfo", "collections.abc", "dataclasses", "clawchat_gateway.tool_capabilities"}

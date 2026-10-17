@@ -296,14 +296,15 @@ async def test_incomplete_names_or_group_membership_never_sends_card(management,
 
 
 @pytest.mark.asyncio
-async def test_group_card_excludes_agent_and_owner_and_baseline_forces_ask(management):
+async def test_group_card_excludes_agent_and_owner_and_sensitive_direct_stays_direct(management):
     h = management
     params = {"groupId": GROUP, "tools": ["terminal"], "mode": "direct"}
     result = await tools.manage_tool_grants("grant", params, session_id="s")
     assert result["pending"]
     assert h.client.get_user_info.call_args.args == ("usr_a",)
     text = h.adapter._send_owner_text.call_args.args[1]
-    assert "每次先问你" in text and "这类操作每次都会先问你。" in text
+    assert "方式：直接用" in text and "只给你完全信任的人。" in text
+    assert "这类操作每次都会先问你。" not in text
     assert "usr_agent" not in text and "usr_owner" not in text
 
 
@@ -338,7 +339,7 @@ async def test_revoke_counts_and_list_excludes_expired_rows(management):
     store.list_grants = lambda **kw: original(**kw, now=now + 10)
     result = await tools.manage_tool_grants("list", {}, session_id="s")
     assert len(result["grants"]) == 2
-    assert all(row["grantee_user_id"] == "usr_a" and row["grantee_name"] == "Person" for row in result["grants"])
+    assert all(row["granteeUserId"] == "usr_a" and row["granteeName"] == "Person" for row in result["grants"])
     assert await tools.manage_tool_grants("revoke", {"userId": "usr_a", "tools": ["memory"]}, session_id="s") == {"revoked": 1}
     assert await tools.manage_tool_grants("revoke", {"userId": "usr_a"}, session_id="s") == {"revoked": 1}
     assert await tools.manage_tool_grants("revoke", {"userId": "usr_a"}, session_id="s") == {"revoked": 0}
