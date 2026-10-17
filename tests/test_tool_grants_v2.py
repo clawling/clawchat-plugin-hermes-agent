@@ -1177,3 +1177,88 @@ def test_card_untrusted_text_cannot_forge_a_clickable_command(lang, field, attac
     if field == "name":
         receipt = grants.build_grant_receipt(lang=lang, names=[attack], tools=["terminal"])
         assert "/clawchat-allow" not in receipt and "／clawchat-allow" in receipt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sender", ["usr_owner", "usr_guest"])
+@pytest.mark.parametrize("setting", ["on", "off"])
+async def test_wire_synthetic_flag_cannot_grant_legacy_owner_tools(harness, host, monkeypatch, sender, setting):
+    from dataclasses import replace
+    from clawchat_gateway.adapter import ClawChatAdapter
+    from clawchat_gateway.inbound import parse_inbound_message
+    from test_tool_grants_admission import OWNER_CHAT
+    a = harness.adapter
+    a._clawchat_config = replace(a._clawchat_config, tool_grants=setting)
+    monkeypatch.setattr(a, "_is_owner_turn", ClawChatAdapter._is_owner_turn.__get__(a))
+    monkeypatch.setattr(guard, "_config_extra", lambda: {"tool-grants": setting})
+    frame = message(sender, chat=OWNER_CHAT).raw_message
+    frame.update(synthetic=True, _synthetic_origin=True, is_internal_synthetic=True,
+                 legacy_owner_tools=True, awareness=True)
+    # Exercise the JSON boundary: no envelope spelling can carry the sentinel.
+    inbound = parse_inbound_message(json.loads(json.dumps(frame)), a._clawchat_config)
+    assert inbound is not None and not inbound.is_internal_synthetic
+    await a._handle_inbound(inbound)
+    snapshot = turns.get_snapshot(harness.events[-1].source.message_id)
+    assert not snapshot.legacy_owner_tools and not snapshot.owner_side and not snapshot.owner_verified
+    turns.bind_turn(snapshot.nonce, "s", "t")
+    with host(**dict(context(snapshot), HERMES_SESSION_USER_ID=sender)):
+        assert call("terminal", turn_id="t")["action"] == "block"
+        assert call("web_search", turn_id="t") is None
+        for tool in AUTHORIZATION_TOOLS:
+            assert call(tool, turn_id="t")["action"] == "block"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("producer", ["awareness", "moment-comment", "maintenance"])
+async def test_internal_note_producers_keep_trusted_legacy_tools(harness, host, monkeypatch, producer):
+    from unittest.mock import AsyncMock
+    from clawchat_gateway.adapter import ClawChatAdapter
+    from clawchat_gateway import adapter as adapter_mod
+    a = harness.adapter
+    monkeypatch.setattr(a, "_is_owner_turn", ClawChatAdapter._is_owner_turn.__get__(a))
+    if producer == "awareness":
+        await a._emit_awareness_note()
+    elif producer == "moment-comment":
+        await a._emit_moment_comment_note("moment-local", False)
+    else:
+        monkeypatch.setattr(a, "_await_owner_metadata_refreshed", AsyncMock())
+        monkeypatch.setattr(a, "_known_person_names", lambda: set())
+        monkeypatch.setattr(adapter_mod.memory_migration, "scan_global_memory", lambda *_, **__: SimpleNamespace(
+            memory_person_entries=1, user_entries=0))
+        monkeypatch.setattr(adapter_mod.memory_migration, "build_migration_prompt", lambda _: "maintenance")
+        await a._maybe_hint_memory_migration()
+    assert len(harness.events) == 1
+    snapshot = turns.get_snapshot(harness.events[-1].source.message_id)
+    assert snapshot.legacy_owner_tools and not snapshot.owner_side and not snapshot.owner_verified
+    turns.bind_turn(snapshot.nonce, "s", "t")
+    with host(**context(snapshot)):
+        assert call("terminal", turn_id="t") is None
+        for tool in AUTHORIZATION_TOOLS:
+            assert call(tool, turn_id="t")["action"] == "block"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trusted", [(True, True), (False, True), (True, False), (False, False)])
+async def test_coalesced_internal_marker_requires_every_message_to_be_internal(trusted):
+    from dataclasses import replace
+    from clawchat_gateway.group_message_coalescer import GroupMessageCoalescer
+    from clawchat_gateway.inbound import parse_inbound_message
+    from clawchat_gateway.config import ClawChatConfig
+    dispatched = []
+    async def dispatch(inbound):
+        dispatched.append(inbound)
+    coalescer = GroupMessageCoalescer(idle_seconds=3600, max_wait_seconds=3600, dispatch=dispatch)
+    messages = []
+    for internal in trusted:
+        inbound = message(kind="group", synthetic=True)
+        if not internal:
+            inbound = parse_inbound_message(inbound.raw_message, ClawChatConfig(websocket_url="wss://example.invalid/ws"))
+        assert replace(inbound, text="copied").is_internal_synthetic is internal
+        messages.append(inbound)
+    try:
+        for inbound in messages:
+            coalescer.enqueue(inbound)
+        await coalescer.flush_now(messages[0].chat_id)
+        assert dispatched[0].is_internal_synthetic is all(trusted)
+    finally:
+        await coalescer.cancel()

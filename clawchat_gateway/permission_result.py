@@ -117,7 +117,7 @@ def handle_permission_result(frame: dict[str, Any]) -> InboundMessage | None:
         operation=operation, outcome=outcome, reason=reason, result=result
     )
     now_ms = int(time.time() * 1000)
-    return InboundMessage(
+    return InboundMessage.internal_synthetic(
         chat_id=chat_id,
         chat_type=chat_type,
         sender_id="clawchat-permission-result",

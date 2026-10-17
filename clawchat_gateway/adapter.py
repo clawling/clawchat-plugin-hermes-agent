@@ -1691,7 +1691,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 f"ClawChat: someone commented on your moment (id {moment_id}). "
                 "Use the get_moment tool to view it and reply if appropriate."
             )
-        inbound = InboundMessage(
+        inbound = InboundMessage.internal_synthetic(
             chat_id=owner_chat_id,
             chat_type="direct",
             sender_id="clawchat-awareness",
@@ -1717,7 +1717,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         owner_chat_id = self._owner_direct_chat_id()
         if not owner_user_id or not owner_chat_id:
             return
-        inbound = InboundMessage(
+        inbound = InboundMessage.internal_synthetic(
             chat_id=owner_chat_id,
             chat_type="direct",
             sender_id="clawchat-awareness",
@@ -1851,7 +1851,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         logger.info(
             "clawchat friend greeting dispatch friend=%s chat_id=%s", friend_user_id, chat_id
         )
-        inbound = InboundMessage(
+        inbound = InboundMessage.internal_synthetic(
             chat_id=chat_id,
             chat_type="direct",
             sender_id=friend_user_id,
@@ -2869,7 +2869,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 if not owner_chat_id:
                     return  # asked on a later connection, once the owner chat is known
                 await self._handle_inbound(
-                    InboundMessage(
+                    InboundMessage.internal_synthetic(
                         chat_id=owner_chat_id,
                         chat_type="direct",
                         sender_id="clawchat-maintenance",
@@ -3115,7 +3115,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             return
         owner_user_id = str(getattr(claim, "owner_user_id", "") or "")
         claimed_at = getattr(claim, "claimed_at", None)
-        inbound = InboundMessage(
+        inbound = InboundMessage.internal_synthetic(
             chat_id=conversation_id,
             chat_type="direct",
             sender_id=owner_user_id,
@@ -4401,7 +4401,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 sender = message.get("sender")
                 return [sender.get("id", "") if isinstance(sender, dict) else ""]
 
-            if not raw.get("synthetic"):
+            if not inbound.is_internal_synthetic and not raw.get("synthetic"):
                 speakers = tuple(dict.fromkeys(batch_speakers(raw))) if "messages" in raw else (inbound.sender_id,)
             trusted = bool(speakers) and all(isinstance(speaker, str) and speaker.strip() for speaker in speakers)
             if trusted and owner and all(speaker == owner for speaker in speakers):
@@ -4505,6 +4505,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         return (inbound.chat_type == "direct" and bool(inbound.sender_id)
                 and inbound.sender_id == self._owner_user_id()
                 and inbound.chat_id == self._owner_direct_chat_id()
+                and not inbound.is_internal_synthetic
                 and not inbound.raw_message.get("synthetic"))
 
     def _admit_owner_direct_inbound(self, inbound: InboundMessage) -> bool:
@@ -4560,7 +4561,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         if (inbound.chat_type != "direct" or not inbound.sender_id
                 or inbound.sender_id != self._owner_user_id()
                 or inbound.chat_id != self._owner_direct_chat_id()
-                or inbound.raw_message.get("synthetic")
+                or inbound.is_internal_synthetic or inbound.raw_message.get("synthetic")
                 or self._clawchat_config.tool_grants != "on"):
             return True
         from clawchat_gateway.owner_language import resolve_owner_language
@@ -4632,7 +4633,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             # what the model is answering (see _current_turn_trigger).
             self._last_inbound_message_id_by_chat.pop(inbound.chat_id, None)
         is_sediment_turn = (
-            isinstance(inbound.raw_message, dict)
+            inbound.is_internal_synthetic
+            and isinstance(inbound.raw_message, dict)
             and bool(inbound.raw_message.get("clawchat_sediment"))
         )
         # Pending skill-update consent gate: an owner's direct affirm/deny reply
@@ -4687,7 +4689,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 speaker_names=self._grant_speaker_names(inbound, speakers),
                 owner_verified=self._verified_owner_inbound(inbound),
                 owner_side=getattr(grants, "owner_only", False),
-                legacy_owner_tools=(inbound.raw_message.get("synthetic") is True
+                legacy_owner_tools=(inbound.is_internal_synthetic
                                     and inbound.chat_type == "direct"
                                     and inbound.chat_id == self._owner_direct_chat_id()
                                     and self._is_owner_turn(inbound)),
@@ -4726,10 +4728,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         # and would treat it as chat. Skip the injection for command turns so
         # the slash stays at the start.
         event_text = inbound.text
-        is_synthetic = (
-            isinstance(inbound.raw_message, dict)
-            and inbound.raw_message.get("synthetic") is True
-        )
+        is_synthetic = inbound.is_internal_synthetic
         if inbound.chat_type == "group" and not is_group_command and not is_synthetic:
             prior_context = self._group_context_for_turn(inbound)
             if prior_context:
@@ -4902,7 +4901,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 logger.warning("clawchat sediment unseen history failed chat_id=%s", chat_id, exc_info=True)
             if unseen:
                 text = f"{unseen}\n\n{text}"
-        inbound = InboundMessage(
+        inbound = InboundMessage.internal_synthetic(
             chat_id=chat_id,
             chat_type=chat_type,
             # A shared group session is keyed without the sender; a direct (or
@@ -8002,7 +8001,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         scope_words = {"always", "permanent", "permanently", "session", "ses", "a", "s", "all"}
         if route.grant_nonce and (
             any(word.lower() in scope_words for word in inbound.text.split()[1:])
-            or inbound.raw_message.get("synthetic")
+            or inbound.is_internal_synthetic or inbound.raw_message.get("synthetic")
             or inbound.chat_id != self._owner_direct_chat_id()
         ):
             choice = "deny"

@@ -24,8 +24,9 @@ def message(sender="usr_a", text="hello", chat=CHAT, kind="direct", synthetic=Fa
                        "message": {"fragments": [{"kind": "text", "text": text}]}}}
     if synthetic:
         raw["synthetic"] = True
-    return InboundMessage(chat_id=chat, chat_type=kind, sender_id=sender, sender_name=sender,
-                          text=text, raw_message=raw, was_mentioned=kind == "group")
+    constructor = InboundMessage.internal_synthetic if synthetic else InboundMessage
+    return constructor(chat_id=chat, chat_type=kind, sender_id=sender, sender_name=sender,
+                       text=text, raw_message=raw, was_mentioned=kind == "group")
 
 
 def grant(user, tool=TOOL, mode="direct"):

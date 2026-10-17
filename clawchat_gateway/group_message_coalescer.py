@@ -275,6 +275,8 @@ class GroupMessageCoalescer:
             text = text.replace("ClawChat group messages:", "ClawChat messages:", 1)
         merged = replace(
             latest,
+            _synthetic_origin=(latest._synthetic_origin
+                               if all(message.is_internal_synthetic for message in batch) else None),
             text=text,
             raw_message=merged_raw,
             media_urls=[url for message in batch for url in message.media_urls],

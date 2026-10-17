@@ -6,6 +6,8 @@ from typing import Any
 from clawchat_gateway.config import ClawChatConfig
 from clawchat_gateway.protocol import MENTION_ALL_USER_ID
 
+_INTERNAL_SYNTHETIC = object()
+
 
 @dataclass(frozen=True)
 class InboundMessage:
@@ -30,6 +32,18 @@ class InboundMessage:
     # age means "delivered late", never "just written". None when the field is
     # absent or unusable.
     emitted_at: int | None = None
+    # Process-local provenance, never read from an envelope by the parser.
+    # Object identity cannot be expressed by JSON; replace() preserves it.
+    _synthetic_origin: object | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def is_internal_synthetic(self) -> bool:
+        return self._synthetic_origin is _INTERNAL_SYNTHETIC
+
+    @classmethod
+    def internal_synthetic(cls, **kwargs: Any) -> InboundMessage:
+        """Construct a plugin-owned event without granting trust to raw fields."""
+        return cls(**kwargs, _synthetic_origin=_INTERNAL_SYNTHETIC)
 
 
 def _coerce_emitted_at(value: Any) -> int | None:

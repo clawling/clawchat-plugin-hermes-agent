@@ -58,6 +58,7 @@ def _frame(outcome, *, request_id="prq_1", operation="group.manage", reason="own
 def _text(frame):
     inbound = pr.handle_permission_result(frame)
     assert inbound is not None
+    assert inbound.is_internal_synthetic
     return inbound.text, inbound
 
 

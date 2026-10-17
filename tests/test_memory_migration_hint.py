@@ -85,6 +85,7 @@ def test_owner_is_asked_once_and_nothing_is_moved(adapter, tmp_path):
 
     assert len(adapter.dispatched) == 1
     turn = adapter.dispatched[0]
+    assert turn.is_internal_synthetic
     assert turn.chat_id == OWNER_CHAT and turn.chat_type == "direct"
     assert "2 of 2" in turn.text and "USER.md" in turn.text
     assert "owner.md" in turn.text and "users/<usr_id>.md" in turn.text
