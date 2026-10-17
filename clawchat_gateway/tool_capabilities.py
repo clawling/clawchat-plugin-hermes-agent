@@ -136,8 +136,52 @@ def is_cross_chat_call(tool_name: str, args, trusted_context) -> bool:
     if tool_name not in TOOL_CAPABILITIES["cross-chat"]["tools"]:
         return False
     chat_id = trusted_context.get("chat_id")
-    target = args.get("chatId") if isinstance(args, dict) else None
+    key = "chat_id" if tool_name == "clawchat_send_file" else "target" if tool_name == "send_message" else "chatId"
+    target = args.get(key) if isinstance(args, dict) else None
+    if isinstance(target, str):
+        target = target.strip()
+        # Mirror tools._tool_chat_id and the host's send target parser: strip
+        # one platform prefix, case-insensitively, without interpreting data.
+        if target[:9].lower() == "clawchat:":
+            target = target[9:].strip()
     return not (chat_id and isinstance(target, str) and target.strip().lower() == chat_id.strip().lower())
+
+
+# Audited host routes, not a scan of arbitrary tool arguments. These mutations
+# start independent workers or wake persisted subscribers whose destination we
+# cannot prove from the model arguments. Do not import newer host internals to
+# infer authority: origin inheritance must be implemented before opening them.
+KANBAN_SESSION_ROUTES = frozenset({
+    "kanban_create", "kanban_complete", "kanban_block", "kanban_schedule",
+    "kanban_request_review", "kanban_request_changes", "kanban_unblock",
+    "kanban_link", "kanban_comment",
+})
+
+
+def host_tool_targets_current_session(tool_name: str, args) -> bool:
+    """Whether an audited call avoids starting/routing work in another session.
+
+    Hermes passes coerced wire arguments to pre_tool_call. It does not fold
+    snake/camel case or key case; these audited keys already satisfy its schema
+    sanitizer. Legacy action aliases are handled by the same action policy.
+    Terminal notify/watch/heartbeat destinations come only from bound host
+    context. ClawChat mention/react/file and send_message are ordinary outbound
+    messages, so remain governed by cross-chat grants and resource checks.
+    """
+    if tool_name in KANBAN_SESSION_ROUTES or tool_name == "message_agent":
+        return False
+    if tool_name in {"delegate_task", "cronjob", "cronjob_manage"}:
+        if not isinstance(args, dict):
+            return False
+        action = args.get("action") or ("spawn" if tool_name == "delegate_task" else "")
+        if not isinstance(action, str):
+            return False
+        action = action.strip().lower()
+        # Spawn/steer address an isolated child; cron executes in a fresh
+        # session even with deliver=origin/local. Existing jobs and subscriber
+        # targets cannot be trusted merely because their id is supplied.
+        return action in ({"list", "stop"} if tool_name == "delegate_task" else {"list", "pause", "remove"})
+    return True
 
 
 def resolve_cross_chat_gate(context=None, effective_grant=None) -> str:

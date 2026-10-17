@@ -362,12 +362,27 @@ def test_channel_prompt_section_for_non_owner_turns(monkeypatch):
     adapter = _adapter()
     assert adapter._non_owner_turn_section(_inbound(OWNER_DM, "direct", OWNER)) is None
     assert adapter._non_owner_turn_section(_inbound(OWNER_DM, "direct", "clawchat-awareness")) is None
-    for inbound in (_inbound(DM, "direct", FRIEND), _inbound(GROUP, "group", OWNER)):
+    assert adapter._non_owner_turn_section(_inbound(GROUP, "group", OWNER)) is None
+    for inbound in (_inbound(DM, "direct", FRIEND),):
         section = adapter._non_owner_turn_section(inbound)
         assert memory_scope.OWNER_NOTE_WRITE_HINT in section
         assert guard.BLOCKED_TOOLS_HINT not in section  # 0.20.1+: the tools are gone
     monkeypatch.setattr(guard, "host_supports_toolset_override", lambda: False)
     assert NON_OWNER_GRANTS_HINT in adapter._non_owner_turn_section(_inbound(DM, "direct", FRIEND))
+
+
+@pytest.mark.parametrize("sender", ["clawchat-maintenance", "clawchat-awareness"])
+def test_plugin_synthetic_owner_dm_without_snapshot_keeps_legacy_behavior(monkeypatch, sender):
+    from clawchat_gateway.turn_grants import active_snapshot
+
+    adapter = _adapter()
+    inbound = _inbound(OWNER_DM, "direct", sender)
+    inbound.raw_message["synthetic"] = True
+    assert active_snapshot(adapter._account_id(), adapter._grant_session_key(inbound)) is None
+    monkeypatch.setattr(guard, "_hook_missing", True)
+    assert not adapter._refuses_turn(inbound)
+    assert adapter._non_owner_turn_section(inbound) is None
+    assert not adapter._verified_owner_inbound(inbound)
 
 
 # --- owner.md: no write outside the owner's direct chat ----------------------

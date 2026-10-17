@@ -2643,7 +2643,11 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
 
     def _is_owner_turn(self, inbound: InboundMessage) -> bool:
-        """The owner's own direct chat, as ``host_tools_guard`` judges a turn."""
+        """Legacy admission/hints, including plugin turns in the owner's DM.
+
+        Snapshot owner_side comes separately from trusted batch speakers;
+        management authority comes from _verified_owner_inbound.
+        """
         from clawchat_gateway.host_tools_guard import is_owner_turn
 
         return is_owner_turn(
@@ -2676,7 +2680,10 @@ class ClawChatAdapter(BasePlatformAdapter):
 
     def _non_owner_turn_section(self, inbound: InboundMessage) -> str | None:
         """What a turn the owner did not start cannot do, for the model."""
-        if self._is_owner_turn(inbound):
+        from clawchat_gateway.turn_grants import active_snapshot
+        snapshot = active_snapshot(self._account_id(), self._grant_session_key(inbound))
+        if ((snapshot is not None and snapshot.owner_side)
+                or (snapshot is None and self._is_owner_turn(inbound))):
             return None
         from clawchat_gateway.host_tools_guard import blocked_tools_hint, limited_tools_hint
         from clawchat_gateway.memory_scope import OWNER_NOTE_WRITE_HINT
@@ -2687,12 +2694,12 @@ class ClawChatAdapter(BasePlatformAdapter):
         grants_hint = None
         if self._clawchat_config.tool_grants == "on":
             try:
-                from clawchat_gateway.turn_grants import active_snapshot
-                snapshot = active_snapshot(self._account_id(), self._grant_session_key(inbound))
                 if snapshot is not None:
                     grants = snapshot.grants
                 else:
                     _, grants, _ = self._turn_grant_values(inbound)
+                    if getattr(grants, "owner_only", False):
+                        return None
                 _, available = host_tool_catalog()
                 grants_hint = build_non_owner_grants_hint(grants, available)
             except Exception:  # noqa: BLE001 - no catalog evidence means no capability list
@@ -4396,13 +4403,13 @@ class ClawChatAdapter(BasePlatformAdapter):
 
             if not raw.get("synthetic"):
                 speakers = tuple(dict.fromkeys(batch_speakers(raw))) if "messages" in raw else (inbound.sender_id,)
-            if (self._clawchat_config.tool_grants != "on" or not speakers
-                    or not all(isinstance(speaker, str) and speaker.strip() for speaker in speakers)):
-                return speakers, {}, frozenset()
-            if owner and all(speaker == owner for speaker in speakers):
+            trusted = bool(speakers) and all(isinstance(speaker, str) and speaker.strip() for speaker in speakers)
+            if trusted and owner and all(speaker == owner for speaker in speakers):
                 return speakers, resolve_turn_grants(list(speakers), owner, [], now), frozenset()
             _, available = host_tool_catalog()
             public = public_tool_names(available)
+            if self._clawchat_config.tool_grants != "on" or not trusted:
+                return speakers, resolve_turn_grants([], owner, [], now, public_tools=public), frozenset()
             rows = self._store.load_grants_for_users(
                 account_id=self._account_id(), user_ids=list(speakers), now=now,
             )
@@ -4592,7 +4599,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             return
         if not self._is_owner_turn(inbound) and self._hold_granted_inbound(inbound, from_dispatch=True):
             return
-        if not self._verified_owner_inbound(inbound):
+        if (inbound.chat_type == "direct" and inbound.chat_id == self._owner_direct_chat_id()
+                and not self._verified_owner_inbound(inbound)):
             from clawchat_gateway.turn_grants import mark_unverified_input
 
             # The host can await before installing its guard, then merge this
@@ -4659,8 +4667,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
         chat_name, user_name = self._session_names(inbound)
         downloaded_media = await self._download_inbound_media(inbound)
-        owner_turn = self._is_owner_turn(inbound)
-        speakers, grants, any_tools = ((), {}, frozenset()) if owner_turn else self._turn_grant_values(inbound)
+        speakers, grants, any_tools = self._turn_grant_values(inbound)
         # Recheck after all preparation awaits, using exactly the grants that
         # will enter the snapshot. A grant added during download must not get
         # into the host's already running turn through steer or text merging.
@@ -4679,7 +4686,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 speakers=speakers, grants=grants, any_granted_tools=any_tools, session_key=key,
                 speaker_names=self._grant_speaker_names(inbound, speakers),
                 owner_verified=self._verified_owner_inbound(inbound),
-                owner_side=owner_turn or getattr(grants, "owner_only", False),
+                owner_side=getattr(grants, "owner_only", False),
                 non_owner_speakers=frozenset(speaker for speaker in speakers if isinstance(speaker, str)
                                              and speaker.strip() and speaker != self._owner_user_id()),
             )

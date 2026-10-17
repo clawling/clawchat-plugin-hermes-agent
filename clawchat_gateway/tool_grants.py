@@ -48,11 +48,13 @@ GRANT_ASK_DENIED_MESSAGE = 'The owner did not approve this call or has not answe
 GRANT_DENIED_MESSAGE = 'The owner has not opened access to this ability. Do not retry or send another access request.'
 GRANT_ASK_UNAVAILABLE_MESSAGE = 'This machine cannot ask the owner for approval on each call, so it did not run. Do not retry or treat this as direct access. Tell them to ask the owner directly.'
 GRANT_NOT_AVAILABLE_MESSAGE = 'This ability is not available here. Say you cannot do it. Do not suggest requesting access or trying another route.'
+GRANT_CROSS_SESSION_MESSAGE = 'This call would start or route work in another session, so it did not run. Do not retry or use another route. Ask the owner directly.'
 
 GRANT_FAILURE_MESSAGES = {
     "not-granted": GRANT_BLOCK_MESSAGE, "denied": GRANT_DENIED_MESSAGE,
     "batch-intersection": GRANT_INTERSECTION_BLOCK_MESSAGE, "ask-declined": GRANT_ASK_DENIED_MESSAGE,
     "ask-unavailable": GRANT_ASK_UNAVAILABLE_MESSAGE, "not-available": GRANT_NOT_AVAILABLE_MESSAGE,
+    "cross-session": GRANT_CROSS_SESSION_MESSAGE,
 }
 
 GRANT_CONFIRM_RECEIPT = {

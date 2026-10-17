@@ -20,8 +20,8 @@ def test_four_version_tiers(host, approval, monkeypatch, tier, has_turn, overrid
     monkeypatch.setattr(guard, "host_supports_toolset_override", lambda: override)
     monkeypatch.setattr(guard, "_host_supports_approve", lambda: approve)
     direct, ask = snapshot(key="direct"), snapshot(grants={TOOL: "ask"}, key="ask")
-    owner = turns.register_turn(account_id="usr_agent", chat_id="cnv_owner", speakers=(),
-                                grants={}, session_key="owner", owner_verified=True)
+    owner = turns.register_turn(account_id="usr_agent", chat_id="cnv_owner", speakers=("usr_owner",),
+                                grants={}, session_key="owner", owner_verified=True, owner_side=True)
     try:
         for s in (direct, ask, owner):
             turns.bind_turn(s.nonce, "s", "t")

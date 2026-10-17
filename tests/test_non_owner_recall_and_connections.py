@@ -417,11 +417,14 @@ def test_limited_tools_hint(monkeypatch):
 
 def test_channel_prompt_carries_the_limits_only_outside_the_owner_chat(monkeypatch):
     from clawchat_gateway.adapter import ClawChatAdapter
+    from clawchat_gateway.inbound import InboundMessage
 
     adapter = ClawChatAdapter({})
-    monkeypatch.setattr(ClawChatAdapter, "_is_owner_turn", lambda self, inbound: inbound == "owner")
-    assert guard.LIMITED_TOOLS_HINT in adapter._non_owner_turn_section("friend")
-    assert adapter._non_owner_turn_section("owner") is None
+    monkeypatch.setattr(ClawChatAdapter, "_is_owner_turn", lambda self, inbound: inbound.sender_id == OWNER)
+    def inbound(sender):
+        return InboundMessage(chat_id=DM, chat_type="direct", sender_id=sender, sender_name="", text="hi", raw_message={})
+    assert guard.LIMITED_TOOLS_HINT in adapter._non_owner_turn_section(inbound(FRIEND))
+    assert adapter._non_owner_turn_section(inbound(OWNER)) is None
 
 
 # --- an external memory provider ---------------------------------------------

@@ -21,6 +21,8 @@ _READ_APPROVAL_CONFIG = guard._approval_config_read
 
 @pytest.fixture
 def approval(monkeypatch):
+    from clawchat_gateway import tools
+    monkeypatch.setattr(tools, "get_clawchat_sender", lambda: SimpleNamespace(_owner_direct_chat_id=lambda: OWNER_CHAT))
     module = ModuleType("tools.approval")
     class ExactQueue(FakeApprovalQueue):
         def resolve_gateway_approval(self, session_key, choice, resolve_all=False, reason=None, request_id=None):
@@ -89,7 +91,7 @@ def test_open_tool_ask_precedes_ordinary_access(host, approval, monkeypatch, sup
             assert result["rule_key"].startswith("clawchat-grant-ask:")
             assert "web_search" in result["message"]
         else:
-            assert result == {"action": "block", "reasonCode": "ask-unavailable", "message": GRANT_ASK_UNAVAILABLE_MESSAGE}
+            assert result == {"action": "block", "reasonCode": "ask-unavailable", "message": GRANT_ASK_UNAVAILABLE_MESSAGE, "blockReason": GRANT_ASK_UNAVAILABLE_MESSAGE}
     finally:
         turns.release_turn(s.nonce)
 
@@ -107,7 +109,7 @@ def test_open_tool_unreliable_ask_fails_closed(host, approval, monkeypatch, fail
     turns.bind_turn(s.nonce, "s", "t")
     try:
         with host(**context(s)):
-            assert call("web_search", turn_id="t") == {"action": "block", "reasonCode": "ask-unavailable", "message": GRANT_ASK_UNAVAILABLE_MESSAGE}
+            assert call("web_search", turn_id="t") == {"action": "block", "reasonCode": "ask-unavailable", "message": GRANT_ASK_UNAVAILABLE_MESSAGE, "blockReason": GRANT_ASK_UNAVAILABLE_MESSAGE}
     finally:
         turns.release_turn(s.nonce)
 
@@ -174,7 +176,7 @@ def test_ask_bypass_is_denied(host, approval, bypass, monkeypatch):
         monkeypatch.setattr(guard, "_approval_config_read", lambda: (_ for _ in ()).throw(OSError()))
     else:
         approval.is_approved = lambda *_: (_ for _ in ()).throw(RuntimeError())
-    assert ask(host) == {"action": "block", "reasonCode": "ask-unavailable", "message": GRANT_ASK_UNAVAILABLE_MESSAGE}
+    assert ask(host) == {"action": "block", "reasonCode": "ask-unavailable", "message": GRANT_ASK_UNAVAILABLE_MESSAGE, "blockReason": GRANT_ASK_UNAVAILABLE_MESSAGE}
 
 
 @pytest.mark.parametrize("marker", ["host_fallback", "class_name", "attribute", "key"])
@@ -203,7 +205,7 @@ def test_failed_config_read_fallback_denies_ask(host, approval, monkeypatch, mar
     monkeypatch.setattr(guard, "_approval_config_read", _READ_APPROVAL_CONFIG)
     with pytest.raises(ValueError, match="Unreadable approval policy"):
         guard._approval_config_read()
-    assert ask(host) == {"action": "block", "reasonCode": "ask-unavailable", "message": GRANT_ASK_UNAVAILABLE_MESSAGE}
+    assert ask(host) == {"action": "block", "reasonCode": "ask-unavailable", "message": GRANT_ASK_UNAVAILABLE_MESSAGE, "blockReason": GRANT_ASK_UNAVAILABLE_MESSAGE}
 
 
 def test_readable_config_without_new_host_class_allows_ask(host, approval, monkeypatch):
@@ -252,7 +254,7 @@ def test_host_denial_timeout_and_unconfirmed_autoapproval_use_ask_message(host, 
     result = approval.request_tool_approval(TOOL, directive["message"], rule_key=directive["rule_key"])
     reason = "ask-declined" if outcome in {"deny", "timeout"} else "ask-unavailable"
     expected = GRANT_ASK_DENIED_MESSAGE if reason == "ask-declined" else GRANT_ASK_UNAVAILABLE_MESSAGE
-    assert result == {"approved": False, "reasonCode": reason, "message": expected}
+    assert result == {"approved": False, "reasonCode": reason, "message": expected, "blockReason": expected}
 
 
 def test_single_call_consent_and_no_persistence_even_external_scope_choice(host, approval):

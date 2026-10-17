@@ -249,6 +249,10 @@ def test_approve_setting_escalates_to_the_human_gate(monkeypatch, tool):
     _approve(monkeypatch)
     _session(monkeypatch, chat_id=GROUP, chat_type="group", user_id=FRIEND)
     result = guard.clawchat_pre_tool_call(tool_name=tool, args={})
+    from clawchat_gateway.tool_capabilities import KANBAN_SESSION_ROUTES
+    if tool in KANBAN_SESSION_ROUTES or tool == "message_agent":
+        assert result == guard._grant_block("cross-session")
+        return
     assert result["action"] == "approve"
     assert result["rule_key"] == f"clawchat-non-owner:{tool}"
 

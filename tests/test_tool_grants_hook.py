@@ -77,7 +77,7 @@ def test_ask_is_blocked_even_with_legacy_approve(host, monkeypatch):
     try:
         with host(**context(s)):
             guard.clawchat_pre_llm_call(session_id="s", turn_id="t")
-            assert call(turn_id="t") == {"action": "block", "reasonCode": "ask-unavailable", "message": GRANT_ASK_UNAVAILABLE_MESSAGE}
+            assert call(turn_id="t") == {"action": "block", "reasonCode": "ask-unavailable", "message": GRANT_ASK_UNAVAILABLE_MESSAGE, "blockReason": GRANT_ASK_UNAVAILABLE_MESSAGE}
     finally:
         turns.release_turn(s.nonce)
 
@@ -115,6 +115,7 @@ def test_missing_identity_and_followup_never_borrow_grants(host, failure, monkey
             expected = {"action": "block", "message": GRANT_BLOCK_MESSAGE}
             if failure != "missing_turn":
                 expected["reasonCode"] = "not-granted"
+                expected["blockReason"] = GRANT_BLOCK_MESSAGE
             assert result == expected
     finally:
         turns.release_turn(s.nonce)

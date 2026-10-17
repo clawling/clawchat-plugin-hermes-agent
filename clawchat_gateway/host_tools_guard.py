@@ -39,10 +39,10 @@ binding. No session-level fallback supplies execution authority.
   the owner's own direct chat loses ungranted :data:`RESTRICTED_TOOLSETS`
   (``memory`` among them) by default and gets the host's ``no_mcp`` sentinel,
   so the model does not see those tools. Listing no MCP server would not do: the host then adds back
-  every enabled one, the fallback list included. **Every group turn counts**, whoever spoke: a group is
-  one shared session, and switching the toolset per speaker would rebuild the
-  agent (and drop the prompt cache) each time the owner and someone else
-  alternate. Granted batches may restore toolsets and rebuild that cache.
+  every enabled one, the fallback list included. Group authority comes only
+  from the trusted batch snapshot: a nonempty owner-only batch has full
+  ordinary tools; mixed batches intersect their non-owner speakers' grants.
+  Changing the toolset can rebuild the agent and its prompt cache.
 * :func:`clawchat_pre_tool_call` — a ``pre_tool_call`` hook that blocks any of
   those tools still reaching dispatch in such a turn (an older host without the
   override, a toolset the filter could not see into). MCP tools are known by
@@ -420,7 +420,7 @@ def _filter_grant_definitions(definitions, snapshot):
 
     def allowed(tool):
         if tool in AUTHORIZATION_TOOLS:
-            return bool(snapshot and snapshot.owner_verified and tool != "clawchat_tool_request")
+            return bool(snapshot and snapshot.owner_side and snapshot.owner_verified and tool != "clawchat_tool_request")
         if snapshot and snapshot.owner_side:
             return True
         default = not _guarded_call(tool, {})
@@ -499,15 +499,20 @@ def public_tool_names(available):
     return frozenset(tool for tool in available if tool not in AUTHORIZATION_TOOLS and not _guarded_call(tool, {}))
 
 
-def ask_grants_available() -> bool:
+def can_ask_each_time(rule_key: str = "clawchat-grant-ask:probe") -> bool:
     """Check real per-call routing at card creation and confirmation as well as execution."""
     try:
         from clawchat_gateway.tools import get_clawchat_sender
         sender = get_clawchat_sender()
-        return bool(_host_supports_approve() and not _approval_bypass("clawchat-grant-ask:probe")
+        return bool(_host_supports_approve() and not _approval_bypass(rule_key)
                     and sender and sender._owner_direct_chat_id() and _install_grant_approval_gate())
     except Exception:  # noqa: BLE001 - uncertainty removes ask, never direct
         return False
+
+
+def ask_grants_available() -> bool:
+    """Compatibility entry point for cards and pending confirmations."""
+    return can_ask_each_time()
 
 
 def _skills_inline_shell() -> bool:
@@ -883,15 +888,18 @@ def toolsets_for_source(source: Any, *, owner_user_id: str | Callable[[], str],
     try:
         owner = owner_user_id() if callable(owner_user_id) else owner_user_id
         chat_id = str(getattr(source, "chat_id", "") or "")
-        if _is_owner_direct(chat_id, str(getattr(source, "chat_type", "") or ""),
-                            str(getattr(source, "user_id", "") or ""), str(owner or ""), owner_direct_chat_id):
-            return None
         snapshot = get_snapshot(str(getattr(source, "message_id", "") or ""))
         if snapshot is not None and snapshot.chat_id != chat_id:
             snapshot = None
         if snapshot and snapshot.owner_side:
+            if snapshot.owner_verified:
+                return None
             return sorted(name for name in _platform_toolsets() if name != GRANT_MANAGEMENT_TOOLSET
                           and not set(_resolve_tools(name)) & set(AUTHORIZATION_TOOLS)) or list(FALLBACK_TOOLSETS)
+        if snapshot is None and not hasattr(source, "message_id") and _is_owner_direct(
+                chat_id, str(getattr(source, "chat_type", "") or ""),
+                str(getattr(source, "user_id", "") or ""), str(owner or ""), owner_direct_chat_id):
+            return None
         narrowed = _narrowed_toolsets()
         if not _tool_grants_enabled():
             return _legacy_approve_toolsets() if non_owner_host_tools() == SETTING_APPROVE else narrowed
@@ -1008,7 +1016,7 @@ def management_snapshot(session_id: str, turn_id: str):
         session_context_value("HERMES_SESSION_MESSAGE_ID"),
         session_context_value("HERMES_SESSION_CHAT_ID"), session_id, turn_id,
     )
-    return snapshot if snapshot and snapshot.owner_verified else None
+    return snapshot if snapshot and snapshot.owner_side and snapshot.owner_verified else None
 
 
 def _approval_config_read() -> dict[str, Any]:
@@ -1058,7 +1066,6 @@ def _install_grant_approval_gate() -> bool:
     try:
         from tools import approval
         from clawchat_gateway.turn_grants import approval_by_nonce, finish_approval
-        from clawchat_gateway.tool_grants import GRANT_ASK_DENIED_MESSAGE, GRANT_ASK_UNAVAILABLE_MESSAGE
 
         with _GRANT_APPROVAL_GATE_LOCK:
             original = approval.request_tool_approval
@@ -1075,21 +1082,22 @@ def _install_grant_approval_gate() -> bool:
                     return original(tool_name, reason, rule_key=rule_key, **kwargs)
                 nonce = rule_key.removeprefix("clawchat-grant-ask:")
                 record = approval_by_nonce(nonce)
-                result = {"approved": False, "reasonCode": "ask-unavailable", "message": GRANT_ASK_UNAVAILABLE_MESSAGE}
+                result = _grant_block("ask-unavailable")
                 try:
                     if (record and record.tool == tool_name and record.description == reason
                             and record.session_key == approval.get_current_session_key()
-                            and not _approval_bypass(rule_key)):
+                            and can_ask_each_time(rule_key)):
                         outcome = original(tool_name, reason, rule_key=rule_key, **kwargs)
                         if record.routed and record.delivered:
-                            result = {"approved": False, "reasonCode": "ask-declined", "message": GRANT_ASK_DENIED_MESSAGE}
+                            result = _grant_block("ask-declined")
                         if finish_approval(nonce) and outcome.get("approved"):
                             return outcome
                 except Exception:  # noqa: BLE001 - unavailable approval never becomes direct
                     pass
                 finally:
                     finish_approval(nonce)
-                return result
+                result.pop("action")
+                return {"approved": False, **result}
 
             def grant_persist(session_key, choice, keys):
                 # Also prevent a decision delivered outside our adapter from ever
@@ -1121,10 +1129,9 @@ def _ask_directive(snapshot, tool_name: str, args: Any):
     import json
     from tools import approval
     from clawchat_gateway.turn_grants import register_approval
-    from clawchat_gateway.tool_grants import GRANT_ASK_UNAVAILABLE_MESSAGE
 
-    denied = {"action": "block", "reasonCode": "ask-unavailable", "message": GRANT_ASK_UNAVAILABLE_MESSAGE}
-    if not _host_supports_approve() or not _install_grant_approval_gate():
+    denied = _grant_block("ask-unavailable")
+    if not can_ask_each_time():
         return denied
     session_key = approval.get_current_session_key()
     if not session_key or session_key == "default":
@@ -1135,7 +1142,7 @@ def _ask_directive(snapshot, tool_name: str, args: Any):
     # The lock finalizes the nonce suffix before exposing the directive.
     record = register_approval(session_key, snapshot.chat_id, tool_name, description, 600)
     rule_key = "clawchat-grant-ask:" + record.nonce
-    if _approval_bypass(rule_key):
+    if not can_ask_each_time(rule_key):
         from clawchat_gateway.turn_grants import finish_approval
         finish_approval(record.nonce)
         return denied
@@ -1169,6 +1176,19 @@ def _ordinary_non_owner_decision(tool_name, args, *, grants_enabled, approve=Fal
     return {"action": "block", "message": message}
 
 
+def _grant_block(reason):
+    from clawchat_gateway.tool_grants import GRANT_FAILURE_MESSAGES
+
+    message = GRANT_FAILURE_MESSAGES[reason]
+    return {"action": "block", "reasonCode": reason, "message": message, "blockReason": message}
+
+
+def _cross_session_decision(tool_name, args):
+    from clawchat_gateway.tool_capabilities import host_tool_targets_current_session
+
+    return None if host_tool_targets_current_session(tool_name, args) else _grant_block("cross-session")
+
+
 def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: Any) -> Optional[dict[str, Any]]:
     """``pre_tool_call`` hook: host tools in a turn the owner did not start."""
     try:
@@ -1182,14 +1202,14 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: A
             # Upgrade hints are only disclosed on a verified owner turn.
             from clawchat_gateway.turn_grants import get_snapshot, session_context_value
             snapshot = get_snapshot(session_context_value("HERMES_SESSION_MESSAGE_ID"))
-            if (_tool_grants_enabled() and not kwargs.get("turn_id") and snapshot and snapshot.owner_verified
+            if (_tool_grants_enabled() and not kwargs.get("turn_id") and snapshot and snapshot.owner_side and snapshot.owner_verified
                     and snapshot.chat_id == session_context_value("HERMES_SESSION_CHAT_ID")
                     and session_context_value("HERMES_SESSION_PLATFORM") == "clawchat"):
                 message = MANAGEMENT_UPGRADE_MESSAGE
             return {"action": "block", "message": message}
         from clawchat_gateway.turn_grants import lookup_snapshot_for_call, session_context_value
         from clawchat_gateway.tool_grants import (
-            evaluate_tool_grant, grant_failure_code, GRANT_FAILURE_MESSAGES,
+            evaluate_tool_grant, grant_failure_code,
         )
         nonce = session_context_value("HERMES_SESSION_MESSAGE_ID")
         chat_id = session_context_value("HERMES_SESSION_CHAT_ID")
@@ -1198,10 +1218,16 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: A
                     if can_bind_call else None)
         if snapshot and snapshot.owner_side:
             return None
+        # Bound snapshots, including mixed overlaps and unattributed events in
+        # the owner's chat, override the host's session-level owner inference.
+        # An old host with no execution IDs keeps its legacy approval policy.
+        session_turn = _session_turn()
+        if session_context_value("HERMES_SESSION_PLATFORM") == "clawchat" and (snapshot or can_bind_call):
+            session_turn = "other"
         # The plugin's own tools: any turn that is not the owner's. The host's
         # send_message: only ClawChat turns the owner did not start, so another
         # platform's own sessions keep the host's behaviour.
-        turn = _session_turn() if tool_name.startswith("clawchat_") or tool_name == "send_message" else ""
+        turn = session_turn if tool_name.startswith("clawchat_") or tool_name == "send_message" else ""
         if (tool_name.startswith("clawchat_") and turn != "owner") or (
             tool_name == "send_message" and turn == "other"
         ):
@@ -1225,7 +1251,7 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: A
                     return {"action": "block", "message": LOCAL_PATH_REFUSAL}
         guarded = _guarded_call(tool_name, args)
         strict = not guarded and _strict_unregistered(tool_name)
-        if _session_turn() != "other":
+        if session_turn != "other":
             return None
         grants_enabled = _tool_grants_enabled()
         if strict:
@@ -1236,7 +1262,11 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: A
         # their pre-existing approval opt-in, including the ordinary messages.
         if grants_enabled and not can_bind_call:
             if not guarded and not strict:
-                return None
+                return _cross_session_decision(tool_name, args)
+            if non_owner_host_tools() == SETTING_APPROVE:
+                route_block = _cross_session_decision(tool_name, args)
+                if route_block:
+                    return route_block
             return _ordinary_non_owner_decision(tool_name, args, grants_enabled=True,
                 approve=non_owner_host_tools() == SETTING_APPROVE)
         if grants_enabled:
@@ -1247,18 +1277,20 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: A
             if snapshot is not None:
                 _, available = host_tool_catalog()
                 if tool_name not in available:
-                    return {"action": "block", "reasonCode": "not-available",
-                            "message": GRANT_FAILURE_MESSAGES["not-available"]}
+                    return _grant_block("not-available")
             if mode == "deny":
                 reason = grant_failure_code(grants, tool_name, args=args, context=context,
                                             speakers=snapshot.non_owner_speakers if snapshot else ())
-                return {"action": "block", "reasonCode": reason, "message": GRANT_FAILURE_MESSAGES[reason]}
+                return _grant_block(reason)
+            if mode in ("ask", "direct") or not guarded and not strict:
+                route_block = _cross_session_decision(tool_name, args)
+                if route_block:
+                    return route_block
             if mode == "ask":
                 try:
                     return _ask_directive(snapshot, tool_name, args)
                 except Exception:  # noqa: BLE001 - routing failure is never direct permission
-                    return {"action": "block", "reasonCode": "ask-unavailable",
-                            "message": GRANT_FAILURE_MESSAGES["ask-unavailable"]}
+                    return _grant_block("ask-unavailable")
             if mode == "direct":
                 from clawchat_gateway.tool_capabilities import TOOL_CAPABILITIES
                 from clawchat_gateway.local_paths import LOCAL_PATH_REFUSAL
@@ -1275,9 +1307,13 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: A
                 if not has_grant_rows(grants, now=time.time() * 1000):
                     return {**_ordinary_non_owner_decision(tool_name, args, grants_enabled=True),
                             "reasonCode": reason}
-            return {"action": "block", "reasonCode": reason, "message": GRANT_FAILURE_MESSAGES[reason]}
+            return _grant_block(reason)
         if not guarded and not strict:
-            return None
+            return _cross_session_decision(tool_name, args)
+        if non_owner_host_tools() == SETTING_APPROVE:
+            route_block = _cross_session_decision(tool_name, args)
+            if route_block:
+                return route_block
         return _ordinary_non_owner_decision(tool_name, args, grants_enabled=False,
                                            approve=non_owner_host_tools() == SETTING_APPROVE)
     except Exception as exc:  # noqa: BLE001 - the host would ignore us and run the tool

@@ -1823,6 +1823,10 @@ async def manage_tool_grants(operation: str, params: Any, *, session_id: str = "
             count = store.apply_grant(account_id=snapshot.account_id, payload=payload, now=now)
             return {"applied": True, "mode": "deny", "count": count}
         # Unique INSERT is the collision check; never replace another card.
+        # Identity lookups above yield; approval policy may have changed meanwhile.
+        ask_available = ask_grants_available()
+        if values["mode"] == "ask" and not ask_available:
+            return _validation_error("ask-unavailable")
         for attempt in range(6):
             code = generate_grant_code()
             card = build_grant_card(**payload, lang=lang, code=code, now=now, ask_available=ask_available)

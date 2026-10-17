@@ -45,6 +45,9 @@ def register_turn(*, account_id: str, chat_id: str, speakers: tuple[str, ...],
                   owner_side: bool = False, non_owner_speakers: frozenset[str] | None = None) -> TurnSnapshot:
     with _lock:
         nonce = NONCE_PREFIX + secrets.token_urlsafe(24)
+        owner_side = bool(owner_side and speakers and all(isinstance(id_, str) and id_.strip() for id_ in speakers))
+        if owner_side and (account_id, session_key) in _unverified_inputs:
+            owner_side, grants = False, {}
         frozen = CompiledGrants(owner_only=True) if owner_side else freeze_turn_grants(grants)
         ids = (frozenset(non_owner_speakers) if non_owner_speakers is not None else
                frozen.non_owner_speakers or (frozenset() if owner_side else frozenset(speakers)))
@@ -87,8 +90,11 @@ def revoke_owner_verification(account_id: str, session_key: str) -> None:
 def _revoke_owner_verification_locked(account_id: str, session_key: str) -> None:
     for nonce in _session_nonces.get((account_id, session_key), ()):
         snapshot = _snapshots.get(nonce)
-        if snapshot is not None and snapshot.owner_verified:
-            _snapshots[nonce] = replace(snapshot, owner_verified=False)
+        if snapshot is not None:
+            # Unattributed input may be merged under this nonce by the host.
+            # Retain denies, but intersect with the ordinary default row.
+            _snapshots[nonce] = replace(snapshot, owner_verified=False, owner_side=False,
+                                        grants=intersect_turn_grants([snapshot.grants, {}]))
 
 
 def mark_unverified_input(account_id: str, session_key: str) -> None:
