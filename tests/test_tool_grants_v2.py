@@ -1,5 +1,6 @@
 """Selector, migration, and execution regressions for capability grants."""
 from contextlib import contextmanager
+from dataclasses import replace
 from types import ModuleType, SimpleNamespace
 import json
 import sqlite3
@@ -406,6 +407,99 @@ def test_hint_lists_only_available_blocked_capabilities():
     assert grants.build_non_owner_grants_hint(result, {"read_file"}) == grants.NON_OWNER_GRANTS_HINT
 
 
+@pytest.mark.parametrize("capability_deny", [False, True])
+def test_hint_exact_terminal_access_keeps_schema_and_execution_per_tool(host, capability_deny):
+    rows = [row("terminal", kind="tool")]
+    if capability_deny:
+        rows.append(row("terminal", "deny", kind="capability"))
+    available = {"terminal", "process", "process_manage"}
+    with bound_rules(rows) as snapshot, host(**context(snapshot)):
+        definitions = [{"function": {"name": name}} for name in sorted(available)]
+        assert guard._filter_grant_definitions(definitions, snapshot) == [{"function": {"name": "terminal"}}]
+        assert call("terminal", turn_id="t") is None
+        assert call("process_manage", turn_id="t")["reasonCode"] == ("denied" if capability_deny else "not-granted")
+        assert "Terminal (terminal)" not in grants.build_non_owner_grants_hint(snapshot.grants, available)
+    assert "Terminal (terminal)" in grants.build_non_owner_grants_hint(resolve(), available)
+
+
+@pytest.fixture
+def search_catalog(host, monkeypatch):
+    model_tools = ModuleType("model_tools")
+    raw = [{"function": {"name": name}} for name in
+           ("terminal", "process", "process_manage", "read_file", "web_search", *AUTHORIZATION_TOOLS)]
+    def definitions(*, skip_tool_search_assembly=False):
+        assert skip_tool_search_assembly
+        return raw
+    model_tools.get_tool_definitions = definitions
+    search = ModuleType("tools.tool_search")
+    search.BRIDGE_TOOL_NAMES = frozenset({"tool_search", "tool_describe", "tool_call"})
+    monkeypatch.setitem(sys.modules, "model_tools", model_tools)
+    monkeypatch.setitem(sys.modules, "tools.tool_search", search)
+    return model_tools
+
+
+@pytest.mark.parametrize("bridge", ["tool_search", "tool_describe"])
+@pytest.mark.parametrize("policy", ["exact", "all-deny", "intersection"])
+def test_search_bridges_read_only_authorized_bound_catalog(host, search_catalog, bridge, policy):
+    rows = [row("terminal", kind="tool"), row("read_file", "deny", kind="tool"),
+            row("process", kind="tool", expires_at=NOW - 1)]
+    speakers = ("usr_alice",)
+    expected = {"terminal", "web_search", "clawchat_tool_request"}
+    if policy == "all-deny":
+        rows.append(row(mode="deny"))
+        expected.remove("web_search")
+    elif policy == "intersection":
+        speakers += ("usr_bob",)
+        expected.remove("terminal")
+    assert guard._install_grant_catalog_filter()
+    with bound_rules(rows, speakers=speakers) as snapshot, host(**context(snapshot)):
+        catalog = search_catalog.get_tool_definitions(skip_tool_search_assembly=True)
+        assert {item["function"]["name"] for item in catalog} == expected
+        assert call("tool_call", turn_id="t")["reasonCode"] == "not-available"
+        assert call("process_manage", turn_id="t")["reasonCode"] == ("batch-intersection" if policy == "intersection" else "denied" if policy == "all-deny" else "not-granted")
+        assert call(bridge, turn_id="t") is None
+
+
+@pytest.mark.parametrize("bridge", ["tool_search", "tool_describe"])
+@pytest.mark.parametrize("failure", ["no-filter", "no-search-module", "chat", "grants", "broad-rules", "speakers", "overlap"])
+def test_search_bridges_fail_closed_without_matching_filtered_catalog(host, search_catalog, monkeypatch, bridge, failure):
+    if failure != "no-filter":
+        assert guard._install_grant_catalog_filter()
+    if failure == "no-search-module":
+        monkeypatch.setitem(sys.modules, "tools.tool_search", None)
+    with bound_rules([row("terminal", kind="tool")]) as snapshot, host(**context(snapshot)):
+        if failure == "broad-rules":
+            # The finite Mapping view is identical, but future-tool access differs.
+            broader = resolve([row("terminal", kind="tool"), row()])
+            assert dict(broader) == dict(snapshot.grants)
+            monkeypatch.setattr(turns, "get_snapshot", lambda _: replace(snapshot, grants=broader))
+        elif failure in {"chat", "grants", "speakers"}:
+            changes = {"chat_id": "cnv_other"} if failure == "chat" else (
+                {"grants": resolve([row()])} if failure == "grants" else {"non_owner_speakers": frozenset({"usr_bob"})})
+            monkeypatch.setattr(turns, "get_snapshot", lambda _: replace(snapshot, **changes))
+        if failure == "overlap":
+            overlap = turns.register_turn(account_id="usr_agent", chat_id=snapshot.chat_id,
+                speakers=("usr_bob",), grants=resolve([], ("usr_bob",)), session_key="rules")
+            # The binding was obtained just before the overlapping input narrowed the catalog.
+            monkeypatch.setattr(turns, "lookup_snapshot_for_call", lambda *args: snapshot)
+            try:
+                assert call(bridge, turn_id="t")["reasonCode"] == "not-available"
+            finally:
+                turns.release_turn(overlap.nonce)
+        else:
+            assert call(bridge, turn_id="t")["reasonCode"] == "not-available"
+
+
+@pytest.mark.parametrize("bridge", ["tool_search", "tool_describe"])
+def test_search_bridges_accept_equivalent_catalog_snapshot(host, search_catalog, monkeypatch, bridge):
+    assert guard._install_grant_catalog_filter()
+    with bound_rules([row("terminal", kind="tool")]) as snapshot, host(**context(snapshot)):
+        equivalent = replace(snapshot, grants=resolve([row("terminal", kind="tool")]))
+        assert equivalent is not snapshot and equivalent.grants is not snapshot.grants
+        monkeypatch.setattr(turns, "get_snapshot", lambda _: equivalent)
+        assert call(bridge, turn_id="t") is None
+
+
 def test_host_catalog_uses_platform_policy_not_last_narrowed_catalog(monkeypatch):
     registry = SimpleNamespace(get_all_tool_names=lambda: ["terminal", "read_file", "web_search"])
     registry_module = ModuleType("tools.registry")
@@ -551,12 +645,22 @@ def test_profile_semicolon_cannot_create_a_new_card_field():
 
 
 @pytest.mark.asyncio
-async def test_ask_card_and_confirmation_check_current_route(management, monkeypatch):
+@pytest.mark.parametrize("locale,lang", [("zh-CN", "zh"), ("zh-TW", "zh_Hant"), (None, "en"), ("ja", "en"), ("unreadable", "en")])
+async def test_ask_card_and_confirmation_check_current_route(management, monkeypatch, locale, lang):
     h = management
+    def owner_locale():
+        if locale == "unreadable":
+            raise RuntimeError("locale unavailable")
+        return locale
+    h.adapter._owner_locale = owner_locale
     monkeypatch.setattr(guard, "ask_grants_available", lambda: False)
     result = await tools.manage_tool_grants("grant", {**PARAMS, "mode": "ask"}, session_id="s")
-    assert result["message"] == "ask-unavailable"
+    assert result == {"error": "validation", "message": "ask-unavailable", "note": grants.GRANT_ASK_UNAVAILABLE_RECEIPT[lang]}
     h.adapter._send_owner_text.assert_not_awaited()
+    with sqlite3.connect(h.adapter._store.db_path) as conn:
+        assert conn.execute("SELECT count(*) FROM tool_grant_pending").fetchone()[0] == 0
+    assert h.adapter._store.list_grants(account_id="usr_agent") == []
+    h.adapter._owner_locale = lambda: "zh-CN"
     h.adapter._store.create_pending_grant(account_id="usr_agent", code="000123", payload=dict(
         grantees=[dict(id="usr_alice", name="Person")], tools=["all"], mode="ask"))
     from test_tool_grants_admission import OWNER_CHAT
@@ -941,8 +1045,11 @@ async def test_ask_cards_recheck_after_profile_lookup(management, monkeypatch, c
         return {"user": {"nickname": "Person"}}
     h.client.get_user_info.side_effect = profile
     result = await tools.manage_tool_grants("grant", {**PARAMS, "mode": "ask"}, session_id="s")
-    assert result["message"] == "ask-unavailable"
+    assert result == {"error": "validation", "message": "ask-unavailable", "note": grants.GRANT_ASK_UNAVAILABLE_RECEIPT["zh"]}
     h.adapter._send_owner_text.assert_not_awaited()
+    with sqlite3.connect(h.adapter._store.db_path) as conn:
+        assert conn.execute("SELECT count(*) FROM tool_grant_pending").fetchone()[0] == 0
+    assert h.adapter._store.list_grants(account_id="usr_agent") == []
 
 
 @pytest.mark.asyncio

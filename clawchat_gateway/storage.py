@@ -624,8 +624,7 @@ class ClawChatStore:
                 AND capability_id = ? AND ((status IN ('sending','pending') AND expires_at > ?) OR (status <> 'failed' AND created_at > ?)) LIMIT 1''',
                 (account_id, origin.requester_user_id, capability_id, now, now - REQUEST_COOLDOWN_MS)).fetchone()
             if existing:
-                return (dict(status='waiting') if existing[0] in ('sending', 'pending') else
-                        dict(status='blocked', reason='rate-limited'))
+                return dict(status='waiting')
             window = resolve_request_daily_window(now)
             count = conn.execute('SELECT count(*) FROM tool_grant_requests WHERE account_id = ? AND created_at > ? AND created_at <= ?',
                                  (account_id, window['start'], window['end'])).fetchone()[0]

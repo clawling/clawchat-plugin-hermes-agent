@@ -1842,7 +1842,7 @@ async def manage_tool_grants(operation: str, params: Any, *, session_id: str = "
     import sqlite3
     import time
     from clawchat_gateway.tool_grants import (
-        build_grant_card, generate_grant_code, validate_grant_params,
+        build_grant_card, generate_grant_code, validate_grant_params, GRANT_ASK_UNAVAILABLE_RECEIPT,
     )
     from clawchat_gateway.owner_language import resolve_owner_language
     from clawchat_gateway.tool_capabilities import normalize_grant_selectors, GrantSelector, selector_string
@@ -1851,6 +1851,17 @@ async def manage_tool_grants(operation: str, params: Any, *, session_id: str = "
     snapshot, sender, error = _grant_management_context(session_id)
     if error:
         return error
+
+    def owner_language():
+        try:
+            return resolve_owner_language(sender._owner_locale())
+        except Exception:  # noqa: BLE001 - missing locale uses the English receipt
+            return "en"
+
+    def ask_unavailable():
+        return {**_validation_error("ask-unavailable"),
+                "note": GRANT_ASK_UNAVAILABLE_RECEIPT.get(owner_language(), GRANT_ASK_UNAVAILABLE_RECEIPT["en"])}
+
     try:
         if not isinstance(params, dict):
             return _validation_error("Arguments must be an object")
@@ -1882,7 +1893,7 @@ async def manage_tool_grants(operation: str, params: Any, *, session_id: str = "
             values["tools"] = normalize_grant_selectors(values["tools"], known_tools=known, available_tools=available)
             ask_available = ask_grants_available()
             if values["mode"] == "ask" and not ask_available:
-                return _validation_error("ask-unavailable")
+                return ask_unavailable()
         except ValueError as exc:
             return _validation_error(str(exc))
         client, error = _build_client()
@@ -1930,7 +1941,7 @@ async def manage_tool_grants(operation: str, params: Any, *, session_id: str = "
         except Exception:  # noqa: BLE001 - incomplete identity or membership is no grant
             return _validation_error("Could not look up every grantee by id; confirm who they are with the owner first")
         payload = dict(values, grantees=grantees)
-        lang = resolve_owner_language(sender._owner_locale())
+        lang = owner_language()
         if values["mode"] == "deny":
             live, current_sender, error = _grant_management_context(session_id)
             if error or live.nonce != snapshot.nonce or current_sender is not sender:
@@ -1941,7 +1952,7 @@ async def manage_tool_grants(operation: str, params: Any, *, session_id: str = "
         # Identity lookups above yield; approval policy may have changed meanwhile.
         ask_available = ask_grants_available()
         if values["mode"] == "ask" and not ask_available:
-            return _validation_error("ask-unavailable")
+            return ask_unavailable()
         for attempt in range(6):
             code = generate_grant_code()
             card = build_grant_card(**payload, lang=lang, code=code, now=now, ask_available=ask_available)

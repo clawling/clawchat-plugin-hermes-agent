@@ -57,8 +57,10 @@ The card freezes the requested mode. Only a real owner message in the activation
 direct chat can confirm with `/clawchat-allow <6-digit code>` within ten minutes,
 once. Wrong, expired and reused codes do not activate it; the code is never
 returned to the model. Sensitive tools can be direct. Ask requires genuine
-per-call approval; unavailable approval returns `ask-unavailable` without a
-card, and runtime never converts ask to direct. Lookup, storage or send failures
+per-call approval; unavailable approval returns `error:"validation"`,
+`message:"ask-unavailable"` and a localized `note` explaining that only direct
+access or denial is supported (English fallback), without a card or grant write.
+Runtime never converts ask to direct. Lookup, storage or send failures
 return an error, never success.
 
 Deny saves immediately without a confirmation card:
@@ -110,8 +112,10 @@ Proactive cards still accept only `/clawchat-allow`, preserving the frozen mode.
 
 Request cards last 24 hours. A persistent six-hour person × capability cooldown
 and rolling 24-hour account limit of 20 serialize quota and code allocation.
-Existing pending cards return waiting. Quota or cooldown blocks without a pending
-card return `blocked`, `reason:"rate-limited"`, `sent:false`; no request was sent.
+Existing pending cards and any non-failed request within the six-hour cooldown,
+including a decided card, return `waiting`, `sent:false` with the same waiting
+guidance, without a new card, code or grant write. Daily quota exhaustion returns
+`blocked`, `reason:"rate-limited"`, `sent:false`; no request was sent.
 Send failures remain failed and consume
 only daily quota, permitting a retry before the person cooldown. `sending` cards can be confirmed after a crash if the owner received them.
 A decision atomically consumes the code, writes the rule and queues a wakeup

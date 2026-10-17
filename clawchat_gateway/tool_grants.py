@@ -283,8 +283,9 @@ def grant_failure_code(grants, tool, *, available=True, args=None, context=None,
 
 def build_non_owner_grants_hint(grants, available_tools):
     blocked = [f"{cap['names']['en']} ({id_})" for id_, cap in TOOL_CAPABILITIES.items()
-               if any(tool in available_tools and evaluate_tool_grant(grants, tool) not in ("direct", "ask")
-                      for tool in cap["tools"])]
+               if any(tool in available_tools for tool in cap["tools"])
+               and all(evaluate_tool_grant(grants, tool) not in ("direct", "ask")
+                       for tool in cap["tools"] if tool in available_tools)]
     return ("Not available to the caller yet: " + ", ".join(blocked) + ". " if blocked else "") + NON_OWNER_GRANTS_HINT
 
 

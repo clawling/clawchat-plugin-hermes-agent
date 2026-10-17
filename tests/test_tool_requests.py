@@ -61,6 +61,8 @@ def test_reserve_cooldown_daily_rolling_limit_and_denied(store):
     assert reserve(store, now=NOW + REQUEST_COOLDOWN_MS)['status'] == 'waiting'  # pending still waits
     decide(store, first, 'deny')
     assert reserve(store, now=NOW + REQUEST_COOLDOWN_MS + 1) == {'status': 'blocked', 'reason': 'denied'}
+    store.revoke_grants(account_id='agent', user_id='usr_guest')
+    assert reserve(store, now=NOW + 2) == {'status': 'waiting'}
     for index in range(19):
         assert reserve(store, user=f'usr_other{index}')['status'] == 'sending'
     assert reserve(store, user='usr_twentyfirst') == {'status': 'blocked', 'reason': 'rate-limited'}
@@ -627,11 +629,35 @@ async def test_daily_quota_after_failed_sends_reports_rate_limited_not_waiting(r
     h.adapter._send_owner_text.assert_not_awaited()
 
 
-def test_cooldown_without_pending_card_does_not_claim_waiting(store):
+@pytest.mark.parametrize('mode', ['direct', 'ask', 'deny'])
+def test_cooldown_without_pending_card_reuses_waiting(store, mode):
     request = reserve(store)['request']
-    decide(store, request)
+    decide(store, request, mode)
     store.revoke_grants(account_id='agent', user_id='usr_guest')
-    assert reserve(store, now=NOW + 2) == dict(status='blocked', reason='rate-limited')
+    assert reserve(store, now=NOW + 2) == dict(status='waiting')
+    assert store.list_grants(account_id='agent') == []
+    with sqlite3.connect(store.db_path) as conn:
+        assert conn.execute('SELECT count(*) FROM tool_grant_requests').fetchone()[0] == 1
+        assert conn.execute('SELECT count(*) FROM tool_grant_pending').fetchone()[0] == 1
+    assert reserve(store, now=NOW + REQUEST_COOLDOWN_MS)['status'] == 'sending'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mode', ['direct', 'ask', 'deny'])
+async def test_decided_card_cooldown_returns_waiting_without_new_card_or_grant(request_env, mode):
+    from clawchat_gateway.tool_requests import request_guidance
+    h = request_env
+    assert (await call_request(h))['status'] == 'pending'
+    request = latest_request(h)
+    assert decide(h.adapter._store, request, mode, now=int(time.time() * 1000))
+    h.adapter._store.revoke_grants(account_id='usr_agent', user_id=request['requester_user_id'])
+    h.adapter._send_owner_text.reset_mock()
+    assert await call_request(h) == dict(status='waiting', sent=False, note=request_guidance('waiting'))
+    h.adapter._send_owner_text.assert_not_awaited()
+    assert h.adapter._store.list_grants(account_id='usr_agent') == []
+    with sqlite3.connect(h.adapter._store.db_path) as conn:
+        assert conn.execute('SELECT count(*) FROM tool_grant_requests').fetchone()[0] == 1
+        assert conn.execute('SELECT count(*) FROM tool_grant_pending').fetchone()[0] == 1
 
 
 @pytest.mark.parametrize('lang', ['zh', 'zh_Hant', 'en'])

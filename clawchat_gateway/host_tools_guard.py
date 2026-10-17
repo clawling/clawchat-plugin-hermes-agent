@@ -437,6 +437,29 @@ def _filter_grant_definitions(definitions, snapshot):
     return [item for item in definitions if allowed(item["function"]["name"])]
 
 
+def _grant_search_bridge_allowed(tool_name, snapshot):
+    """Catalog reads are safe only through the filter for this bound authority."""
+    try:
+        import model_tools
+        from tools.tool_search import BRIDGE_TOOL_NAMES
+        from clawchat_gateway.turn_grants import get_snapshot, session_context_value
+
+        if (tool_name == "tool_call" or tool_name not in BRIDGE_TOOL_NAMES
+                or not getattr(model_tools.get_tool_definitions, "_clawchat_grants", False)):
+            return False
+        current = get_snapshot(session_context_value("HERMES_SESSION_MESSAGE_ID"))
+        if current is None or current.chat_id != session_context_value("HERMES_SESSION_CHAT_ID"):
+            return False
+        # Compare complete compiled rules: Mapping equality sees only finite
+        # candidates and can miss a different all/future-tool policy.
+        return current is snapshot or (
+            current.non_owner_speakers == snapshot.non_owner_speakers
+            and current.grants.plans == snapshot.grants.plans
+            and current.grants.owner_only == snapshot.grants.owner_only)
+    except Exception:  # noqa: BLE001 - old hosts and unreadable catalogs stay closed
+        return False
+
+
 def _install_grant_catalog_filter() -> bool:
     """Filter after host caching and before search assembly, using this turn's rules.
 
@@ -1361,6 +1384,8 @@ def _clawchat_pre_tool_decision(*, tool_name: str = "", args: Any = None, **kwar
             if snapshot is not None:
                 _, available = host_tool_catalog()
                 if tool_name not in available:
+                    if can_bind_call and _grant_search_bridge_allowed(tool_name, snapshot):
+                        return None
                     return _grant_block("not-available")
             if mode == "deny":
                 reason = grant_failure_code(grants, tool_name, args=args, context=context,

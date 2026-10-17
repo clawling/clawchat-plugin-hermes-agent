@@ -1081,8 +1081,10 @@ Every `all` card explicitly includes future tools and sensitive tools, and
 excludes the four authorization tools. Ask cards say “These operations will
 ask you first every time.” When per-call approval is unavailable, cards say
 “This machine cannot ask you each time. You can only choose Use directly or
-Deny.” Ask is not offered: an ask grant returns `ask-unavailable` without a
-card; direct cards include that explanation. The current proactive card
+Deny.” Ask is not offered: an ask grant returns `error:"validation"`,
+`message:"ask-unavailable"` and that explanation in a `note` in the owner's
+language (English fallback), without a card or grant write; direct cards include
+that explanation. The current proactive card
 confirms a preselected mode; guest request cards instead select direct/ask/deny.
 Profile names and labels neutralize Markdown markers, backticks and slashes
 with fullwidth characters; only the code-generated confirmation command is clickable.
@@ -1134,6 +1136,15 @@ Synthetic or unidentified input in that direct chat removes owner verification
 and intersects live grants with defaults until the session is idle; finishing
 one nonce alone cannot restore it. Read failures, expired grants and missing
 snapshots add no authority.
+
+With grants enabled, a bound non-owner turn can use `tool_search` and
+`tool_describe` only when the grants catalog filter is installed and the
+snapshot read by that filter matches the bound grants and non-owner speakers,
+including the chat ID. The host reads this authorized catalog with
+`skip_tool_search_assembly=True`; it includes `clawchat_tool_request` even under
+`all:deny` and excludes ungranted, denied and expired tools. Missing filtering
+or mismatched snapshots retain `not-available`. `tool_call` is unpacked by the
+host and the real inner tool still passes through the execution hook.
 
 #### Local attachments
 
@@ -1202,11 +1213,15 @@ the existing execution binding is supported.
 
 #### Non-owner hints and refusal reasons
 
-The dynamic short prompt lists currently available host capabilities whose
-members the caller cannot yet use, as English display names plus IDs, e.g.
+The dynamic short prompt lists host capabilities with at least one currently
+available member and no available member authorized as direct or ask, as
+English display names plus IDs, e.g.
 `Not available to the caller yet: Terminal (terminal), Files (files).`
 It omits uninstalled/globally disabled capabilities and omits the list sentence
-when empty. Catalog lookup failure emits only generic guidance. Mixed batches
+when empty. One authorized available member, including an exact-tool exception
+to a capability denial, removes the capability from this hint; schemas and
+execution still check each tool separately. Catalog lookup failure emits only
+generic guidance. Mixed batches
 describe shared availability without identifying who lacks access. The rest
 says to call `clawchat_tool_request` with the ability ID and one short reason
 for missing access, never request after denial or a mixed-turn block, and
@@ -1315,8 +1330,10 @@ One transaction checks the person × capability six-hour cooldown and account
 rolling 24-hour limit of 20, reserves a code in `tool_grant_pending` and creates
 `sending`. Code collisions retry at most five times after the initial attempt.
 A successful send changes it to `pending`; failure changes it to `failed` and
-never claims the owner was asked. An existing pending card returns `waiting`.
-Quota or cooldown blocks without a pending card return `blocked` with
+never claims the owner was asked. An existing pending card or any non-failed
+request within the six-hour cooldown returns `waiting`, `sent:false`, with the
+same waiting guidance, even after a decision. This creates no new card or code
+and writes no grant. Daily quota exhaustion returns `blocked` with
 `reason="rate-limited"` and `sent:false`; the fixed guidance states that no
 request was sent and the caller can ask the owner directly. Failed sends retain
 the daily quota but do not impose the person cooldown. `REQUEST_DAILY_WINDOW_POLICY` is

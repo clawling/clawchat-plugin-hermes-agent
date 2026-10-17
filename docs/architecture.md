@@ -182,8 +182,12 @@ The source override restores needed toolsets; the catalog filter narrows
 concrete schemas after host caching and before search assembly. The execution
 hook rechecks the same rules and current availability, including inner tools
 reached through search/dispatch. A restored toolset grants no implicit access
-to its other members. Non-owner channel prompts list only installed, available
-capabilities still blocked for this batch, with English display names and IDs;
+to its other members. In a bound non-owner turn, `tool_search` and `tool_describe`
+can read the filtered catalog only when the grants filter is installed and its
+context snapshot matches the bound grants and non-owner speakers. A mismatch
+keeps the unavailable refusal. `tool_call` still checks the real inner tool.
+Non-owner channel prompts list only installed, available capabilities with no
+available member authorized for this batch, with English display names and IDs;
 refusals expose reason codes without disclosing other speakers' permissions.
 Cross-chat schemas remain visible when a current-chat action is permitted;
 the execution check still resolves the actual target against cross-chat rules.
@@ -242,7 +246,9 @@ nonce/session/turn binding and immutable `RequestOrigin`, while overlapping
 snapshots continue to restrict access. It accepts only capability and reason.
 An owner plus one trusted non-owner binds the non-owner regardless of order;
 multiple non-owners create no request context. Quota exhaustion returns
-`blocked/rate-limited`, while an existing pending card returns `waiting`.
+`blocked/rate-limited`, while an existing pending card or any non-failed request
+within the six-hour person × capability cooldown returns `waiting`, even after
+a decision. Both waiting cases send no new card and write no grant.
 All three confirmation commands are intercepted before model dispatch; only
 real owner-direct input can decide, including a `sending` card after a crash.
 Proactive cards still accept only `/clawchat-allow` for the frozen mode.
