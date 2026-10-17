@@ -630,7 +630,9 @@ def is_mcp_tool(name: str) -> bool:
 
 
 def is_restricted_tool(name: str) -> bool:
-    name = str(name or "")
+    from clawchat_gateway.tool_capabilities import canonical_tool_name
+
+    name = canonical_tool_name(str(name or ""))
     return (
         name in restricted_tool_names()
         or name.startswith(_RESTRICTED_TOOL_PREFIXES)
@@ -780,13 +782,11 @@ def _is_owner_direct(
     owner: str,
     owner_chat_lookup: Optional[Callable[[], str]] = None,
 ) -> bool:
-    """A turn in the owner's own direct chat: the owner spoke, or the plugin did.
+    """Legacy session classification, subordinate to the bound turn snapshot.
 
-    The owner's direct chat holds only the owner and the agent, so a turn the
-    plugin starts there (permission receipts, the memory-migration hint,
-    moment-comment and awareness notes — sender "ClawChat") is the owner's
-    turn too. A group never qualifies, whoever spoke; any lookup failure means
-    "not the owner's".
+    Synthetic events obtain authority only from the adapter's audited origin
+    marker. An owner-chat location alone cannot authorize a synthetic turn.
+    A group never qualifies; any lookup failure means "not the owner's".
 
     Hermes before 0.19.1 binds no chat type into the session context; with
     none, the chat id alone decides (:func:`_is_owner_chat_without_type`).
@@ -1181,10 +1181,30 @@ def _grant_block(reason):
     return {"action": "block", "reasonCode": reason, "message": message, "blockReason": message}
 
 
-def _cross_session_decision(tool_name, args):
+def _cross_session_decision(tool_name, args, session_id=""):
+    process_session_id = ""
+    if tool_name in {"process", "process_manage"} and isinstance(args, dict):
+        target = args.get("session_id")
+        if target is not None and str(target):
+            try:
+                from tools.process_registry import process_registry
+                from tools.approval import get_current_session_key
+
+                process = process_registry.get(str(target))
+                current_key = get_current_session_key(default="")
+                # parent_session_id is stamped at spawn; session_key changes
+                # on ownership transfer. Both must still identify this caller.
+                if not (current_key and process is not None and process.session_key == current_key):
+                    return _grant_block("cross-session")
+                process_session_id = process.parent_session_id if process is not None else ""
+            except Exception:  # Missing/older registry or unreadable ownership.
+                return _grant_block("cross-session")
+
     from clawchat_gateway.tool_capabilities import host_tool_targets_current_session
 
-    return None if host_tool_targets_current_session(tool_name, args) else _grant_block("cross-session")
+    return None if host_tool_targets_current_session(
+        tool_name, args, session_id=session_id, process_session_id=process_session_id,
+    ) else _grant_block("cross-session")
 
 
 def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: Any) -> Optional[dict[str, Any]]:
@@ -1227,7 +1247,9 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: A
         # the owner's chat, override the host's session-level owner inference.
         # An old host with no execution IDs keeps its legacy approval policy.
         session_turn = _session_turn()
-        if session_context_value("HERMES_SESSION_PLATFORM") == "clawchat" and (snapshot or can_bind_call):
+        pending_snapshot = get_snapshot(nonce)
+        if session_context_value("HERMES_SESSION_PLATFORM") == "clawchat" and (
+                snapshot or can_bind_call or pending_snapshot and pending_snapshot.chat_id == chat_id):
             session_turn = "other"
         # The plugin's own tools: any turn that is not the owner's. The host's
         # send_message: only ClawChat turns the owner did not start, so another
@@ -1267,9 +1289,9 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: A
         # their pre-existing approval opt-in, including the ordinary messages.
         if grants_enabled and not can_bind_call:
             if not guarded and not strict:
-                return _cross_session_decision(tool_name, args)
+                return _cross_session_decision(tool_name, args, kwargs.get("session_id", ""))
             if non_owner_host_tools() == SETTING_APPROVE:
-                route_block = _cross_session_decision(tool_name, args)
+                route_block = _cross_session_decision(tool_name, args, kwargs.get("session_id", ""))
                 if route_block:
                     return route_block
             return _ordinary_non_owner_decision(tool_name, args, grants_enabled=True,
@@ -1288,7 +1310,7 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: A
                                             speakers=snapshot.non_owner_speakers if snapshot else ())
                 return _grant_block(reason)
             if mode in ("ask", "direct") or not guarded and not strict:
-                route_block = _cross_session_decision(tool_name, args)
+                route_block = _cross_session_decision(tool_name, args, kwargs.get("session_id", ""))
                 if route_block:
                     return route_block
             if mode == "ask":
@@ -1314,9 +1336,9 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: A
                             "reasonCode": reason}
             return _grant_block(reason)
         if not guarded and not strict:
-            return _cross_session_decision(tool_name, args)
+            return _cross_session_decision(tool_name, args, kwargs.get("session_id", ""))
         if non_owner_host_tools() == SETTING_APPROVE:
-            route_block = _cross_session_decision(tool_name, args)
+            route_block = _cross_session_decision(tool_name, args, kwargs.get("session_id", ""))
             if route_block:
                 return route_block
         return _ordinary_non_owner_decision(tool_name, args, grants_enabled=False,

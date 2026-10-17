@@ -29,6 +29,21 @@ def message(sender="usr_a", text="hello", chat=CHAT, kind="direct", synthetic=Fa
                        text=text, raw_message=raw, was_mentioned=kind == "group")
 
 
+async def coalesced(messages):
+    from clawchat_gateway.group_message_coalescer import GroupMessageCoalescer
+    dispatched = []
+    async def dispatch(inbound):
+        dispatched.append(inbound)
+    queue = GroupMessageCoalescer(idle_seconds=3600, max_wait_seconds=3600, dispatch=dispatch)
+    try:
+        for incoming in messages:
+            queue.enqueue(incoming)
+        await queue.flush_now(messages[0].chat_id)
+        return dispatched[0]
+    finally:
+        await queue.cancel()
+
+
 def grant(user, tool=TOOL, mode="direct"):
     return {"grantee_user_id": user, "grantee_name": user, "tool": tool, "mode": mode, "expires_at": None}
 
@@ -224,7 +239,7 @@ async def test_admission_timeout_revokes_before_dispatch(harness, kind):
 @pytest.mark.parametrize("raw", [{"synthetic": True}, {"messages": [{"sender": {"id": "usr_a"}}, {}]}])
 async def test_synthetic_or_missing_batch_speaker_has_no_grants(harness, raw):
     harness.rows.append(grant("usr_a"))
-    incoming = replace(message(kind="group"), raw_message=raw)
+    incoming = await coalesced([message(kind="group"), replace(message("", kind="group"), raw_message=raw)])
     await harness.adapter._handle_inbound(incoming)
     s = turns.get_snapshot(harness.events[0].source.message_id)
     assert s.grants == {}
@@ -308,11 +323,9 @@ async def test_grant_added_during_preparation_cannot_enter_running_host_turn(har
 @pytest.mark.asyncio
 async def test_nested_batches_keep_full_speaker_intersection(harness):
     harness.rows.extend([grant("usr_a"), grant("usr_b"), grant("usr_b", tool="memory")])
-    raw = {"clawchat_group_batch": True, "messages": [
-        {"clawchat_group_batch": True, "messages": [message().raw_message]},
-        message("usr_b").raw_message,
-    ]}
-    await harness.adapter._handle_inbound(replace(message(kind="group"), raw_message=raw))
+    nested = await coalesced([message(kind="group")])
+    incoming = await coalesced([nested, message("usr_b", kind="group")])
+    await harness.adapter._handle_inbound(incoming)
     s = turns.get_snapshot(harness.events[0].source.message_id)
     assert s.speakers == ("usr_a", "usr_b") and s.grants == {TOOL: "direct"}
 

@@ -159,9 +159,12 @@ nonce, chat, session and turn without a latest-session fallback. Overlapping
 snapshots intersect. Synthetic/unidentified input in the owner's direct chat
 removes verification until idle. Grant/revoke writes affect subsequent
 snapshots; expiry is checked again at execution.
-Plugin-generated synthetic turns in the owner's direct chat separately retain
-legacy ordinary tools on all hosts, regardless of `tool-grants`. This exception
-does not make them owner-side snapshots or give them grant-management access.
+Only the one-time activation greeting, constructed from the stored owner pairing,
+retains legacy ordinary tools in the owner's direct chat. Other synthetic turns
+use defaults, including permission receipts, contact/comment notifications,
+memory migration hints and sediment turns. No synthetic turn can manage grants.
+Speaker authority comes from parsed sender IDs and the coalescer's internal
+speaker tuple; envelope `messages` fields never establish authority.
 Exact-name resolution canonicalizes verified host aliases without rewriting storage.
 
 Host tool discovery starts from the effective ClawChat catalog before
@@ -185,6 +188,11 @@ No grant, including `all`, opens these routes from a non-owner turn:
 - `delegate_task` spawn/steer (omitted action means spawn); only list/stop pass
   the routing check.
 - `message_agent`, which starts work in another agent's session.
+- `process` / `process_manage` calls with `session_id` unless the trusted process
+  registry records the current host session as `parent_session_id` and its
+  `session_key` still matches the trusted current approval-session key. Transfers
+  update the latter. Unavailable ownership fails closed. Target-free list calls
+  use ordinary authorization.
 - `cronjob` / `cronjob_manage` create/run/enable and any action except
   list/pause/remove, even if delivery is origin/local.
 - Worker/subscriber Kanban mutations: `kanban_create`, `kanban_complete`,

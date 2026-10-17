@@ -309,7 +309,8 @@ def build_grant_receipt(*, lang: str, names: list[str], tools: list[str], mode: 
     separator = ", " if lang == "en" else "、"
     values = {"names": separator.join(map(_clean_text, names)),
               "tools": separator.join(_clean_text(tool, identifier=True) for tool in tools)}
-    return re.sub(r"\{(names|tools)\}", lambda match: values[match[1]], (GRANT_DENY_RECEIPT if mode == "deny" else GRANT_CONFIRM_RECEIPT)[lang])
+    text = re.sub(r"\{(names|tools)\}", lambda match: values[match[1]], (GRANT_DENY_RECEIPT if mode == "deny" else GRANT_CONFIRM_RECEIPT)[lang])
+    return text + ("\n" + HERMES_LIMIT_COPY[lang] if selectors_have_host_limits(tools) else "")
 
 
 def _format_expiry(expires_at: float, time_zone: str | None) -> str:
@@ -399,6 +400,25 @@ def validate_grant_params(params: Any, now: float) -> dict[str, Any]:
     return result
 
 
+HERMES_LIMIT_COPY = {
+    "zh": "在这台机器上，别人发起的回合不能派子 Agent、建或运行定时任务、创建看板任务，只能查看和停止已有的。",
+    "zh_Hant": "在這台機器上，別人發起的回合不能派子 Agent、建立或執行定時任務、建立看板任務，只能查看和停止現有的。",
+    "en": "On this machine, turns started by others cannot dispatch sub-agents, create or run scheduled tasks, or create Kanban tasks; they can only view and stop existing ones.",
+}
+
+
+def selectors_have_host_limits(tools):
+    for tool in tools:
+        selector = parse_grant_selector(tool)
+        if (selector.what_kind == "all"
+                or selector.what_kind == "capability" and selector.what in {"subagent", "schedule"}
+                or selector.what_kind == "tool" and (
+                    selector.what in {"delegate_task", "cronjob", "cronjob_manage", "message_agent"}
+                    or selector.what.startswith("kanban_"))):
+            return True
+    return False
+
+
 CARD_COPY = {'sensitive': {'zh': '{names}能在这台机器上跑任何命令、读写任何文件，包括这个 Agent 的登录凭据、你的模型 key 和这张授权列表。拿到凭据的人可以冒充这个 Agent '
                      '跟别人说话。只给你完全信任的人。',
                'zh_Hant': '{names}能在這台機器上執行任何命令、讀寫任何檔案，包括這個 Agent 的登入憑證、你的模型 key 和這張授權列表。拿到憑證的人可以冒充這個 Agent '
@@ -484,6 +504,8 @@ def build_grant_card(*, grantees, tools, mode, lang, code, now, label=None,
              copy("expiry_hint"), copy("consequence", names=names), copy("resource")]
     if any(parse_grant_selector(tool).what_kind == "all" for tool in tools):
         lines += [copy(key) for key in ("all_future", "all_sensitive", "all_exclusions")]
+    if selectors_have_host_limits(tools):
+        lines.append(HERMES_LIMIT_COPY[lang])
     if mode == "direct" and any(selector_is_sensitive(tool) for tool in tools):
         lines.append(copy("sensitive", names=names))
     if mode == "ask":

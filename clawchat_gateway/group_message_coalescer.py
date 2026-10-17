@@ -275,6 +275,12 @@ class GroupMessageCoalescer:
             text = text.replace("ClawChat group messages:", "ClawChat messages:", 1)
         merged = replace(
             latest,
+            _batch_speakers=tuple(dict.fromkeys(
+                speaker for message in batch for speaker in (message.grant_speakers or ("",)))),
+            _batch_speaker_names=tuple(
+                (message.sender_id, message.sender_name) for message in batch),
+            _owner_action_origin=(latest._owner_action_origin
+                                  if all(message.is_owner_action for message in batch) else None),
             _synthetic_origin=(latest._synthetic_origin
                                if all(message.is_internal_synthetic for message in batch) else None),
             text=text,

@@ -832,13 +832,11 @@ same reason the memory tools refuse any write to `owner.md` — append included 
 outside the owner's direct chat (see
 [`./reference/tools.md`](./reference/tools.md#what-a-conversation-may-read)).
 
-The owner's direct chat is the activation conversation. Plugin-generated
-synthetic turns there retain legacy ordinary tool access on every supported
-host, with `tool-grants` on or off. They are not owner-side grant snapshots
-and cannot manage grants. Other synthetic or unattributed input uses defaults.
-Management requires the verified real owner in that direct chat.
-Older hosts without execution bindings retain legacy chat-based classification,
-including plugin-started turns in the activation chat, and cannot apply grants.
+The owner's direct chat is the activation conversation. Only its one-time
+activation greeting retains legacy ordinary tool access, based on the stored
+owner pairing. Contact/comment notifications, permission receipts, memory
+migration hints and sediment turns use defaults. Synthetic turns cannot manage
+grants. Management requires the verified real owner in that direct chat.
 
 Hermes before 0.19.1 does not pass the turn's chat type to plugins. There the
 plugin falls back to the chat id: a turn is the owner's only in the owner's
@@ -1032,7 +1030,7 @@ runs directly. The owner's own messages are neutral. A nonempty trusted batch
 whose speakers are all the owner has full ordinary host tools, including in a
 group, but cannot manage grants there. Only the owner's own user id is recognized;
 other agents belonging to the owner remain ordinary users. Missing/invalid
-speakers, synthetic input outside the owner's direct chat and grant-store failures use defaults, never an
+speakers, synthetic input without a verified owner-action origin and grant-store failures use defaults, never an
 owner-only empty-set shortcut or an approve fallback that could miss a deny.
 An allowed person may ask again alone after a mixed-turn block.
 
@@ -1045,6 +1043,10 @@ plugin's per-turn narrowing. Execution rechecks current availability. It exclude
 `clawchat_tool_request`. It cannot bypass host global disablement, host policy,
 platform availability or tool identity/resource checks. Exact and capability
 exceptions still override `all`.
+
+On this machine, turns started by others cannot dispatch sub-agents, create or run scheduled tasks, or create Kanban tasks; they can only view and stop existing ones.
+Cards and activation receipts repeat this restriction for `all`, sub-agent and
+schedule capabilities, and related exact tools.
 
 #### Confirmation and per-call approval
 

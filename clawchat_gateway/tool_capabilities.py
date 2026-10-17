@@ -169,7 +169,7 @@ KANBAN_SESSION_ROUTES = frozenset({
 })
 
 
-def host_tool_targets_current_session(tool_name: str, args) -> bool:
+def host_tool_targets_current_session(tool_name: str, args, *, session_id="", process_session_id="") -> bool:
     """Whether an audited call avoids starting/routing work in another session.
 
     Hermes passes coerced wire arguments to pre_tool_call. It does not fold
@@ -179,6 +179,10 @@ def host_tool_targets_current_session(tool_name: str, args) -> bool:
     context. ClawChat mention/react/file and send_message are ordinary outbound
     messages, so remain governed by cross-chat grants and resource checks.
     """
+    if tool_name in {"process", "process_manage"} and isinstance(args, dict):
+        target = args.get("session_id")
+        if target is not None and str(target):
+            return bool(session_id and process_session_id == session_id)
     if tool_name in KANBAN_SESSION_ROUTES or tool_name == "message_agent":
         return False
     if tool_name in {"delegate_task", "cronjob", "cronjob_manage"}:

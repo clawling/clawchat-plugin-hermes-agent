@@ -372,7 +372,7 @@ def test_channel_prompt_section_for_non_owner_turns(monkeypatch):
 
 
 @pytest.mark.parametrize("sender", ["clawchat-maintenance", "clawchat-awareness"])
-def test_plugin_synthetic_owner_dm_without_snapshot_keeps_legacy_behavior(monkeypatch, sender):
+def test_unattributed_synthetic_owner_dm_without_hooks_is_refused(monkeypatch, sender):
     from clawchat_gateway.turn_grants import active_snapshot
 
     adapter = _adapter()
@@ -380,8 +380,8 @@ def test_plugin_synthetic_owner_dm_without_snapshot_keeps_legacy_behavior(monkey
     inbound.raw_message["synthetic"] = True
     assert active_snapshot(adapter._account_id(), adapter._grant_session_key(inbound)) is None
     monkeypatch.setattr(guard, "_hook_missing", True)
-    assert not adapter._refuses_turn(inbound)
-    assert adapter._non_owner_turn_section(inbound) is None
+    assert adapter._refuses_turn(inbound)
+    assert adapter._non_owner_turn_section(inbound) is not None
     assert not adapter._verified_owner_inbound(inbound)
 
 

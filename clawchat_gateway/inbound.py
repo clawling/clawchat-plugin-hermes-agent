@@ -7,6 +7,7 @@ from clawchat_gateway.config import ClawChatConfig
 from clawchat_gateway.protocol import MENTION_ALL_USER_ID
 
 _INTERNAL_SYNTHETIC = object()
+_OWNER_ACTION = object()
 
 
 @dataclass(frozen=True)
@@ -35,15 +36,30 @@ class InboundMessage:
     # Process-local provenance, never read from an envelope by the parser.
     # Object identity cannot be expressed by JSON; replace() preserves it.
     _synthetic_origin: object | None = field(default=None, repr=False, compare=False)
+    # Only the coalescer writes these from parsed messages; never wire fields.
+    _batch_speakers: tuple[str, ...] | None = field(default=None, repr=False, compare=False)
+    _batch_speaker_names: tuple[tuple[str, str], ...] = field(default=(), repr=False, compare=False)
+    _owner_action_origin: object | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def grant_speakers(self) -> tuple[str, ...]:
+        if self.is_internal_synthetic or self.raw_message.get("synthetic"):
+            return ()
+        return self._batch_speakers if self._batch_speakers is not None else (self.sender_id,)
+
+    @property
+    def is_owner_action(self) -> bool:
+        return self.is_internal_synthetic and self._owner_action_origin is _OWNER_ACTION
 
     @property
     def is_internal_synthetic(self) -> bool:
         return self._synthetic_origin is _INTERNAL_SYNTHETIC
 
     @classmethod
-    def internal_synthetic(cls, **kwargs: Any) -> InboundMessage:
+    def internal_synthetic(cls, *, owner_action: bool = False, **kwargs: Any) -> InboundMessage:
         """Construct a plugin-owned event without granting trust to raw fields."""
-        return cls(**kwargs, _synthetic_origin=_INTERNAL_SYNTHETIC)
+        return cls(**kwargs, _synthetic_origin=_INTERNAL_SYNTHETIC,
+                   _owner_action_origin=_OWNER_ACTION if owner_action else None)
 
 
 def _coerce_emitted_at(value: Any) -> int | None:

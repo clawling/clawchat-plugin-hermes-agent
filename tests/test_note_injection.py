@@ -20,6 +20,7 @@ nothing.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 
 import pytest
@@ -77,14 +78,12 @@ def group_batch(*senders):
         }
         for i, sender in enumerate(senders)
     ]
-    return InboundMessage(
-        chat_id=GROUP,
-        chat_type="group",
-        sender_id=senders[-1],
-        sender_name="",
-        text="ClawChat group messages: ...",
-        raw_message={"clawchat_group_batch": True, "messages": frames},
-    )
+    from clawchat_gateway.inbound import parse_inbound_message
+    from clawchat_gateway.config import ClawChatConfig
+    from test_tool_grants_admission import coalesced
+    config = ClawChatConfig(websocket_url="wss://example.invalid/ws")
+    return asyncio.run(coalesced([parse_inbound_message(frame, config) for frame in frames]))
+
 
 
 def test_friend_dm_carries_their_note(adapter):

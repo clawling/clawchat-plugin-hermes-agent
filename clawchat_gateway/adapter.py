@@ -2643,13 +2643,18 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
 
     def _is_owner_turn(self, inbound: InboundMessage) -> bool:
-        """Legacy admission/hints, including plugin turns in the owner's DM.
+        """Admission/hints; only an audited synthetic owner action keeps access.
 
         Snapshot owner_side comes separately from trusted batch speakers;
         management authority comes from _verified_owner_inbound.
         """
         from clawchat_gateway.host_tools_guard import is_owner_turn
 
+        if inbound.is_internal_synthetic:
+            return (inbound.is_owner_action and inbound.sender_id == self._owner_user_id()
+                    and inbound.chat_type == "direct" and inbound.chat_id == self._owner_direct_chat_id())
+        if inbound.raw_message.get("synthetic"):
+            return False
         return is_owner_turn(
             inbound.chat_id,
             inbound.chat_type,
@@ -3116,6 +3121,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         owner_user_id = str(getattr(claim, "owner_user_id", "") or "")
         claimed_at = getattr(claim, "claimed_at", None)
         inbound = InboundMessage.internal_synthetic(
+            owner_action=True,  # One-time owner pairing, claimed from activation storage.
             chat_id=conversation_id,
             chat_type="direct",
             sender_id=owner_user_id,
@@ -4366,18 +4372,7 @@ class ClawChatAdapter(BasePlatformAdapter):
     def _grant_speaker_names(self, inbound: InboundMessage, speakers: tuple[str, ...]) -> tuple[str, ...]:
         names = {inbound.sender_id: inbound.sender_name or inbound.sender_id}
 
-        def collect(raw: Any) -> None:
-            if not isinstance(raw, dict):
-                return
-            for item in raw.get("messages", []) if isinstance(raw.get("messages"), list) else []:
-                collect(item)
-            sender = raw.get("sender")
-            if isinstance(sender, dict) and isinstance(sender.get("id"), str):
-                name = sender.get("nick_name") or sender.get("nickname") or sender.get("name")
-                if isinstance(name, str) and name.strip():
-                    names[sender["id"]] = name
-
-        collect(inbound.raw_message)
+        names.update(inbound._batch_speaker_names)
         return tuple(names.get(speaker) or speaker for speaker in speakers)
 
     def _turn_grant_values(self, inbound: InboundMessage) -> tuple[tuple[str, ...], dict[str, str], frozenset[str]]:
@@ -4389,20 +4384,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         owner = self._owner_user_id()
         now = int(time.time() * 1000)
         try:
-            raw = inbound.raw_message
-            def batch_speakers(message: Any) -> list[str]:
-                if not isinstance(message, dict) or message.get("synthetic"):
-                    return [""]
-                if "messages" in message:
-                    items = message["messages"]
-                    if not isinstance(items, list) or not items:
-                        return [""]
-                    return [speaker for item in items for speaker in batch_speakers(item)]
-                sender = message.get("sender")
-                return [sender.get("id", "") if isinstance(sender, dict) else ""]
-
-            if not inbound.is_internal_synthetic and not raw.get("synthetic"):
-                speakers = tuple(dict.fromkeys(batch_speakers(raw))) if "messages" in raw else (inbound.sender_id,)
+            speakers = inbound.grant_speakers
             trusted = bool(speakers) and all(isinstance(speaker, str) and speaker.strip() for speaker in speakers)
             if trusted and owner and all(speaker == owner for speaker in speakers):
                 return speakers, resolve_turn_grants(list(speakers), owner, [], now), frozenset()
@@ -4689,7 +4671,8 @@ class ClawChatAdapter(BasePlatformAdapter):
                 speaker_names=self._grant_speaker_names(inbound, speakers),
                 owner_verified=self._verified_owner_inbound(inbound),
                 owner_side=getattr(grants, "owner_only", False),
-                legacy_owner_tools=(inbound.is_internal_synthetic
+                legacy_owner_tools=(inbound.is_owner_action
+                                    and inbound.sender_id == self._owner_user_id()
                                     and inbound.chat_type == "direct"
                                     and inbound.chat_id == self._owner_direct_chat_id()
                                     and self._is_owner_turn(inbound)),
@@ -5424,7 +5407,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             return inbound
         raw = inbound.raw_message if isinstance(inbound.raw_message, dict) else {}
         messages = raw.get("messages")
-        if raw.get("clawchat_group_batch") is not True or not isinstance(messages, list):
+        if inbound._batch_speakers is None or not isinstance(messages, list):
             return inbound
         resolved: list[InboundMessage] = []
         for frame in messages:
@@ -5845,7 +5828,7 @@ class ClawChatAdapter(BasePlatformAdapter):
     def _group_messages_for_metadata(self, inbound: InboundMessage) -> list[InboundMessage]:
         raw = inbound.raw_message if isinstance(inbound.raw_message, dict) else {}
         messages = raw.get("messages")
-        if raw.get("clawchat_group_batch") is not True or not isinstance(messages, list):
+        if inbound._batch_speakers is None or not isinstance(messages, list):
             return [inbound]
         resolved: list[InboundMessage] = []
         for frame in messages:
