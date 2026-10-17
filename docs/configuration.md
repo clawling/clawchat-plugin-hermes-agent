@@ -806,8 +806,9 @@ it). In non-owner turns, HTTP(S) attachments are fetched only from globally
 routable unicast addresses. Connections use the checked IP directly, without
 proxies, and each redirect is resolved and checked again. In non-owner ClawChat
 turns, `send_message` to other platforms cannot carry attachments; ClawChat
-targets retain the local-file and remote-address policy. Web
-search/extract, skills and the owner's direct chat keep their existing access.
+targets retain the local-file and remote-address policy. Without an effective
+ask grant, web search/extract and skills keep their existing access. The
+owner's direct chat keeps its existing access.
 
 `session_search` goes because it reads every conversation in Hermes' session
 store — the owner's direct chat, other friends' chats, other groups, other
@@ -848,18 +849,23 @@ direct chat reads every note on those hosts too.
 Two layers (`clawchat_gateway/host_tools_guard.py`):
 
 - the adapter's per-source toolset override (`toolsets_for_source`, Hermes
-  0.20.1+): the tools are not in the turn's schema at all. MCP needs Hermes'
+  0.20.1+): without grants or the `approve` opt-in, these restricted tools are
+  not in the turn's schema at all. Grant management tools use a separate
+  `clawchat-grants` toolset, removed from non-owner turns under both policies.
+  MCP needs Hermes'
   `no_mcp` sentinel in that list: a list that names no MCP server makes
   Hermes add back every enabled one. On an older host the plugin logs a
   warning at load and relies on the second layer;
-- a `pre_tool_call` hook that blocks any of those tools still reaching
-  dispatch in such a turn. MCP tools are recognised by their host toolset
+- a `pre_tool_call` hook that applies per-person grants first, then blocks
+  ungranted restricted calls still reaching dispatch (or escalates them under
+  `approve`). MCP tools are recognised by their host toolset
   (`mcp-<server>`), else by the `mcp_` name prefix (`mcp_<server>_<tool>`
   before Hermes 0.18.1, `mcp__<server>__<tool>` since); hosted connector tools
   by their `connectors__` prefix (the `tool_call` bridge hands the hook the
   underlying tool's name).
 
-The hook also limits a few tools those turns keep, by what a call asks for
+Without an applicable per-person grant, the hook also limits a few tools
+those turns keep, by what a call asks for
 (these tools stay in the schema on every Hermes, so each such turn's channel
 prompt carries a line listing the limits):
 
@@ -882,15 +888,16 @@ prompt carries a line listing the limits):
 
 An external memory provider (`memory.provider`: honcho, mem0, supermemory, …)
 brings its own tools. Hermes gates them with the `memory` toolset only from
-0.18.1, and only layer 1 drops that toolset, so the hook blocks them by the
+0.18.1, and only layer 1 drops that toolset, so the hook restricts ungranted calls by the
 names the provider itself lists (loaded once per process). If the provider
 cannot be loaded or lists no tools, a turn layer 1 does not narrow (no override,
-or `approve`) gets no tool the host's tool registry does not know, and the
+or `approve`) blocks ungranted calls to tools the host's tool registry does not know, and the
 plugin logs it.
 
 Home Assistant (`homeassistant`, on by itself once `HASS_TOKEN` is set) and
 Spotify (`spotify`) stay available in these turns: a friend or a group can
-switch the owner's devices or play music on the owner's account. Owners who do
+switch the owner's devices or play music on the owner's account, unless an
+effective ask grant requires approval first. Owners who do
 not want that should disable those toolsets for ClawChat
 (`platform_toolsets.clawchat`).
 
@@ -898,17 +905,19 @@ Without grants, `no_mcp` drops **every** MCP server from such a turn, including 
 "portable" MCP servers other Hermes plugins bring: they are configured by the
 owner too. The owner's direct chat keeps all of them.
 
-What each Hermes version gets:
+What each Hermes version gets (block columns describe calls without an
+applicable per-person grant):
 
 | Hermes | Layer 1: tools left out of the schema | Layer 2: `pre_tool_call` block | `approve` | Memory provider tools | Per-person grants |
 |---|---|---|---|---|---|
-| 0.21.0 and later | yes | yes | yes — every call goes to the human gate | left out with `memory` (layer 1); under `approve` every call goes to the gate | direct in both layers; ask with a reliable owner approval route and no bypass |
+| 0.21.0 and later | yes | yes | yes — ungranted restricted calls go to the human gate | left out with `memory` (layer 1); under `approve` ungranted calls go to the gate | direct in both layers; ask with a reliable owner approval route and no bypass |
 | 0.20.1 – 0.20.x | yes | yes | no — blocked instead (the tools stay visible) | left out with `memory` (layer 1); under `approve` blocked by name | direct in both layers; ask refused |
 | 0.19.1 – 0.20.0 | no — the tools stay visible | yes | no — blocked instead | visible, blocked by name | direct through the hook only; ask refused |
 | 0.12.0 – 0.19.0 | no — the tools stay visible | yes (no chat type from the host: the owner's activation chat id decides, see above) | no — blocked instead | visible, blocked by name | unsupported; management tools require upgrade to 0.19.1+ |
 
 `connections` exists from Hermes 0.21.3. The argument limits above and the
-memory provider block are layer 2 only, on every version.
+memory provider restrictions are layer 2 only, on every version; applicable
+grants take precedence over these restrictions.
 
 Where ungranted tools stay visible but their calls are blocked, each such turn's
 ClawChat channel prompt says so, so the model does not spend rounds trying
@@ -918,11 +927,15 @@ could keep these tools out, so the plugin does not answer friends' direct
 chats or groups at all there (it logs `reason=host_without_plugin_hooks`)
 and only the owner's direct chat works.
 
-`non-owner-host-tools: approve` is the owner's opt-in: the tools stay
-visible and every call in such a turn goes to Hermes' human-approval gate,
-which smart never answers. A friend's direct chat then declines it on the
-spot (above); a group's approval goes to the owner. A host that cannot
-escalate a hook's `approve` keeps blocking. Any other value means `off`.
+`non-owner-host-tools: approve` is the owner's opt-in: restricted host tools stay
+visible, and calls without an applicable per-person grant go to Hermes'
+human-approval gate, which smart never answers. A friend's direct chat declines
+these ungranted calls on the spot (above); a group's approval goes to the owner.
+Effective per-person grants take precedence over `non-owner-host-tools`:
+direct grants execute without this gate, while ask grants route each call to
+the owner's direct chat, including normally open tools such as `web_search`.
+A host that cannot escalate a hook's `approve` blocks calls requiring approval.
+Any other setting value means `off`.
 
 Hermes ignores an exception from either layer and then *opens up* (all
 platform tools; the hook skipped), so both fail closed: an override that
@@ -945,7 +958,7 @@ They list the actual tools, names, mode, expiry, and what granting means.
 `richInteractions` does not change this text-and-command card.
 
 `direct` lets the named person use a tool without an approval for each call;
-local path arguments remain refused. `ask` sends each call to the owner's
+for otherwise restricted calls, local path arguments remain refused. `ask` sends each call to the owner's
 direct chat with the speakers' names (ids when unavailable), conversation
 type, tool name and raw arguments. Commands/processes, file reads/writes,
 code execution, sub-agents, scheduled tasks and browser operations **always
@@ -965,8 +978,12 @@ activation direct chat, the actual owner as sender, and a non-synthetic
 message. Both the hook and handler check a live nonce bound to the host's
 exact `(session_id, turn_id)`. Groups, friends, other platforms and synthetic
 owner turns cannot manage grants. Missing identities or unknown capabilities
-fail closed. With `tool-grants: off`, stored grants do not apply, management
-tools refuse calls, and the grant hint is omitted; the separate
+fail closed. On Hermes 0.20.1+, their separate toolset is absent from non-owner
+schemas and tool-search catalogs; the owner's direct chat retains it.
+With `tool-grants: off`, stored grants do not apply, management tools are not
+registered, and the grant hint is omitted. If registration cannot read the
+configuration, it retains these tools for owner discovery; execution still
+enforces `tool-grants: off`. The separate
 `non-owner-host-tools` policy retains its existing behavior.
 
 A group batch gets the **intersection** of all non-owner speakers' grants;
@@ -989,6 +1006,8 @@ read errors and expired grants add no authority.
 
 Known limits:
 
+- Hermes before 0.20.1 has no layer 1: when registered, management tools can
+  remain visible to non-owner turns, but the execution checks refuse them.
 - In a conversation with grants, other messages wait while a granted turn is
   running; they cannot interject or interrupt it.
 - Sub-agent tool calls and calls after compression switches the session do
@@ -1204,9 +1223,10 @@ memory:
 
 `memory_enabled` is left as is: `MEMORY.md` remains the agent's global notebook
 for facts that do not depend on who it is talking to. Facts about one person or
-one group go into the ClawChat notes above. Only the owner's direct chat can
-write it: in a friend's direct chat or a group the `memory` tool is left out or
-blocked like the other host tools (see
+one group go into the ClawChat notes above. By default, only the owner's direct
+chat can write it: in a friend's direct chat or a group the `memory` tool is
+left out or blocked. Per-person grants and the `non-owner-host-tools: approve`
+opt-in apply here too (see
 [Host tools in turns the owner did not start](#host-tools-in-turns-the-owner-did-not-start)).
 
 Activation writes both keys (overwriting, like the `agent.*` defaults). Plugin

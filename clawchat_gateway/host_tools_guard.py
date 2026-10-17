@@ -36,13 +36,13 @@ binding. No session-level fallback supplies execution authority.
 
 * :func:`toolsets_for_source` — the adapter's per-source toolset override
   (``BasePlatformAdapter.toolsets_for_source``, host 0.20.1+). Every turn but
-  the owner's own direct chat loses :data:`RESTRICTED_TOOLSETS` (``memory``
-  among them) and gets the host's ``no_mcp`` sentinel, so the model never sees
-  those tools. Listing no MCP server would not do: the host then adds back
+  the owner's own direct chat loses ungranted :data:`RESTRICTED_TOOLSETS`
+  (``memory`` among them) by default and gets the host's ``no_mcp`` sentinel,
+  so the model does not see those tools. Listing no MCP server would not do: the host then adds back
   every enabled one, the fallback list included. **Every group turn counts**, whoever spoke: a group is
   one shared session, and switching the toolset per speaker would rebuild the
   agent (and drop the prompt cache) each time the owner and someone else
-  alternate.
+  alternate. Granted batches may restore toolsets and rebuild that cache.
 * :func:`clawchat_pre_tool_call` — a ``pre_tool_call`` hook that blocks any of
   those tools still reaching dispatch in such a turn (an older host without the
   override, a toolset the filter could not see into). MCP tools are known by
@@ -51,9 +51,12 @@ binding. No session-level fallback supplies execution authority.
   since). ``memory`` has only write actions — reading it is the system-prompt
   injection, which stays — so the whole tool goes. With
   ``non-owner-host-tools: approve`` the owner opts in instead: the tools stay
-  visible and every call is escalated to the human-approval gate, which smart
-  never answers — a friend's direct chat refuses it on the spot, a group's goes
-  to the owner (``adapter.send_exec_approval``).
+  visible and ungranted restricted calls are escalated to the human-approval
+  gate, which smart never answers — a friend's direct chat refuses those calls
+  on the spot, a group's goes to the owner (``adapter.send_exec_approval``).
+  Effective direct grants execute directly; ask grants route each call,
+  including otherwise open tools, to the owner's direct chat. Grant management
+  has its own toolset, hidden from non-owner turns regardless of this setting.
 
   The hook also limits a few tools such turns keep, by what a call asks for
   (:func:`_limited_call`): ``skill_manage`` (a skill it writes is in the
@@ -93,13 +96,17 @@ import json
 import logging
 import os
 import re
+import threading
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-#: Host toolsets (Hermes 0.21 ``toolsets.py`` names) a turn the owner did not
-#: start never gets: shell + process management, file read/write/patch/search,
+GRANT_MANAGEMENT_TOOLSET = "clawchat-grants"
+_GRANT_APPROVAL_GATE_LOCK = threading.Lock()
+
+#: Host toolsets (Hermes 0.21 ``toolsets.py`` names) removed by default from
+#: turns the owner did not start: shell + process management, file read/write/patch/search,
 #: Python execution, sub-agents (which inherit tools), scheduled jobs, kanban tasks
 #: (separate workers lose the initiating turn's identity and use full profile tools),
 #: desktop control, browser automation (which opens ``file://`` URLs and
@@ -690,7 +697,9 @@ def _is_owner_chat_without_type(
 
 
 def _narrowed_toolsets() -> list[str]:
-    restricted_tools = restricted_tool_names()
+    from clawchat_gateway.tool_grants import GRANT_TOOL_NAMES
+
+    restricted_tools = restricted_tool_names() | set(GRANT_TOOL_NAMES)
     try:
         mcp_servers = _mcp_server_names()
     except Exception:  # noqa: BLE001 - NO_MCP still drops them host-side
@@ -699,6 +708,7 @@ def _narrowed_toolsets() -> list[str]:
     for name in sorted(_platform_toolsets()):
         if (
             name in RESTRICTED_TOOLSETS
+            or name == GRANT_MANAGEMENT_TOOLSET
             or name == NO_MCP
             or name in mcp_servers
             or name.startswith(_MCP_TOOLSET_PREFIX)
@@ -727,7 +737,8 @@ def toolsets_for_source(
     """The toolset override for a ClawChat turn, or ``None`` to keep the platform's.
 
     ``None`` for the owner's own direct chat, and for every turn when the owner
-    chose ``non-owner-host-tools: approve`` (the hook escalates instead).
+    chose ``non-owner-host-tools: approve`` and has no grant management toolset
+    to remove (the hook escalates instead). Grant management stays owner-only.
     Otherwise the platform toolset minus :data:`RESTRICTED_TOOLSETS` and every
     MCP server, plus :data:`NO_MCP` — never empty, and on any failure
     :data:`FALLBACK_TOOLSETS`.
@@ -740,7 +751,18 @@ def toolsets_for_source(
         if _is_owner_direct(chat_id, chat_type, user_id, str(owner or ""), owner_direct_chat_id):
             return None
         if non_owner_host_tools() == SETTING_APPROVE:
-            return None
+            from clawchat_gateway.tool_grants import GRANT_TOOL_NAMES
+
+            platform = _platform_toolsets()
+            management_tools = set(GRANT_TOOL_NAMES)
+            kept = {
+                name for name in platform
+                if name != GRANT_MANAGEMENT_TOOLSET
+                and not set(_resolve_tools(name)) & management_tools
+            }
+            if kept == platform:
+                return None
+            return sorted(kept) or list(FALLBACK_TOOLSETS)
         narrowed = _narrowed_toolsets()
         try:
             if not _tool_grants_enabled():
@@ -889,56 +911,57 @@ def _install_grant_approval_gate() -> bool:
         from clawchat_gateway.turn_grants import approval_by_nonce, finish_approval
         from clawchat_gateway.tool_grants import GRANT_ASK_DENIED_MESSAGE
 
-        if getattr(approval.request_tool_approval, "_clawchat_grants", False):
+        with _GRANT_APPROVAL_GATE_LOCK:
+            original = approval.request_tool_approval
+            if getattr(original, "_clawchat_grants", False):
+                return True
+            if not callable(getattr(approval, "list_gateway_approvals", None)):
+                return False
+            persist = getattr(approval, "_persist_choice", None)
+            approve_session = approval.approve_session
+            approve_permanent = approval.approve_permanent
+
+            def grant_gate(tool_name, reason, *, rule_key="", **kwargs):
+                if not rule_key.startswith("clawchat-grant-ask:"):
+                    return original(tool_name, reason, rule_key=rule_key, **kwargs)
+                nonce = rule_key.removeprefix("clawchat-grant-ask:")
+                record = approval_by_nonce(nonce)
+                result = {"approved": False, "message": GRANT_ASK_DENIED_MESSAGE}
+                try:
+                    if (record and record.tool == tool_name and record.description == reason
+                            and record.session_key == approval.get_current_session_key()
+                            and not _approval_bypass(rule_key)):
+                        outcome = original(tool_name, reason, rule_key=rule_key, **kwargs)
+                        if finish_approval(nonce) and outcome.get("approved"):
+                            return outcome
+                except Exception:  # noqa: BLE001 - ask errors are denials
+                    pass
+                finally:
+                    finish_approval(nonce)
+                return result
+
+            def grant_persist(session_key, choice, keys):
+                # Also prevent a decision delivered outside our adapter from ever
+                # persisting these single-call keys. The shim then refuses it.
+                ordinary = [key for key in keys if not key.startswith("plugin_rule:clawchat-grant-ask:")]
+                if ordinary:
+                    return persist(session_key, choice, ordinary)
+
+            def grant_session(session_key, pattern_key):
+                if not pattern_key.startswith("plugin_rule:clawchat-grant-ask:"):
+                    return approve_session(session_key, pattern_key)
+
+            def grant_permanent(pattern_key):
+                if not pattern_key.startswith("plugin_rule:clawchat-grant-ask:"):
+                    return approve_permanent(pattern_key)
+
+            grant_gate._clawchat_grants = True
+            if persist is not None:
+                approval._persist_choice = grant_persist
+            approval.approve_session = grant_session
+            approval.approve_permanent = grant_permanent
+            approval.request_tool_approval = grant_gate
             return True
-        if not callable(getattr(approval, "list_gateway_approvals", None)):
-            return False
-        original = approval.request_tool_approval
-        persist = getattr(approval, "_persist_choice", None)
-        approve_session = approval.approve_session
-        approve_permanent = approval.approve_permanent
-
-        def grant_gate(tool_name, reason, *, rule_key="", **kwargs):
-            if not rule_key.startswith("clawchat-grant-ask:"):
-                return original(tool_name, reason, rule_key=rule_key, **kwargs)
-            nonce = rule_key.removeprefix("clawchat-grant-ask:")
-            record = approval_by_nonce(nonce)
-            result = {"approved": False, "message": GRANT_ASK_DENIED_MESSAGE}
-            try:
-                if (record and record.tool == tool_name and record.description == reason
-                        and record.session_key == approval.get_current_session_key()
-                        and not _approval_bypass(rule_key)):
-                    outcome = original(tool_name, reason, rule_key=rule_key, **kwargs)
-                    if finish_approval(nonce) and outcome.get("approved"):
-                        return outcome
-            except Exception:  # noqa: BLE001 - ask errors are denials
-                pass
-            finally:
-                finish_approval(nonce)
-            return result
-
-        def grant_persist(session_key, choice, keys):
-            # Also prevent a decision delivered outside our adapter from ever
-            # persisting these single-call keys. The shim then refuses it.
-            ordinary = [key for key in keys if not key.startswith("plugin_rule:clawchat-grant-ask:")]
-            if ordinary:
-                return persist(session_key, choice, ordinary)
-
-        def grant_session(session_key, pattern_key):
-            if not pattern_key.startswith("plugin_rule:clawchat-grant-ask:"):
-                return approve_session(session_key, pattern_key)
-
-        def grant_permanent(pattern_key):
-            if not pattern_key.startswith("plugin_rule:clawchat-grant-ask:"):
-                return approve_permanent(pattern_key)
-
-        grant_gate._clawchat_grants = True
-        if persist is not None:
-            approval._persist_choice = grant_persist
-        approval.approve_session = grant_session
-        approval.approve_permanent = grant_permanent
-        approval.request_tool_approval = grant_gate
-        return True
     except Exception:  # noqa: BLE001 - unsupported host stays blocked
         return False
 
@@ -1025,18 +1048,21 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: A
                 )
                 if has_local_path(args) or local_marker:
                     return {"action": "block", "message": LOCAL_PATH_REFUSAL}
-        if not _guarded_call(tool_name, args):
-            if not _strict_unregistered(tool_name) or _session_turn() != "other":
-                return None
+        guarded = _guarded_call(tool_name, args)
+        strict = not guarded and _strict_unregistered(tool_name)
+        if _session_turn() != "other":
+            return None
+        if strict:
+            guarded = True
             logger.warning(
                 "clawchat host tools: %s is not in the host registry and the memory provider's "
                 "tools are unknown; treating it as restricted",
                 tool_name,
             )
-        elif _session_turn() != "other":
-            return None
         message = BLOCK_MESSAGE
-        if _tool_grants_enabled():
+        grants = {}
+        grants_enabled = _tool_grants_enabled()
+        if grants_enabled:
             from clawchat_gateway.turn_grants import get_snapshot, lookup_for_tool_call, session_context_value
             from clawchat_gateway.tool_grants import GRANT_ASK_DENIED_MESSAGE, GRANT_INTERSECTION_BLOCK_MESSAGE
             from clawchat_gateway.local_paths import LOCAL_PATH_REFUSAL
@@ -1044,10 +1070,6 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: A
             nonce = session_context_value("HERMES_SESSION_MESSAGE_ID")
             chat_id = session_context_value("HERMES_SESSION_CHAT_ID")
             grants = lookup_for_tool_call(nonce, chat_id, kwargs.get("session_id"), kwargs.get("turn_id"))
-            if grants.get(tool_name) == "direct":
-                if has_local_path(args, any_string=True):
-                    return {"action": "block", "message": LOCAL_PATH_REFUSAL}
-                return None
             if grants.get(tool_name) == "ask":
                 if not _host_supports_approve():
                     return {"action": "block", "message": GRANT_ASK_DENIED_MESSAGE}
@@ -1055,6 +1077,15 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: A
                     return _ask_directive(get_snapshot(nonce), tool_name, args)
                 except Exception:  # noqa: BLE001 - any unreliable ask is refused
                     return {"action": "block", "message": GRANT_ASK_DENIED_MESSAGE}
+        # An effective ask also applies to normally open tools. Direct grants
+        # and absent grants leave those tools' ordinary access unchanged.
+        if not guarded:
+            return None
+        if grants_enabled:
+            if grants.get(tool_name) == "direct":
+                if has_local_path(args, any_string=True):
+                    return {"action": "block", "message": LOCAL_PATH_REFUSAL}
+                return None
             snapshot = get_snapshot(nonce)
             message = GRANT_BLOCK_MESSAGE
             if (snapshot is not None and snapshot.chat_id == chat_id

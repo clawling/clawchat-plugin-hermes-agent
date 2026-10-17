@@ -233,9 +233,10 @@ async def test_management_error_messages_do_not_disclose_private_details(managem
         assert forbidden not in result["message"]
 
 
-def test_management_schema_manifest_and_nonowner_whitelist():
+def test_management_schema_manifest_and_nonowner_whitelist(monkeypatch):
     from pathlib import Path
     import yaml
+    monkeypatch.setattr(guard, "_config_extra", lambda: {})
     calls = {}
     plugin_tools.register_tools(SimpleNamespace(register_tool=lambda name, group, schema, handler, **kw: calls.update({name: schema})))
     manifest = yaml.safe_load(Path("plugin.yaml").read_text())
@@ -243,3 +244,76 @@ def test_management_schema_manifest_and_nonowner_whitelist():
     for name in GRANT_TOOL_NAMES:
         assert name in calls and calls[name]["parameters"]["additionalProperties"] is False
         assert guard.clawchat_pre_tool_call(tool_name=name)["action"] == "block"
+
+
+@pytest.mark.parametrize("policy", ["off", "approve"])
+@pytest.mark.parametrize("chat_type,user_id", [("dm", "usr_a"), ("group", "usr_a"), ("group", "usr_owner")])
+@pytest.mark.parametrize("with_alias", [False, True])
+def test_management_toolset_hidden_from_nonowner_schema_and_catalog(monkeypatch, policy, chat_type, user_id, with_alias):
+    registered = {}
+    monkeypatch.setattr(guard, "_config_extra", lambda: {"non-owner-host-tools": policy})
+    plugin_tools.register_tools(SimpleNamespace(register_tool=lambda name, group, schema, handler, **kw:
+                                registered.update({name: (group, schema)})))
+    for name in GRANT_TOOL_NAMES:
+        assert registered[name][0] == guard.GRANT_MANAGEMENT_TOOLSET
+    groups = {group for group, _ in registered.values()} | {"web", "terminal"}
+    if with_alias:
+        groups.add("custom-clawchat")
+
+    def resolve(group):
+        if group == "custom-clawchat":
+            return list(registered)
+        return [name for name, (toolset, _) in registered.items() if toolset == group] + {
+            "web": ["web_search"], "terminal": ["terminal"],
+        }.get(group, [])
+
+    monkeypatch.setattr(guard, "_platform_toolsets", lambda: groups)
+    monkeypatch.setattr(guard, "_resolve_tools", resolve)
+    monkeypatch.setattr(guard, "_mcp_server_names", lambda: set())
+    monkeypatch.setattr(guard, "memory_provider_tools", lambda: frozenset())
+    source = SimpleNamespace(chat_id=CHAT, chat_type=chat_type, user_id=user_id)
+    kept = guard.toolsets_for_source(source, owner_user_id="usr_owner")
+    assert kept and guard.GRANT_MANAGEMENT_TOOLSET not in kept
+    assert "custom-clawchat" not in kept
+    catalog = {name for group in kept for name in resolve(group)}
+    schemas = {name: schema for name, (_, schema) in registered.items() if name in catalog}
+    assert not set(GRANT_TOOL_NAMES) & (catalog | schemas.keys())
+    assert "clawchat_memory_read" in schemas and "web_search" in catalog
+    assert ("terminal" in catalog) == (policy == "approve")
+    owner = SimpleNamespace(chat_id=OWNER_CHAT, chat_type="dm", user_id="usr_owner")
+    assert guard.toolsets_for_source(owner, owner_user_id="usr_owner") is None
+    assert set(GRANT_TOOL_NAMES) <= {name for group in groups for name in resolve(group)}
+
+
+@pytest.mark.parametrize("setting", ["off", "on", "read_error"])
+def test_management_tools_registration_respects_setting(monkeypatch, setting):
+    def config():
+        if setting == "read_error":
+            raise OSError("unreadable config")
+        return {"tool-grants": setting}
+
+    monkeypatch.setattr(guard, "_config_extra", config)
+    registered = {}
+    plugin_tools.register_tools(SimpleNamespace(register_tool=lambda name, group, schema, handler, **kw:
+                                registered.update({name: group})))
+    assert "clawchat_memory_read" in registered
+    assert set(registered) & set(GRANT_TOOL_NAMES) == (set() if setting == "off" else set(GRANT_TOOL_NAMES))
+    assert (guard.GRANT_MANAGEMENT_TOOLSET in registered.values()) == (setting != "off")
+    if setting != "on":
+        for name in GRANT_TOOL_NAMES:
+            assert guard.clawchat_pre_tool_call(tool_name=name)["action"] == "block"
+
+
+def test_configuration_documents_grant_precedence_and_visibility_limits():
+    from pathlib import Path
+
+    text = " ".join(Path("docs/configuration.md").read_text().split())
+    assert "Effective per-person grants take precedence over `non-owner-host-tools`" in text
+    assert "direct grants execute without this gate" in text
+    assert "ask grants route each call to the owner's direct chat" in text
+    assert "including normally open tools such as `web_search`" in text
+    assert "Hermes before 0.20.1 has no layer 1" in text
+    assert "management tools can remain visible to non-owner turns" in text
+    assert "Per-person grants and the `non-owner-host-tools: approve` opt-in apply here too" in text
+    assert "every call goes to the human gate" not in text
+    assert "visible and every call in such a turn" not in text
