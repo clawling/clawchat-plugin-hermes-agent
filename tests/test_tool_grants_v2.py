@@ -490,6 +490,20 @@ def test_search_bridges_allow_all_grant_when_host_has_no_connections(host, searc
 
 
 @pytest.mark.parametrize("bridge", ["tool_search", "tool_describe"])
+def test_search_bridges_block_registered_connections_missing_from_platform_catalog(host, search_catalog, monkeypatch, bridge):
+    # Platform settings changed after the session resolved its toolsets: the
+    # session catalog can still offer the tool the platform catalog now omits.
+    assert guard._install_grant_catalog_filter()
+    known, available = guard.host_tool_catalog()
+    assert "manage_connections" in known
+    monkeypatch.setattr(guard, "host_tool_catalog", lambda: (known, available - {"manage_connections"}))
+    with bound_rules([row(mode="deny"), row("manage_connections", kind="tool")]) as snapshot, host(**context(snapshot)):
+        catalog = search_catalog.get_tool_definitions(skip_tool_search_assembly=True)
+        assert "manage_connections" in {item["function"]["name"] for item in catalog}
+        assert call(bridge, turn_id="t")["reasonCode"] == "not-available"
+
+
+@pytest.mark.parametrize("bridge", ["tool_search", "tool_describe"])
 @pytest.mark.parametrize("failure", ["no-filter", "no-search-module", "chat", "grants", "broad-rules", "speakers", "overlap", "visibility-error"])
 def test_search_bridges_fail_closed_without_matching_filtered_catalog(host, search_catalog, monkeypatch, bridge, failure):
     if failure != "no-filter":

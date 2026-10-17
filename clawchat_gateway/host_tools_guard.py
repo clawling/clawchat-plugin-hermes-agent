@@ -452,8 +452,9 @@ def _grant_search_bridge_allowed(tool_name, snapshot):
             return False
         # This host catalog entry enables extra remote connector results that
         # bypass our per-tool grants filter. Refuse both catalog bridges.
-        # The unnarrowed catalog is a superset of the session's, so this stays closed.
-        if ("manage_connections" in host_tool_catalog()[1]
+        # Any registered tool may be in the session's toolsets, whatever the
+        # platform settings say now; only an unregistered one is safely absent.
+        if ("manage_connections" in host_tool_catalog()[0]
                 and _filter_grant_definitions([{"function": {"name": "manage_connections"}}], current)):
             return False
         # Compare complete compiled rules: Mapping equality sees only finite
