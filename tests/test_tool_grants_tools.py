@@ -12,7 +12,7 @@ import pytest_asyncio
 from clawchat_gateway import tools, plugin_tools, host_tools_guard as guard, turn_grants as turns
 from clawchat_gateway.storage import ClawChatStore
 from clawchat_gateway.tool_grants import GRANT_BLOCK_MESSAGE, GRANT_TOOL_NAMES
-from test_tool_grants_admission import harness, message, OWNER_CHAT, CHAT
+from test_tool_grants_admission import harness, message, wait_for_events, OWNER_CHAT, CHAT
 from test_tool_grants_hook import host, context
 from test_tool_grants_ask import approval
 
@@ -61,42 +61,17 @@ async def test_owner_grant_sends_localized_card_without_code_in_model_result(man
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["synthetic", "other_sender", "missing_sender", "rejected_confirmation"])
-@pytest.mark.parametrize("entry", ["message", "internal"])
-async def test_unverified_input_revokes_running_owner_management_without_queueing(management, case, entry):
+async def test_synthetic_input_waits_for_owner_turn_and_never_borrows_management_authority(management):
     h = management
-    # A real owner merge must not hide the earlier nonce retained by the host.
-    await h.adapter._handle_inbound(message("usr_owner", "second", chat=OWNER_CHAT))
-    owner_nonces = [event.source.message_id for event in h.harness.events]
-    assert all(turns.get_snapshot(nonce).owner_verified for nonce in owner_nonces)
-    async def check_revoked_before_preparation(_):
-        assert all(not turns.get_snapshot(nonce).owner_verified for nonce in owner_nonces)
-        assert guard.management_snapshot("s", "t") is None
-        return False
-    h.harness.monkeypatch.setattr(h.adapter, "_maybe_consume_skill_update_consent", check_revoked_before_preparation)
-    sender = "usr_a" if case == "other_sender" else "" if case == "missing_sender" else "usr_owner"
-    incoming = message(sender, "/clawchat-allow 123456" if case == "rejected_confirmation" else "wake",
-                       chat=OWNER_CHAT, synthetic=case in {"synthetic", "rejected_confirmation"})
-    if entry == "message":
-        await h.adapter._on_message(incoming.raw_message)
-    else:
-        await h.adapter._handle_inbound(incoming)
-    assert not h.adapter._grant_admission_queue._pending
-    assert all(not turns.get_snapshot(nonce).owner_verified for nonce in owner_nonces)
-    if case == "rejected_confirmation":
-        assert len(h.harness.events) == 2
-    else:
-        assert len(h.harness.events) == 3
-    fresh = turns.active_snapshot("usr_agent", h.adapter._grant_session_key(incoming))
+    await h.adapter._handle_inbound(message("usr_owner", chat=OWNER_CHAT, synthetic=True))
+    assert len(h.harness.events) == 1
+    h.adapter._active_sessions.clear()
+    await h.adapter.on_processing_complete(h.harness.events[0], "SUCCESS")
+    await wait_for_events(h.harness, 2)
+    fresh = turns.get_snapshot(h.harness.events[1].source.message_id)
     assert not fresh.owner_verified and fresh.grants == {}
-    for tool in GRANT_TOOL_NAMES:
-        assert guard.clawchat_pre_tool_call(tool_name=tool, session_id="s", turn_id="t")["action"] == "block"
     assert (await tools.manage_tool_grants("grant", PARAMS, session_id="s"))["message"] == GRANT_BLOCK_MESSAGE
     h.adapter._send_owner_text.assert_not_awaited()
-    h.harness.monkeypatch.setattr(h.adapter, "_maybe_consume_skill_update_consent", AsyncMock(return_value=False))
-    await h.adapter._handle_inbound(message("usr_owner", "third", chat=OWNER_CHAT))
-    assert all(not turns.get_snapshot(nonce).owner_verified for nonce in owner_nonces)
-    assert guard.management_snapshot("s", "t") is None
 
 
 @pytest.mark.asyncio

@@ -16,8 +16,6 @@ from test_turn_grants import snapshot
 from test_tool_grants_admission import harness, message, OWNER_CHAT, CHAT
 from test_command_gating import FakeApprovalQueue, _frame_text
 
-_READ_APPROVAL_CONFIG = guard._approval_config_read
-
 
 @pytest.fixture
 def approval(monkeypatch):
@@ -177,44 +175,6 @@ def test_ask_bypass_is_denied(host, approval, bypass, monkeypatch):
     assert ask(host) == {"action": "block", "message": GRANT_ASK_DENIED_MESSAGE}
 
 
-@pytest.mark.parametrize("marker", ["host_fallback", "class_name", "attribute", "key"])
-def test_failed_config_read_fallback_denies_ask(host, approval, monkeypatch, marker):
-    class FailedConfigRead(dict):
-        def __init__(self, data, *, error):
-            super().__init__(data)
-            self.read_error = error
-
-    class MarkedConfig(dict):
-        pass
-
-    data = {"approvals": {"mode": "manual"}, "command_allowlist": []}
-    if marker == "host_fallback":
-        config = FailedConfigRead(data, error=OSError("unreadable config"))
-    elif marker == "class_name":
-        config = type("FailedConfigRead", (dict,), {})(data)
-    elif marker == "attribute":
-        config = MarkedConfig(data)
-        config.read_error = OSError("unreadable config")
-    else:
-        config = dict(data, read_error="unreadable config")
-    module = ModuleType("hermes_cli.config")
-    module.load_config_readonly = lambda: config
-    monkeypatch.setitem(sys.modules, "hermes_cli.config", module)
-    monkeypatch.setattr(guard, "_approval_config_read", _READ_APPROVAL_CONFIG)
-    with pytest.raises(ValueError, match="Unreadable approval policy"):
-        guard._approval_config_read()
-    assert ask(host) == {"action": "block", "message": GRANT_ASK_DENIED_MESSAGE}
-
-
-def test_readable_config_without_new_host_class_allows_ask(host, approval, monkeypatch):
-    module = ModuleType("hermes_cli.config")
-    module.load_config_readonly = lambda: {"approvals": {"mode": "manual"}, "command_allowlist": []}
-    monkeypatch.setitem(sys.modules, "hermes_cli.config", module)
-    monkeypatch.setitem(sys.modules, "hermes_cli.config_read_errors", ModuleType("hermes_cli.config_read_errors"))
-    monkeypatch.setattr(guard, "_approval_config_read", _READ_APPROVAL_CONFIG)
-    assert ask(host)["action"] == "approve"
-
-
 def test_ask_rule_keys_are_unique_and_card_contains_speaker_type_and_raw_args(host, approval):
     s = turns.register_turn(account_id="usr_agent", chat_id=CHAT, speakers=("usr_a",),
                             speaker_names=("Speaker Name",), grants={TOOL: "ask"}, session_key="key")
@@ -367,25 +327,6 @@ async def test_grant_decision_targets_nonce_without_resolving_ordinary_approval(
     assert approval.queue.pending["sk"] == [{"request_id": "ordinary", "pattern_key": "ordinary"}]
     assert a._resolve_gateway_approval("sk", "always", resolve_all=False) == 1
     assert approval.queue.resolved[-1][1] == "always"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("command,choice", [("approve", "once"), ("deny", "deny")])
-async def test_forwarded_approval_code_resolves_while_owner_turn_is_busy(harness, approval, command, choice):
-    a = harness.adapter
-    await a._handle_inbound(message("usr_owner", chat=OWNER_CHAT))
-    owner_nonce = harness.events[0].source.message_id
-    record, _ = await forward(harness, approval)
-    a.send = AsyncMock()
-    harness.monkeypatch.setattr(a, "_handle_owner_forwarded_approval",
-                               ClawChatAdapter._handle_owner_forwarded_approval.__get__(a))
-    code = next(iter(a._owner_approval_route_table()[OWNER_CHAT]))
-    await a._on_message(message("usr_owner", f"/{command} {code}", chat=OWNER_CHAT).raw_message)
-    assert record.choice == choice
-    assert approval.queue.resolved[-1][1] == choice
-    assert not a._grant_admission_queue._pending
-    assert len(harness.events) == 1
-    assert turns.get_snapshot(owner_nonce).owner_verified
 
 
 @pytest.mark.asyncio

@@ -3436,7 +3436,6 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
             if protocol_message_id:
                 self._last_inbound_message_id_by_chat[inbound.chat_id] = protocol_message_id
-        self._admit_owner_direct_inbound(inbound)
         if await self._consume_grant_confirmation(inbound):
             return
         if self._hold_granted_inbound(inbound):
@@ -4462,29 +4461,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._expire_grant_session(key)
         return False
 
-    def _verified_owner_inbound(self, inbound: InboundMessage) -> bool:
-        return (inbound.chat_type == "direct" and bool(inbound.sender_id)
-                and inbound.sender_id == self._owner_user_id()
-                and inbound.chat_id == self._owner_direct_chat_id()
-                and not inbound.raw_message.get("synthetic"))
-
-    def _admit_owner_direct_inbound(self, inbound: InboundMessage) -> bool:
-        if inbound.chat_type != "direct" or inbound.chat_id != self._owner_direct_chat_id():
-            return False
-        if not self._verified_owner_inbound(inbound):
-            from clawchat_gateway.turn_grants import revoke_owner_verification
-
-            # The host may merge this input using an earlier source nonce.
-            # Revoke before any confirmation/command handler can consume it.
-            revoke_owner_verification(self._account_id(), self._grant_session_key(inbound))
-        return True
-
     def _hold_granted_inbound(self, inbound: InboundMessage, *, from_dispatch: bool = False,
                               ignore_dispatch: bool = False, new_grants: dict[str, str] | None = None) -> bool:
-        # Owner approvals and controls must reach their existing handlers even
-        # while a turn is waiting for them. Unverified input revokes authority.
-        if self._admit_owner_direct_inbound(inbound):
-            return False
         if (self._clawchat_config.tool_grants != "on"
                 or asyncio.current_task() in self._grant_timeout_tasks):
             return False
@@ -4497,7 +4475,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             busy = True
         if not busy:
             return False
-        if not (snapshot and snapshot.grants) and not self._grant_dispatching_grants.get(key) and not (
+        if not (snapshot and (snapshot.grants or snapshot.owner_verified)) and not self._grant_dispatching_grants.get(key) and not (
             self._grant_group_grants.get(inbound.chat_id)
         ) and not (self._turn_grant_values(inbound)[1] if new_grants is None else new_grants):
             return False
@@ -4544,7 +4522,6 @@ class ClawChatAdapter(BasePlatformAdapter):
         return True
 
     async def _handle_inbound(self, inbound: InboundMessage) -> None:
-        self._admit_owner_direct_inbound(inbound)
         if await self._consume_grant_confirmation(inbound):
             return
         if self._refuses_turn(inbound):
@@ -4635,7 +4612,11 @@ class ClawChatAdapter(BasePlatformAdapter):
                 account_id=self._account_id(), chat_id=inbound.chat_id,
                 speakers=speakers, grants=grants, any_granted_tools=any_tools, session_key=key,
                 speaker_names=self._grant_speaker_names(inbound, speakers),
-                owner_verified=self._verified_owner_inbound(inbound),
+                owner_verified=(inbound.chat_type == "direct"
+                                and bool(inbound.sender_id)
+                                and inbound.sender_id == self._owner_user_id()
+                                and inbound.chat_id == self._owner_direct_chat_id()
+                                and not inbound.raw_message.get("synthetic")),
             )
             self._grant_dispatch_started[key] = snapshot.nonce
             self._grant_sessions.add(key)

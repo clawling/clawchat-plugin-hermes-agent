@@ -246,22 +246,6 @@ async def test_owner_direct_has_verified_empty_snapshot_and_prompt_switch(harnes
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("text", ["/approve", "/deny", "/new", "/approve ABC123", "/deny ABC123",
-                                  "ABC123", "ordinary text"])
-async def test_busy_owner_direct_messages_reach_host_without_admission_delay(harness, text):
-    a = harness.adapter
-    await a._handle_inbound(message("usr_owner", chat=OWNER_CHAT))
-    first = turns.get_snapshot(harness.events[0].source.message_id)
-    assert first.owner_verified and not first.grants and a._active_sessions
-    await a._on_message(message("usr_owner", text, chat=OWNER_CHAT).raw_message)
-    assert len(harness.events) == 2
-    assert harness.events[-1].text == text
-    assert not a._grant_admission_queue._pending
-    assert turns.get_snapshot(first.nonce).owner_verified
-    assert turns.get_snapshot(harness.events[-1].source.message_id).owner_verified
-
-
-@pytest.mark.asyncio
 async def test_nonce_reply_anchor_is_restored_after_release(harness):
     a = harness.adapter
     incoming = message(mid="real-message-id")
