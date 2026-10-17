@@ -4610,6 +4610,10 @@ class ClawChatAdapter(BasePlatformAdapter):
                 or request['source_session_key'] != self._grant_session_key(inbound)):
             raise RuntimeError('host-rejected')
 
+    def _finish_request_notices(self, notices, *, accepted):
+        for claim_key in {notice['notice_claim_key'] for notice in notices}:
+            self._store.finish_pending_notice(account_id=self._account_id(), claim_key=claim_key, accepted=accepted)
+
     def _finish_request_wake(self, inbound, error=None):
         if inbound.grant_origin:
             request = self._store.get_request(account_id=self._account_id(), request_id=inbound.grant_origin[1])
@@ -4790,13 +4794,14 @@ class ClawChatAdapter(BasePlatformAdapter):
             from clawchat_gateway.turn_grants import get_snapshot, register_turn, RequestOrigin
 
             key = self._grant_session_key(inbound)
+            non_owners = tuple(dict.fromkeys(speaker for speaker in speakers if speaker and speaker != self._owner_user_id()))
+            requester = non_owners[0] if len(non_owners) == 1 else None
             snapshot = register_turn(
                 account_id=self._account_id(), chat_id=inbound.chat_id,
                 speakers=speakers, grants=grants, any_granted_tools=any_tools, session_key=key,
-                request_origin=(RequestOrigin(inbound.sender_id, inbound.chat_id, inbound.chat_type, key,
+                request_origin=(RequestOrigin(requester, inbound.chat_id, inbound.chat_type, key,
                     self._inbound_trigger_id(inbound.raw_message), inbound.text)
-                    if not inbound.is_internal_synthetic and inbound.sender_id
-                    and inbound.sender_id != self._owner_user_id() else None),
+                    if not inbound.is_internal_synthetic and requester else None),
                 speaker_names=self._grant_speaker_names(inbound, speakers),
                 owner_verified=self._verified_owner_inbound(inbound),
                 owner_side=getattr(grants, "owner_only", False),
@@ -4870,78 +4875,84 @@ class ClawChatAdapter(BasePlatformAdapter):
             reply_to_message_id=reply_to_message_id,
             reply_to_text=reply_to_text,
         )
-        channel_prompt_parts = self._compose_channel_prompt_parts(inbound)
-        if (not inbound.is_internal_synthetic and self._clawchat_config.tool_grants == 'on'
-                and hasattr(self._store, 'take_pending_notice')):
-            from clawchat_gateway.tool_requests import build_request_notice
-            try:
-                notices = self._store.take_pending_notice(account_id=self._account_id(), requester_ids=speakers,
-                    session_key=self._grant_session_key(inbound), chat_id=inbound.chat_id, chat_type=inbound.chat_type)
-                if notices:
-                    channel_prompt_parts.append(self._channel_prompt_part('access-request-notice', 'platform',
-                        '\n'.join(build_request_notice(request) for request in notices)))
-            except Exception:
-                logger.warning('clawchat access notice lookup failed', exc_info=True)
-        channel_prompt = self._render_channel_prompt_parts(channel_prompt_parts)
-        if channel_prompt:
-            event.channel_prompt = channel_prompt
-            remember_injection_parts(
-                platform="clawchat",
-                user_message=event.text,
-                parts=channel_prompt_parts,
+        notices = []
+        try:
+            channel_prompt_parts = self._compose_channel_prompt_parts(inbound)
+            if (not inbound.is_internal_synthetic and self._clawchat_config.tool_grants == 'on'
+                    and hasattr(self._store, 'take_pending_notice')):
+                from clawchat_gateway.tool_requests import build_request_notice
+                try:
+                    notices = self._store.take_pending_notice(account_id=self._account_id(), requester_ids=speakers,
+                        session_key=self._grant_session_key(inbound), chat_id=inbound.chat_id, chat_type=inbound.chat_type)
+                    if notices:
+                        channel_prompt_parts.append(self._channel_prompt_part('access-request-notice', 'platform',
+                            '\n'.join(build_request_notice(request) for request in notices)))
+                except Exception:
+                    self._finish_request_notices(notices, accepted=False)
+                    notices = []
+                    logger.warning('clawchat access notice lookup failed', exc_info=True)
+            channel_prompt = self._render_channel_prompt_parts(channel_prompt_parts)
+            if channel_prompt:
+                event.channel_prompt = channel_prompt
+                remember_injection_parts(
+                    platform="clawchat",
+                    user_message=event.text,
+                    parts=channel_prompt_parts,
+                    trace={
+                        "messageId": inbound.raw_message.get("message_id") or "",
+                        "chatId": inbound.chat_id,
+                        "chatType": inbound.chat_type,
+                        "senderId": inbound.sender_id,
+                    },
+                )
+                if _debug_prompt_injection_enabled():
+                    logger.warning(
+                        "clawchat prompt injection debug chat_id=%s chat_type=%s sender_id=%s\n%s\n%s\n%s\n%s\n%s\n%s",
+                        inbound.chat_id,
+                        inbound.chat_type,
+                        inbound.sender_id,
+                        DEBUG_PROMPT_INJECTION_BEGIN,
+                        channel_prompt,
+                        DEBUG_PROMPT_INJECTION_END,
+                        DEBUG_EVENT_TEXT_BEGIN,
+                        event.text,
+                        DEBUG_EVENT_TEXT_END,
+                    )
+            write_llm_context_snapshot(
+                visibility="host_event",
                 trace={
                     "messageId": inbound.raw_message.get("message_id") or "",
                     "chatId": inbound.chat_id,
                     "chatType": inbound.chat_type,
                     "senderId": inbound.sender_id,
                 },
+                input={
+                    "injectedPrompt": channel_prompt or "",
+                    "eventText": event.text,
+                },
+                context={"injectionParts": channel_prompt_parts},
+                warnings=[] if channel_prompt else [
+                    "Hermes event did not include a ClawChat channel_prompt for this turn.",
+                ],
             )
-            if _debug_prompt_injection_enabled():
-                logger.warning(
-                    "clawchat prompt injection debug chat_id=%s chat_type=%s sender_id=%s\n%s\n%s\n%s\n%s\n%s\n%s",
-                    inbound.chat_id,
-                    inbound.chat_type,
-                    inbound.sender_id,
-                    DEBUG_PROMPT_INJECTION_BEGIN,
-                    channel_prompt,
-                    DEBUG_PROMPT_INJECTION_END,
-                    DEBUG_EVENT_TEXT_BEGIN,
-                    event.text,
-                    DEBUG_EVENT_TEXT_END,
-                )
-        write_llm_context_snapshot(
-            visibility="host_event",
-            trace={
-                "messageId": inbound.raw_message.get("message_id") or "",
-                "chatId": inbound.chat_id,
-                "chatType": inbound.chat_type,
-                "senderId": inbound.sender_id,
-            },
-            input={
-                "injectedPrompt": channel_prompt or "",
-                "eventText": event.text,
-            },
-            context={"injectionParts": channel_prompt_parts},
-            warnings=[] if channel_prompt else [
-                "Hermes event did not include a ClawChat channel_prompt for this turn.",
-            ],
-        )
-        logger.info(
-            "clawchat dispatch to hermes chat_id=%s user_id=%s text_len=%d media=%d downloaded=%d reply_to=%s",
-            inbound.chat_id,
-            inbound.sender_id,
-            len(inbound.text),
-            len(inbound.media_urls),
-            len(media_urls),
-            reply_to_message_id,
-        )
-        try:
+            logger.info(
+                "clawchat dispatch to hermes chat_id=%s user_id=%s text_len=%d media=%d downloaded=%d reply_to=%s",
+                inbound.chat_id,
+                inbound.sender_id,
+                len(inbound.text),
+                len(inbound.media_urls),
+                len(media_urls),
+                reply_to_message_id,
+            )
             self._check_request_wake(inbound)
             await self.handle_message(event)
-            if inbound.grant_origin and getattr(event, '_gateway_accepted', None) is False:
+            accepted = getattr(event, '_gateway_accepted', None) is not False
+            if inbound.grant_origin and not accepted:
                 raise RuntimeError('host-rejected')
+            self._finish_request_notices(notices, accepted=accepted)
             self._finish_request_wake(inbound)
         except BaseException:
+            self._finish_request_notices(notices, accepted=False)
             self._finish_request_wake(inbound, 'dispatch-failed')
             if snapshot is not None:
                 from clawchat_gateway.turn_grants import release_turn

@@ -290,6 +290,13 @@ CREATE INDEX tool_request_status_expiry ON tool_grant_requests(account_id,status
 """
 
 
+TOOL_REQUEST_NOTICE_CLAIMS_SCHEMA = """
+ALTER TABLE tool_grant_requests ADD COLUMN notice_claim_key TEXT;
+ALTER TABLE tool_grant_requests ADD COLUMN notice_claimed_at INTEGER;
+CREATE INDEX tool_request_notice_claim ON tool_grant_requests(account_id, notice_claim_key);
+"""
+
+
 def refresh_token_fingerprint(refresh_token: str) -> str:
     """Fingerprint the credential as submitted to the refresh endpoint."""
     return hashlib.sha256(refresh_token.strip().encode("utf-8")).hexdigest()
@@ -311,6 +318,7 @@ MIGRATIONS = [
     (13, "tool_grants", TOOL_GRANTS_SCHEMA),
     (14, "tool_grants_v2", TOOL_GRANTS_V2_SCHEMA),
     (15, "tool_grant_requests", TOOL_GRANT_REQUESTS_SCHEMA),
+    (16, "tool_request_notice_claims", TOOL_REQUEST_NOTICE_CLAIMS_SCHEMA),
 ]
 
 # Lookup behind ClawChatStore.find_seen_message_in_chat: a real chat message
@@ -612,15 +620,17 @@ class ClawChatStore:
             block = request_grant_block(grants, capability_id, now=now)
             if block:
                 return dict(status='blocked', reason=block)
-            if conn.execute('''SELECT 1 FROM tool_grant_requests WHERE account_id = ? AND requester_user_id = ?
+            existing = conn.execute('''SELECT status FROM tool_grant_requests WHERE account_id = ? AND requester_user_id = ?
                 AND capability_id = ? AND ((status IN ('sending','pending') AND expires_at > ?) OR (status <> 'failed' AND created_at > ?)) LIMIT 1''',
-                (account_id, origin.requester_user_id, capability_id, now, now - REQUEST_COOLDOWN_MS)).fetchone():
-                return dict(status='waiting')
+                (account_id, origin.requester_user_id, capability_id, now, now - REQUEST_COOLDOWN_MS)).fetchone()
+            if existing:
+                return (dict(status='waiting') if existing[0] in ('sending', 'pending') else
+                        dict(status='blocked', reason='rate-limited'))
             window = resolve_request_daily_window(now)
             count = conn.execute('SELECT count(*) FROM tool_grant_requests WHERE account_id = ? AND created_at > ? AND created_at <= ?',
                                  (account_id, window['start'], window['end'])).fetchone()[0]
             if count >= REQUEST_DAILY_LIMIT:
-                return dict(status='waiting')
+                return dict(status='blocked', reason='rate-limited')
             request_id, wake_key = secrets.token_urlsafe(24), secrets.token_urlsafe(24)
             for attempt in range(6):
                 code = generate_grant_code()
@@ -715,11 +725,15 @@ class ClawChatStore:
             ('failed' if error else 'delivered', None if error else now, now, error, account_id, wake_key)).rowcount)
 
     def _recover_stale(self, conn, account_id, now):
-        from clawchat_gateway.tool_requests import REQUEST_WAKE_STALE_MS
+        from clawchat_gateway.tool_requests import REQUEST_WAKE_STALE_MS, REQUEST_NOTICE_CLAIM_TTL_MS
         self._expire_requests(conn, account_id, now)
         conn.execute('''UPDATE tool_grant_requests SET wake_state = 'failed', last_error_code = 'dispatch-timeout', updated_at = ?
             WHERE account_id = ? AND wake_state = 'dispatching' AND (wake_attempted_at IS NULL OR wake_attempted_at <= ?)''',
             (now, account_id, now - REQUEST_WAKE_STALE_MS))
+        conn.execute('''UPDATE tool_grant_requests SET notice_claim_key = NULL, notice_claimed_at = NULL
+            WHERE account_id = ? AND notice_claim_key IS NOT NULL
+            AND (notice_claimed_at IS NULL OR notice_claimed_at <= ? OR expires_at <= ?)''',
+            (account_id, now - REQUEST_NOTICE_CLAIM_TTL_MS, now))
 
     def recover_stale(self, *, account_id, now=None):
         now = _now_ms() if now is None else now
@@ -730,20 +744,36 @@ class ClawChatStore:
         return self._tool_grants_transaction(write)
 
     def take_pending_notice(self, *, account_id, requester_ids, session_key, chat_id, chat_type, now=None):
+        """Claim notices on the original route; host acceptance must confirm consumption."""
+        import secrets
         now = _now_ms() if now is None else now
         def write(conn):
             self._recover_stale(conn, account_id, now)
             ids = [row[0] for row in conn.execute('''SELECT request_id FROM tool_grant_requests WHERE account_id = ?
                 AND source_session_key = ? AND source_chat_id = ? AND source_chat_type = ? AND expires_at > ?
-                AND wake_state = 'failed' AND wake_notified_at IS NULL AND status IN ('allowed','asked','denied')''',
+                AND wake_state = 'failed' AND wake_notified_at IS NULL AND notice_claim_key IS NULL
+                AND status IN ('allowed','asked','denied')''',
                 (account_id, session_key, chat_id, chat_type, now))]
             requests = [self._request_row(conn, account_id, id_) for id_ in ids]
             requests = [request for request in requests if request['requester_user_id'] in requester_ids]
+            claim_key = secrets.token_urlsafe(24)
             for request in requests:
-                conn.execute('UPDATE tool_grant_requests SET wake_notified_at = ?, updated_at = ? WHERE account_id = ? AND wake_key = ?',
-                             (now, now, account_id, request['wake_key']))
+                conn.execute('''UPDATE tool_grant_requests SET notice_claim_key = ?, notice_claimed_at = ?, updated_at = ?
+                    WHERE account_id = ? AND wake_key = ?''', (claim_key, now, now, account_id, request['wake_key']))
+                request.update(notice_claim_key=claim_key, notice_claimed_at=now)
             return requests
         return self._tool_grants_transaction(write)
+
+    def finish_pending_notice(self, *, account_id, claim_key, accepted, now=None):
+        """Acknowledge or release this claim only; late acknowledgments cannot steal a new claim."""
+        now = _now_ms() if now is None else now
+        if not claim_key or not isinstance(accepted, bool) or not _finite(now):
+            raise ValueError('Invalid notice acknowledgement')
+        return self._tool_grants_transaction(lambda conn: conn.execute('''UPDATE tool_grant_requests
+            SET wake_notified_at = CASE WHEN ? AND expires_at > ? THEN ? ELSE wake_notified_at END,
+                notice_claim_key = NULL, notice_claimed_at = NULL, updated_at = ?
+            WHERE account_id = ? AND notice_claim_key = ? AND wake_notified_at IS NULL''',
+            (accepted, now, now, now, account_id, claim_key)).rowcount)
 
     def create_pending_grant(
         self, *, account_id: str, code: str, payload: dict[str, Any], now: int | None = None, payload_version: int = 2,

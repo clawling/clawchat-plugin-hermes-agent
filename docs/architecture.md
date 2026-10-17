@@ -223,6 +223,8 @@ policy defaults](./configuration.md#storage-upgrade-and-unimplemented-policy-cho
 `tool_requests.py` owns fixed card/continuation/notice copy, sanitation and the
 rolling 24-hour quota policy interface. Migration 15 adds durable requests,
 shared pending-code references, rate indexes and one-time wake notice storage.
+Migration 16 adds durable notice claim tokens and timestamps; pending requests
+and decisions survive the upgrade.
 The new schema cannot be downgraded; never share the DB with an old process.
 Quota checks, code insertion and request creation use one `BEGIN IMMEDIATE`;
 confirmation consumes the code, upserts the rule and queues the wake in another
@@ -232,6 +234,9 @@ atomic transaction. Send failures retain rate quota and never report pending.
 visible in non-owner turns even under `all:deny`. Its handler uses the exact
 nonce/session/turn binding and immutable `RequestOrigin`, while overlapping
 snapshots continue to restrict access. It accepts only capability and reason.
+An owner plus one trusted non-owner binds the non-owner regardless of order;
+multiple non-owners create no request context. Quota exhaustion returns
+`blocked/rate-limited`, while an existing pending card returns `waiting`.
 All three confirmation commands are intercepted before model dispatch; only
 real owner-direct input can decide, including a `sending` card after a crash.
 Proactive cards still accept only `/clawchat-allow` for the frozen mode.
@@ -250,6 +255,9 @@ v0.12.0+ compatibility contract.
 Startup recovers unexpired pending wakes. Dispatch failures and claims stuck
 for ten minutes become failed with a one-time, original-route-only notice on
 the requester's next real turn. Notice retrieval also recovers stale claims.
+Notice claims expire after ten minutes; the adapter acknowledges consumption
+only after host acceptance and releases claims on rejection or exceptions.
+Tokens prevent stale acknowledgements from consuming replacement claims.
 Notices expire with the card. Ambiguous dispatches are never retried; the host
 does not provide guaranteed idempotent delivery. Unknown spontaneous producers
 retain default permissions and do not inherit owner or guest authority.

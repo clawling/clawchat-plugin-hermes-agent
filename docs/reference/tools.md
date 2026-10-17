@@ -110,12 +110,19 @@ Proactive cards still accept only `/clawchat-allow`, preserving the frozen mode.
 
 Request cards last 24 hours. A persistent six-hour person × capability cooldown
 and rolling 24-hour account limit of 20 serialize quota and code allocation.
-Existing pending cards return waiting; send failures remain failed and consume
+Existing pending cards return waiting. Quota or cooldown blocks without a pending
+card return `blocked`, `reason:"rate-limited"`, `sent:false`; no request was sent.
+Send failures remain failed and consume
 only daily quota, permitting a retry before the person cooldown. `sending` cards can be confirmed after a crash if the owner received them.
 A decision atomically consumes the code, writes the rule and queues a wakeup
 in the requester's original session, with the requester as the speaker and
 permissions freshly loaded. Wake failures produce a one-time English notice
 on the requester's next real turn in that same session, until card expiry.
+Notices use a ten-minute claim lease and are consumed only after host acceptance;
+rejected or failed events release the notice for the next real turn.
+A group batch with the owner and one non-owner always requests for that
+non-owner; batches with multiple non-owners create no request context.
+Subagent and schedule cards also display the proactive card's Hermes limits.
 With `tool-grants: off`, all four authorization tools stop and rules are retained.
 
 Cross-chat grants can allow mention, reaction and file sends to another chat,

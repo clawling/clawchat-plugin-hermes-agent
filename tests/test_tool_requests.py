@@ -16,7 +16,7 @@ from clawchat_gateway import host_tools_guard as guard, plugin_tools, tools, tur
 from clawchat_gateway.adapter import ClawChatAdapter
 from clawchat_gateway.inbound import InboundMessage, parse_inbound_message
 from clawchat_gateway.storage import ClawChatStore
-from clawchat_gateway.tool_capabilities import AUTHORIZATION_TOOLS, ORIGIN_INHERITANCE_POLICY, resolve_origin_grant_context
+from clawchat_gateway.tool_capabilities import AUTHORIZATION_TOOLS, TOOL_CAPABILITIES, ORIGIN_INHERITANCE_POLICY, resolve_origin_grant_context
 from clawchat_gateway.tool_grants import GRANT_WRITE_FAILED_MESSAGE, NON_OWNER_GRANTS_HINT, GRANT_BLOCK_MESSAGE
 from clawchat_gateway.tool_requests import (
     REQUEST_CARD_TTL_MS, REQUEST_COOLDOWN_MS, REQUEST_WAKE_STALE_MS, REQUEST_DAILY_WINDOW_POLICY,
@@ -63,7 +63,7 @@ def test_reserve_cooldown_daily_rolling_limit_and_denied(store):
     assert reserve(store, now=NOW + REQUEST_COOLDOWN_MS + 1) == {'status': 'blocked', 'reason': 'denied'}
     for index in range(19):
         assert reserve(store, user=f'usr_other{index}')['status'] == 'sending'
-    assert reserve(store, user='usr_twentyfirst')['status'] == 'waiting'
+    assert reserve(store, user='usr_twentyfirst') == {'status': 'blocked', 'reason': 'rate-limited'}
     assert reserve(store, user='usr_twentyfirst', now=NOW + REQUEST_CARD_TTL_MS)['status'] == 'sending'
     assert REQUEST_DAILY_WINDOW_POLICY == 'rolling-24h'
     assert resolve_request_daily_window(NOW, 'UTC') == {'start': NOW - REQUEST_CARD_TTL_MS, 'end': NOW}
@@ -73,7 +73,7 @@ def test_failed_send_counts_daily_quota_without_person_cooldown(store):
     for _ in range(20):
         request = reserve(store)['request']
         store.mark_failed(account_id='agent', request_id=request['request_id'], now=NOW)
-    assert reserve(store)['status'] == 'waiting'
+    assert reserve(store) == {'status': 'blocked', 'reason': 'rate-limited'}
     assert reserve(store, now=NOW + REQUEST_CARD_TTL_MS)['status'] == 'sending'
 
 
@@ -158,6 +158,9 @@ def test_restart_recovery_stale_dispatch_and_notice_once_original_route(store):
     assert notices(restarted, now=NOW + REQUEST_WAKE_STALE_MS + 2, users=('usr_other',)) == []
     notice = notices(restarted, now=NOW + REQUEST_WAKE_STALE_MS + 2)
     assert len(notice) == 1 and notice[0]['last_error_code'] == 'dispatch-timeout'
+    assert fetch(restarted, first)['wake_notified_at'] is None
+    restarted.finish_pending_notice(account_id='agent', claim_key=notice[0]['notice_claim_key'], accepted=True,
+                                    now=NOW + REQUEST_WAKE_STALE_MS + 2)
     assert notices(restarted, now=NOW + REQUEST_WAKE_STALE_MS + 2) == []
 
 
@@ -563,7 +566,7 @@ def test_concurrent_account_requests_cannot_exceed_daily_quota(store):
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(lambda index: reserve(ClawChatStore(store.db_path), user=f'usr_guest{index}'), range(25)))
     assert sum(result['status'] == 'sending' for result in results) == 20
-    assert sum(result['status'] == 'waiting' for result in results) == 5
+    assert sum(result == {'status': 'blocked', 'reason': 'rate-limited'} for result in results) == 5
 
 
 @pytest.mark.asyncio
@@ -607,3 +610,177 @@ async def test_startup_busy_chat_does_not_hold_other_pending_wakes(request_env):
         if not recovery.done():
             recovery.cancel()
             await asyncio.gather(recovery, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_daily_quota_after_failed_sends_reports_rate_limited_not_waiting(request_env):
+    from clawchat_gateway.tool_requests import REQUEST_RATE_LIMITED_MESSAGE
+    h = request_env
+    for index in range(20):
+        request = reserve(h.adapter._store, account='usr_agent', user=f'usr_failed{index}', now=int(time.time() * 1000))['request']
+        h.adapter._store.mark_failed(account_id='usr_agent', request_id=request['request_id'])
+    result = await call_request(h)
+    assert {key: result[key] for key in ('status', 'reason', 'sent')} == dict(status='blocked', reason='rate-limited', sent=False)
+    assert result['note'] == REQUEST_RATE_LIMITED_MESSAGE + " Explain only the requested ability in the conversation's language. Do not reveal others' access."
+    assert 'was not sent' in result['note'] and 'ask the owner directly' in result['note']
+    assert 'I have already asked' not in result['note'] and 'I have asked' not in result['note']
+    h.adapter._send_owner_text.assert_not_awaited()
+
+
+def test_cooldown_without_pending_card_does_not_claim_waiting(store):
+    request = reserve(store)['request']
+    decide(store, request)
+    store.revoke_grants(account_id='agent', user_id='usr_guest')
+    assert reserve(store, now=NOW + 2) == dict(status='blocked', reason='rate-limited')
+
+
+@pytest.mark.parametrize('lang', ['zh', 'zh_Hant', 'en'])
+@pytest.mark.parametrize('capability', list(TOOL_CAPABILITIES))
+def test_request_card_host_limit_copy_only_for_limited_capabilities(store, lang, capability):
+    from clawchat_gateway.tool_grants import HERMES_LIMIT_COPY
+    request = reserve(store, capability=capability)['request']
+    card = build_request_card(request, lang=lang, ask_available=True)
+    assert (HERMES_LIMIT_COPY[lang] in card) is (capability in ('subagent', 'schedule'))
+    assert card.count(HERMES_LIMIT_COPY[lang]) == (1 if capability in ('subagent', 'schedule') else 0)
+
+
+def failed_wake(store):
+    request = reserve(store)['request']
+    decide(store, request)
+    store.claim_wake(account_id='agent', wake_key=request['wake_key'], now=NOW + 2)
+    store.fail_wake(account_id='agent', wake_key=request['wake_key'], now=NOW + 3)
+    return request
+
+
+def test_notice_claim_release_timeout_and_stale_acknowledgement(store):
+    from clawchat_gateway.tool_requests import REQUEST_NOTICE_CLAIM_TTL_MS
+    request = failed_wake(store)
+    first = notices(store)[0]
+    assert fetch(store, request)['wake_notified_at'] is None
+    assert notices(store) == []
+    store.finish_pending_notice(account_id='agent', claim_key=first['notice_claim_key'], accepted=False, now=NOW + 6)
+    second = notices(store, now=NOW + 7)[0]
+    assert second['notice_claim_key'] != first['notice_claim_key']
+    assert notices(store, now=NOW + 7 + REQUEST_NOTICE_CLAIM_TTL_MS - 1) == []
+    restarted = ClawChatStore(store.db_path)
+    third = notices(restarted, now=NOW + 7 + REQUEST_NOTICE_CLAIM_TTL_MS)[0]
+    assert third['notice_claim_key'] != second['notice_claim_key']
+    assert restarted.finish_pending_notice(account_id='agent', claim_key=second['notice_claim_key'], accepted=True,
+        now=NOW + 8 + REQUEST_NOTICE_CLAIM_TTL_MS) == 0
+    assert fetch(restarted, request)['wake_notified_at'] is None
+    restarted.finish_pending_notice(account_id='agent', claim_key=third['notice_claim_key'], accepted=True,
+        now=NOW + 8 + REQUEST_NOTICE_CLAIM_TTL_MS)
+    assert notices(restarted, now=NOW + 9 + REQUEST_NOTICE_CLAIM_TTL_MS) == []
+    assert fetch(restarted, request)['wake_notified_at'] is not None
+
+
+def test_concurrent_notice_claims_only_one_turn_can_inject(store):
+    failed_wake(store)
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        results = list(pool.map(lambda _: notices(ClawChatStore(store.db_path)), range(6)))
+    assert sum(len(result) for result in results) == 1
+
+
+def test_notice_claim_expiring_with_card_is_not_consumed(store):
+    request = failed_wake(store)
+    claim = notices(store)[0]
+    store.finish_pending_notice(account_id='agent', claim_key=claim['notice_claim_key'], accepted=True, now=NOW + REQUEST_CARD_TTL_MS)
+    assert fetch(store, request)['wake_notified_at'] is None
+    assert notices(store, now=NOW + REQUEST_CARD_TTL_MS) == []
+
+
+def test_notice_claim_migration_upgrades_existing_requests_without_loss(tmp_path, monkeypatch):
+    from clawchat_gateway import storage
+    migrations = storage.MIGRATIONS
+    monkeypatch.setattr(storage, 'MIGRATIONS', migrations[:15])
+    old = ClawChatStore(tmp_path / 'upgrade.sqlite')
+    request = failed_wake(old)
+    monkeypatch.setattr(storage, 'MIGRATIONS', migrations)
+    upgraded = ClawChatStore(old.db_path)
+    claim = notices(upgraded)[0]
+    assert claim['request_id'] == request['request_id']
+    assert fetch(upgraded, request)['decision_mode'] == 'direct'
+    upgraded.finish_pending_notice(account_id='agent', claim_key=claim['notice_claim_key'], accepted=True, now=NOW + 6)
+    assert notices(upgraded, now=NOW + 7) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure', ['reject', 'exception', 'cancel', 'render'])
+async def test_notice_remains_pending_until_host_accepts(request_env, monkeypatch, failure):
+    h = request_env
+    await call_request(h)
+    request = latest_request(h)
+    h.adapter._store.confirm_request(account_id='usr_agent', code=request['code'], mode='direct', decided_by_user_id='usr_owner')
+    h.client.get_conversation.side_effect = RuntimeError('unavailable')
+    await h.adapter._dispatch_request_wake(request['wake_key'])
+    h.adapter._active_sessions.clear()
+    await h.adapter.on_processing_complete(h.harness.events[0], 'SUCCESS')
+    original_handle, original_render = h.adapter.handle_message, h.adapter._render_channel_prompt_parts
+    observed = []
+    async def fail(event):
+        observed.append(event)
+        assert latest_request(h)['wake_notified_at'] is None
+        assert latest_request(h)['notice_claim_key']
+        if failure == 'exception':
+            raise RuntimeError('host failed')
+        if failure == 'cancel':
+            raise asyncio.CancelledError()
+        event._gateway_accepted = False
+    monkeypatch.setattr(h.adapter, 'handle_message', fail)
+    if failure == 'render':
+        monkeypatch.setattr(h.adapter, '_render_channel_prompt_parts', lambda _: (_ for _ in ()).throw(RuntimeError('render failed')))
+    if failure == 'reject':
+        await h.adapter._handle_inbound(message())
+    else:
+        with pytest.raises(asyncio.CancelledError if failure == 'cancel' else RuntimeError):
+            await h.adapter._handle_inbound(message())
+    assert latest_request(h)['wake_notified_at'] is None
+    assert latest_request(h)['notice_claim_key'] is None
+    if observed:
+        assert build_request_notice(request | dict(decision_mode='direct')) in observed[0].channel_prompt
+    monkeypatch.setattr(h.adapter, 'handle_message', original_handle)
+    monkeypatch.setattr(h.adapter, '_render_channel_prompt_parts', original_render)
+    await h.adapter._handle_inbound(message(text='try again'))
+    assert build_request_notice(latest_request(h)) in h.harness.events[-1].channel_prompt
+    assert latest_request(h)['wake_notified_at'] is not None
+    h.adapter._active_sessions.clear()
+    await h.adapter.on_processing_complete(h.harness.events[-1], 'SUCCESS')
+    await h.adapter._handle_inbound(message(text='next'))
+    assert build_request_notice(latest_request(h)) not in (getattr(h.harness.events[-1], 'channel_prompt', '') or '')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('order', [('usr_owner', 'usr_a'), ('usr_a', 'usr_owner')])
+async def test_owner_and_unique_guest_batch_always_requests_for_guest(request_env, order):
+    h = request_env
+    h.adapter._active_sessions.clear()
+    await h.adapter.on_processing_complete(h.harness.events[0], 'SUCCESS')
+    h.adapter._clawchat_config = replace(h.adapter._clawchat_config, group_sessions_per_user=False)
+    h.client.get_conversation.side_effect = lambda chat: {'conversation': {'id': chat, 'type': 'group', 'title': 'Group'}}
+    incoming = await coalesced([message(sender, text='Please inspect the result', kind='group') for sender in order])
+    await h.adapter._handle_inbound(incoming)
+    snapshot = turns.get_snapshot(h.harness.events[-1].source.message_id)
+    assert snapshot.request_origin.requester_user_id == 'usr_a'
+    turns.bind_turn(snapshot.nonce, 's', 't')
+    with h.binder(**context(snapshot, group=True)):
+        assert (await call_request(h))['status'] == 'pending'
+    assert latest_request(h)['requester_user_id'] == 'usr_a'
+    h.client.get_user_info.assert_awaited_once_with('usr_a')
+    assert h.adapter._send_owner_text.call_args.args[0] == OWNER_CHAT
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('order', [('usr_owner', 'usr_a', 'usr_b'), ('usr_a', 'usr_b', 'usr_owner')])
+async def test_multiple_guest_batch_has_no_request_context_or_card(request_env, order):
+    h = request_env
+    h.adapter._active_sessions.clear()
+    await h.adapter.on_processing_complete(h.harness.events[0], 'SUCCESS')
+    h.adapter._clawchat_config = replace(h.adapter._clawchat_config, group_sessions_per_user=False)
+    await h.adapter._handle_inbound(await coalesced([message(sender, kind='group') for sender in order]))
+    snapshot = turns.get_snapshot(h.harness.events[-1].source.message_id)
+    assert snapshot.request_origin is None
+    turns.bind_turn(snapshot.nonce, 's', 't')
+    with h.binder(**context(snapshot, group=True)):
+        assert guard.clawchat_pre_tool_call(tool_name='clawchat_tool_request', session_id='s', turn_id='t')['action'] == 'block'
+        assert (await call_request(h))['status'] == 'blocked'
+    h.adapter._send_owner_text.assert_not_awaited()

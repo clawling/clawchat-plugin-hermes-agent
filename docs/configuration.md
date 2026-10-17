@@ -1232,14 +1232,17 @@ It records the trusted requester and original chat/session/message, one opaque
 request ID, one shared six-digit pending code, capability, sanitized reason and
 summary, timestamps, decision/decider, unique wake key, wake state and notice
 consumption time. Indexes cover person/capability/time, account/time and
-status/expiry. Migration 15 includes notice storage; no migration 16 is needed.
-**Migrations 14 and 15 cannot be downgraded. New and old processes must not share a DB.**
+status/expiry. Migration **16** (`tool_request_notice_claims`) adds notice
+claim tokens and timestamps, preserving existing requests and decisions.
+**Migrations 14–16 cannot be downgraded. New and old processes must not share a DB.**
 
 #### Guest access requests and resumption
 
 `clawchat_tool_request({capability, reason})` is independently visible to every
 non-owner turn, even under `all:deny`. It does not inherit from `all` and cannot
-specify a user or destination. Deny, mixed-turn blocks, unavailable capabilities
+specify a user or destination. In a group batch containing the owner and exactly
+one trusted non-owner, that non-owner is the requester regardless of message
+order. Two or more non-owners create no request context. Deny, mixed-turn blocks, unavailable capabilities
 and existing access send no card. Unclassified tools require an owner-created
 exact-tool grant. Model arguments never determine requester identity or routing.
 
@@ -1247,8 +1250,11 @@ One transaction checks the person × capability six-hour cooldown and account
 rolling 24-hour limit of 20, reserves a code in `tool_grant_pending` and creates
 `sending`. Code collisions retry at most five times after the initial attempt.
 A successful send changes it to `pending`; failure changes it to `failed` and
-never claims the owner was asked. Pending cards and throttled calls return
-`waiting`. Failed sends retain the daily quota but do not impose the person cooldown. `REQUEST_DAILY_WINDOW_POLICY` is
+never claims the owner was asked. An existing pending card returns `waiting`.
+Quota or cooldown blocks without a pending card return `blocked` with
+`reason="rate-limited"` and `sent:false`; the fixed guidance states that no
+request was sent and the caller can ask the owner directly. Failed sends retain
+the daily quota but do not impose the person cooldown. `REQUEST_DAILY_WINDOW_POLICY` is
 `rolling-24h`; `resolve_request_daily_window(now, owner_time_zone)` isolates the
 pending calendar-day decision without using the owner's timezone today.
 
@@ -1256,6 +1262,8 @@ Only the owner's activation direct chat receives a code-generated card.
 Profile names, group names and the relayed reason are cleaned, with links,
 controls and hidden characters removed and Markdown/slash commands neutralized;
 reasons are limited to 60 Unicode code points and marked “Their words, relayed”.
+Subagent and schedule cards include the same three-language Hermes limitations
+as proactive cards; other capabilities do not include that limitation.
 A request card lasts 24 hours. `/clawchat-allow`, `/clawchat-ask` and
 `/clawchat-deny` select direct/ask/deny without another confirmation card.
 Ask is absent and refused when the actual approval route cannot ask reliably.
@@ -1277,7 +1285,11 @@ Startup dispatches unexpired pending wakes. A dispatching claim older than ten
 minutes becomes failed, with a pending notice; taking notices also recovers
 stale claims. Failed wakes retain the effective grant and inject one short
 English notice only on that requester's next real turn in the original
-chat/session, expiring with the card. Ambiguous dispatches are not retried;
+chat/session, expiring with the card. Notices are atomically claimed with a
+ten-minute lease and marked consumed only after the host accepts the event.
+Rejection or exceptions release the claim; expired claims are reclaimed on
+startup or notice retrieval. Claim tokens prevent a late acknowledgement from
+consuming a newer claim. Ambiguous dispatches are not retried;
 the host has no guaranteed idempotent delivery, so this is one claimed dispatch,
 not a promise of strict end-to-end exactly-once delivery.
 
