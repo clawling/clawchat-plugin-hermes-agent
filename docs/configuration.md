@@ -747,7 +747,7 @@ plain-text restart phrases, and an approval word while a dangerous-command
 approval blocks that chat's session. In groups a non-owner's `/always` or
 `/remember` is dropped even when `group_command_mode` is `all`.
 
-When the agent hits a dangerous command inside a non-owner's direct chat,
+For an ordinary dangerous-command approval inside a non-owner's direct chat,
 Hermes' approval prompt (the command plus `/approve` / `/deny` choices) is
 not shown to them, since they cannot approve it. The plugin denies that
 approval immediately through Hermes' own `/deny` path
@@ -758,13 +758,16 @@ can approve it. On Hermes hosts whose resolve call accepts a reason, the
 agent also sees that it was declined by policy and must not retry; older
 hosts relay a plain denial. The owner is not notified. On a host without
 that resolve path the plugin only sends the note, and Hermes waits and
-denies on timeout as before. Owner chats and groups are unchanged.
+denies on timeout as before. Per-person ask grants are the exception: their
+approval goes to the owner's direct chat instead (see below). Other owner-chat
+and group approvals keep their existing behavior.
 
 ### Host tools in turns the owner did not start
 
 | `extra.*` key          | Default | Values             |
 |------------------------|---------|--------------------|
 | `non-owner-host-tools` | `off`   | `off` / `approve`  |
+| `tool-grants` | `on` | `on` / `off` |
 
 Hermes gives a ClawChat turn the platform's full host toolset, and its
 factory `approvals.mode: smart` lets an auxiliary model run a "dangerous"
@@ -776,7 +779,8 @@ run commands on the owner's machine or read `$HERMES_HOME/.env`,
 `config.yaml` or `owner.md`.
 
 So every turn except the owner's own direct chat — a friend's direct chat
-and **every group turn, whoever spoke** — loses these host toolsets:
+and **every group turn, whoever spoke** — loses these host toolsets by default
+(per-person grants can add explicitly named tools back; see below):
 `terminal` (`terminal`, `process_manage`), `file` (`read_file`, `write_file`,
 `patch`, `search_files`), `code_execution` (`execute_code`), `delegation`
 (`delegate_task`), `cronjob` (`cronjob_manage`), `kanban` (every `kanban_*`
@@ -792,9 +796,9 @@ and without the initiating turn's session identity. The plugin's hook cannot
 identify the caller there, so it restricts kanban tools in the initiating turn.
 For the same reason the hook also blocks Bot Mode's `message_agent` (the
 receiving agent runs with its own full tools).
-Group turns are narrowed as a whole because a group is one shared session:
-switching its toolset per speaker would rebuild the agent each time the
-owner and someone else alternate. In turns the owner did not start (including
+Without per-person grants, group turns are narrowed as a whole because a
+group is one shared session. A granted batch can add toolsets back and cause
+Hermes to rebuild its cached agent; the tool hook still checks exact names. In turns the owner did not start (including
 every group turn), plugin tools refuse local file paths and local attachments
 are not sent (a reply delivered after the turn may carry one only into the
 owner's direct chat, an intentional exception because only the owner receives
@@ -829,6 +833,8 @@ outside the owner's direct chat (see
 sender is: turns the plugin itself starts there — permission receipts, the
 memory-migration hint, moment-comment and awareness notes, sender "ClawChat" —
 are owner turns too, because only the owner and the agent are in that chat.
+This broad owner classification does not authorize the three grant management
+tools: those require a real message from the owner and a verified turn binding.
 The same synthetic turns in a friend's direct chat (the friend greeting) or a
 group stay narrowed, and a failed lookup counts as "not the owner's chat".
 
@@ -888,23 +894,23 @@ switch the owner's devices or play music on the owner's account. Owners who do
 not want that should disable those toolsets for ClawChat
 (`platform_toolsets.clawchat`).
 
-`no_mcp` drops **every** MCP server from such a turn, including the
+Without grants, `no_mcp` drops **every** MCP server from such a turn, including the
 "portable" MCP servers other Hermes plugins bring: they are configured by the
 owner too. The owner's direct chat keeps all of them.
 
 What each Hermes version gets:
 
-| Hermes | Layer 1: tools left out of the schema | Layer 2: `pre_tool_call` block | `approve` | Memory provider tools |
-|---|---|---|---|---|
-| 0.21.0 and later | yes | yes | yes — every call goes to the human gate | left out with `memory` (layer 1); under `approve` every call goes to the gate |
-| 0.20.1 – 0.20.x | yes | yes | no — blocked instead (the tools stay visible) | left out with `memory` (layer 1); under `approve` blocked by name |
-| 0.19.1 – 0.20.0 | no — the tools stay visible | yes | no — blocked instead | visible, blocked by name |
-| 0.12.0 – 0.19.0 | no — the tools stay visible | yes (no chat type from the host: the owner's activation chat id decides, see above) | no — blocked instead | visible, blocked by name |
+| Hermes | Layer 1: tools left out of the schema | Layer 2: `pre_tool_call` block | `approve` | Memory provider tools | Per-person grants |
+|---|---|---|---|---|---|
+| 0.21.0 and later | yes | yes | yes — every call goes to the human gate | left out with `memory` (layer 1); under `approve` every call goes to the gate | direct in both layers; ask with a reliable owner approval route and no bypass |
+| 0.20.1 – 0.20.x | yes | yes | no — blocked instead (the tools stay visible) | left out with `memory` (layer 1); under `approve` blocked by name | direct in both layers; ask refused |
+| 0.19.1 – 0.20.0 | no — the tools stay visible | yes | no — blocked instead | visible, blocked by name | direct through the hook only; ask refused |
+| 0.12.0 – 0.19.0 | no — the tools stay visible | yes (no chat type from the host: the owner's activation chat id decides, see above) | no — blocked instead | visible, blocked by name | unsupported; management tools require upgrade to 0.19.1+ |
 
 `connections` exists from Hermes 0.21.3. The argument limits above and the
 memory provider block are layer 2 only, on every version.
 
-Where the tools stay visible but every call is blocked, each such turn's
+Where ungranted tools stay visible but their calls are blocked, each such turn's
 ClawChat channel prompt says so, so the model does not spend rounds trying
 them. Every Hermes that can load the plugin (0.12.0+, `register_platform`)
 can take the hook; should one ever load it without `register_hook`, no layer
@@ -923,6 +929,77 @@ platform tools; the hook skipped), so both fail closed: an override that
 cannot work out the platform toolset narrows the turn to the plugin's own
 `clawchat` toolset plus `no_mcp` (without the sentinel Hermes would add
 every MCP server back), and a hook that cannot place the turn blocks the call.
+
+### Per-person tool grants
+
+`tool-grants: on` (default) lets the owner authorize a person to use exact
+host or connected-app tool names. In the owner's ClawChat direct chat, ask
+"Allow <name> to use <ability>". The agent resolves explicit user ids and
+calls `clawchat_tool_grant`; code looks up every person's name and sends a
+confirmation card to the owner's direct chat. Nothing takes effect until the
+owner sends `/clawchat-allow <6-digit code>` within ten minutes. Only a real
+message from the owner in the activation direct chat can confirm; wrong,
+expired and reused codes never activate a grant. The code is not returned to
+the model. Cards use the owner's language (zh, zh_Hant or en; others use en).
+They list the actual tools, names, mode, expiry, and what granting means.
+`richInteractions` does not change this text-and-command card.
+
+`direct` lets the named person use a tool without an approval for each call;
+local path arguments remain refused. `ask` sends each call to the owner's
+direct chat with the speakers' names (ids when unavailable), conversation
+type, tool name and raw arguments. Commands/processes, file reads/writes,
+code execution, sub-agents, scheduled tasks and browser operations **always
+use ask**, even when requested as direct. A mixed card lists the actual mode
+for each tool. Ask requires Hermes 0.21.0+ and refuses to run when yolo is on,
+`approvals.mode` is off, the host would satisfy that call from its session or
+permanent allowlist, or the policy cannot be read. Each call has a fresh rule
+key. Only "Approve Once" and "Deny" are offered; session/permanent choices
+and their aliases are treated as deny and persist no permission. Rejection,
+timeout, unavailable owner route and delivery failure all refuse the call.
+
+`clawchat_tool_revoke` takes effect immediately in storage, and
+`clawchat_tool_grants_list` lists unexpired rows with person names and ids,
+tools, modes and expiry. Changes affect subsequent turn snapshots. These three
+management tools require `tool-grants: on`, the ClawChat platform, the owner's
+activation direct chat, the actual owner as sender, and a non-synthetic
+message. Both the hook and handler check a live nonce bound to the host's
+exact `(session_id, turn_id)`. Groups, friends, other platforms and synthetic
+owner turns cannot manage grants. Missing identities or unknown capabilities
+fail closed. With `tool-grants: off`, stored grants do not apply, management
+tools refuse calls, and the grant hint is omitted; the separate
+`non-owner-host-tools` policy retains its existing behavior.
+
+A group batch gets the **intersection** of all non-owner speakers' grants;
+ask wins over direct. The owner's messages are neutral in this calculation;
+a batch containing only the owner adds no tools back. An allowed person can
+call the agent again alone when a mixed batch cannot use a tool. A group grant
+captures the current members, excluding this Agent and the owner, with each
+name verified by code; new members do not inherit it and leaving does not
+delete it. Other Agents belonging to the owner are treated as ordinary users,
+because the plugin cannot identify that relationship.
+
+The adapter computes an immutable snapshot before dispatch and carries its
+nonce in the source message id. `pre_llm_call` binds it once to the actual
+execution turn. The tool hook requires the same nonce, chat, session and turn;
+it never falls back to the latest snapshot in a session. Plugin admission
+holds new messages when they could mix authority with an executing granted
+turn, then recomputes the intersection for the queued batch. Verified owner
+management turns also hold new input until completion. Missing snapshots,
+read errors and expired grants add no authority.
+
+Known limits:
+
+- In a conversation with grants, other messages wait while a granted turn is
+  running; they cannot interject or interrupt it.
+- Sub-agent tool calls and calls after compression switches the session do
+  not receive the parent turn's grants.
+- Granted group batches can change toolsets and rebuild the host agent cache.
+- Layer 1 can add back only an entire toolset or an explicit MCP server;
+  precise tool-name enforcement is in the tool hook. All other tools in that
+  restored group remain subject to the ordinary restrictions.
+- Hermes 0.19.0 and earlier has no tool-hook turn id and supports no grants;
+  the management tools ask the owner to upgrade to 0.19.1 or later. Unknown
+  versions/capabilities never imply authorization.
 
 ## Reconnect, heartbeat, ack
 

@@ -832,6 +832,140 @@ def _tool_grants_enabled() -> bool:
 
     return _read_tool_grants(_config_extra().get("tool-grants")) == "on"
 
+MANAGEMENT_UPGRADE_MESSAGE = "The owner needs to upgrade Hermes to 0.19.1 or later to manage tool grants."
+
+
+def management_snapshot(session_id: str, turn_id: str):
+    from clawchat_gateway.turn_grants import lookup_snapshot_for_call, session_context_value
+
+    if not _tool_grants_enabled() or session_context_value("HERMES_SESSION_PLATFORM") != "clawchat":
+        return None
+    snapshot = lookup_snapshot_for_call(
+        session_context_value("HERMES_SESSION_MESSAGE_ID"),
+        session_context_value("HERMES_SESSION_CHAT_ID"), session_id, turn_id,
+    )
+    return snapshot if snapshot and snapshot.owner_verified else None
+
+
+def _approval_config_read() -> dict[str, Any]:
+    # The host's _get_approval_config catches read errors and returns {}.
+    # Check its underlying reader as well so that fallback cannot authorize ask.
+    from hermes_cli.config import load_config_readonly
+
+    config = load_config_readonly()
+    if not isinstance(config, dict) or not isinstance(config.get("approvals", {}), dict):
+        raise ValueError("Unreadable approval policy")
+    allowlist = config.get("command_allowlist", [])
+    if not isinstance(allowlist, list) or any(not isinstance(key, str) for key in allowlist):
+        raise ValueError("Unreadable approval allowlist")
+    return config
+
+
+def _approval_bypass(rule_key: str) -> bool:
+    """Read exactly the predicates used by the host's arbitrary-tool gate."""
+    try:
+        from tools import approval
+
+        _approval_config_read()
+        if hasattr(approval, "_yolo_active"):
+            yolo = approval._yolo_active()
+        else:  # 0.21.x before approval_context.py was extracted
+            yolo = approval._YOLO_MODE_FROZEN or approval.is_current_session_yolo_enabled()
+        context = getattr(approval, "approval_context", approval)
+        return (yolo or context._get_approval_mode() not in {"manual", "smart"}
+                or approval.is_approved(approval.get_current_session_key(), "plugin_rule:" + rule_key))
+    except Exception:  # noqa: BLE001 - unreadable policy is not a human gate
+        return True
+
+
+def _install_grant_approval_gate() -> bool:
+    """Narrow shim: enforce a delivered, once-only ask and normalize denial text.
+
+    The host otherwise returns its own denial prose and may auto-approve before
+    contacting the adapter. Ordinary plugin rules keep the original function.
+    """
+    try:
+        from tools import approval
+        from clawchat_gateway.turn_grants import approval_by_nonce, finish_approval
+        from clawchat_gateway.tool_grants import GRANT_ASK_DENIED_MESSAGE
+
+        if getattr(approval.request_tool_approval, "_clawchat_grants", False):
+            return True
+        if not callable(getattr(approval, "list_gateway_approvals", None)):
+            return False
+        original = approval.request_tool_approval
+        persist = getattr(approval, "_persist_choice", None)
+        approve_session = approval.approve_session
+        approve_permanent = approval.approve_permanent
+
+        def grant_gate(tool_name, reason, *, rule_key="", **kwargs):
+            if not rule_key.startswith("clawchat-grant-ask:"):
+                return original(tool_name, reason, rule_key=rule_key, **kwargs)
+            nonce = rule_key.removeprefix("clawchat-grant-ask:")
+            record = approval_by_nonce(nonce)
+            result = {"approved": False, "message": GRANT_ASK_DENIED_MESSAGE}
+            try:
+                if (record and record.tool == tool_name and record.description == reason
+                        and record.session_key == approval.get_current_session_key()
+                        and not _approval_bypass(rule_key)):
+                    outcome = original(tool_name, reason, rule_key=rule_key, **kwargs)
+                    if finish_approval(nonce) and outcome.get("approved"):
+                        return outcome
+            except Exception:  # noqa: BLE001 - ask errors are denials
+                pass
+            finally:
+                finish_approval(nonce)
+            return result
+
+        def grant_persist(session_key, choice, keys):
+            # Also prevent a decision delivered outside our adapter from ever
+            # persisting these single-call keys. The shim then refuses it.
+            ordinary = [key for key in keys if not key.startswith("plugin_rule:clawchat-grant-ask:")]
+            if ordinary:
+                return persist(session_key, choice, ordinary)
+
+        def grant_session(session_key, pattern_key):
+            if not pattern_key.startswith("plugin_rule:clawchat-grant-ask:"):
+                return approve_session(session_key, pattern_key)
+
+        def grant_permanent(pattern_key):
+            if not pattern_key.startswith("plugin_rule:clawchat-grant-ask:"):
+                return approve_permanent(pattern_key)
+
+        grant_gate._clawchat_grants = True
+        if persist is not None:
+            approval._persist_choice = grant_persist
+        approval.approve_session = grant_session
+        approval.approve_permanent = grant_permanent
+        approval.request_tool_approval = grant_gate
+        return True
+    except Exception:  # noqa: BLE001 - unsupported host stays blocked
+        return False
+
+
+def _ask_directive(snapshot, tool_name: str, args: Any):
+    import json
+    from tools import approval
+    from clawchat_gateway.turn_grants import register_approval
+    from clawchat_gateway.tool_grants import GRANT_ASK_DENIED_MESSAGE
+
+    denied = {"action": "block", "message": GRANT_ASK_DENIED_MESSAGE}
+    if not _host_supports_approve() or not _install_grant_approval_gate():
+        return denied
+    session_key = approval.get_current_session_key()
+    if not session_key or session_key == "default":
+        return denied
+    names = snapshot.speaker_names or snapshot.speakers
+    chat_type = "group" if _session_value("HERMES_SESSION_CHAT_TYPE").lower() == "group" else "direct chat"
+    description = f"Speaker: {', '.join(names)}\nConversation: {chat_type}\nTool: {tool_name}\nArguments: {json.dumps(args, ensure_ascii=False)}"
+    # The lock finalizes the nonce suffix before exposing the directive.
+    record = register_approval(session_key, snapshot.chat_id, tool_name, description, 600)
+    rule_key = "clawchat-grant-ask:" + record.nonce
+    if _approval_bypass(rule_key):
+        from clawchat_gateway.turn_grants import finish_approval
+        finish_approval(record.nonce)
+        return denied
+    return {"action": "approve", "message": record.description, "rule_key": rule_key}
 
 def clawchat_pre_llm_call(*, session_id: str = "", turn_id: str = "", **_: Any) -> None:
     from clawchat_gateway.turn_grants import bind_turn, session_context_value
@@ -855,7 +989,17 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: A
         from clawchat_gateway.tool_grants import GRANT_TOOL_NAMES, GRANT_BLOCK_MESSAGE
 
         if tool_name in GRANT_TOOL_NAMES:
-            return {"action": "block", "message": GRANT_BLOCK_MESSAGE}
+            if management_snapshot(kwargs.get("session_id", ""), kwargs.get("turn_id", "")):
+                return None
+            message = GRANT_BLOCK_MESSAGE
+            # Upgrade hints are only disclosed on a verified owner turn.
+            from clawchat_gateway.turn_grants import get_snapshot, session_context_value
+            snapshot = get_snapshot(session_context_value("HERMES_SESSION_MESSAGE_ID"))
+            if (_tool_grants_enabled() and not kwargs.get("turn_id") and snapshot and snapshot.owner_verified
+                    and snapshot.chat_id == session_context_value("HERMES_SESSION_CHAT_ID")
+                    and session_context_value("HERMES_SESSION_PLATFORM") == "clawchat"):
+                message = MANAGEMENT_UPGRADE_MESSAGE
+            return {"action": "block", "message": message}
         # The plugin's own tools: any turn that is not the owner's. The host's
         # send_message: only ClawChat turns the owner did not start, so another
         # platform's own sessions keep the host's behaviour.
@@ -905,7 +1049,12 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: A
                     return {"action": "block", "message": LOCAL_PATH_REFUSAL}
                 return None
             if grants.get(tool_name) == "ask":
-                return {"action": "block", "message": GRANT_ASK_DENIED_MESSAGE}
+                if not _host_supports_approve():
+                    return {"action": "block", "message": GRANT_ASK_DENIED_MESSAGE}
+                try:
+                    return _ask_directive(get_snapshot(nonce), tool_name, args)
+                except Exception:  # noqa: BLE001 - any unreliable ask is refused
+                    return {"action": "block", "message": GRANT_ASK_DENIED_MESSAGE}
             snapshot = get_snapshot(nonce)
             message = GRANT_BLOCK_MESSAGE
             if (snapshot is not None and snapshot.chat_id == chat_id

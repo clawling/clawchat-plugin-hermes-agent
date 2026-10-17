@@ -238,6 +238,15 @@ tests/*
 !tests/test_group_command_receipt.py
 !tests/test_yaml_compat.py
 !tests/test_local_path_turn_policy.py
+!tests/test_tool_grants.py
+!tests/test_tool_grants_storage.py
+!tests/test_turn_grants.py
+!tests/test_tool_grants_hook.py
+!tests/test_tool_grants_admission.py
+!tests/test_tool_grants_confirm.py
+!tests/test_tool_grants_ask.py
+!tests/test_tool_grants_tools.py
+!tests/test_tool_grants_versions.py
 deploy/
 scripts/
 docs/superpowers/
