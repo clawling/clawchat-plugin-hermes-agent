@@ -1,4 +1,5 @@
 """Strict owner execution checks, server identities and confirmation cards."""
+import asyncio
 import json
 import time
 from contextvars import ContextVar
@@ -97,6 +98,123 @@ async def test_unverified_input_revokes_running_owner_management_without_queuein
     await h.adapter._handle_inbound(message("usr_owner", "third", chat=OWNER_CHAT))
     assert all(not turns.get_snapshot(nonce).owner_verified for nonce in owner_nonces)
     assert guard.management_snapshot("s", "t") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["synthetic", "other_sender", "missing_sender"])
+@pytest.mark.parametrize("entry", ["message", "internal"])
+async def test_unverified_dispatch_race_denies_new_owner_nonce_until_idle(management, case, entry):
+    h = management
+    a = h.adapter
+    entered, accept = asyncio.Event(), asyncio.Event()
+    original_handle = a.handle_message
+    unverified_events = []
+
+    async def delayed_host(event):
+        if event.text == "wake":
+            unverified_events.append(event)
+            entered.set()
+            # Mirror the host's async profile read before busy admission.
+            await accept.wait()
+            # Queue debounce keeps the owner's source nonce. This input has
+            # no processing_complete callback of its own after being merged.
+            h.harness.events[-1].text += "\n" + event.text
+        else:
+            await original_handle(event)
+
+    h.harness.monkeypatch.setattr(a, "handle_message", delayed_host)
+    sender = "usr_a" if case == "other_sender" else "" if case == "missing_sender" else "usr_owner"
+    incoming = message(sender, "wake", chat=OWNER_CHAT, synthetic=case == "synthetic")
+    # There is no host guard during the delayed profile read. The plugin's
+    # in-flight dispatch count must still prevent clearing the marker.
+    a._active_sessions.clear()
+    dispatch = asyncio.create_task(a._on_message(incoming.raw_message) if entry == "message"
+                                   else a._handle_inbound(incoming))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        assert not turns.get_snapshot(h.snapshot.nonce).owner_verified
+        await a._on_message(message("usr_owner", "during read", chat=OWNER_CHAT).raw_message)
+        current = turns.get_snapshot(h.harness.events[-1].source.message_id)
+        assert not current.owner_verified
+        assert not a._grant_admission_queue._pending
+        turns.bind_turn(current.nonce, "s", "t")
+        with h.binder(**dict(context(current), HERMES_SESSION_USER_ID="usr_owner")):
+            for tool in GRANT_TOOL_NAMES:
+                assert guard.clawchat_pre_tool_call(tool_name=tool, session_id="s", turn_id="t")["action"] == "block"
+            for operation in ("grant", "revoke", "list"):
+                assert (await tools.manage_tool_grants(operation, PARAMS, session_id="s"))["message"] == GRANT_BLOCK_MESSAGE
+        h.adapter._send_owner_text.assert_not_awaited()
+
+        accept.set()
+        await dispatch
+        assert "wake" in h.harness.events[-1].text
+        await a._on_message(message("usr_owner", "after merge", chat=OWNER_CHAT).raw_message)
+        assert not turns.get_snapshot(h.harness.events[-1].source.message_id).owner_verified
+        assert not a._grant_admission_queue._pending
+        # No complete for the synthetic input: busy alone retains the marker.
+        assert unverified_events[0] not in h.harness.events
+        a._active_sessions.clear()
+        await a._on_message(message("usr_owner", "after idle", chat=OWNER_CHAT).raw_message)
+        recovered = turns.get_snapshot(h.harness.events[-1].source.message_id)
+        assert recovered.owner_verified
+        turns.bind_turn(recovered.nonce, "s", "t")
+        with h.binder(**dict(context(recovered), HERMES_SESSION_USER_ID="usr_owner")):
+            for tool in GRANT_TOOL_NAMES:
+                assert guard.clawchat_pre_tool_call(tool_name=tool, session_id="s", turn_id="t") is None
+            assert await tools.manage_tool_grants("list", {}, session_id="s") == {"grants": []}
+    finally:
+        accept.set()
+        await dispatch
+        for event in unverified_events:
+            turns.release_turn(event.source.message_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("store", ["_pending_messages", "_text_debounce"])
+async def test_host_held_input_keeps_unverified_marker(management, store):
+    a = management.adapter
+    await a._on_message(message("usr_owner", "wake", chat=OWNER_CHAT, synthetic=True).raw_message)
+    a._active_sessions.clear()
+    # The host still buffers that input; it can merge into the owner's next event.
+    management.harness.monkeypatch.setattr(a, store, {f"agent:main:clawchat:dm:{OWNER_CHAT}": object()}, raising=False)
+    await a._on_message(message("usr_owner", "while held", chat=OWNER_CHAT).raw_message)
+    assert not turns.get_snapshot(management.harness.events[-1].source.message_id).owner_verified
+    getattr(a, store).clear()
+    a._active_sessions.clear()
+    await a._on_message(message("usr_owner", "after flush", chat=OWNER_CHAT).raw_message)
+    assert turns.get_snapshot(management.harness.events[-1].source.message_id).owner_verified
+
+
+@pytest.mark.asyncio
+async def test_unverified_complete_during_owner_dispatch_keeps_marker(management):
+    h = management
+    a = h.adapter
+    await a._handle_inbound(message("usr_owner", "wake", chat=OWNER_CHAT, synthetic=True))
+    unverified = h.harness.events[-1]
+    entered, proceed = asyncio.Event(), asyncio.Event()
+
+    async def download(_):
+        entered.set()
+        await proceed.wait()
+        return []
+
+    h.harness.monkeypatch.setattr(a, "_download_inbound_media", download)
+    dispatch = asyncio.create_task(a._handle_inbound(message("usr_owner", "preparing", chat=OWNER_CHAT)))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        a._active_sessions.clear()
+        await a.on_processing_complete(unverified, "SUCCESS")
+        proceed.set()
+        await dispatch
+        assert not turns.get_snapshot(h.harness.events[-1].source.message_id).owner_verified
+        # Only a complete with host idle and no plugin dispatch can clear it.
+        a._active_sessions.clear()
+        await a.on_processing_complete(h.harness.events[-1], "SUCCESS")
+        await a._handle_inbound(message("usr_owner", "recovered", chat=OWNER_CHAT))
+        assert turns.get_snapshot(h.harness.events[-1].source.message_id).owner_verified
+    finally:
+        proceed.set()
+        await dispatch
 
 
 @pytest.mark.asyncio

@@ -31,6 +31,7 @@ _snapshots: dict[str, TurnSnapshot] = {}
 _bindings: dict[str, tuple[str, str]] = {}
 _active: dict[tuple[str, str], str] = {}
 _session_nonces: dict[tuple[str, str], set[str]] = {}
+_unverified_inputs: set[tuple[str, str]] = set()
 _approvals: dict[str, GrantApproval] = {}
 
 
@@ -43,7 +44,7 @@ def register_turn(*, account_id: str, chat_id: str, speakers: tuple[str, ...],
         snapshot = TurnSnapshot(
             nonce, account_id, chat_id, tuple(speakers),
             MappingProxyType(dict(grants)), time.monotonic(), frozenset(any_granted_tools),
-            tuple(speaker_names), owner_verified is True,
+            tuple(speaker_names), owner_verified is True and (account_id, session_key) not in _unverified_inputs,
         )
         _snapshots[nonce] = snapshot
         _active[account_id, session_key] = nonce
@@ -64,10 +65,27 @@ def active_snapshot(account_id: str, session_key: str) -> TurnSnapshot | None:
 def revoke_owner_verification(account_id: str, session_key: str) -> None:
     """Revoke every live nonce that the host could retain for this session."""
     with _lock:
-        for nonce in _session_nonces.get((account_id, session_key), ()):
-            snapshot = _snapshots.get(nonce)
-            if snapshot is not None and snapshot.owner_verified:
-                _snapshots[nonce] = replace(snapshot, owner_verified=False)
+        _revoke_owner_verification_locked(account_id, session_key)
+
+
+def _revoke_owner_verification_locked(account_id: str, session_key: str) -> None:
+    for nonce in _session_nonces.get((account_id, session_key), ()):
+        snapshot = _snapshots.get(nonce)
+        if snapshot is not None and snapshot.owner_verified:
+            _snapshots[nonce] = replace(snapshot, owner_verified=False)
+
+
+def mark_unverified_input(account_id: str, session_key: str) -> None:
+    """Deny existing and future owner nonces until the host session is idle."""
+    with _lock:
+        _unverified_inputs.add((account_id, session_key))
+        _revoke_owner_verification_locked(account_id, session_key)
+
+
+def clear_unverified_input(account_id: str, session_key: str) -> None:
+    """Caller must prove host idle and no plugin dispatch in progress."""
+    with _lock:
+        _unverified_inputs.discard((account_id, session_key))
 
 
 def release_turn(nonce: str) -> None:
