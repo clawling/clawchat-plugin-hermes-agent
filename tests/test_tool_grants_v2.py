@@ -426,7 +426,7 @@ def test_hint_exact_terminal_access_keeps_schema_and_execution_per_tool(host, ca
 def search_catalog(host, monkeypatch):
     model_tools = ModuleType("model_tools")
     raw = [{"function": {"name": name}} for name in
-           ("terminal", "process", "process_manage", "read_file", "web_search", *AUTHORIZATION_TOOLS)]
+           ("terminal", "process", "process_manage", "read_file", "web_search", "manage_connections", *AUTHORIZATION_TOOLS)]
     def definitions(*, skip_tool_search_assembly=False):
         assert skip_tool_search_assembly
         return raw
@@ -461,12 +461,45 @@ def test_search_bridges_read_only_authorized_bound_catalog(host, search_catalog,
 
 
 @pytest.mark.parametrize("bridge", ["tool_search", "tool_describe"])
-@pytest.mark.parametrize("failure", ["no-filter", "no-search-module", "chat", "grants", "broad-rules", "speakers", "overlap"])
+@pytest.mark.parametrize("policy", ["all-deny-exact", "all-direct", "all-direct-connections-denied"])
+def test_search_bridges_block_remote_connector_catalog(host, search_catalog, bridge, policy):
+    rows = ([row(mode="deny"), row("manage_connections", kind="tool")]
+            if policy == "all-deny-exact" else [row()])
+    if policy == "all-direct-connections-denied":
+        rows.append(row("manage_connections", "deny", kind="tool"))
+    assert guard._install_grant_catalog_filter()
+    with bound_rules(rows) as snapshot, host(**context(snapshot)):
+        catalog = search_catalog.get_tool_definitions(skip_tool_search_assembly=True)
+        connections_visible = policy != "all-direct-connections-denied"
+        assert ("manage_connections" in {item["function"]["name"] for item in catalog}) is connections_visible
+        result = call(bridge, turn_id="t")
+        if connections_visible:
+            assert result is not None and result["reasonCode"] == "not-available"
+        else:
+            assert result is None
+
+
+@pytest.mark.parametrize("bridge", ["tool_search", "tool_describe"])
+def test_search_bridges_allow_all_grant_when_host_has_no_connections(host, search_catalog, monkeypatch, bridge):
+    assert guard._install_grant_catalog_filter()
+    known, available = guard.host_tool_catalog()
+    monkeypatch.setattr(guard, "host_tool_catalog",
+                        lambda: (known - {"manage_connections"}, available - {"manage_connections"}))
+    with bound_rules([row()]) as snapshot, host(**context(snapshot)):
+        assert call(bridge, turn_id="t") is None
+
+
+@pytest.mark.parametrize("bridge", ["tool_search", "tool_describe"])
+@pytest.mark.parametrize("failure", ["no-filter", "no-search-module", "chat", "grants", "broad-rules", "speakers", "overlap", "visibility-error"])
 def test_search_bridges_fail_closed_without_matching_filtered_catalog(host, search_catalog, monkeypatch, bridge, failure):
     if failure != "no-filter":
         assert guard._install_grant_catalog_filter()
     if failure == "no-search-module":
         monkeypatch.setitem(sys.modules, "tools.tool_search", None)
+    if failure == "visibility-error":
+        def broken_filter(*args):
+            raise RuntimeError("catalog visibility unavailable")
+        monkeypatch.setattr(guard, "_filter_grant_definitions", broken_filter)
     with bound_rules([row("terminal", kind="tool")]) as snapshot, host(**context(snapshot)):
         if failure == "broad-rules":
             # The finite Mapping view is identical, but future-tool access differs.

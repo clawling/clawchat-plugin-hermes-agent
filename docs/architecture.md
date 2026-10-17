@@ -185,7 +185,10 @@ reached through search/dispatch. A restored toolset grants no implicit access
 to its other members. In a bound non-owner turn, `tool_search` and `tool_describe`
 can read the filtered catalog only when the grants filter is installed and its
 context snapshot matches the bound grants and non-owner speakers. A mismatch
-keeps the unavailable refusal. `tool_call` still checks the real inner tool.
+keeps the unavailable refusal. When the authorized catalog includes
+`manage_connections`, the bridges stay `not-available` because the host adds
+remote connector results that the grants filter cannot check. `tool_call`
+still checks the real inner tool.
 Non-owner channel prompts list only installed, available capabilities with no
 available member authorized for this batch, with English display names and IDs;
 refusals expose reason codes without disclosing other speakers' permissions.

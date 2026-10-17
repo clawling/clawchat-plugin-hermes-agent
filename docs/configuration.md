@@ -1142,9 +1142,12 @@ With grants enabled, a bound non-owner turn can use `tool_search` and
 snapshot read by that filter matches the bound grants and non-owner speakers,
 including the chat ID. The host reads this authorized catalog with
 `skip_tool_search_assembly=True`; it includes `clawchat_tool_request` even under
-`all:deny` and excludes ungranted, denied and expired tools. Missing filtering
-or mismatched snapshots retain `not-available`. `tool_call` is unpacked by the
-host and the real inner tool still passes through the execution hook.
+`all:deny` and excludes ungranted, denied and expired tools. When the authorized
+catalog includes `manage_connections`, the bridges stay `not-available` because
+the host adds remote connector results that the grants filter cannot check.
+Missing filtering or mismatched snapshots retain `not-available`. `tool_call`
+is unpacked by the host and the real inner tool still passes through the
+execution hook.
 
 #### Local attachments
 
