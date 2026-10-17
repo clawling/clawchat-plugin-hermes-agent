@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 from clawchat_gateway.api_client import DEFAULT_BASE_URL, DEFAULT_WEBSOCKET_URL
 from clawchat_gateway.hermes_home import hermes_home
+from clawchat_gateway.tool_grants import TOOL_GRANTS_CONFIG_KEY
 
 logger = logging.getLogger("clawchat_gateway.config")
 
@@ -350,6 +351,21 @@ def _read_group_mode(value: Any) -> str:
     return "mention" if value == "mention" else "all"
 
 
+def _read_tool_grants(value: Any) -> str:
+    # Hermes' YAML 1.1 reader turns unquoted on/off into True/False.
+    return "off" if value is False or (isinstance(value, str) and value.strip().lower() == "off") else "on"
+
+
+def tool_grants() -> str:
+    """Read the optional on/off switch from this profile's config.yaml extra."""
+    try:
+        from clawchat_gateway.memory_scope import _config_extra
+
+        return _read_tool_grants((_config_extra() or {}).get(TOOL_GRANTS_CONFIG_KEY))
+    except Exception:  # noqa: BLE001 - same fallback as the other optional switches
+        return "on"
+
+
 def _read_group_command_mode(value: Any) -> str:
     return value if value in {"owner", "all", "off"} else "owner"
 
@@ -543,6 +559,7 @@ class ClawChatConfig:
     runtime_status_messages: bool = False
     awareness_note: bool = False
     friend_greeting: bool = True
+    tool_grants: str = "on"
     typing_max_continuous_seconds: float = 900.0
     liveware_sample: bool = True
     note_cap_user: int = 1500
@@ -632,6 +649,7 @@ class ClawChatConfig:
                 _get_config_value(operator_extra or {}, "group_sessions_per_user", False)
             ),
             groups=_read_groups(_get_config_value(extra, "groups", {})),
+            tool_grants=_read_tool_grants(_get_config_value(extra, TOOL_GRANTS_CONFIG_KEY)),
             reconnect_initial_delay_ms=_get_config_value(
                 extra, "reconnect_initial_delay_ms", 500
             ),
