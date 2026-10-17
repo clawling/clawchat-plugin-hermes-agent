@@ -502,6 +502,26 @@ def _install_guest_search_guard() -> bool:
         return False
 
 
+def _guest_search_guard_complete() -> bool:
+    """Whether every known host path that bypasses the filtered catalog is neutralized."""
+    try:
+        import tools.tool_search as ts
+
+        if any(not getattr(getattr(ts, name), "_clawchat_guest", False)
+               for name in _GUEST_SEARCH_ENTRY_POINTS if hasattr(ts, name)):
+            return False
+        catalog = _guest_search_catalog_module()
+        if (catalog is not None and hasattr(catalog, "hidden_declared_sources")
+                and not getattr(catalog.hidden_declared_sources, "_clawchat_guest", False)):
+            return False
+        # Connector hosts must expose both known remote entry points so the
+        # guard can neutralize them even if a deny expires before dispatch.
+        return not ("manage_connections" in host_tool_catalog()[0]
+                    and any(not hasattr(ts, name) for name in _GUEST_SEARCH_ENTRY_POINTS[:2]))
+    except Exception:  # noqa: BLE001 - unverifiable guards count as missing
+        return False
+
+
 def _grant_search_bridge_allowed(tool_name, snapshot):
     """Catalog reads are safe only through the filter for this bound authority."""
     try:
@@ -512,20 +532,10 @@ def _grant_search_bridge_allowed(tool_name, snapshot):
         if (tool_name == "tool_call" or tool_name not in ts.BRIDGE_TOOL_NAMES
                 or not getattr(model_tools.get_tool_definitions, "_clawchat_grants", False)):
             return False
-        if any(not getattr(getattr(ts, name), "_clawchat_guest", False)
-               for name in _GUEST_SEARCH_ENTRY_POINTS if hasattr(ts, name)):
-            return False
-        catalog = _guest_search_catalog_module()
-        if (catalog is not None and hasattr(catalog, "hidden_declared_sources")
-                and not getattr(catalog.hidden_declared_sources, "_clawchat_guest", False)):
+        if not _guest_search_guard_complete():
             return False
         current = get_snapshot(session_context_value("HERMES_SESSION_MESSAGE_ID"))
         if current is None or current.chat_id != session_context_value("HERMES_SESSION_CHAT_ID"):
-            return False
-        # Connector hosts must expose both known remote entry points so the
-        # guard can neutralize them even if a deny expires before dispatch.
-        if ("manage_connections" in host_tool_catalog()[0]
-                and any(not hasattr(ts, name) for name in _GUEST_SEARCH_ENTRY_POINTS[:2])):
             return False
         # Compare complete compiled rules: Mapping equality sees only finite
         # candidates and can miss a different all/future-tool policy.
@@ -606,7 +616,9 @@ def _install_grant_catalog_filter() -> bool:
                     filtered = _filter_grant_definitions(raw, snapshot)
                 except Exception:  # noqa: BLE001 - filter errors never restore the full toolset
                     return []
-                if modern and not skip_assembly:
+                # Assembly writes source summaries into the tool_search schema
+                # itself; a later bridge refusal cannot take them back.
+                if modern and not skip_assembly and (not _guest_catalog_turn() or _guest_search_guard_complete()):
                     try:
                         from tools.tool_search import assemble_tool_defs, load_config
                         config = load_config()

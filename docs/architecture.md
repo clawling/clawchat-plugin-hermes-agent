@@ -190,6 +190,8 @@ remote connector search/describe, registry fallback and list of declared but
 unavailable sources, so the bridges only see
 the filtered catalog, even when grants expire between checks and dispatch.
 Bridges stay `not-available` when that guard cannot be installed or verified.
+Without a complete guard, guest schemas also skip search assembly, so no
+catalog listing or source summary reaches the model.
 `tool_describe` returns the same refusal as a direct call for registered names
 hidden in this turn or unavailable on the host. Owner turns and other platforms
 keep the host's original search behavior. `tool_call` still checks the real inner tool.

@@ -986,9 +986,17 @@ def test_search_assembly_only_receives_authorized_schemas(host, monkeypatch):
         assembled.append(definitions)
         return SimpleNamespace(tool_defs=[{"function": {"name": "tool_search"}}])
     search.assemble_tool_defs = assemble
+    search.connector_entries_by_group = lambda queries, **kw: ([[] for _ in queries], None)
+    search.remote_schemas_for = lambda *args: ({}, None)
+    search._registry_entry = lambda name: None
+    package = ModuleType("tools")
+    package.__path__ = []
+    package.tool_search = search
+    monkeypatch.setitem(sys.modules, "tools", package)
     monkeypatch.setitem(sys.modules, "model_tools", model_tools)
     monkeypatch.setitem(sys.modules, "tools.tool_search", search)
     assert guard._install_grant_catalog_filter()
+    assert guard._install_guest_search_guard()
     with bound_rules([row("process_manage", kind="tool"), row("web_search", "deny", kind="tool")]) as snapshot, host(**context(snapshot)):
         assert model_tools.get_tool_definitions(quiet_mode=True) == [{"function": {"name": "tool_search"}}]
         assert assembled == [[{"function": {"name": "process_manage"}}]]
@@ -1871,3 +1879,41 @@ def test_search_bridges_stay_closed_when_source_summary_is_unguarded(host, searc
     search_catalog.catalog.hidden_declared_sources = search_catalog.catalog.original_hidden_declared_sources
     with bound_rules([row("terminal", kind="tool")]) as snapshot, host(**context(snapshot)):
         assert call(bridge, turn_id="t")["reasonCode"] == "not-available"
+
+
+@pytest.mark.parametrize("failure", ["uncallable-registry-entry", "unwrapped-sources", "not-installed"])
+def test_guest_assembly_skips_catalog_summaries_when_search_guard_is_incomplete(host, search_catalog, monkeypatch, failure):
+    # Assembly writes source summaries into the tool_search schema itself, before any bridge check.
+    model_tools, search, catalog = search_catalog, search_catalog.search, search_catalog.catalog
+    model_tools._resolve_active_context_length = lambda: 10000
+    assembled = []
+    def assemble(definitions, **kw):
+        assembled.append(definitions)
+        catalog.hidden_declared_sources()
+        return SimpleNamespace(tool_defs=[*definitions, {"function": {"name": "tool_search"}}])
+    search.assemble_tool_defs = assemble
+    search.load_config = lambda: SimpleNamespace(enabled="on")
+    base = model_tools.get_tool_definitions
+    def definitions(*, enabled_toolsets=None, disabled_toolsets=None, quiet_mode=False, skip_tool_search_assembly=False):
+        return base(skip_tool_search_assembly=True)
+    model_tools.get_tool_definitions = definitions
+    if failure == "uncallable-registry-entry":
+        monkeypatch.setattr(search, "_registry_entry", None)
+    elif failure == "unwrapped-sources":
+        monkeypatch.setattr(catalog, "hidden_declared_sources", catalog.original_hidden_declared_sources)
+    else:
+        for name, original in search.originals.items():
+            monkeypatch.setattr(search, name, original)
+        monkeypatch.setattr(catalog, "hidden_declared_sources", catalog.original_hidden_declared_sources)
+    assert guard._install_grant_catalog_filter()
+    with bound_rules([row("terminal", kind="tool")]) as snapshot, host(**context(snapshot)):
+        names = [item["function"]["name"] for item in model_tools.get_tool_definitions(quiet_mode=True)]
+        assert assembled == [] and ("sources",) not in search.calls
+        assert "tool_search" not in names and "terminal" in names and "process" not in names
+    owner = turns.register_turn(account_id="usr_agent", chat_id="cnv_rules", session_key="owner-assembly",
+                                speakers=("usr_owner",), grants={}, owner_side=True)
+    try:
+        with host(**context(owner)):
+            assert "tool_search" in [item["function"]["name"] for item in model_tools.get_tool_definitions(quiet_mode=True)]
+    finally:
+        turns.release_turn(owner.nonce)
