@@ -18,6 +18,9 @@ fifty-one `clawchat_*` tools to the agent.
 | Configure ClawChat output visibility                         | [`./output-visibility.md`](./output-visibility.md)      |
 | Understand the Liveware Sample auto-boot demo app             | [`./liveware-sample.md`](./liveware-sample.md)          |
 | Look up an env var or `platforms.clawchat.extra` field       | [`./configuration.md`](./configuration.md)              |
+| Set per-person direct / ask / deny rules, capabilities or all tools | [Tool grants](./configuration.md#per-person-tool-grants) |
+| Check cross-session execution limits and cross-chat messaging | [Routing limits](./configuration.md#cross-session-routing-and-known-limits) |
+| Upgrade the grant database safely / check unimplemented features | [Storage and current defaults](./configuration.md#storage-upgrade-and-unimplemented-policy-choices) |
 | Find a specific `clawchat_*` tool                            | [`./reference/tools.md`](./reference/tools.md)          |
 | See every outbound HTTP / WS endpoint the plugin calls       | [`./reference/http-endpoints.md`](./reference/http-endpoints.md) |
 | Use one of the activation CLIs                               | [`./reference/cli.md`](./reference/cli.md)              |
