@@ -47,6 +47,7 @@ from pathlib import Path
 import pytest
 
 from clawchat_gateway import host_tools_guard as guard
+from clawchat_gateway.tool_grants import GRANT_BLOCK_MESSAGE
 
 OWNER = "usr_owner"
 FRIEND = "usr_friend"
@@ -181,7 +182,7 @@ def test_static_list_covers_them_without_the_host_resolver(monkeypatch):
 def test_hook_blocks_them_in_non_owner_turns(monkeypatch, tool, args, where):
     _session(monkeypatch, **TURNS[where])
     result = guard.clawchat_pre_tool_call(tool_name=tool, args=args)
-    assert result == {"action": "block", "message": guard.BLOCK_MESSAGE}
+    assert result == {"action": "block", "message": GRANT_BLOCK_MESSAGE}
 
 
 @pytest.mark.parametrize("tool,args", RECALL_AND_ACCOUNT_CALLS)
@@ -190,7 +191,7 @@ def test_hook_blocks_without_a_chat_type(monkeypatch, tool, args, where):
     """Hermes before 0.19.1: no chat type, the chat id decides."""
     _session(monkeypatch, **{**TURNS[where], "chat_type": ""})
     result = guard.clawchat_pre_tool_call(tool_name=tool, args=args)
-    assert result == {"action": "block", "message": guard.BLOCK_MESSAGE}
+    assert result == {"action": "block", "message": GRANT_BLOCK_MESSAGE}
 
 
 @pytest.mark.parametrize("tool,args", RECALL_AND_ACCOUNT_CALLS)
@@ -232,7 +233,7 @@ def test_approve_blocks_when_the_host_cannot_escalate(monkeypatch):
     monkeypatch.setattr(guard, "_host_supports_approve", lambda: False)
     _session(monkeypatch, **TURNS["friend_dm"])
     result = guard.clawchat_pre_tool_call(tool_name="session_search", args={"query": "x"})
-    assert result == {"action": "block", "message": guard.BLOCK_MESSAGE}
+    assert result == {"action": "block", "message": GRANT_BLOCK_MESSAGE}
 
 
 @pytest.mark.parametrize("tool", ["session_search", "manage_connections", "connectors__gmail__send_message"])
@@ -417,7 +418,7 @@ def test_limited_tools_hint(monkeypatch):
 def test_channel_prompt_carries_the_limits_only_outside_the_owner_chat(monkeypatch):
     from clawchat_gateway.adapter import ClawChatAdapter
 
-    adapter = ClawChatAdapter.__new__(ClawChatAdapter)
+    adapter = ClawChatAdapter({})
     monkeypatch.setattr(ClawChatAdapter, "_is_owner_turn", lambda self, inbound: inbound == "owner")
     assert guard.LIMITED_TOOLS_HINT in adapter._non_owner_turn_section("friend")
     assert adapter._non_owner_turn_section("owner") is None
@@ -435,7 +436,7 @@ def test_memory_provider_tools_are_blocked(monkeypatch, override, tool, where):
     monkeypatch.setattr(guard, "memory_provider_tools", lambda: PROVIDER_TOOLS)
     monkeypatch.setattr(guard, "host_supports_toolset_override", lambda: override)
     result = _limited(monkeypatch, where, tool, {"query": "owner"})
-    assert result == {"action": "block", "message": guard.BLOCK_MESSAGE}
+    assert result == {"action": "block", "message": GRANT_BLOCK_MESSAGE}
 
 
 @pytest.mark.parametrize("chat_type", ["dm", ""])
@@ -457,7 +458,7 @@ def test_unknown_provider_blocks_unregistered_tools_without_the_override(monkeyp
     monkeypatch.setattr(guard, "host_supports_toolset_override", lambda: False)
     with caplog.at_level(logging.WARNING, logger="clawchat_gateway.host_tools_guard"):
         result = _limited(monkeypatch, where, "honcho_search", {})
-    assert result == {"action": "block", "message": guard.BLOCK_MESSAGE}
+    assert result == {"action": "block", "message": GRANT_BLOCK_MESSAGE}
     assert "not in the host registry" in caplog.text
     for tool, args in KEPT_CALLS:
         assert _limited(monkeypatch, where, tool, args) is None, tool
