@@ -416,12 +416,12 @@ def host_tool_catalog() -> tuple[frozenset[str], frozenset[str]]:
 
 def _filter_grant_definitions(definitions, snapshot):
     from clawchat_gateway.tool_capabilities import AUTHORIZATION_TOOLS
-    from clawchat_gateway.tool_grants import evaluate_tool_grant
+    from clawchat_gateway.tool_grants import tool_grant_visible
 
     def allowed(tool):
         if tool in AUTHORIZATION_TOOLS:
             return bool(snapshot and snapshot.owner_side and snapshot.owner_verified and tool != "clawchat_tool_request")
-        if snapshot and snapshot.owner_side:
+        if snapshot and (snapshot.owner_side or snapshot.legacy_owner_tools):
             return True
         default = not _guarded_call(tool, {})
         if not _host_supports_pre_llm_call():
@@ -430,8 +430,7 @@ def _filter_grant_definitions(definitions, snapshot):
             return default or non_owner_host_tools() == SETTING_APPROVE
         if snapshot is None:
             return default
-        return evaluate_tool_grant(snapshot.grants, tool, context={"default_allowed": default},
-                                   now=time.time() * 1000) in ("direct", "ask")
+        return tool_grant_visible(snapshot.grants, tool, default_allowed=default, now=time.time() * 1000)
     return [item for item in definitions if allowed(item["function"]["name"])]
 
 
@@ -881,7 +880,7 @@ def _legacy_approve_toolsets():
 def toolsets_for_source(source: Any, *, owner_user_id: str | Callable[[], str],
                         owner_direct_chat_id: Optional[Callable[[], str]] = None) -> Optional[list[str]]:
     """Offer toolsets from the effective host catalog using the turn's frozen rules."""
-    from clawchat_gateway.tool_grants import evaluate_tool_grant
+    from clawchat_gateway.tool_grants import tool_grant_visible
     from clawchat_gateway.tool_capabilities import AUTHORIZATION_TOOLS
     from clawchat_gateway.turn_grants import get_snapshot
     narrowed = list(FALLBACK_TOOLSETS)
@@ -891,7 +890,7 @@ def toolsets_for_source(source: Any, *, owner_user_id: str | Callable[[], str],
         snapshot = get_snapshot(str(getattr(source, "message_id", "") or ""))
         if snapshot is not None and snapshot.chat_id != chat_id:
             snapshot = None
-        if snapshot and snapshot.owner_side:
+        if snapshot and (snapshot.owner_side or snapshot.legacy_owner_tools):
             if snapshot.owner_verified:
                 return None
             return sorted(name for name in _platform_toolsets() if name != GRANT_MANAGEMENT_TOOLSET
@@ -913,9 +912,8 @@ def toolsets_for_source(source: Any, *, owner_user_id: str | Callable[[], str],
             return narrowed
         _, available = host_tool_catalog()
         public = public_tool_names(available)
-        allowed = {tool for tool in available if evaluate_tool_grant(
-            snapshot.grants, tool, context={"default_allowed": tool in public},
-            now=time.time() * 1000) in ("direct", "ask")}
+        allowed = {tool for tool in available if tool_grant_visible(
+            snapshot.grants, tool, default_allowed=tool in public, now=time.time() * 1000)}
         # A toolset can contain several tools. The execution hook still checks
         # each concrete member against the same rules, including explicit deny.
         servers = _mcp_server_names()
@@ -1207,7 +1205,7 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: A
                     and session_context_value("HERMES_SESSION_PLATFORM") == "clawchat"):
                 message = MANAGEMENT_UPGRADE_MESSAGE
             return {"action": "block", "message": message}
-        from clawchat_gateway.turn_grants import lookup_snapshot_for_call, session_context_value
+        from clawchat_gateway.turn_grants import get_snapshot, lookup_snapshot_for_call, session_context_value
         from clawchat_gateway.tool_grants import (
             evaluate_tool_grant, grant_failure_code,
         )
@@ -1216,8 +1214,15 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: A
         can_bind_call = "session_id" in kwargs and "turn_id" in kwargs
         snapshot = (lookup_snapshot_for_call(nonce, chat_id, kwargs.get("session_id"), kwargs.get("turn_id"))
                     if can_bind_call else None)
-        if snapshot and snapshot.owner_side:
+        if snapshot and (snapshot.owner_side or snapshot.legacy_owner_tools):
             return None
+        if not _host_supports_pre_llm_call():
+            legacy = get_snapshot(nonce)
+            if (legacy and legacy.legacy_owner_tools and legacy.chat_id == chat_id
+                    and session_context_value("HERMES_SESSION_PLATFORM") == "clawchat"):
+                # Some old hosts pass empty execution IDs despite lacking the
+                # binding hook. This exception is ordinary legacy access only.
+                return None
         # Bound snapshots, including mixed overlaps and unattributed events in
         # the owner's chat, override the host's session-level owner inference.
         # An old host with no execution IDs keeps its legacy approval policy.

@@ -159,6 +159,10 @@ nonce, chat, session and turn without a latest-session fallback. Overlapping
 snapshots intersect. Synthetic/unidentified input in the owner's direct chat
 removes verification until idle. Grant/revoke writes affect subsequent
 snapshots; expiry is checked again at execution.
+Plugin-generated synthetic turns in the owner's direct chat separately retain
+legacy ordinary tools on all hosts, regardless of `tool-grants`. This exception
+does not make them owner-side snapshots or give them grant-management access.
+Exact-name resolution canonicalizes verified host aliases without rewriting storage.
 
 Host tool discovery starts from the effective ClawChat catalog before
 per-source narrowing, applying host global disablement, dependencies and
@@ -171,6 +175,8 @@ reached through search/dispatch. A restored toolset grants no implicit access
 to its other members. Non-owner channel prompts list only installed, available
 capabilities still blocked for this batch, with English display names and IDs;
 refusals expose reason codes without disclosing other speakers' permissions.
+Cross-chat schemas remain visible when a current-chat action is permitted;
+the execution check still resolves the actual target against cross-chat rules.
 
 ### Cross-session execution routes
 

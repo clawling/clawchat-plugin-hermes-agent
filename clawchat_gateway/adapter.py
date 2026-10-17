@@ -2682,7 +2682,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         """What a turn the owner did not start cannot do, for the model."""
         from clawchat_gateway.turn_grants import active_snapshot
         snapshot = active_snapshot(self._account_id(), self._grant_session_key(inbound))
-        if ((snapshot is not None and snapshot.owner_side)
+        if ((snapshot is not None and (snapshot.owner_side or snapshot.legacy_owner_tools))
                 or (snapshot is None and self._is_owner_turn(inbound))):
             return None
         from clawchat_gateway.host_tools_guard import blocked_tools_hint, limited_tools_hint
@@ -4687,6 +4687,10 @@ class ClawChatAdapter(BasePlatformAdapter):
                 speaker_names=self._grant_speaker_names(inbound, speakers),
                 owner_verified=self._verified_owner_inbound(inbound),
                 owner_side=getattr(grants, "owner_only", False),
+                legacy_owner_tools=(inbound.raw_message.get("synthetic") is True
+                                    and inbound.chat_type == "direct"
+                                    and inbound.chat_id == self._owner_direct_chat_id()
+                                    and self._is_owner_turn(inbound)),
                 non_owner_speakers=frozenset(speaker for speaker in speakers if isinstance(speaker, str)
                                              and speaker.strip() and speaker != self._owner_user_id()),
             )

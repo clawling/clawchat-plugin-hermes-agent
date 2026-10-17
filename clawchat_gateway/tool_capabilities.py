@@ -9,6 +9,17 @@ AUTHORIZATION_TOOLS = (
     "clawchat_tool_grant", "clawchat_tool_revoke", "clawchat_tool_grants_list", "clawchat_tool_request",
 )
 
+# Mirror only verified host aliases: model_tools._LEGACY_TOOL_ALIASES and
+# tools.todo_tool.TODO_LEGACY_ALIASES. Keep persisted selectors unchanged.
+HOST_TOOL_ALIASES = MappingProxyType({
+    "process": "process_manage", "cronjob": "cronjob_manage",
+    "todo": "todo_list", "tour": "gui_tour", "tip": "show_tip",
+})
+
+
+def canonical_tool_name(name: str) -> str:
+    return HOST_TOOL_ALIASES.get(name, name)
+
 
 def _capability(tools, zh, zh_hant, en, sensitive):
     return MappingProxyType(dict(tools=tuple(tools.split()),

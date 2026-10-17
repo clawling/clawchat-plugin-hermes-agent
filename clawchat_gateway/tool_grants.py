@@ -15,6 +15,7 @@ from clawchat_gateway.tool_capabilities import (
     AUTHORIZATION_TOOLS, TOOL_CAPABILITIES, parse_grant_selector,
     normalize_grant_selectors, selector_display, selector_is_sensitive,
     is_sensitive_tool, is_cross_chat_call, plan_deny_removal,
+    canonical_tool_name,
 )
 
 GRANT_TOOL_NAMES = (
@@ -103,18 +104,21 @@ class _SpeakerPlan:
     unmatched: str
 
     def resolve(self, tool, args, context, now):
+        tool = canonical_tool_name(tool)
         level, result = 0, None
         for kind, what, mode, expiry in self.rows:
             if now is not None and expiry is not None and expiry <= now:
                 continue
-            matches = (what == tool if kind == "tool" else True if kind == "all" else
+            matches = (canonical_tool_name(what) == tool if kind == "tool" else True if kind == "all" else
                        tool in TOOL_CAPABILITIES[what]["tools"] and
-                       (what != "cross-chat" or args is None or context is None or
-                        is_cross_chat_call(tool, args, context)))
+                       (what != "cross-chat" or
+                        (not (context or {}).get("current_chat_catalog") and
+                         (args is None or context is None or is_cross_chat_call(tool, args, context)))))
             priority = {"tool": 3, "capability": 2, "all": 1}[kind]
             if matches and (priority > level or priority == level and _RANK[mode] > _RANK.get(result, 0)):
                 level, result = priority, mode
-        default_allowed = context.get("default_allowed", tool in self.public_tools) if context else tool in self.public_tools
+        public = tool in {canonical_tool_name(name) for name in self.public_tools}
+        default_allowed = context.get("default_allowed", public) if context else public
         return result or ("direct" if default_allowed else
                           "ask" if self.unmatched == "ask" else None)
 
@@ -162,9 +166,24 @@ def evaluate_tool_grant(grants, tool, args=None, context=None, now=None):
     try:
         if now is not None and not _finite(now):
             return None
-        return grants.resolve(tool, args, context, now) if isinstance(grants, CompiledGrants) else grants.get(tool)
+        return freeze_turn_grants(grants).resolve(tool, args, context, now)
     except Exception:  # noqa: BLE001 - malformed authority fails closed
         return None
+
+
+def tool_grant_visible(grants, tool, *, default_allowed, now):
+    """A schema is useful when either the current-chat or cross-chat call can run.
+
+    Evaluate complete batch intersections for each case; do not combine one
+    speaker's current-chat access with another speaker's cross-chat access.
+    Exact-tool and all rules still apply to current-chat actions.
+    """
+    context = {"default_allowed": default_allowed}
+    if evaluate_tool_grant(grants, tool, context=context, now=now) in ("direct", "ask"):
+        return True
+    return (tool in TOOL_CAPABILITIES["cross-chat"]["tools"] and
+            evaluate_tool_grant(grants, tool, context={**context, "current_chat_catalog": True},
+                                now=now) in ("direct", "ask"))
 
 
 def resolve_turn_grants(speakers, owner_user_id, rows, now, *, public_tools=(), unmatched="none",
@@ -273,8 +292,12 @@ def generate_grant_code() -> str:
 _UNSAFE_TEXT = re.compile(r"[\u0000-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]")
 
 
-def _clean_text(text: str) -> str:
-    return " ".join(_UNSAFE_TEXT.sub(" ", text).split())
+def _clean_text(text: str, *, identifier: bool = False) -> str:
+    text = " ".join(_UNSAFE_TEXT.sub(" ", text).split())
+    # Untrusted profile/label text must never create Markdown or a clickable
+    # slash command. The confirmation command is appended separately in code.
+    punctuation = "[]()*~`/\\<>!#|" + ("" if identifier else "_")
+    return text.translate(str.maketrans({char: chr(ord(char) + 0xFEE0) for char in punctuation}))
 
 
 def _card_language(lang: str) -> str:
@@ -284,7 +307,8 @@ def _card_language(lang: str) -> str:
 def build_grant_receipt(*, lang: str, names: list[str], tools: list[str], mode: str = "direct") -> str:
     lang = _card_language(lang)
     separator = ", " if lang == "en" else "、"
-    values = {"names": separator.join(map(_clean_text, names)), "tools": separator.join(map(_clean_text, tools))}
+    values = {"names": separator.join(map(_clean_text, names)),
+              "tools": separator.join(_clean_text(tool, identifier=True) for tool in tools)}
     return re.sub(r"\{(names|tools)\}", lambda match: values[match[1]], (GRANT_DENY_RECEIPT if mode == "deny" else GRANT_CONFIRM_RECEIPT)[lang])
 
 
@@ -444,9 +468,9 @@ def build_grant_card(*, grantees, tools, mode, lang, code, now, label=None,
     separator = ", " if en else "、"
     names = separator.join(_clean_text(g["name"]) for g in grantees)
     people = separator.join(
-        f'{_clean_text(g["name"])} ({_clean_text(g["id"])})' if en else
-        f'{_clean_text(g["name"])}（{_clean_text(g["id"])}）' for g in grantees)
-    abilities = separator.join(_clean_text(selector_display(tool, lang)) for tool in tools)
+        f'{_clean_text(g["name"])} ({_clean_text(g["id"], identifier=True)})' if en else
+        f'{_clean_text(g["name"])}（{_clean_text(g["id"], identifier=True)}）' for g in grantees)
+    abilities = separator.join(_clean_text(selector_display(tool, lang), identifier=True) for tool in tools)
     label = _clean_text(label) if label else ""
     if label:
         abilities += (f' (you called it “{label}”)' if en else

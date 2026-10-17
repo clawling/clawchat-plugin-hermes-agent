@@ -27,6 +27,7 @@ class TurnSnapshot:
     owner_verified: bool = False
     non_owner_speakers: frozenset[str] = frozenset()
     owner_side: bool = False
+    legacy_owner_tools: bool = False
 
 
 _lock = threading.Lock()
@@ -42,7 +43,8 @@ def register_turn(*, account_id: str, chat_id: str, speakers: tuple[str, ...],
                   grants: Mapping[str, str], session_key: str,
                   any_granted_tools: frozenset[str] = frozenset(),
                   speaker_names: tuple[str, ...] = (), owner_verified: bool = False,
-                  owner_side: bool = False, non_owner_speakers: frozenset[str] | None = None) -> TurnSnapshot:
+                  owner_side: bool = False, non_owner_speakers: frozenset[str] | None = None,
+                  legacy_owner_tools: bool = False) -> TurnSnapshot:
     with _lock:
         nonce = NONCE_PREFIX + secrets.token_urlsafe(24)
         owner_side = bool(owner_side and speakers and all(isinstance(id_, str) and id_.strip() for id_ in speakers))
@@ -53,17 +55,23 @@ def register_turn(*, account_id: str, chat_id: str, speakers: tuple[str, ...],
                frozen.non_owner_speakers or (frozenset() if owner_side else frozenset(speakers)))
         overlaps = [_snapshots[value] for value in _session_nonces.get((account_id, session_key), ())
                     if value in _snapshots]
+        # A trusted plugin turn in the owner's DM retains legacy ordinary
+        # tools without representing a speaker or gaining management powers.
+        legacy_owner_tools = bool(legacy_owner_tools and not speakers and not owner_verified
+                                  and not ids and all(not item.non_owner_speakers for item in overlaps))
         if overlaps:
             frozen = intersect_turn_grants([frozen, *(item.grants for item in overlaps)])
             ids |= frozenset(id_ for item in overlaps for id_ in item.non_owner_speakers)
             for item in overlaps:
                 _snapshots[item.nonce] = replace(item, grants=frozen, non_owner_speakers=ids,
-                                                owner_side=item.owner_side and owner_side)
+                                                owner_side=item.owner_side and owner_side,
+                                                legacy_owner_tools=item.legacy_owner_tools and not ids)
         snapshot = TurnSnapshot(
             nonce, account_id, chat_id, tuple(speakers),
             frozen, time.monotonic(), frozenset(any_granted_tools),
             tuple(speaker_names), owner_verified is True and (account_id, session_key) not in _unverified_inputs,
             ids, owner_side and all(item.owner_side for item in overlaps),
+            legacy_owner_tools,
         )
         _snapshots[nonce] = snapshot
         _active[account_id, session_key] = nonce
@@ -93,7 +101,7 @@ def _revoke_owner_verification_locked(account_id: str, session_key: str) -> None
         if snapshot is not None:
             # Unattributed input may be merged under this nonce by the host.
             # Retain denies, but intersect with the ordinary default row.
-            _snapshots[nonce] = replace(snapshot, owner_verified=False, owner_side=False,
+            _snapshots[nonce] = replace(snapshot, owner_verified=False, owner_side=False, legacy_owner_tools=False,
                                         grants=intersect_turn_grants([snapshot.grants, {}]))
 
 

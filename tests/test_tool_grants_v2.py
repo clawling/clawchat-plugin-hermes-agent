@@ -15,6 +15,7 @@ from clawchat_gateway.tool_capabilities import (
     parse_grant_selector, normalize_grant_selectors, selector_display,
     is_sensitive_tool, selector_is_sensitive, resolve_cross_chat_gate, plan_deny_removal,
     KANBAN_SESSION_ROUTES,
+    HOST_TOOL_ALIASES,
 )
 from test_tool_grants_hook import host, context, call
 from test_tool_grants_ask import approval
@@ -89,7 +90,8 @@ def test_priority_expiry_and_exact_override_of_capability_deny():
     result = resolve(rules)
     assert result.get("terminal") == result.get("process_manage") == "deny"
     result = resolve([*rules, row("process_manage", kind="tool")])
-    assert result.get("terminal") == result.get("process") == "deny"
+    assert result.get("terminal") == "deny"
+    assert result.get("process") == "direct"
     assert result.get("process_manage") == "direct"
     assert result.get("read_file") == result.get("unclassified_future") == "direct"
     assert resolve([*rules, row("process_manage", kind="tool", expires_at=NOW)]).get("process_manage") == "deny"
@@ -825,8 +827,10 @@ def test_cross_chat_outbound_and_mention_visibility_follow_the_same_caller(host,
     tools_ = ["clawchat_mention_message", "clawchat_react_message", "clawchat_send_file"]
     with bound_rules([row("cross-chat", mode, kind="capability")]) as snapshot, host(**context(snapshot, group=kind == "group")):
         definitions = [{"function": {"name": name}} for name in tools_]
-        assert guard._filter_grant_definitions(definitions, snapshot) == (definitions if mode == "direct" else [])
+        assert guard._filter_grant_definitions(definitions, snapshot) == definitions
         for tool in tools_:
+            key = "chat_id" if tool == "clawchat_send_file" else "chatId"
+            assert call(tool, turn_id="t", args={key: snapshot.chat_id}) is None
             args = {"chat_id" if tool == "clawchat_send_file" else "chatId": "cnv_other"}
             result = call(tool, turn_id="t", args=args)
             assert result is None if mode == "direct" else result == guard._grant_block("denied")
@@ -951,22 +955,32 @@ async def test_direct_card_uses_current_ask_availability_after_profile_lookup(ma
 
 
 @pytest.mark.asyncio
-async def test_synthetic_owner_chat_snapshot_is_default_despite_legacy_admission(harness, host, approval, monkeypatch):
+@pytest.mark.parametrize("setting", ["on", "off"])
+@pytest.mark.parametrize("sender", ["clawchat-maintenance", "clawchat-awareness", "usr_owner"])
+@pytest.mark.parametrize("binding", [True, False])
+async def test_synthetic_owner_chat_keeps_legacy_ordinary_tools_on_all_hosts(harness, host, approval, monkeypatch, setting, sender, binding):
+    from dataclasses import replace
     from clawchat_gateway.adapter import ClawChatAdapter
     from test_tool_grants_admission import OWNER_CHAT
     a = harness.adapter
     monkeypatch.setattr(a, "_is_owner_turn", ClawChatAdapter._is_owner_turn.__get__(a))
     monkeypatch.setattr(guard, "public_tool_names", lambda _: frozenset({"web_search"}))
-    monkeypatch.setattr(guard, "_config_extra", lambda: {"non-owner-host-tools": "approve"})
-    inbound = message("usr_owner", chat=OWNER_CHAT, synthetic=True)
+    monkeypatch.setattr(guard, "_config_extra", lambda: {"non-owner-host-tools": "approve", "tool-grants": setting})
+    a._clawchat_config = replace(a._clawchat_config, tool_grants=setting)
+    monkeypatch.setattr(guard, "_host_supports_pre_llm_call", lambda: binding)
+    inbound = message(sender, chat=OWNER_CHAT, synthetic=True)
     assert a._is_owner_turn(inbound)
     assert not a._verified_owner_inbound(inbound)
     await a._handle_inbound(inbound)
     snapshot = turns.get_snapshot(harness.events[-1].source.message_id)
-    assert not snapshot.owner_side and not snapshot.speakers
-    turns.bind_turn(snapshot.nonce, "s", "t")
-    with host(**dict(context(snapshot), HERMES_SESSION_USER_ID="usr_owner")):
-        assert call("terminal", turn_id="t")["action"] == "block"
+    assert not snapshot.owner_side and not snapshot.speakers and snapshot.legacy_owner_tools
+    definitions = [{"function": {"name": tool}} for tool in ("terminal", "web_search", *AUTHORIZATION_TOOLS)]
+    assert guard._filter_grant_definitions(definitions, snapshot) == definitions[:2]
+    assert "memory" in guard.toolsets_for_source(harness.events[-1].source, owner_user_id="usr_owner")
+    if binding:
+        turns.bind_turn(snapshot.nonce, "s", "t")
+    with host(**dict(context(snapshot), HERMES_SESSION_USER_ID=sender)):
+        assert call("terminal", turn_id="t") is None
         assert call("web_search", turn_id="t") is None
         for tool in AUTHORIZATION_TOOLS:
             assert call(tool, turn_id="t")["action"] == "block"
@@ -1059,3 +1073,107 @@ async def test_dynamic_group_hint_describes_common_access_without_identifying_pe
     assert "Not available to the caller yet: Terminal (terminal). " + grants.NON_OWNER_GRANTS_HINT in hint
     assert "Files (files)" not in hint and "Scheduled tasks (schedule)" not in hint
     assert "usr_alice" not in hint and "usr_bob" not in hint
+
+
+@pytest.mark.parametrize("old,new", HOST_TOOL_ALIASES.items())
+@pytest.mark.parametrize("origin", ["migration", "v1-pending"])
+def test_legacy_exact_alias_keeps_ask_over_all_direct_without_rewriting_storage(tmp_path, old, new, origin):
+    path = tmp_path / "legacy.sqlite"
+    old_database(path)
+    with sqlite3.connect(path) as conn:
+        if origin == "migration":
+            conn.execute("INSERT INTO tool_grants VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                         ("usr_agent", "usr_alice", "Person", old, "ask", None, None, NOW))
+        else:
+            conn.execute("INSERT INTO tool_grant_pending VALUES (?, ?, ?, ?, ?, NULL)",
+                         ("usr_agent", "000234", json.dumps(dict(grantees=[dict(id="usr_alice", name="Person")],
+                          tools=[old], mode="ask")), NOW, NOW + 100))
+    store = storage.ClawChatStore(path)
+    store.initialize()
+    if origin == "v1-pending":
+        store.confirm_pending_grant(account_id="usr_agent", code="000234", now=NOW + 1)
+    store.create_pending_grant(account_id="usr_agent", code="000345", payload=dict(
+        grantees=[dict(id="usr_alice", name="Person")], tools=["all"], mode="direct"), now=NOW)
+    store.confirm_pending_grant(account_id="usr_agent", code="000345", now=NOW + 1)
+    rows = store.list_grants(account_id="usr_agent", now=NOW + 1)
+    rules = resolve(rows)
+    assert rules.get(old) == rules.get(new) == "ask"
+    assert grants.freeze_turn_grants({old: "ask", new: "direct"}).get(new) == "ask"
+    assert any(item["what_kind"] == "tool" and item["what"] == old and item["mode"] == "ask"
+               for item in store.list_grants(account_id="usr_agent", now=NOW + 1))
+
+
+@pytest.mark.parametrize("old,new", HOST_TOOL_ALIASES.items())
+@pytest.mark.parametrize("modes,expected", [(("direct", "ask"), "ask"), (("ask", "deny"), "deny"),
+                                          (("deny", "direct"), "deny")])
+def test_alias_conflicts_use_strictest_mode_in_either_order(old, new, modes, expected):
+    rows = [row(), row(old, modes[0], kind="tool"), row(new, modes[1], kind="tool")]
+    for ordered in (rows, rows[::-1]):
+        rules = resolve(ordered)
+        assert rules.get(old) == rules.get(new) == expected
+    assert resolve([row(old.upper(), "deny", kind="tool"), row()]).get(new) == "direct"
+
+
+@pytest.mark.parametrize("old,new", HOST_TOOL_ALIASES.items())
+def test_dispatch_keeps_legacy_exact_ask_for_canonical_name(host, monkeypatch, old, new):
+    known, available = guard.host_tool_catalog()
+    monkeypatch.setattr(guard, "host_tool_catalog", lambda: (known | {new}, available | {new}))
+    seen = []
+    def ask(snapshot, name, args):
+        seen.append(name)
+        return {"action": "approve", "message": "owner approval"}
+    monkeypatch.setattr(guard, "_ask_directive", ask)
+    with bound_rules([row(old, "ask", kind="tool"), row()]) as snapshot, host(**context(snapshot)):
+        assert call(new, turn_id="t", args={"action": "list"})["action"] == "approve"
+        assert seen == [new]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind,chat,sender,synthetic", [
+    ("group", "cnv_group", "usr_owner", True),
+    ("direct", "cnv_other", "usr_owner", True),
+    ("direct", "cnv_owner", "usr_guest", False),
+])
+async def test_legacy_synthetic_tool_exception_does_not_spread(harness, host, monkeypatch, kind, chat, sender, synthetic):
+    from clawchat_gateway.adapter import ClawChatAdapter
+    a = harness.adapter
+    monkeypatch.setattr(a, "_is_owner_turn", ClawChatAdapter._is_owner_turn.__get__(a))
+    await a._handle_inbound(message(sender, kind=kind, chat=chat, synthetic=synthetic))
+    snapshot = turns.get_snapshot(harness.events[-1].source.message_id)
+    assert not snapshot.owner_side and not snapshot.legacy_owner_tools
+    turns.bind_turn(snapshot.nonce, "s", "t")
+    with host(**dict(context(snapshot, group=kind == "group"), HERMES_SESSION_USER_ID=sender)):
+        assert call("terminal", turn_id="t")["action"] == "block"
+
+
+@pytest.mark.parametrize("mode", ["deny", "ask"])
+def test_cross_chat_catalog_preserves_specific_rules_and_shared_target_intersection(host, mode):
+    tool = "clawchat_mention_message"
+    definition = [{"function": {"name": tool}}]
+    with bound_rules([row("cross-chat", mode, kind="capability"), row(tool, "deny", kind="tool")]) as snapshot:
+        assert guard._filter_grant_definitions(definition, snapshot) == []
+    # Current chat is denied to the first person; cross-chat is denied to the
+    # second. Different available actions cannot be combined across speakers.
+    rows = [row(mode="deny"), row("cross-chat", "direct", kind="capability"),
+            row("cross-chat", "deny", user="usr_bob", kind="capability")]
+    with bound_rules(rows, speakers=("usr_alice", "usr_bob")) as snapshot:
+        assert guard._filter_grant_definitions(definition, snapshot) == []
+
+
+@pytest.mark.parametrize("lang", ["en", "zh", "zh_Hant"])
+@pytest.mark.parametrize("field", ["name", "label"])
+@pytest.mark.parametrize("attack", ["[Confirm](/clawchat-allow%20654321)", "`/clawchat-allow 654321`",
+                                  "**/clawchat-allow 654321**", "_ask_ /clawchat-allow 654321"])
+def test_card_untrusted_text_cannot_forge_a_clickable_command(lang, field, attack):
+    payload = dict(grantees=[dict(id="usr_person", name=attack if field == "name" else "Person")],
+                   tools=["all"], mode="direct", lang=lang, code="000123", now=NOW,
+                   label=attack if field == "label" else None)
+    card = grants.build_grant_card(**payload)
+    assert card.count("/clawchat-allow") == 1
+    assert "`/clawchat-allow 000123`" in card
+    assert "／clawchat-allow" in card
+    assert "[Confirm](" not in card and "**" not in card and "_ask_" not in card
+    assert "`" not in "\n".join(card.splitlines()[:-1])
+    if field == "name":
+        receipt = grants.build_grant_receipt(lang=lang, names=[attack], tools=["terminal"])
+        assert "/clawchat-allow" not in receipt and "／clawchat-allow" in receipt

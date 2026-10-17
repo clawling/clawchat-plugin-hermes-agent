@@ -832,10 +832,11 @@ same reason the memory tools refuse any write to `owner.md` — append included 
 outside the owner's direct chat (see
 [`./reference/tools.md`](./reference/tools.md#what-a-conversation-may-read)).
 
-The owner's direct chat is the activation conversation. On hosts with turn
-binding, ordinary authority comes from trusted batch speakers: owner-only real
-input is owner-side; synthetic or unattributed input uses defaults even there.
-Management additionally requires the verified real owner in that direct chat.
+The owner's direct chat is the activation conversation. Plugin-generated
+synthetic turns there retain legacy ordinary tool access on every supported
+host, with `tool-grants` on or off. They are not owner-side grant snapshots
+and cannot manage grants. Other synthetic or unattributed input uses defaults.
+Management requires the verified real owner in that direct chat.
 Older hosts without execution bindings retain legacy chat-based classification,
 including plugin-started turns in the activation chat, and cannot apply grants.
 
@@ -1012,6 +1013,11 @@ specific direct rule can override a broader deny. For example, `all` direct
 plus `cap:terminal` deny blocks Terminal; adding `tool:process_manage` direct
 opens only that exact tool.
 
+Exact-name matching mirrors the verified host aliases `process` →
+`process_manage`, `cronjob` → `cronjob_manage`, `todo` → `todo_list`,
+`tour` → `gui_tour`, and `tip` → `show_tip`. Stored rows and old pending cards
+keep their original names; alias conflicts use deny > ask > direct at execution.
+
 With no matching rule, use the host's ordinary default for that call. Explicit
 ask or deny also applies to normally open tools such as `web_search`. In a
 group with `non-owner-host-tools: approve`, a restricted tool with no matching
@@ -1026,7 +1032,7 @@ runs directly. The owner's own messages are neutral. A nonempty trusted batch
 whose speakers are all the owner has full ordinary host tools, including in a
 group, but cannot manage grants there. Only the owner's own user id is recognized;
 other agents belonging to the owner remain ordinary users. Missing/invalid
-speakers, synthetic input and grant-store failures use defaults, never an
+speakers, synthetic input outside the owner's direct chat and grant-store failures use defaults, never an
 owner-only empty-set shortcut or an approve fallback that could miss a deny.
 An allowed person may ask again alone after a mixed-turn block.
 
@@ -1074,6 +1080,8 @@ ask you first every time.” When per-call approval is unavailable, cards say
 Deny.” Ask is not offered: an ask grant returns `ask-unavailable` without a
 card; direct cards include that explanation. The current proactive card
 confirms a preselected mode; guest request cards are not implemented.
+Profile names and labels neutralize Markdown markers, backticks and slashes
+with fullwidth characters; only the code-generated confirmation command is clickable.
 
 Ask needs Hermes 0.21.0+ and a working owner approval route. Card creation,
 confirmation and execution all check this. Yolo, `approvals.mode: off`,
@@ -1178,7 +1186,9 @@ Cross-chat **messages** are separate: `cap:cross-chat` applies to
 legacy registered `send_message` calls to another conversation. Explicit rules
 can allow them subject to normal target, attachment and resource checks;
 unknown targets are not presumed current-chat targets. Current-chat actions
-retain defaults unless another rule matches. Hermes has no blanket
+retain defaults unless another rule matches. A cross-chat deny alone does not
+hide these tool schemas when a current-chat action is available; the execution
+check still refuses a denied cross-chat target. Hermes has no blanket
 current-chat-only gate for non-owner turns; `resolve_cross_chat_gate` currently
 returns `legacy`. Sending a file still requires a permitted source file:
 a cross-chat grant alone does not open local attachments in a non-owner turn.

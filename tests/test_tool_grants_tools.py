@@ -452,11 +452,11 @@ def test_configuration_documents_grant_precedence_and_visibility_limits():
     from pathlib import Path
 
     text = " ".join(Path("docs/configuration.md").read_text().split())
-    assert "Effective per-person grants take precedence over `non-owner-host-tools`" in text
-    assert "direct grants execute without this gate" in text
-    assert "ask grants route each call to the owner's direct chat" in text
+    assert "Effective per-person rules take precedence over `non-owner-host-tools`" in text
+    assert "direct executes without this gate" in text
+    assert "ask routes each call to the owner's direct chat" in text
     assert "including normally open tools such as `web_search`" in text
-    assert "Hermes before 0.20.1 has no layer 1" in text
+    assert "0.19.1 – 0.20.0 | no — the tools stay visible" in text
     assert "management tools can remain visible to non-owner turns" in text
     assert "Per-person grants and the `non-owner-host-tools: approve` opt-in apply here too" in text
     assert "every call goes to the human gate" not in text
