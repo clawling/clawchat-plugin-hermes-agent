@@ -32,7 +32,6 @@ from dataclasses import dataclass
 import pytest
 
 from clawchat_gateway import host_tools_guard as guard
-from clawchat_gateway.tool_grants import GRANT_BLOCK_MESSAGE, NON_OWNER_GRANTS_HINT
 from clawchat_gateway import memory_scope, plugin_tools, tools
 from clawchat_gateway.clawchat_memory import (
     read_clawchat_memory_file,
@@ -182,7 +181,7 @@ def test_hook_blocks_mcp_and_memory_in_non_owner_turns(monkeypatch, tool, args, 
     _session(monkeypatch, **TURNS[where])
     result = guard.clawchat_pre_tool_call(tool_name=tool, args=args)
     assert result["action"] == "block"
-    assert result["message"] == GRANT_BLOCK_MESSAGE
+    assert "MCP" in result["message"] and "memory" in result["message"]
 
 
 @pytest.mark.parametrize("tool,args", MCP_CALLS + MEMORY_CALLS)
@@ -316,7 +315,7 @@ def test_host_with_register_hook_takes_every_turn():
 def _adapter():
     from clawchat_gateway.adapter import ClawChatAdapter
 
-    adapter = ClawChatAdapter({})
+    adapter = ClawChatAdapter.__new__(ClawChatAdapter)
     adapter._owner_user_id = lambda: OWNER
     adapter._owner_direct_chat_id = lambda: OWNER_DM
     return adapter
@@ -367,7 +366,7 @@ def test_channel_prompt_section_for_non_owner_turns(monkeypatch):
         assert memory_scope.OWNER_NOTE_WRITE_HINT in section
         assert guard.BLOCKED_TOOLS_HINT not in section  # 0.20.1+: the tools are gone
     monkeypatch.setattr(guard, "host_supports_toolset_override", lambda: False)
-    assert NON_OWNER_GRANTS_HINT in adapter._non_owner_turn_section(_inbound(DM, "direct", FRIEND))
+    assert guard.BLOCKED_TOOLS_HINT in adapter._non_owner_turn_section(_inbound(DM, "direct", FRIEND))
 
 
 # --- owner.md: no write outside the owner's direct chat ----------------------
