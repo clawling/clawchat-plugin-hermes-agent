@@ -186,7 +186,8 @@ to its other members. In a bound non-owner turn, `tool_search` and `tool_describ
 can read the filtered catalog only when the grants filter is installed and its
 context snapshot matches the bound grants and non-owner speakers. A mismatch
 keeps the unavailable refusal. In guest turns the plugin neutralizes the host's
-remote connector search/describe and registry fallback, so the bridges only see
+remote connector search/describe, registry fallback and list of declared but
+unavailable sources, so the bridges only see
 the filtered catalog, even when grants expire between checks and dispatch.
 Bridges stay `not-available` when that guard cannot be installed or verified.
 `tool_describe` returns the same refusal as a direct call for registered names

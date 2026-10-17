@@ -450,13 +450,21 @@ def search_catalog(host, monkeypatch):
                             remote_schemas_for=remote_schemas, _registry_entry=registry_entry)
     for name, original in search.originals.items():
         setattr(search, name, original)
+    catalog = ModuleType("tools.tool_search_catalog")
+    def hidden_sources():
+        search.calls.append(("sources",))
+        return [{"name": "private-mcp", "tool_count": 3, "unavailable": "offline"}]
+    catalog.hidden_declared_sources = catalog.original_hidden_declared_sources = hidden_sources
     package = ModuleType("tools")
     package.__path__ = []
     package.tool_search = search
+    package.tool_search_catalog = catalog
     monkeypatch.setitem(sys.modules, "tools", package)
     monkeypatch.setitem(sys.modules, "model_tools", model_tools)
     monkeypatch.setitem(sys.modules, "tools.tool_search", search)
+    monkeypatch.setitem(sys.modules, "tools.tool_search_catalog", catalog)
     model_tools.search = search
+    model_tools.catalog = catalog
     install = getattr(guard, "_install_guest_search_guard", None)
     if install is not None:
         assert install()
@@ -1830,3 +1838,36 @@ async def test_wire_synthetic_cannot_erase_coalesced_speakers(harness, host, fla
     turns.bind_turn(snapshot.nonce, "s", "t")
     with host(**context(snapshot, group=True)):
         assert call("web_search", turn_id="t") == guard._grant_block("denied")
+
+
+@pytest.mark.parametrize("turn", ["guest", "owner", "other-platform"])
+def test_guest_search_guard_hides_declared_unavailable_sources(host, search_catalog, turn):
+    # The host lists declared-but-unavailable MCP sources from the whole registry.
+    catalog = search_catalog.catalog
+    assert guard._install_grant_catalog_filter()
+    with bound_rules([row(mode="deny")]) as snapshot:
+        if turn == "owner":
+            snapshot = turns.register_turn(account_id="usr_agent", chat_id=snapshot.chat_id, session_key="sources",
+                speakers=("usr_owner",), grants={}, owner_side=True)
+        values = context(snapshot)
+        if turn == "other-platform":
+            values["HERMES_SESSION_PLATFORM"] = "telegram"
+        try:
+            with host(**values):
+                sources = catalog.hidden_declared_sources()
+                if turn == "guest":
+                    assert sources == [] and ("sources",) not in search_catalog.search.calls
+                    assert call("tool_search", turn_id="t") is None
+                else:
+                    assert sources == [{"name": "private-mcp", "tool_count": 3, "unavailable": "offline"}]
+        finally:
+            if turn == "owner":
+                turns.release_turn(snapshot.nonce)
+
+
+@pytest.mark.parametrize("bridge", ["tool_search", "tool_describe"])
+def test_search_bridges_stay_closed_when_source_summary_is_unguarded(host, search_catalog, bridge):
+    assert guard._install_grant_catalog_filter()
+    search_catalog.catalog.hidden_declared_sources = search_catalog.catalog.original_hidden_declared_sources
+    with bound_rules([row("terminal", kind="tool")]) as snapshot, host(**context(snapshot)):
+        assert call(bridge, turn_id="t")["reasonCode"] == "not-available"

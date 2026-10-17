@@ -1143,8 +1143,8 @@ snapshot read by that filter matches the bound grants and non-owner speakers,
 including the chat ID. The host reads this authorized catalog with
 `skip_tool_search_assembly=True`; it includes `clawchat_tool_request` even under
 `all:deny` and excludes ungranted, denied and expired tools. In guest turns the
-plugin neutralizes the host's remote connector search/describe and registry
-fallback, so the bridges only see the filtered catalog, including after an
+plugin neutralizes the host's remote connector search/describe, registry
+fallback and list of declared but unavailable sources, so the bridges only see the filtered catalog, including after an
 authorization expires between checks and dispatch. Bridges stay `not-available`
 when that guard cannot be installed or verified, filtering is missing, or
 snapshots mismatch. `tool_describe` returns the same refusal as a direct call

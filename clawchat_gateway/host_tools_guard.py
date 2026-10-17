@@ -452,6 +452,14 @@ def _guest_catalog_turn():
         return True
 
 
+def _guest_search_catalog_module():
+    try:
+        import tools.tool_search_catalog as catalog
+        return catalog
+    except Exception:  # noqa: BLE001 - hosts without the module have no source summaries
+        return None
+
+
 def _install_guest_search_guard() -> bool:
     """Neutralize host search paths that can bypass the filtered guest catalog."""
     try:
@@ -467,6 +475,8 @@ def _install_guest_search_guard() -> bool:
                     return ([[] for _ in queries], None)
                 if name == "remote_schemas_for":
                     return ({}, None)
+                if name == "hidden_declared_sources":
+                    return []  # Declared but unavailable sources are scanned from the whole registry.
                 return None  # No global registry fallback for guest descriptions.
             entry._clawchat_guest = True
             return entry
@@ -480,6 +490,13 @@ def _install_guest_search_guard() -> bool:
                     return False
                 if not getattr(original, "_clawchat_guest", False):
                     setattr(ts, name, wrap_entry(original, name))
+            catalog = _guest_search_catalog_module()
+            if catalog is not None and hasattr(catalog, "hidden_declared_sources"):
+                original = catalog.hidden_declared_sources
+                if not callable(original):
+                    return False
+                if not getattr(original, "_clawchat_guest", False):
+                    setattr(catalog, "hidden_declared_sources", wrap_entry(original, "hidden_declared_sources"))
         return True
     except Exception:  # noqa: BLE001 - unknown hosts cannot safely open search bridges
         return False
@@ -497,6 +514,10 @@ def _grant_search_bridge_allowed(tool_name, snapshot):
             return False
         if any(not getattr(getattr(ts, name), "_clawchat_guest", False)
                for name in _GUEST_SEARCH_ENTRY_POINTS if hasattr(ts, name)):
+            return False
+        catalog = _guest_search_catalog_module()
+        if (catalog is not None and hasattr(catalog, "hidden_declared_sources")
+                and not getattr(catalog.hidden_declared_sources, "_clawchat_guest", False)):
             return False
         current = get_snapshot(session_context_value("HERMES_SESSION_MESSAGE_ID"))
         if current is None or current.chat_id != session_context_value("HERMES_SESSION_CHAT_ID"):
