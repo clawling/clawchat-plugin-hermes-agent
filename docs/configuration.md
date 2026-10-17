@@ -1157,11 +1157,19 @@ artifacts. Ending the turn immediately clears pending permits and artifacts.
 
 Guest delivery rejects symlinks (including parent directories), hard links,
 non-regular files, credential/system paths, and files changed since declaration.
-It opens one descriptor, compares device/inode/size/mtime/ctime with `fstat`,
-reads at most the checked size (maximum 100 MiB), rechecks the descriptor and
-pathname, and uploads those bytes. Owner and local-operator delivery keep their
-existing policy. Files direct does not relax public-address checks for remote
-media.
+Artifact registration opens the file and records its kernel-reported real path
+and `fstat` identity, rather than combining a resolved path with pathname stats.
+Guest attachment uploads open one descriptor, look up its actual path (`/proc/self/fd`
+on Linux, `F_GETPATH` on macOS, `GetFinalPathNameByHandle` on Windows), reapply
+the complete path policy to that path, and compare device/inode/size/mtime/ctime
+and link count from `fstat`. Both paths are resolved for comparison; Windows
+prefixes and case are normalized too. Missing descriptor-path support refuses
+guest delivery. The reader uses at most the checked size (100 MiB limit), rechecks the descriptor
+path, policy and identity after the read and final pathname check, and uploads
+only those bytes. Owner and local-operator delivery keep their original path
+checks and byte reads without descriptor lookup or additional rejection rules.
+Avatar, moment image, app icon and media upload tools also retain their original
+read paths. Files direct does not relax public-address checks for remote media.
 
 #### Narrow-tool artifact contract
 

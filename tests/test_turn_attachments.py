@@ -15,6 +15,7 @@ from clawchat_gateway import host_tools_guard as guard, local_paths, media_runti
 from clawchat_gateway.tool_grants import resolve_turn_grants
 from test_tool_grants_hook import host, context, call, TOOL
 from test_turn_grants import snapshot
+from test_local_path_turn_policy import policy as legacy_policy, invoke as legacy_invoke, set_turn
 
 
 @pytest.fixture
@@ -27,8 +28,11 @@ def scope(host, monkeypatch, tmp_path):
     path.write_bytes(b"speech bytes")
 
     @contextmanager
-    def open_turn(grants=None, *, speakers=("usr_a",), key="session", chat="cnv_chat", bind=True):
-        s = snapshot(grants=grants, speakers=speakers, key=key, chat=chat)
+    def open_turn(grants=None, *, speakers=("usr_a",), key="session", chat="cnv_chat", bind=True,
+                  owner_side=False):
+        s = (turns.register_turn(account_id="usr_agent", chat_id=chat, speakers=("usr_owner",),
+             grants={}, session_key=key, owner_side=True, owner_verified=True) if owner_side else
+             snapshot(grants=grants, speakers=speakers, key=key, chat=chat))
         try:
             with host(**context(s)):
                 if bind:
@@ -478,3 +482,251 @@ def test_files_direct_keeps_remote_media_public_only(scope, monkeypatch):
     with scope.open(grants([files_rows()])):
         assert attachments.files_direct()
         assert not media_runtime.media_reference_allowed("http://example.test/x", "cnv_chat")
+
+
+def _parent_swap(scope, name=".env"):
+    """An allowed output and a sensitive file with the same basename."""
+    sensitive = scope.path.parent / "home" / name
+    sensitive.parent.mkdir(parents=True, exist_ok=True)
+    sensitive.write_bytes(b"private credential")
+    directory = scope.path.parent / "output"
+    directory.mkdir()
+    source = directory / sensitive.name
+    source.write_bytes(b"public output")
+    parked = directory.with_name("parked-output")
+
+    def swap():
+        directory.rename(parked)
+        directory.symlink_to(sensitive.parent, target_is_directory=True)
+    return source, swap
+
+
+@pytest.mark.parametrize("name", [".env", "config.yaml", "auth.json", "clawchat/clawchat.sqlite"])
+def test_artifact_registration_parent_swap_after_resolve_is_refused(scope, monkeypatch, name):
+    source, swap = _parent_swap(scope, name)
+    original = attachments._source_path
+    def resolved_then_swapped(value, **kwargs):
+        resolved = original(value, **kwargs)
+        swap()
+        return resolved
+    monkeypatch.setattr(attachments, "_source_path", resolved_then_swapped)
+    with scope.open() as s:
+        allow()
+        finish(source)
+        assert str(source) not in attachments._artifacts.get(attachments._scope(s), {})
+
+
+@pytest.mark.parametrize("stage", ["before-open", "final-recheck"])
+@pytest.mark.parametrize("mode", ["files", "artifact"])
+def test_parent_swap_after_resolve_never_uploads_sensitive_file(scope, monkeypatch, stage, mode):
+    source, swap = _parent_swap(scope)
+    with scope.open(grants([files_rows()]) if mode == "files" else None, owner_side=mode == "owner"):
+        if mode == "artifact":
+            allow()
+            finish(source)
+        original = attachments._source_path
+        visits = []
+        def resolved_then_swapped(value, **kwargs):
+            resolved = original(value, **kwargs)
+            visits.append(value)
+            if len(visits) == (1 if stage == "before-open" else 2):
+                swap()
+            return resolved
+        monkeypatch.setattr(attachments, "_source_path", resolved_then_swapped)
+        calls = []
+        assert asyncio.run(upload(source, calls)) == []
+        assert calls == []
+        assert len(visits) == (1 if stage == "before-open" else 2)
+
+
+@pytest.mark.parametrize("mode", ["files", "artifact"])
+def test_descriptor_path_unavailable_refuses_registration_and_upload(scope, monkeypatch, mode):
+    rules = grants([files_rows(), files_rows(kind="tool", what=TOOL)]) if mode == "files" else None
+    with scope.open(rules, owner_side=mode == "owner") as s:
+        if mode == "artifact":
+            allow()
+            finish(scope.path)
+        def unavailable(fd):
+            raise ValueError("kernel lookup unavailable")
+        monkeypatch.setattr(attachments, "_descriptor_path", unavailable)
+        allow()
+        second = scope.path.with_name("second.mp3")
+        second.write_bytes(b"another output")
+        finish(second)
+        assert str(second) not in attachments._artifacts.get(attachments._scope(s), {})
+        calls = []
+        assert asyncio.run(upload(scope.path, calls)) == []
+        assert calls == []
+
+
+def test_linux_descriptor_lookup_failure_is_not_replaced_with_requested_path(scope, monkeypatch):
+    def unavailable(_):
+        raise OSError("proc unavailable")
+    monkeypatch.setattr(attachments.os, "readlink", unavailable)
+    with pytest.raises(ValueError, match="descriptor path is unavailable"):
+        attachments._descriptor_path(123)
+
+
+@pytest.mark.parametrize("platform", ["darwin", "win32", "unknown"])
+def test_unsupported_or_failed_platform_descriptor_lookup_is_closed(scope, monkeypatch, platform):
+    # Stub only the platform lookup; never alter pathlib's native path flavour.
+    monkeypatch.setattr(attachments, "sys", SimpleNamespace(platform=platform))
+    if platform == "darwin":
+        module = ModuleType("fcntl")
+        module.fcntl = lambda *a: (_ for _ in ()).throw(OSError("F_GETPATH unavailable"))
+        monkeypatch.setitem(sys.modules, "fcntl", module)
+    elif platform == "win32":
+        monkeypatch.setitem(sys.modules, "msvcrt", None)
+    with pytest.raises(ValueError, match="descriptor path is unavailable"):
+        attachments._descriptor_path(123)
+
+
+def test_open_descriptor_identity_uses_kernel_path_and_fstat(scope):
+    with attachments._open_checked_file(str(scope.path)) as (fd, identity):
+        info = os.fstat(fd)
+        assert identity.realpath == str(scope.path.resolve())
+        assert (identity.dev, identity.ino, identity.size, identity.mtime_ns, identity.ctime_ns) == (
+            info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+@pytest.mark.parametrize("kind", ["symlink", "directory-symlink", "hardlink"])
+def test_owner_links_keep_original_reader_without_descriptor_lookup(scope, monkeypatch, kind):
+    link = scope.path.with_name("owner-linked.mp3")
+    if kind == "symlink":
+        link.symlink_to(scope.path)
+    elif kind == "directory-symlink":
+        directory = scope.path.parent / "owner-linked-dir"
+        directory.symlink_to(scope.path.parent, target_is_directory=True)
+        link = directory / scope.path.name
+    else:
+        os.link(scope.path, link)
+    monkeypatch.setattr(attachments, "MAX_ATTACHMENT_BYTES", 1)
+    monkeypatch.setattr(attachments, "_descriptor_path", lambda *_: pytest.fail("owner fd lookup"))
+    with scope.open(owner_side=True):
+        calls = []
+        assert asyncio.run(upload(link, calls))
+        assert calls[0]["buffer"] == b"speech bytes"
+
+
+def test_macos_descriptor_path_uses_f_getpath(scope, monkeypatch):
+    calls = []
+    module = ModuleType("fcntl")
+    def get_path(fd, command, buffer):
+        calls.append((fd, command, len(buffer)))
+        return os.fsencode(scope.path) + b"\0"
+    module.fcntl = get_path
+    monkeypatch.setitem(sys.modules, "fcntl", module)
+    monkeypatch.setattr(attachments, "sys", SimpleNamespace(platform="darwin"))
+    assert attachments._descriptor_path(123) == str(scope.path)
+    assert calls == [(123, 50, 1024)]
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("\\\\?\\C:\\output\\speech.mp3", "C:\\output\\speech.mp3"),
+    ("\\\\?\\UNC\\server\\share\\speech.mp3", "\\\\server\\share\\speech.mp3"),
+])
+def test_windows_descriptor_path_uses_final_handle_path_and_normalizes_prefix(scope, monkeypatch, raw, expected):
+    import ctypes
+    msvcrt = ModuleType("msvcrt")
+    msvcrt.get_osfhandle = lambda fd: fd + 1000
+    calls = []
+    class GetPath:
+        def __call__(self, handle, buffer, size, flags):
+            calls.append((handle, size, flags))
+            if buffer is None:
+                return len(raw) + 1
+            buffer.value = raw
+            return len(raw)
+    function = GetPath()
+    monkeypatch.setitem(sys.modules, "msvcrt", msvcrt)
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *a, **kw: SimpleNamespace(GetFinalPathNameByHandleW=function), raising=False)
+    monkeypatch.setattr(attachments, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(attachments, "Path", lambda path: SimpleNamespace(is_absolute=lambda: path == expected))
+    assert attachments._descriptor_path(123) == expected
+    assert calls == [(1123, 0, 0), (1123, len(raw) + 1, 0)]
+
+
+def test_legacy_false_reader_skips_all_guest_policy_checks(scope, monkeypatch):
+    def forbidden(*_a, **_kw):
+        pytest.fail("legacy read entered guest checks")
+    monkeypatch.setattr(attachments, "_open_checked_file", forbidden)
+    monkeypatch.setattr(attachments, "files_direct", forbidden)
+    monkeypatch.setattr(attachments, "_recorded_artifact", forbidden)
+    monkeypatch.setattr(attachments, "MAX_ATTACHMENT_BYTES", 0)
+    assert attachments.read_local_attachment(str(scope.path), None, require_turn_permission=False) == b"speech bytes"
+
+
+@pytest.mark.parametrize("reference", ["case", "short-name", "prefix", "different-file"])
+@pytest.mark.parametrize("artifact", [False, True])
+def test_windows_guest_upload_normalizes_same_file_but_refuses_other_file(scope, monkeypatch, reference, artifact):
+    import ntpath
+    from pathlib import Path
+
+    alias = {
+        "case": "C:\\Output\\SPEECH.MP3",
+        "short-name": "C:\\OUTPUT~1\\SPEECH.MP3",
+        "prefix": "\\\\?\\C:\\Output\\speech.mp3",
+        "different-file": "C:\\Output\\other.mp3",
+    }[reference]
+    stripped = attachments._without_windows_prefix(alias)
+    original_resolve = Path.resolve
+    other = scope.path.with_name("other.mp3")
+    other.write_bytes(b"different bytes")
+    resolved_inputs = []
+    def native_resolve(path, *args, **kwargs):
+        if str(path) == stripped:
+            resolved_inputs.append(str(path))
+            # Simulate Windows resolving an 8.3 alias and preserving a different
+            # spelling of the canonical file's case. The real fd stays open on
+            # speech.mp3, so a genuinely different path must still fail.
+            target = other if reference == "different-file" else scope.path
+            return Path(str(target).upper())
+        return original_resolve(path, *args, **kwargs)
+    original_policy = media_runtime.ensure_allowed_local_path
+    def policy(path, *args, **kwargs):
+        if path == alias:
+            target = other if reference == "different-file" else scope.path
+            return original_policy(str(target), *args, **kwargs)
+        return original_policy(path, *args, **kwargs)
+    with scope.open(None if artifact else grants([files_rows()])):
+        monkeypatch.setattr(attachments, "sys", SimpleNamespace(platform="win32"))
+        monkeypatch.setattr(attachments, "os", SimpleNamespace(**{**vars(os), "path": ntpath}))
+        monkeypatch.setattr(Path, "resolve", native_resolve)
+        monkeypatch.setattr(media_runtime, "ensure_allowed_local_path", policy)
+        if artifact:
+            monkeypatch.setattr(attachments, "_descriptor_path", lambda fd: str(scope.path))
+            allow()
+            finish(scope.path)
+        monkeypatch.setattr(attachments, "_descriptor_path", lambda fd: alias)
+        calls = []
+        assert bool(asyncio.run(upload(scope.path, calls))) is (reference != "different-file")
+        assert resolved_inputs
+        if reference != "different-file":
+            assert calls[0]["buffer"] == b"speech bytes"
+
+
+def test_macos_normalization_resolves_var_and_private_var_on_both_sides(scope, monkeypatch):
+    from pathlib import Path
+    original_resolve = Path.resolve
+    resolved = []
+    def native_resolve(path, *args, **kwargs):
+        resolved.append(str(path))
+        if str(path) in {"/var/output/speech.mp3", "/private/var/output/speech.mp3"}:
+            return Path("/private/var/output/speech.mp3")
+        return original_resolve(path, *args, **kwargs)
+    monkeypatch.setattr(attachments, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(Path, "resolve", native_resolve)
+    assert attachments._normalized_path("/var/output/speech.mp3") == attachments._normalized_path("/private/var/output/speech.mp3")
+    assert resolved == ["/var/output/speech.mp3", "/private/var/output/speech.mp3"]
+
+
+@pytest.mark.parametrize("tool", ["upload_avatar_image", "create_moment", "register_app", "upload_media_file"])
+def test_original_tool_uploads_never_enter_guest_reader(legacy_policy, monkeypatch, tool):
+    set_turn(legacy_policy, "owner_direct")
+    def forbidden(*_a, **_kw):
+        pytest.fail("original upload entered guest reader")
+    monkeypatch.setattr(attachments, "read_local_attachment", forbidden)
+    monkeypatch.setattr(attachments, "_descriptor_path", forbidden)
+    result = asyncio.run(legacy_invoke(tool, str(legacy_policy.home / "picture.png")))
+    assert "error" not in result
+    assert legacy_policy.calls

@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import sys
 import threading
 import time
 
@@ -110,15 +111,17 @@ class FileIdentity:
     size: int
     mtime_ns: int
     ctime_ns: int
+    nlink: int
 
 
 def _from_stat(path: str, info) -> FileIdentity:
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
         raise ValueError("attachment is not a single regular file")
-    return FileIdentity(path, info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    return FileIdentity(path, info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+                        info.st_nlink)
 
 
-def file_identity(source: str) -> FileIdentity:
+def _source_path(source: str) -> str:
     from clawchat_gateway.media_runtime import ensure_allowed_local_path
     path = Path(source).expanduser()
     if not path.is_absolute():
@@ -127,8 +130,98 @@ def file_identity(source: str) -> FileIdentity:
     for component in (path, *path.parents):
         if component.is_symlink():
             raise ValueError("attachment symlink is not allowed")
-    resolved = ensure_allowed_local_path(str(path))
-    return _from_stat(str(resolved), path.lstat())
+    return str(ensure_allowed_local_path(str(path)))
+
+
+def _without_windows_prefix(path: str) -> str:
+    if path[:8].lower() == "\\\\?\\unc\\":
+        return "\\\\" + path[8:]
+    return path[4:] if path.startswith("\\\\?\\") else path
+
+
+def _normalized_path(path: str) -> str:
+    """Compare resolved paths, including native short-name and /private aliases."""
+    if sys.platform == "win32":
+        path = _without_windows_prefix(path)
+    resolved = str(Path(path).resolve())
+    if sys.platform == "win32":
+        return os.path.normcase(_without_windows_prefix(resolved))
+    return resolved
+
+
+def _descriptor_path(fd: int) -> str:
+    """Ask the kernel which file is open; never substitute the requested path."""
+    try:
+        if sys.platform.startswith("linux"):
+            path = os.readlink(f"/proc/self/fd/{fd}")
+            if path.endswith(" (deleted)"):
+                raise ValueError("attachment was removed")
+        elif sys.platform == "darwin":
+            import fcntl
+            # F_GETPATH is a Darwin ABI constant, absent from some Python builds.
+            path = os.fsdecode(fcntl.fcntl(fd, 50, bytes(1024)).split(b"\0", 1)[0])
+        elif sys.platform == "win32":
+            import ctypes
+            from ctypes import wintypes
+            import msvcrt
+
+            get_path = ctypes.WinDLL("kernel32", use_last_error=True).GetFinalPathNameByHandleW
+            get_path.argtypes = (wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD)
+            get_path.restype = wintypes.DWORD
+            handle = msvcrt.get_osfhandle(fd)
+            size = get_path(handle, None, 0, 0)
+            if not 0 < size <= 32768:
+                raise ValueError("attachment handle path is unavailable")
+            buffer = ctypes.create_unicode_buffer(size)
+            length = get_path(handle, buffer, size, 0)
+            if not 0 < length < size:
+                raise ValueError("attachment handle path changed")
+            path = buffer.value
+            path = _without_windows_prefix(path)
+        else:
+            raise ValueError("attachment descriptor paths are unsupported")
+        if not path or not Path(path).is_absolute():
+            raise ValueError("attachment descriptor path is unavailable")
+        return path
+    except Exception:  # noqa: BLE001 - unsupported/failed kernel lookup grants nothing
+        raise ValueError("attachment descriptor path is unavailable") from None
+
+
+def _descriptor_identity(fd: int) -> FileIdentity:
+    from clawchat_gateway.media_runtime import ensure_allowed_local_path
+
+    path = _descriptor_path(fd)
+    normalized = _normalized_path(path)
+    before = _from_stat(normalized, os.fstat(fd))
+    # Reapply the complete policy to the kernel path, including Hermes homes,
+    # profiles, credentials and stores. Normalize both sides so native aliases
+    # do not reject the same file; identity still comes solely from this fd.
+    if _normalized_path(str(ensure_allowed_local_path(path))) != normalized:
+        raise ValueError("attachment descriptor path was redirected")
+    if (_normalized_path(_descriptor_path(fd)) != normalized
+            or _from_stat(normalized, os.fstat(fd)) != before):
+        raise ValueError("attachment descriptor changed")
+    return before
+
+
+@contextmanager
+def _open_checked_file(source: str):
+    expected = _normalized_path(_source_path(source))
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(str(Path(source).expanduser()), flags)
+    try:
+        identity = _descriptor_identity(fd)
+        if identity.realpath != expected:
+            raise ValueError("attachment path changed before open")
+        yield fd, identity
+    finally:
+        os.close(fd)
+
+
+def file_identity(source: str) -> FileIdentity:
+    # Registration and preflight identity come from the opened file too.
+    with _open_checked_file(source) as (_, identity):
+        return identity
 
 
 def _scope(snapshot):
@@ -136,14 +229,18 @@ def _scope(snapshot):
             snapshot.non_owner_speakers)
 
 
-def artifact_identity(source: str, chat_id: str | None = None) -> FileIdentity | None:
+def _recorded_artifact(source: str, chat_id: str | None = None) -> FileIdentity | None:
     if not completion_hook_registered:
         return None
     snapshot = current_snapshot(chat_id)
     if not snapshot:
         return None
     with _lock:
-        recorded = _artifacts.get(_scope(snapshot), {}).get(source)
+        return _artifacts.get(_scope(snapshot), {}).get(source)
+
+
+def artifact_identity(source: str, chat_id: str | None = None) -> FileIdentity | None:
+    recorded = _recorded_artifact(source, chat_id)
     try:
         return recorded if recorded and file_identity(source) == recorded else None
     except (ValueError, OSError, RuntimeError):
@@ -151,7 +248,9 @@ def artifact_identity(source: str, chat_id: str | None = None) -> FileIdentity |
 
 
 def attachment_allowed(source: str | None, chat_id: str | None) -> bool:
-    return files_direct(chat_id) or bool(source and artifact_identity(source, chat_id))
+    # This is a scope/permit check; the sole upload descriptor verifies the
+    # actual file. Do not reopen the pathname to authorize a different fd.
+    return files_direct(chat_id) or bool(source and _recorded_artifact(source, chat_id))
 
 
 def _call_binding(tool_name, args, session_id, turn_id, tool_call_id=""):
@@ -256,16 +355,16 @@ def post_tool_call(*, tool_name="", args=None, result=None, session_id="", turn_
         return
 
 
-def read_local_attachment(source: str, chat_id: str | None) -> bytes:
-    before = file_identity(source)
-    recorded = None if files_direct(chat_id) else artifact_identity(source, chat_id)
+def read_local_attachment(source: str, chat_id: str | None, *, require_turn_permission: bool = True) -> bytes:
+    if not require_turn_permission:
+        # Legacy callers already apply their original path policy. Preserve
+        # their original read without fd lookup, type checks or size limits.
+        return Path(source).read_bytes()
+    recorded = None if files_direct(chat_id) else _recorded_artifact(source, chat_id)
     if not files_direct(chat_id) and recorded is None:
         raise ValueError("attachment is not authorized")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-    fd = os.open(source, flags)
-    try:
-        opened = _from_stat(before.realpath, os.fstat(fd))
-        if opened != before or recorded is not None and recorded != opened:
+    with _open_checked_file(source) as (fd, opened):
+        if recorded is not None and recorded != opened:
             raise ValueError("attachment identity changed")
         if opened.size > MAX_ATTACHMENT_BYTES:
             raise ValueError("attachment exceeds size limit")
@@ -276,9 +375,9 @@ def read_local_attachment(source: str, chat_id: str | None) -> bytes:
                 raise ValueError("attachment changed during read")
             chunks.append(chunk)
             remaining -= len(chunk)
-        if (_from_stat(before.realpath, os.fstat(fd)) != opened or file_identity(source) != opened
+        if (_descriptor_identity(fd) != opened
+                or _normalized_path(_source_path(source)) != opened.realpath
+                or _descriptor_identity(fd) != opened
                 or not attachment_allowed(source, chat_id)):
             raise ValueError("attachment changed during read")
         return b"".join(chunks)
-    finally:
-        os.close(fd)

@@ -91,9 +91,10 @@ refuse local paths and local attachments are not sent, except through the two
 per-person grant paths (every Files tool granted as direct, or a declared output
 of a tool call allowed in this turn; see
 [Local attachments](configuration.md#local-attachments)). Hermes delivers a reply after the turn's session
-context is cleared; such a delivery may carry a local attachment only into the
-owner's direct chat. This is an intentional exception because delivery goes
-only to the owner. In non-owner turns, HTTP(S) attachments are fetched only
+context is cleared; a trusted live nonce preserves the guest's attachment
+permission for that turn and conversation. Without that nonce, local delivery
+is allowed only into the owner's direct chat because only the owner receives
+it. In non-owner turns, HTTP(S) attachments are fetched only
 from globally routable unicast addresses. Connections use the checked IP
 directly, without proxies, and each redirect is resolved and checked again.
 In non-owner ClawChat turns, `send_message` to other platforms cannot carry

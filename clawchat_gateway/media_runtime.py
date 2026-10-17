@@ -463,7 +463,7 @@ async def upload_outbound_media(
                     loaded = await asyncio.to_thread(_fetch_public_media, url)
             else:
                 # Losing a guest snapshot between the policy check and loading
-                # must never select the legacy unchecked owner reader.
+                # must never remove the requirement for a live turn permit.
                 checked = not legacy_attachment_allowed(chat_id)
                 loaded = await asyncio.to_thread(
                     _load_local_media, url, media_local_roots, chat_id, checked
