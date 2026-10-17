@@ -29,10 +29,7 @@ and without the initiating turn's session identity. The hook cannot identify
 that caller in the worker, so every ``kanban_*`` tool is restricted at dispatch
 in the initiating turn.
 
-This module narrows those turns in two layers. Per-person grants can add
-individual tools back: the adapter holds new input while a granted turn is
-busy, and a nonce snapshot must match the first pre_llm_call session/turn
-binding. No session-level fallback supplies execution authority.
+This module narrows those turns in two layers:
 
 * :func:`toolsets_for_source` — the adapter's per-source toolset override
   (``BasePlatformAdapter.toolsets_for_source``, host 0.20.1+). Every turn but
@@ -741,32 +738,7 @@ def toolsets_for_source(
             return None
         if non_owner_host_tools() == SETTING_APPROVE:
             return None
-        narrowed = _narrowed_toolsets()
-        try:
-            if not _tool_grants_enabled():
-                return narrowed
-            from clawchat_gateway.turn_grants import get_snapshot
-
-            snapshot = get_snapshot(str(getattr(source, "message_id", "") or ""))
-            if snapshot is None or snapshot.chat_id != chat_id or not snapshot.grants:
-                return narrowed
-            added = set()
-            servers = _mcp_server_names()
-            for tool in snapshot.grants:
-                toolset = _registry_toolset(tool)
-                if not toolset:
-                    raise ValueError("Granted tool has no toolset")
-                if toolset.startswith(_MCP_TOOLSET_PREFIX):
-                    server = toolset[len(_MCP_TOOLSET_PREFIX):]
-                    if server not in servers:
-                        raise ValueError("Granted MCP server is unavailable")
-                    added.add(server)
-                else:
-                    added.add(toolset)
-            kept = [name for name in narrowed if name != NO_MCP or not added & servers]
-            return sorted(set(kept) | added)
-        except Exception:  # noqa: BLE001 - retain the original nonempty restriction
-            return narrowed
+        return _narrowed_toolsets()
     except Exception as exc:  # noqa: BLE001 - the host would fall back to *all* tools
         logger.warning(
             "clawchat host tools: toolset override failed (%s); narrowing to %s",
@@ -794,68 +766,10 @@ def _session_turn() -> str:
         return "other"
 
 
-_PATH_FIELDS = {
-    "path", "filepath", "file_path", "images", "iconpath", "icon_path",
-    "media", "media_files", "attachments", "avatar", "image",
-}
-
-
-def has_local_path(value: Any, path_field: bool = False, *, any_string: bool = False) -> bool:
-    """T100 path fields, or every nested argument string for a direct grant."""
-    if isinstance(value, str):
-        text = value.strip()
-        if not any_string and text.lower().startswith(("https://", "http://")):
-            return False
-        if any_string:
-            text = re.sub(r"https?://[^\s\"'<>]+", "", text, flags=re.IGNORECASE)
-            if path_field:
-                return bool(text.strip())
-            return bool(re.search(
-                r"(?i)(?:file:|(?:^|[\s\"'`=:(\[{,;&|<>])(?:/|\\|[a-z]:[/\\]|~)|(?:^|[/\\\s])\.\.(?:[/\\\s]|$))",
-                text,
-            ))
-        if path_field:
-            return bool(text)
-        return text.lower().startswith("file:")
-    if isinstance(value, list) or (any_string and isinstance(value, tuple)):
-        return any(has_local_path(item, path_field, any_string=any_string) for item in value)
-    if isinstance(value, dict):
-        return any(
-            has_local_path(item, path_field or str(key).lower() in _PATH_FIELDS, any_string=any_string)
-            for key, item in value.items()
-        )
-    return False
-
-
-def _tool_grants_enabled() -> bool:
-    from clawchat_gateway.config import _read_tool_grants
-
-    return _read_tool_grants(_config_extra().get("tool-grants")) == "on"
-
-
-def clawchat_pre_llm_call(*, session_id: str = "", turn_id: str = "", **_: Any) -> None:
-    from clawchat_gateway.turn_grants import bind_turn, session_context_value
-
-    bind_turn(session_context_value("HERMES_SESSION_MESSAGE_ID"), session_id, turn_id)
-
-
-def _host_supports_pre_llm_call() -> bool:
-    try:
-        from hermes_cli.plugins import VALID_HOOKS
-
-        return "pre_llm_call" in VALID_HOOKS
-    except Exception:  # noqa: BLE001 - do not assume an unknown hook runs
-        return False
-
-
-def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: Any) -> Optional[dict[str, Any]]:
+def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **_: Any) -> Optional[dict[str, Any]]:
     """``pre_tool_call`` hook: host tools in a turn the owner did not start."""
     try:
         tool_name = str(tool_name or "")
-        from clawchat_gateway.tool_grants import GRANT_TOOL_NAMES, GRANT_BLOCK_MESSAGE
-
-        if tool_name in GRANT_TOOL_NAMES:
-            return {"action": "block", "message": GRANT_BLOCK_MESSAGE}
         # The plugin's own tools: any turn that is not the owner's. The host's
         # send_message: only ClawChat turns the owner did not start, so another
         # platform's own sessions keep the host's behaviour.
@@ -874,6 +788,30 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: A
                 ):
                     return {"action": "block", "message": ATTACHMENT_REFUSAL}
             if not is_local_surface():
+                path_fields = {
+                    "path", "filepath", "file_path", "images", "iconpath", "icon_path",
+                    "media", "media_files", "attachments", "avatar", "image",
+                }
+
+                # Free text (a caption, a moment's text) may start with "/" or
+                # "~"; only path-carrying fields, and file: URIs anywhere, count.
+                def has_local_path(value: Any, path_field: bool = False) -> bool:
+                    if isinstance(value, str):
+                        text = value.strip()
+                        if text.lower().startswith(("https://", "http://")):
+                            return False
+                        if path_field:
+                            return bool(text)
+                        return text.lower().startswith("file:")
+                    if isinstance(value, list):
+                        return any(has_local_path(item, path_field) for item in value)
+                    if isinstance(value, dict):
+                        return any(
+                            has_local_path(item, path_field or str(key).lower() in path_fields)
+                            for key, item in value.items()
+                        )
+                    return False
+
                 message = args.get("message", "") if isinstance(args, dict) else ""
                 local_marker = tool_name == "send_message" and any(
                     not match.group(1).lower().startswith(("http://", "https://"))
@@ -892,26 +830,6 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: A
         elif _session_turn() != "other":
             return None
         message = BLOCK_MESSAGE
-        if _tool_grants_enabled():
-            from clawchat_gateway.turn_grants import get_snapshot, lookup_for_tool_call, session_context_value
-            from clawchat_gateway.tool_grants import GRANT_ASK_DENIED_MESSAGE, GRANT_INTERSECTION_BLOCK_MESSAGE
-            from clawchat_gateway.local_paths import LOCAL_PATH_REFUSAL
-
-            nonce = session_context_value("HERMES_SESSION_MESSAGE_ID")
-            chat_id = session_context_value("HERMES_SESSION_CHAT_ID")
-            grants = lookup_for_tool_call(nonce, chat_id, kwargs.get("session_id"), kwargs.get("turn_id"))
-            if grants.get(tool_name) == "direct":
-                if has_local_path(args, any_string=True):
-                    return {"action": "block", "message": LOCAL_PATH_REFUSAL}
-                return None
-            if grants.get(tool_name) == "ask":
-                return {"action": "block", "message": GRANT_ASK_DENIED_MESSAGE}
-            snapshot = get_snapshot(nonce)
-            message = GRANT_BLOCK_MESSAGE
-            if (snapshot is not None and snapshot.chat_id == chat_id
-                    and _session_value("HERMES_SESSION_CHAT_TYPE").lower() == "group"
-                    and tool_name in snapshot.any_granted_tools and tool_name not in snapshot.grants):
-                message = GRANT_INTERSECTION_BLOCK_MESSAGE
         if not is_restricted_tool(tool_name) and _limited_call(tool_name, args):
             message = LIMITED_BLOCK_MESSAGE
         if non_owner_host_tools() == SETTING_APPROVE and _host_supports_approve():
@@ -1020,11 +938,6 @@ def register_host_tools_guard(ctx: Any) -> None:
         )
         raise
     _hook_missing = False
-    if _host_supports_pre_llm_call():
-        try:
-            register_hook("pre_llm_call", clawchat_pre_llm_call)
-        except Exception:  # noqa: BLE001 - unbound grants remain unusable
-            logger.warning("clawchat turn grants: pre_llm_call hook was not registered")
 
 
 __all__ = [
