@@ -167,7 +167,7 @@ def test_grant_lookup_exception_blocks(host, monkeypatch):
         assert call(turn_id="t")["action"] == "block"
 
 
-def test_direct_grant_keeps_t100_relative_path_field_check(host):
+def test_direct_grant_keeps_relative_path_field_check(host):
     s = snapshot()
     try:
         with host(**context(s)):

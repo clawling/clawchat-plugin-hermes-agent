@@ -5,7 +5,7 @@ and `description` strings live in `clawchat_gateway/plugin_tools.py`
 inside `register_tools(...)`. This page is the human-readable index and
 must stay aligned with both.
 
-There are **50** tools, grouped by purpose.
+There are **51** tools, grouped by purpose.
 
 ## Account and identity
 

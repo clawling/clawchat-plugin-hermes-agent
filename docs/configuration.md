@@ -1000,15 +1000,19 @@ nonce in the source message id. `pre_llm_call` binds it once to the actual
 execution turn. The tool hook requires the same nonce, chat, session and turn;
 it never falls back to the latest snapshot in a session. Plugin admission
 holds new messages when they could mix authority with an executing granted
-turn, then recomputes the intersection for the queued batch. Verified owner
-management turns also hold new input until completion. Missing snapshots,
-read errors and expired grants add no authority.
+turn in a non-owner conversation, then recomputes the intersection for the
+queued batch. The owner's direct chat admits messages immediately, including
+approvals and control commands. Any synthetic input or input with a missing
+or different sender revokes owner verification for all live snapshots in that
+session; subsequent management calls in those turns are refused. Real owner
+messages preserve their existing verification. Missing snapshots, read errors
+and expired grants add no authority.
 
 Known limits:
 
 - Hermes before 0.20.1 has no layer 1: when registered, management tools can
   remain visible to non-owner turns, but the execution checks refuse them.
-- In a conversation with grants, other messages wait while a granted turn is
+- In a non-owner conversation with grants, other messages wait while a granted turn is
   running; they cannot interject or interrupt it.
 - Sub-agent tool calls and calls after compression switches the session do
   not receive the parent turn's grants.
