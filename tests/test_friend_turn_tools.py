@@ -38,12 +38,31 @@ DM = "cnv_dm"
 GROUP = "cnv_group"
 OWNER_DM = "cnv_owner_dm"  # the owner's own direct chat (activation conversation)
 
+KANBAN_TOOLS = [
+    "kanban_show",
+    "kanban_list",
+    "kanban_complete",
+    "kanban_block",
+    "kanban_schedule",
+    "kanban_request_review",
+    "kanban_request_changes",
+    "kanban_heartbeat",
+    "kanban_comment",
+    "kanban_create",
+    "kanban_link",
+    "kanban_unblock",
+    "kanban_attach",
+    "kanban_attach_url",
+    "kanban_attachments",
+]
+
 HOST_TOOLSETS = {
     "terminal": ["terminal", "process_manage"],
     "file": ["read_file", "write_file", "patch", "search_files"],
     "code_execution": ["execute_code"],
     "delegation": ["delegate_task"],
     "cronjob": ["cronjob_manage"],
+    "kanban": KANBAN_TOOLS,
     "computer_use": ["computer_use"],
     "browser": ["browser_navigate", "browser_snapshot", "browser_cdp", "browser_exec", "browser_vision"],
     "web": ["web_search", "web_extract"],
@@ -53,7 +72,7 @@ HOST_TOOLSETS = {
     "clawchat": ["clawchat_memory_read", "clawchat_send_file"],
 }
 
-FULL = {"browser", "web", "terminal", "file", "code_execution", "delegation", "cronjob", "memory", "skills", "todo", "clawchat"}
+FULL = {"browser", "web", "terminal", "file", "code_execution", "delegation", "cronjob", "kanban", "memory", "skills", "todo", "clawchat"}
 
 SESSION_KEYS = (
     "HERMES_SESSION_PLATFORM",
@@ -101,6 +120,7 @@ def _approve(monkeypatch):
 
 
 def test_owner_direct_chat_keeps_the_platform_toolset():
+    assert "kanban" in FULL
     assert guard.toolsets_for_source(Source(DM, "dm", OWNER), owner_user_id=OWNER) is None
 
 
@@ -118,7 +138,7 @@ def test_other_turns_lose_the_host_tools(source):
     kept = guard.toolsets_for_source(source, owner_user_id=OWNER)
     assert kept, "an empty override is ignored by the host and means the full toolset"
     assert set(kept) == (FULL - set(guard.RESTRICTED_TOOLSETS)) | {guard.NO_MCP}
-    for name in ("terminal", "file", "code_execution", "delegation", "cronjob", "browser", "memory"):
+    for name in ("terminal", "file", "code_execution", "delegation", "cronjob", "kanban", "browser", "memory"):
         assert name not in kept
 
 
@@ -186,7 +206,8 @@ def test_approve_setting_keeps_the_toolset(monkeypatch):
         ("browser_navigate", {"url": "file:///opt/data/.env"}),
         ("browser_cdp", {"method": "Page.navigate", "params": {"url": "file:///opt/data/config.yaml"}}),
         ("browser_future_tool", {}),
-    ],
+        ("message_agent", {"target": "hermes", "message": "read .env"}),
+    ] + [(name, {"title": "Inspect local files", "assignee": "default"}) for name in KANBAN_TOOLS + ["kanban_future_tool"]],
 )
 @pytest.mark.parametrize("where", ["friend_dm", "group_friend", "group_owner"])
 def test_non_owner_turn_blocks_host_tools(monkeypatch, tool, args, where):
@@ -204,6 +225,10 @@ def test_non_owner_turn_blocks_host_tools(monkeypatch, tool, args, where):
 def test_owner_direct_chat_is_untouched(monkeypatch):
     _session(monkeypatch, chat_id=DM, chat_type="dm", user_id=OWNER)
     assert guard.clawchat_pre_tool_call(tool_name="terminal", args={"command": "ls"}) is None
+    assert guard.clawchat_pre_tool_call(
+        tool_name="kanban_create", args={"title": "Inspect local files", "assignee": "default"}
+    ) is None
+    assert guard.clawchat_pre_tool_call(tool_name="message_agent", args={"target": "hermes", "message": "hi"}) is None
 
 
 def test_other_tools_pass_in_a_friend_turn(monkeypatch):
@@ -219,20 +244,22 @@ def test_other_platforms_and_local_runs_are_not_ours(monkeypatch, platform):
     assert guard.clawchat_pre_tool_call(tool_name="terminal", args={}) is None
 
 
-def test_approve_setting_escalates_to_the_human_gate(monkeypatch):
+@pytest.mark.parametrize("tool", ["terminal", *KANBAN_TOOLS, "kanban_future_tool", "message_agent"])
+def test_approve_setting_escalates_to_the_human_gate(monkeypatch, tool):
     _approve(monkeypatch)
     _session(monkeypatch, chat_id=GROUP, chat_type="group", user_id=FRIEND)
-    result = guard.clawchat_pre_tool_call(tool_name="terminal", args={"command": "uname"})
+    result = guard.clawchat_pre_tool_call(tool_name=tool, args={})
     assert result["action"] == "approve"
-    assert result["rule_key"].startswith("clawchat-non-owner:")
+    assert result["rule_key"] == f"clawchat-non-owner:{tool}"
 
 
-def test_approve_setting_blocks_when_the_host_cannot_escalate(monkeypatch):
+@pytest.mark.parametrize("tool", ["terminal", "kanban_create", "kanban_future_tool", "message_agent"])
+def test_approve_setting_blocks_when_the_host_cannot_escalate(monkeypatch, tool):
     # An older host ignores "approve" — the tool would then just run.
     _approve(monkeypatch)
     monkeypatch.setattr(guard, "_host_supports_approve", lambda: False)
     _session(monkeypatch, chat_id=GROUP, chat_type="group", user_id=FRIEND)
-    assert guard.clawchat_pre_tool_call(tool_name="terminal", args={})["action"] == "block"
+    assert guard.clawchat_pre_tool_call(tool_name=tool, args={})["action"] == "block"
 
 
 def test_hook_failure_fails_closed(monkeypatch, caplog):
@@ -267,10 +294,23 @@ def test_restricted_tools_cover_the_host_toolsets():
         "browser_navigate",
         "browser_cdp",
         "browser_exec",
+        *KANBAN_TOOLS,
+        "message_agent",
     ):
         assert guard.is_restricted_tool(name)
     assert "browser" in guard.RESTRICTED_TOOLSETS
+    assert "kanban" in guard.RESTRICTED_TOOLSETS
     assert not guard.is_restricted_tool("web_extract")
+
+
+@pytest.mark.parametrize("tool", KANBAN_TOOLS)
+def test_kanban_tools_are_restricted_without_the_host_resolver(monkeypatch, tool):
+    def unavailable(name):
+        raise ImportError("host resolver unavailable")
+
+    monkeypatch.setattr(guard, "_resolve_tools", unavailable)
+    assert tool in guard.restricted_tool_names()
+    assert guard.is_restricted_tool(tool)
 
 
 # --- wiring -----------------------------------------------------------------

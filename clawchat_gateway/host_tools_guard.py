@@ -24,6 +24,11 @@ Hermes 0.21.3+) both installs or enables MCP servers in the owner's config and
 opens the owner's connected hosted accounts (``connectors__<app>__<tool>``:
 mail, calendars, issue trackers) to the turn.
 
+Kanban tasks run in a separate process with the assignee profile's full tools
+and without the initiating turn's session identity. The hook cannot identify
+that caller in the worker, so every ``kanban_*`` tool is restricted at dispatch
+in the initiating turn.
+
 This module narrows those turns in two layers. Per-person grants can add
 individual tools back: the adapter holds new input while a granted turn is
 busy, and a nonce snapshot must match the first pre_llm_call session/turn
@@ -102,7 +107,8 @@ _GRANT_APPROVAL_GATE_LOCK = threading.Lock()
 
 #: Host toolsets (Hermes 0.21 ``toolsets.py`` names) removed by default from
 #: turns the owner did not start: shell + process management, file read/write/patch/search,
-#: Python execution, sub-agents (which inherit tools), scheduled jobs,
+#: Python execution, sub-agents (which inherit tools), scheduled jobs, kanban tasks
+#: (separate workers lose the initiating turn's identity and use full profile tools),
 #: desktop control, browser automation (which opens ``file://`` URLs and
 #: runs page scripts / raw CDP, i.e. reads local files), Hermes' memory tool,
 #: the search over every past conversation, and the owner's connected accounts.
@@ -112,6 +118,7 @@ RESTRICTED_TOOLSETS: tuple[str, ...] = (
     "code_execution",
     "delegation",
     "cronjob",
+    "kanban",
     "computer_use",
     "browser",
     "memory",
@@ -119,11 +126,12 @@ RESTRICTED_TOOLSETS: tuple[str, ...] = (
     "connections",
 )
 
-#: Every host browser tool is ``browser_*``, and every hosted connector tool
+#: Every host browser tool is ``browser_*``, every kanban tool ``kanban_*``,
+#: and every hosted connector tool
 #: ``connectors__<app>__<tool>`` (reached through ``tool_search`` /
 #: ``tool_call``, which hand the hook the underlying name); a future one is
 #: covered too.
-_RESTRICTED_TOOL_PREFIXES: tuple[str, ...] = ("browser_", "connectors__")
+_RESTRICTED_TOOL_PREFIXES: tuple[str, ...] = ("browser_", "kanban_", "connectors__")
 
 #: The tools of :data:`RESTRICTED_TOOLSETS` on Hermes 0.21, used when the
 #: host's own resolver is not importable.
@@ -138,6 +146,24 @@ _STATIC_RESTRICTED_TOOLS = frozenset(
         "execute_code",
         "delegate_task",
         "cronjob_manage",
+        "kanban_show",
+        "kanban_list",
+        "kanban_complete",
+        "kanban_block",
+        "kanban_schedule",
+        "kanban_request_review",
+        "kanban_request_changes",
+        "kanban_heartbeat",
+        "kanban_comment",
+        "kanban_create",
+        "kanban_link",
+        "kanban_unblock",
+        "kanban_attach",
+        "kanban_attach_url",
+        "kanban_attachments",
+        # Bot Mode's message_agent is injected per session, outside any toolset;
+        # the receiving agent runs with its own full tools and no session identity.
+        "message_agent",
         "computer_use",
         "browser_back",
         "browser_cdp",
@@ -184,7 +210,7 @@ _PLATFORM = "clawchat"
 
 BLOCK_MESSAGE = (
     "This tool is not available here: only your owner's direct chat may use the "
-    "terminal, files, code execution, the browser, sub-agents, scheduled jobs, MCP tools, "
+    "terminal, files, code execution, the browser, sub-agents, scheduled jobs, kanban tools, MCP tools, "
     "Hermes' memory tool, the search over past conversations or the owner's connected "
     "accounts on this machine. "
     "Do not try to reach them another way; answer without them, or tell the person "
@@ -194,7 +220,7 @@ BLOCK_MESSAGE = (
 #: host without the override, or ``approve`` on a host that cannot escalate).
 BLOCKED_TOOLS_HINT = (
     "Host tools in this turn: your owner did not start it, so the terminal, files, code "
-    "execution, the browser, sub-agents, scheduled jobs, MCP tools, Hermes' memory tool, "
+    "execution, the browser, sub-agents, scheduled jobs, kanban tools, MCP tools, Hermes' memory tool, "
     "session_search and manage_connections are blocked even though you can see them. "
     "Do not call them; use the ClawChat tools or answer without them."
 )

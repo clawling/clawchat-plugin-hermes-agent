@@ -783,13 +783,19 @@ and **every group turn, whoever spoke** — loses these host toolsets by default
 (per-person grants can add explicitly named tools back; see below):
 `terminal` (`terminal`, `process_manage`), `file` (`read_file`, `write_file`,
 `patch`, `search_files`), `code_execution` (`execute_code`), `delegation`
-(`delegate_task`), `cronjob` (`cronjob_manage`), `computer_use` and
+(`delegate_task`), `cronjob` (`cronjob_manage`), `kanban` (every `kanban_*`
+tool), `computer_use` and
 `browser` (every `browser_*` tool: it opens `file://` URLs and runs page
 scripts and raw CDP, so it reads local files too), Hermes' `memory` tool,
 `session_search`, `connections` (`manage_connections` and every hosted
 connector tool `connectors__<app>__<tool>`), and every **MCP tool** — the MCP
 servers the owner configured for ClawChat (a filesystem or database server
 reads the same files the `file` tools do).
+Kanban tasks run in a separate process with the assignee profile's full tools
+and without the initiating turn's session identity. The plugin's hook cannot
+identify the caller there, so it restricts kanban tools in the initiating turn.
+For the same reason the hook also blocks Bot Mode's `message_agent` (the
+receiving agent runs with its own full tools).
 Without per-person grants, group turns are narrowed as a whole because a
 group is one shared session. A granted batch can add toolsets back and cause
 Hermes to rebuild its cached agent; the tool hook still checks exact names. In turns the owner did not start (including
