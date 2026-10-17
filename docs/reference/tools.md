@@ -5,7 +5,7 @@ and `description` strings live in `clawchat_gateway/plugin_tools.py`
 inside `register_tools(...)`. This page is the human-readable index and
 must stay aligned with both.
 
-There are **51** tools, grouped by purpose.
+There are **52** tools, grouped by purpose.
 
 ## Account and identity
 
@@ -82,12 +82,41 @@ UTC epoch milliseconds or `null`:
 {"grants": [{"granteeUserId": "usr_example", "granteeName": "Example", "whatKind": "capability", "what": "files", "mode": "deny", "expiresAt": null}]}
 ```
 
-`clawchat_tool_request` is reserved and excluded from `all`, but is **not
-implemented or registered**. Guest request cards, `/clawchat-ask` /
-`/clawchat-deny` decisions and automatic resumption are not available. The
-current proactive confirmation command is `/clawchat-allow`, for the frozen
-direct/ask mode. With `tool-grants: off`, the three management tools are not
-registered and stored rules are retained but ignored.
+`clawchat_tool_request({capability, reason})` is independently visible in all
+non-owner turns, including `all:deny`; it is excluded from `all` inheritance.
+Only the twelve capability IDs above are accepted, with one short reason.
+Extra fields, exact tool names and `all` are rejected. Caller and original
+chat/session/message come from the bound execution snapshot, never arguments.
+Denied, unavailable, already-granted and mixed-turn blocked requests send no card.
+
+Results contain no confirmation code or other people's permissions:
+
+```json
+{"status":"pending","requestId":"opaque-id","sent":true}
+{"status":"waiting","sent":false}
+{"status":"blocked","reason":"denied","sent":false}
+{"status":"failed","error":"send-failed","sent":false}
+```
+
+Results also include fixed English `note` guidance. Storage failure uses
+`storage-unavailable`. Only successful sending permits “I have asked the owner.”
+The code-generated card goes solely to the owner's activation direct chat.
+`/clawchat-allow`, `/clawchat-ask`, or `/clawchat-deny` plus its six-digit code
+select direct, ask, or deny in one step. No second confirmation is needed.
+Ask is omitted and refused when reliable per-call approval is unavailable.
+All three commands are consumed before model dispatch in every chat; only a
+real owner message in that account's activation direct chat can decide a card.
+Proactive cards still accept only `/clawchat-allow`, preserving the frozen mode.
+
+Request cards last 24 hours. A persistent six-hour person × capability cooldown
+and rolling 24-hour account limit of 20 serialize quota and code allocation.
+Existing pending cards return waiting; send failures remain failed and consume
+only daily quota, permitting a retry before the person cooldown. `sending` cards can be confirmed after a crash if the owner received them.
+A decision atomically consumes the code, writes the rule and queues a wakeup
+in the requester's original session, with the requester as the speaker and
+permissions freshly loaded. Wake failures produce a one-time English notice
+on the requester's next real turn in that same session, until card expiry.
+With `tool-grants: off`, all four authorization tools stop and rules are retained.
 
 Cross-chat grants can allow mention, reaction and file sends to another chat,
 subject to existing resource checks; they do not open local attachments.

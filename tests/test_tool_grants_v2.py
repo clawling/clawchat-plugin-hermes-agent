@@ -205,7 +205,7 @@ def test_all_dispatch_uses_unnarrowed_surface_and_inner_tool_checks(host, monkey
             assert call("process_manage", turn_id="t") is None
             assert call("terminal", turn_id="t")["reasonCode"] == "denied"
             assert call("read_file", turn_id="t", args={"path": "/tmp/fixture"}) is None
-            for tool in AUTHORIZATION_TOOLS:
+            for tool in grants.GRANT_TOOL_NAMES:
                 assert call(tool, turn_id="t")["action"] == "block"
 
 
@@ -395,7 +395,7 @@ async def test_owner_only_group_is_full_but_management_is_still_private(harness,
     with host(**context(snapshot, group=True)):
         assert call("terminal", turn_id="t") is None
         assert call("clawchat_mention_message", turn_id="t", args={"chatId": "cnv_elsewhere"}) is None
-        for tool in AUTHORIZATION_TOOLS:
+        for tool in grants.GRANT_TOOL_NAMES:
             assert call(tool, turn_id="t")["action"] == "block"
 
 
@@ -590,14 +590,14 @@ def test_cached_host_catalog_is_filtered_per_snapshot_and_unfiltered_for_all(hos
     def names():
         return {item["function"]["name"] for item in wrapped(quiet_mode=True, skip_tool_search_assembly=True)}
     with bound_rules([row("process_manage", kind="tool"), row("web_search", "deny", kind="tool")]) as snapshot, host(**context(snapshot)):
-        assert names() == {"process_manage"}
+        assert names() == {"process_manage", "clawchat_tool_request"}
         previous = list(model_tools._last_resolved_tool_names)
         known, available = guard.host_tool_catalog()
         assert "terminal" in known and "terminal" in available
         assert model_tools._last_resolved_tool_names == previous
-        assert names() == {"process_manage"}
+        assert names() == {"process_manage", "clawchat_tool_request"}
     with bound_rules([row()]) as snapshot, host(**context(snapshot)):
-        assert names() == {"terminal", "process_manage", "read_file", "web_search"}
+        assert names() == {"terminal", "process_manage", "read_file", "web_search", "clawchat_tool_request"}
     with host(HERMES_SESSION_PLATFORM="telegram"):
         assert set(AUTHORIZATION_TOOLS) <= names()
     assert all(calls)
@@ -725,9 +725,9 @@ def test_legacy_catalog_preserves_approve_but_capable_missing_nonce_stays_narrow
     monkeypatch.setattr(guard, "_host_supports_pre_llm_call", lambda: False)
     definitions = [{"function": {"name": tool}} for tool in ("terminal", "web_search", *AUTHORIZATION_TOOLS)]
     with host(HERMES_SESSION_PLATFORM="clawchat", HERMES_SESSION_CHAT_ID="cnv_rules"):
-        assert guard._filter_grant_definitions(definitions, None) == definitions[:2]
+        assert guard._filter_grant_definitions(definitions, None) == definitions[:2] + definitions[-1:]
         monkeypatch.setattr(guard, "_host_supports_pre_llm_call", lambda: True)
-        assert guard._filter_grant_definitions(definitions, None) == definitions[1:2]
+        assert guard._filter_grant_definitions(definitions, None) == definitions[1:2] + definitions[-1:]
     monkeypatch.setattr(guard, "_platform_toolsets", lambda: {"terminal", "web"})
     monkeypatch.setattr(guard, "_resolve_tools", lambda name: ["terminal"] if name == "terminal" else ["web_search"])
     legacy = SimpleNamespace(chat_id="cnv_rules", chat_type="group", user_id="usr_alice")
@@ -746,7 +746,7 @@ def test_old_host_nonce_cannot_replace_legacy_catalog_approval(host, monkeypatch
     with bound_rules(rows) as snapshot, host(**context(snapshot, group=True)):
         source = SimpleNamespace(chat_id=snapshot.chat_id, chat_type="group", user_id="usr_alice", message_id=snapshot.nonce)
         assert guard.toolsets_for_source(source, owner_user_id="usr_owner") is None
-        assert guard._filter_grant_definitions(definitions, snapshot) == definitions[:2]
+        assert guard._filter_grant_definitions(definitions, snapshot) == definitions[:2] + definitions[-1:]
 
 
 # Each routed host entry is covered, including unadvertised action/parameter
@@ -858,7 +858,7 @@ async def test_actual_group_batches_use_only_trusted_nonowner_intersection(harne
         result = call("terminal", turn_id="t")
         assert result["reasonCode"] == reason
         assert result["message"] == grants.GRANT_FAILURE_MESSAGES[reason]
-        for tool in AUTHORIZATION_TOOLS:
+        for tool in grants.GRANT_TOOL_NAMES:
             assert call(tool, turn_id="t")["action"] == "block"
 
 
@@ -895,10 +895,10 @@ def test_owner_direct_overlap_never_borrows_session_owner_identity(host, order):
             turns.bind_turn(snapshot.nonce, "s", snapshot.nonce)
             current = turns.get_snapshot(snapshot.nonce)
             assert not current.owner_side
-            assert guard._filter_grant_definitions(definitions, current) == []
+            assert guard._filter_grant_definitions(definitions, current) == definitions[-1:]
             with host(**dict(context(snapshot), HERMES_SESSION_USER_ID="usr_owner")):
                 assert call("terminal", turn_id=snapshot.nonce) == guard._grant_block("denied")
-                for tool in AUTHORIZATION_TOOLS:
+                for tool in grants.GRANT_TOOL_NAMES:
                     assert call(tool, turn_id=snapshot.nonce)["action"] == "block"
     finally:
         for snapshot in snapshots:
@@ -979,13 +979,13 @@ async def test_unattributed_synthetic_owner_chat_uses_defaults_on_all_hosts(harn
     snapshot = turns.get_snapshot(harness.events[-1].source.message_id)
     assert not snapshot.owner_side and not snapshot.speakers and not snapshot.legacy_owner_tools
     definitions = [{"function": {"name": tool}} for tool in ("terminal", "web_search", *AUTHORIZATION_TOOLS)]
-    assert guard._filter_grant_definitions(definitions, snapshot) == (definitions[1:2] if binding else definitions[:2])
+    assert guard._filter_grant_definitions(definitions, snapshot) == (definitions[1:2] if binding else definitions[:2]) + (definitions[-1:] if setting == "on" else [])
     if binding:
         turns.bind_turn(snapshot.nonce, "s", "t")
     with host(**dict(context(snapshot), HERMES_SESSION_USER_ID=sender)):
         assert call("terminal", turn_id="t")["action"] == ("block" if setting == "on" else "approve")
         assert call("web_search", turn_id="t") is None
-        for tool in AUTHORIZATION_TOOLS:
+        for tool in grants.GRANT_TOOL_NAMES:
             assert call(tool, turn_id="t")["action"] == "block"
 
 
@@ -1206,7 +1206,7 @@ async def test_wire_synthetic_flag_cannot_grant_legacy_owner_tools(harness, host
     with host(**dict(context(snapshot), HERMES_SESSION_USER_ID=sender)):
         assert call("terminal", turn_id="t")["action"] == "block"
         assert call("web_search", turn_id="t") is None
-        for tool in AUTHORIZATION_TOOLS:
+        for tool in grants.GRANT_TOOL_NAMES:
             assert call(tool, turn_id="t")["action"] == "block"
 
 
@@ -1237,7 +1237,7 @@ async def test_internal_note_producers_use_default_tools(harness, host, monkeypa
         assert call("terminal", turn_id="t")["action"] == "block"
         for tool, args in [("delegate_task", {"goal": "work"}), ("cronjob_manage", {"action": "create"})]:
             assert call(tool, turn_id="t", args=args)["action"] == "block"
-        for tool in AUTHORIZATION_TOOLS:
+        for tool in grants.GRANT_TOOL_NAMES:
             assert call(tool, turn_id="t")["action"] == "block"
 
 
@@ -1362,7 +1362,7 @@ async def test_synthetic_producer_authority_is_explicit(harness, host, monkeypat
                            ("cronjob_manage", {"action": "create"})]:
             result = call(tool, turn_id="t", args=args) if binding else guard.clawchat_pre_tool_call(tool_name=tool, args=args)
             assert result is None if producer == "activation" else result["action"] == "block"
-        for tool in AUTHORIZATION_TOOLS:
+        for tool in grants.GRANT_TOOL_NAMES:
             assert call(tool, turn_id="t")["action"] == "block"
 
 

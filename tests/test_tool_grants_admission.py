@@ -194,8 +194,9 @@ async def test_empty_or_off_preserves_immediate_dispatch_source_and_toolsets(har
     harness.monkeypatch.setattr(guard, "_is_known_group", lambda _: False)
     harness.monkeypatch.setattr(guard, "_config_extra", lambda: {"tool-grants": "off" if off else "on"})
     harness.monkeypatch.setattr(guard, "_narrowed_toolsets", lambda: ["web", guard.NO_MCP])
-    assert a.toolsets_for_source(harness.events[0].source) == ["web", guard.NO_MCP]
-    assert a.toolsets_for_source(SimpleNamespace(**expected)) == ["web", guard.NO_MCP]
+    expected_tools = ["web", guard.NO_MCP] if off else [guard.GRANT_REQUEST_TOOLSET, "web", guard.NO_MCP]
+    assert a.toolsets_for_source(harness.events[0].source) == expected_tools
+    assert a.toolsets_for_source(SimpleNamespace(**expected)) == expected_tools
 
 
 @pytest.mark.asyncio

@@ -186,7 +186,7 @@ def test_clean_text_and_receipt_substitution():
 def test_approved_hints_verbatim_and_no_disclosure():
     messages = [grants.NON_OWNER_GRANTS_HINT, grants.GRANT_BLOCK_MESSAGE,
                 grants.GRANT_INTERSECTION_BLOCK_MESSAGE, grants.GRANT_ASK_DENIED_MESSAGE]
-    assert messages == ["Explain only the requested ability in the conversation's language. For missing access, tell them the owner can allow it in their direct chat. For a mixed-turn block, an allowed person can ask again alone. Do not invent reasons or reveal others' access, settings, paths, or versions.", 'This tool is not available to the caller yet. Do not try another way. Explain that the owner can allow this ability in their direct chat.', 'Someone in this turn is not allowed to use this tool, so it did not run. Do not retry. Say that an allowed person can call you again alone.', 'The owner did not approve this call or has not answered yet, so it did not run. Do not retry this request. They can try later or ask the owner directly.']
+    assert messages == ["For missing access, call clawchat_tool_request with the ability ID and one short reason. Do not request after a denial or mixed-turn block. Explain only the requested ability in the conversation's language. Do not invent reasons or reveal others' access, settings, paths, or versions.", 'This tool is not available to the caller yet. Do not try another way. Call clawchat_tool_request with the ability ID and one short reason.', 'Someone in this turn is not allowed to use this tool, so it did not run. Do not retry. Say that an allowed person can call you again alone.', 'The owner did not approve this call or has not answered yet, so it did not run. Do not retry this request. They can try later or ask the owner directly.']
     for message in messages + list(grants.GRANT_WRITE_FAILED_MESSAGE.values()) + list(grants.GRANT_INVALID_CODE_MESSAGE.values()):
         for forbidden in ("张三", "李四", "Alice", "Bob", "tool-grants", "non-owner-host-tools", "approvals.plugin",
                           "/home/", "/tmp/", "config.yaml", "clawchat.sqlite", "0.21.0", "2026.9.8",
@@ -206,7 +206,7 @@ def test_code_randomness_and_command(monkeypatch):
     assert grants.generate_grant_code() == "000000"
     assert grants.generate_grant_code() == "999999"
     assert calls == [1000000, 1000000]
-    assert grants.GRANT_CONFIRM_COMMAND.fullmatch("  /clawchat-allow 000123  ".strip())[1] == "000123"
+    assert grants.GRANT_CONFIRM_COMMAND.fullmatch("  /clawchat-allow 000123  ".strip())[2] == "000123"
     for text in ("/clawchat-allow 12345", "/clawchat-allow 1234567", "/clawchat-allow abcdef", "x /clawchat-allow 123456",
                  "/clawchat-allow 123456 x", "/clawchat-allow 123456\n", "/clawchat-allow １２３４５６"):
         assert not grants.GRANT_CONFIRM_COMMAND.fullmatch(text)

@@ -135,7 +135,7 @@ def _approve(monkeypatch):
 def test_override_drops_memory_and_every_mcp_server(where):
     turn = TURNS[where]
     kept = guard.toolsets_for_source(Source(turn["chat_id"], turn["chat_type"], turn["user_id"]), owner_user_id=OWNER)
-    assert kept == ["clawchat", "skills", "web", guard.NO_MCP]
+    assert kept == [guard.GRANT_REQUEST_TOOLSET, "clawchat", "skills", "web", guard.NO_MCP]
     for name in ("memory", "core", "filesystem", "github", "mcp-filesystem"):
         assert name not in kept
 
@@ -158,9 +158,9 @@ def test_fallback_has_no_mcp(monkeypatch, caplog):
         raise RuntimeError("config unreadable")
 
     monkeypatch.setattr(guard, "_platform_toolsets", boom)
-    assert guard.toolsets_for_source(Source(GROUP, "group", OWNER), owner_user_id=OWNER) == ["clawchat", "no_mcp"]
+    assert guard.toolsets_for_source(Source(GROUP, "group", OWNER), owner_user_id=OWNER) == [guard.GRANT_REQUEST_TOOLSET, "clawchat", "no_mcp"]
     monkeypatch.setattr(guard, "_platform_toolsets", lambda: {"memory", "filesystem", "terminal"})
-    assert guard.toolsets_for_source(Source(DM, "dm", FRIEND), owner_user_id=OWNER) == ["clawchat", "no_mcp"]
+    assert guard.toolsets_for_source(Source(DM, "dm", FRIEND), owner_user_id=OWNER) == [guard.GRANT_REQUEST_TOOLSET, "clawchat", "no_mcp"]
 
 
 def test_owner_direct_chat_keeps_mcp_and_memory():

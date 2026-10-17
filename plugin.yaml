@@ -10,6 +10,7 @@ provides_hooks:
   - pre_gateway_dispatch
   - pre_tool_call
 provides_tools:
+  - clawchat_tool_request
   - clawchat_tool_grant
   - clawchat_tool_revoke
   - clawchat_tool_grants_list

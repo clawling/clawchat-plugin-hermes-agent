@@ -836,6 +836,11 @@ _ORCHESTRATION_HANDLERS = {
 
 
 
+async def handle_clawchat_tool_request(args, **kw):
+    from clawchat_gateway.tools import request_tool_access
+    return _tool_result(await request_tool_access(args, session_id=kw.get("session_id", "")))
+
+
 async def handle_clawchat_tool_grant(args, **kw):
     from clawchat_gateway.tools import manage_tool_grants
 
@@ -885,6 +890,19 @@ def register_tools(ctx) -> None:
              "parameters": {"type": "object", "additionalProperties": False,
                             "properties": properties, "required": required}},
             handler, is_async=True, description=description, emoji="G",
+        )
+
+    if grants_enabled:
+        from clawchat_gateway.tool_capabilities import TOOL_CAPABILITIES
+        from clawchat_gateway.host_tools_guard import GRANT_REQUEST_TOOLSET
+        ctx.register_tool(
+            "clawchat_tool_request", GRANT_REQUEST_TOOLSET,
+            {"name": "clawchat_tool_request", "description": "Ask the owner for access to one capability when the caller lacks it. Supply only capability and one short reason. Never request after a denial or a mixed-turn block.",
+             "parameters": {"type": "object", "additionalProperties": False,
+                            "properties": {"capability": {"type": "string", "enum": list(TOOL_CAPABILITIES)},
+                                           "reason": {"type": "string", "minLength": 1}},
+                            "required": ["capability", "reason"]}},
+            handle_clawchat_tool_request, is_async=True, description="Request ClawChat Access", emoji="G",
         )
 
     target_properties = {

@@ -41,8 +41,16 @@ class InboundMessage:
     _batch_speaker_names: tuple[tuple[str, str], ...] = field(default=(), repr=False, compare=False)
     _owner_action_origin: object | None = field(default=None, repr=False, compare=False)
 
+    _grant_request_origin: tuple[str, str, int] | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def grant_origin(self):
+        return self._grant_request_origin if self.is_internal_synthetic else None
+
     @property
     def grant_speakers(self) -> tuple[str, ...]:
+        if self.grant_origin:
+            return (self.grant_origin[0],)
         if self.is_internal_synthetic:
             return ()
         return self._batch_speakers if self._batch_speakers is not None else (self.sender_id,)
@@ -56,10 +64,11 @@ class InboundMessage:
         return self._synthetic_origin is _INTERNAL_SYNTHETIC
 
     @classmethod
-    def internal_synthetic(cls, *, owner_action: bool = False, **kwargs: Any) -> InboundMessage:
+    def internal_synthetic(cls, *, owner_action: bool = False, grant_origin: tuple[str, str, int] | None = None, **kwargs: Any) -> InboundMessage:
         """Construct a plugin-owned event without granting trust to raw fields."""
         return cls(**kwargs, _synthetic_origin=_INTERNAL_SYNTHETIC,
-                   _owner_action_origin=_OWNER_ACTION if owner_action else None)
+                   _owner_action_origin=_OWNER_ACTION if owner_action and not grant_origin else None,
+                   _grant_request_origin=grant_origin)
 
 
 def _coerce_emitted_at(value: Any) -> int | None:

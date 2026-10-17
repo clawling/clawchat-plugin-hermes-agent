@@ -137,7 +137,7 @@ def test_owner_direct_chat_keeps_the_platform_toolset():
 def test_other_turns_lose_the_host_tools(source):
     kept = guard.toolsets_for_source(source, owner_user_id=OWNER)
     assert kept, "an empty override is ignored by the host and means the full toolset"
-    assert set(kept) == (FULL - set(guard.RESTRICTED_TOOLSETS)) | {guard.NO_MCP}
+    assert set(kept) == (FULL - set(guard.RESTRICTED_TOOLSETS)) | {guard.NO_MCP, guard.GRANT_REQUEST_TOOLSET}
     for name in ("terminal", "file", "code_execution", "delegation", "cronjob", "kanban", "browser", "memory"):
         assert name not in kept
 
@@ -157,12 +157,12 @@ def test_composite_that_carries_a_host_tool_is_dropped(monkeypatch):
             name, []
         ),
     )
-    assert guard.toolsets_for_source(Source(DM, "dm", FRIEND), owner_user_id=OWNER) == ["web", guard.NO_MCP]
+    assert guard.toolsets_for_source(Source(DM, "dm", FRIEND), owner_user_id=OWNER) == [guard.GRANT_REQUEST_TOOLSET, "web", guard.NO_MCP]
 
 
 def test_nothing_left_still_returns_a_non_empty_override(monkeypatch):
     monkeypatch.setattr(guard, "_platform_toolsets", lambda: {"terminal", "file"})
-    assert guard.toolsets_for_source(Source(DM, "dm", FRIEND), owner_user_id=OWNER) == list(guard.FALLBACK_TOOLSETS)
+    assert guard.toolsets_for_source(Source(DM, "dm", FRIEND), owner_user_id=OWNER) == [guard.GRANT_REQUEST_TOOLSET, *guard.FALLBACK_TOOLSETS]
 
 
 def test_override_failure_fails_closed(monkeypatch, caplog):
@@ -170,7 +170,7 @@ def test_override_failure_fails_closed(monkeypatch, caplog):
         raise RuntimeError("config unreadable")
 
     monkeypatch.setattr(guard, "_platform_toolsets", boom)
-    assert guard.toolsets_for_source(Source(DM, "dm", FRIEND), owner_user_id=OWNER) == list(guard.FALLBACK_TOOLSETS)
+    assert guard.toolsets_for_source(Source(DM, "dm", FRIEND), owner_user_id=OWNER) == [guard.GRANT_REQUEST_TOOLSET, *guard.FALLBACK_TOOLSETS]
     assert "fail" in caplog.text.lower()
 
 

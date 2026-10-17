@@ -264,6 +264,32 @@ ALTER TABLE tool_grant_pending ADD COLUMN payload_version INTEGER NOT NULL DEFAU
 """
 
 
+TOOL_GRANT_REQUESTS_SCHEMA = """
+CREATE TABLE tool_grant_requests (
+  account_id TEXT NOT NULL, request_id TEXT NOT NULL,
+  code TEXT NOT NULL CHECK(length(code) = 6 AND code NOT GLOB '*[^0-9]*'),
+  requester_user_id TEXT NOT NULL, requester_name TEXT NOT NULL, capability_id TEXT NOT NULL,
+  source_chat_id TEXT NOT NULL, source_chat_type TEXT NOT NULL CHECK(source_chat_type IN ('direct','group')),
+  source_session_key TEXT NOT NULL, source_message_id TEXT NOT NULL,
+  reason TEXT NOT NULL, request_summary TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('sending','pending','allowed','asked','denied','expired','failed')),
+  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  sent_at INTEGER, decided_at INTEGER,
+  decision_mode TEXT CHECK(decision_mode IN ('direct','ask','deny')), decided_by_user_id TEXT,
+  wake_state TEXT NOT NULL CHECK(wake_state IN ('none','pending','dispatching','delivered','failed')),
+  wake_key TEXT NOT NULL UNIQUE CHECK(length(wake_key) > 0), wake_attempted_at INTEGER, wake_delivered_at INTEGER,
+  last_error_code TEXT, wake_notified_at INTEGER,
+  PRIMARY KEY(account_id,request_id), UNIQUE(account_id,code),
+  CHECK(status NOT IN ('allowed','asked','denied') OR
+    (decision_mode IS NOT NULL AND decided_by_user_id IS NOT NULL AND decided_at IS NOT NULL)),
+  FOREIGN KEY(account_id,code) REFERENCES tool_grant_pending(account_id,code)
+);
+CREATE INDEX tool_request_person_cap_created ON tool_grant_requests(account_id,requester_user_id,capability_id,created_at);
+CREATE INDEX tool_request_account_created ON tool_grant_requests(account_id,created_at);
+CREATE INDEX tool_request_status_expiry ON tool_grant_requests(account_id,status,expires_at);
+"""
+
+
 def refresh_token_fingerprint(refresh_token: str) -> str:
     """Fingerprint the credential as submitted to the refresh endpoint."""
     return hashlib.sha256(refresh_token.strip().encode("utf-8")).hexdigest()
@@ -284,6 +310,7 @@ MIGRATIONS = [
     (12, "revoked_refresh_tokens", REVOKED_REFRESH_SCHEMA),
     (13, "tool_grants", TOOL_GRANTS_SCHEMA),
     (14, "tool_grants_v2", TOOL_GRANTS_V2_SCHEMA),
+    (15, "tool_grant_requests", TOOL_GRANT_REQUESTS_SCHEMA),
 ]
 
 # Lookup behind ClawChatStore.find_seen_message_in_chat: a real chat message
@@ -547,6 +574,176 @@ class ClawChatStore:
             raise
         finally:
             conn.close()
+
+    @staticmethod
+    def _request_row(conn, account_id, request_id):
+        cursor = conn.execute('SELECT * FROM tool_grant_requests WHERE account_id = ? AND request_id = ?',
+                              (account_id, request_id))
+        row = cursor.fetchone()
+        return dict(zip((col[0] for col in cursor.description), row)) if row else None
+
+    def get_request(self, *, account_id, request_id):
+        return self._tool_grants_transaction(lambda conn: self._request_row(conn, account_id, request_id))
+
+    def reserve_request(self, *, account_id, owner_user_id, origin, requester_name, capability_id, reason, now=None):
+        """Rate check, quota, shared code reservation and request write serialize together."""
+        import secrets
+        from dataclasses import asdict
+        from clawchat_gateway.tool_capabilities import TOOL_CAPABILITIES
+        from clawchat_gateway.tool_grants import generate_grant_code, resolve_turn_grants
+        from clawchat_gateway.tool_requests import (
+            REQUEST_CARD_TTL_MS, REQUEST_COOLDOWN_MS, REQUEST_DAILY_LIMIT,
+            resolve_request_daily_window, request_grant_block, sanitize_request_text,
+        )
+        now = _now_ms() if now is None else now
+        if (not _finite(now) or not account_id or not owner_user_id or capability_id not in TOOL_CAPABILITIES
+                or not sanitize_request_text(requester_name, 120) or not re.fullmatch(r'usr_[^\s]+', origin.requester_user_id)
+                or origin.requester_user_id == owner_user_id
+                or not origin.source_chat_id or not origin.source_session_key or not origin.source_message_id
+                or origin.source_chat_type not in ('direct', 'group')):
+            raise ValueError('Invalid request')
+
+        def write(conn):
+            self._expire_requests(conn, account_id, now)
+            cursor = conn.execute('SELECT * FROM tool_grants WHERE account_id = ? AND grantee_user_id = ?',
+                                  (account_id, origin.requester_user_id))
+            rows = [dict(zip((col[0] for col in cursor.description), row)) for row in cursor.fetchall()]
+            grants = resolve_turn_grants([origin.requester_user_id], owner_user_id, rows, now)
+            block = request_grant_block(grants, capability_id, now=now)
+            if block:
+                return dict(status='blocked', reason=block)
+            if conn.execute('''SELECT 1 FROM tool_grant_requests WHERE account_id = ? AND requester_user_id = ?
+                AND capability_id = ? AND ((status IN ('sending','pending') AND expires_at > ?) OR (status <> 'failed' AND created_at > ?)) LIMIT 1''',
+                (account_id, origin.requester_user_id, capability_id, now, now - REQUEST_COOLDOWN_MS)).fetchone():
+                return dict(status='waiting')
+            window = resolve_request_daily_window(now)
+            count = conn.execute('SELECT count(*) FROM tool_grant_requests WHERE account_id = ? AND created_at > ? AND created_at <= ?',
+                                 (account_id, window['start'], window['end'])).fetchone()[0]
+            if count >= REQUEST_DAILY_LIMIT:
+                return dict(status='waiting')
+            request_id, wake_key = secrets.token_urlsafe(24), secrets.token_urlsafe(24)
+            for attempt in range(6):
+                code = generate_grant_code()
+                try:
+                    conn.execute('''INSERT INTO tool_grant_pending
+                        (account_id, code, payload_json, created_at, expires_at, purpose, payload_version)
+                        VALUES (?, ?, ?, ?, ?, 'request', 2)''',
+                        (account_id, code, json.dumps({'request_id': request_id}), now, now + REQUEST_CARD_TTL_MS))
+                    break
+                except sqlite3.IntegrityError:
+                    if attempt == 5:
+                        raise
+            values = dict(account_id=account_id, request_id=request_id, code=code, **asdict(origin),
+                          requester_name=sanitize_request_text(requester_name, 120), capability_id=capability_id,
+                          reason=sanitize_request_text(reason), created_at=now, updated_at=now,
+                          expires_at=now + REQUEST_CARD_TTL_MS, status='sending', wake_state='none', wake_key=wake_key)
+            values['request_summary'] = sanitize_request_text(values['request_summary'], 500)
+            columns = ','.join(values)
+            conn.execute(f'INSERT INTO tool_grant_requests ({columns}) VALUES ({",".join("?" for _ in values)})', tuple(values.values()))
+            return dict(status='sending', request=self._request_row(conn, account_id, request_id))
+        return self._tool_grants_transaction(write)
+
+    def mark_sent(self, *, account_id, request_id, now=None):
+        now = _now_ms() if now is None else now
+        return self._tool_grants_transaction(lambda conn: conn.execute('''UPDATE tool_grant_requests
+            SET status = 'pending', sent_at = ?, updated_at = ? WHERE account_id = ? AND request_id = ? AND status = 'sending' ''',
+            (now, now, account_id, request_id)).rowcount)
+
+    def mark_failed(self, *, account_id, request_id, now=None):
+        now = _now_ms() if now is None else now
+        return self._tool_grants_transaction(lambda conn: conn.execute('''UPDATE tool_grant_requests
+            SET status = 'failed', last_error_code = 'send-failed', updated_at = ?
+            WHERE account_id = ? AND request_id = ? AND status = 'sending' ''', (now, account_id, request_id)).rowcount)
+
+    @staticmethod
+    def _expire_requests(conn, account_id, now):
+        conn.execute("UPDATE tool_grant_requests SET status = 'expired', updated_at = ? WHERE account_id = ? AND status IN ('sending','pending') AND expires_at <= ?",
+                     (now, account_id, now))
+
+    def confirm_request(self, *, account_id, code, mode, decided_by_user_id, ask_available=True, now=None):
+        now = _now_ms() if now is None else now
+        if not _finite(now) or mode not in ('direct', 'ask', 'deny') or not decided_by_user_id:
+            raise ValueError('Invalid request decision')
+        def write(conn):
+            self._expire_requests(conn, account_id, now)
+            pending = conn.execute('''SELECT request_id FROM tool_grant_requests WHERE account_id = ? AND code = ?
+                AND status IN ('sending','pending') AND expires_at > ?''', (account_id, code, now)).fetchone()
+            if not pending:
+                return None
+            request = self._request_row(conn, account_id, pending[0])
+            registered = conn.execute("SELECT 1 FROM tool_grant_pending WHERE account_id = ? AND code = ? AND purpose = 'request' AND consumed_at IS NULL AND expires_at > ?",
+                                      (account_id, code, now)).fetchone()
+            if not registered:
+                return None
+            if mode == 'ask' and not ask_available:
+                raise ValueError('ask-unavailable')
+            payload = dict(grantees=[dict(id=request['requester_user_id'], name=request['requester_name'])],
+                           tools=['cap:' + request['capability_id']], mode=mode)
+            rows = self._write_grant_payload(conn, account_id, payload, now)
+            conn.execute('UPDATE tool_grant_pending SET consumed_at = ? WHERE account_id = ? AND code = ?', (now, account_id, code))
+            conn.execute('''UPDATE tool_grant_requests SET status = ?, decision_mode = ?, decided_by_user_id = ?,
+                decided_at = ?, updated_at = ?, wake_state = 'pending' WHERE account_id = ? AND request_id = ?''',
+                ({'direct': 'allowed', 'ask': 'asked', 'deny': 'denied'}[mode], mode, decided_by_user_id, now, now, account_id, pending[0]))
+            return dict(request=self._request_row(conn, account_id, pending[0]), rows=rows)
+        return self._tool_grants_transaction(write)
+
+    def claim_wake(self, *, account_id, wake_key, now=None):
+        now = _now_ms() if now is None else now
+        def write(conn):
+            cursor = conn.execute('''UPDATE tool_grant_requests SET wake_state = 'dispatching', wake_attempted_at = ?, updated_at = ?
+                WHERE account_id = ? AND wake_key = ? AND wake_state = 'pending'
+                AND status IN ('allowed','asked','denied') AND expires_at > ?''', (now, now, account_id, wake_key, now))
+            if cursor.rowcount != 1:
+                return None
+            request_id = conn.execute('SELECT request_id FROM tool_grant_requests WHERE account_id = ? AND wake_key = ?', (account_id, wake_key)).fetchone()[0]
+            return self._request_row(conn, account_id, request_id)
+        return self._tool_grants_transaction(write)
+
+    def finish_wake(self, *, account_id, wake_key, now=None):
+        return self._complete_wake(account_id, wake_key, None, now)
+
+    def fail_wake(self, *, account_id, wake_key, error='dispatch-failed', now=None):
+        if error not in ('dispatch-failed', 'session-unavailable', 'host-rejected', 'dispatch-timeout'):
+            raise ValueError('Invalid wake error')
+        return self._complete_wake(account_id, wake_key, error, now)
+
+    def _complete_wake(self, account_id, wake_key, error, now):
+        now = _now_ms() if now is None else now
+        return self._tool_grants_transaction(lambda conn: conn.execute('''UPDATE tool_grant_requests SET wake_state = ?,
+            wake_delivered_at = ?, updated_at = ?, last_error_code = ?
+            WHERE account_id = ? AND wake_key = ? AND wake_state = 'dispatching' ''',
+            ('failed' if error else 'delivered', None if error else now, now, error, account_id, wake_key)).rowcount)
+
+    def _recover_stale(self, conn, account_id, now):
+        from clawchat_gateway.tool_requests import REQUEST_WAKE_STALE_MS
+        self._expire_requests(conn, account_id, now)
+        conn.execute('''UPDATE tool_grant_requests SET wake_state = 'failed', last_error_code = 'dispatch-timeout', updated_at = ?
+            WHERE account_id = ? AND wake_state = 'dispatching' AND (wake_attempted_at IS NULL OR wake_attempted_at <= ?)''',
+            (now, account_id, now - REQUEST_WAKE_STALE_MS))
+
+    def recover_stale(self, *, account_id, now=None):
+        now = _now_ms() if now is None else now
+        def write(conn):
+            self._recover_stale(conn, account_id, now)
+            return [row[0] for row in conn.execute('''SELECT wake_key FROM tool_grant_requests WHERE account_id = ?
+                AND wake_state = 'pending' AND status IN ('allowed','asked','denied') AND expires_at > ?''', (account_id, now))]
+        return self._tool_grants_transaction(write)
+
+    def take_pending_notice(self, *, account_id, requester_ids, session_key, chat_id, chat_type, now=None):
+        now = _now_ms() if now is None else now
+        def write(conn):
+            self._recover_stale(conn, account_id, now)
+            ids = [row[0] for row in conn.execute('''SELECT request_id FROM tool_grant_requests WHERE account_id = ?
+                AND source_session_key = ? AND source_chat_id = ? AND source_chat_type = ? AND expires_at > ?
+                AND wake_state = 'failed' AND wake_notified_at IS NULL AND status IN ('allowed','asked','denied')''',
+                (account_id, session_key, chat_id, chat_type, now))]
+            requests = [self._request_row(conn, account_id, id_) for id_ in ids]
+            requests = [request for request in requests if request['requester_user_id'] in requester_ids]
+            for request in requests:
+                conn.execute('UPDATE tool_grant_requests SET wake_notified_at = ?, updated_at = ? WHERE account_id = ? AND wake_key = ?',
+                             (now, now, account_id, request['wake_key']))
+            return requests
+        return self._tool_grants_transaction(write)
 
     def create_pending_grant(
         self, *, account_id: str, code: str, payload: dict[str, Any], now: int | None = None, payload_version: int = 2,

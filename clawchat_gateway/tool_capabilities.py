@@ -207,3 +207,11 @@ def resolve_cross_chat_gate(context=None, effective_grant=None) -> str:
 def plan_deny_removal(rows) -> str:
     """Pending product decision; revocation returns to the ordinary default."""
     return "immediate"
+
+
+ORIGIN_INHERITANCE_POLICY = "unconfigured"
+
+def resolve_origin_grant_context(event):
+    """Only access-card wakeups carry a trusted origin; other producers default."""
+    from clawchat_gateway.inbound import InboundMessage
+    return (event.grant_origin or "unknown") if isinstance(event, InboundMessage) else "unknown"

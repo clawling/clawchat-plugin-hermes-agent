@@ -106,6 +106,7 @@ from typing import Any, Callable, Optional
 logger = logging.getLogger(__name__)
 
 GRANT_MANAGEMENT_TOOLSET = "clawchat-grants"
+GRANT_REQUEST_TOOLSET = "clawchat-requests"
 _GRANT_APPROVAL_GATE_LOCK = threading.Lock()
 _GRANT_CATALOG_LOCK = threading.Lock()
 _UNNARROWED_CATALOG = ContextVar("clawchat_unnarrowed_catalog", default=False)
@@ -419,6 +420,8 @@ def _filter_grant_definitions(definitions, snapshot):
     from clawchat_gateway.tool_grants import tool_grant_visible
 
     def allowed(tool):
+        if tool == "clawchat_tool_request":
+            return _tool_grants_enabled() and not (snapshot and (snapshot.owner_side or snapshot.legacy_owner_tools))
         if tool in AUTHORIZATION_TOOLS:
             return bool(snapshot and snapshot.owner_side and snapshot.owner_verified and tool != "clawchat_tool_request")
         if snapshot and (snapshot.owner_side or snapshot.legacy_owner_tools):
@@ -872,12 +875,26 @@ def _legacy_approve_toolsets():
     from clawchat_gateway.tool_capabilities import AUTHORIZATION_TOOLS
 
     platform = _platform_toolsets()
-    kept = {name for name in platform if name != GRANT_MANAGEMENT_TOOLSET
+    kept = {name for name in platform if name not in {GRANT_MANAGEMENT_TOOLSET, GRANT_REQUEST_TOOLSET}
             and not set(_resolve_tools(name)) & set(AUTHORIZATION_TOOLS)}
     return None if kept == platform else sorted(kept) or list(FALLBACK_TOOLSETS)
 
 
-def toolsets_for_source(source: Any, *, owner_user_id: str | Callable[[], str],
+def toolsets_for_source(source: Any, *, owner_user_id, owner_direct_chat_id=None):
+    from clawchat_gateway.turn_grants import get_snapshot
+    result = _toolsets_for_source(source, owner_user_id=owner_user_id, owner_direct_chat_id=owner_direct_chat_id)
+    try:
+        snapshot = get_snapshot(str(getattr(source, "message_id", "") or ""))
+        if snapshot and snapshot.chat_id != str(getattr(source, "chat_id", "") or ""):
+            snapshot = None
+        if _tool_grants_enabled() and result is not None and not (snapshot and (snapshot.owner_side or snapshot.legacy_owner_tools)):
+            return list(dict.fromkeys([GRANT_REQUEST_TOOLSET, *result]))
+    except Exception:
+        pass
+    return result
+
+
+def _toolsets_for_source(source: Any, *, owner_user_id: str | Callable[[], str],
                         owner_direct_chat_id: Optional[Callable[[], str]] = None) -> Optional[list[str]]:
     """Offer toolsets from the effective host catalog using the turn's frozen rules."""
     from clawchat_gateway.tool_grants import tool_grant_visible
@@ -893,7 +910,7 @@ def toolsets_for_source(source: Any, *, owner_user_id: str | Callable[[], str],
         if snapshot and (snapshot.owner_side or snapshot.legacy_owner_tools):
             if snapshot.owner_verified:
                 return None
-            return sorted(name for name in _platform_toolsets() if name != GRANT_MANAGEMENT_TOOLSET
+            return sorted(name for name in _platform_toolsets() if name not in {GRANT_MANAGEMENT_TOOLSET, GRANT_REQUEST_TOOLSET}
                           and not set(_resolve_tools(name)) & set(AUTHORIZATION_TOOLS)) or list(FALLBACK_TOOLSETS)
         if snapshot is None and not hasattr(source, "message_id") and _is_owner_direct(
                 chat_id, str(getattr(source, "chat_type", "") or ""),
@@ -1003,6 +1020,15 @@ def _tool_grants_enabled() -> bool:
     return _read_tool_grants(_config_extra().get("tool-grants")) == "on"
 
 MANAGEMENT_UPGRADE_MESSAGE = "The owner needs to upgrade Hermes to 0.19.1 or later to manage tool grants."
+
+
+def request_snapshot(session_id: str, turn_id: str):
+    from clawchat_gateway.turn_grants import lookup_snapshot_for_call, session_context_value
+    if not _tool_grants_enabled() or session_context_value("HERMES_SESSION_PLATFORM") != "clawchat":
+        return None
+    snapshot = lookup_snapshot_for_call(session_context_value("HERMES_SESSION_MESSAGE_ID"),
+        session_context_value("HERMES_SESSION_CHAT_ID"), session_id, turn_id)
+    return snapshot if snapshot and not snapshot.owner_side and not snapshot.legacy_owner_tools else None
 
 
 def management_snapshot(session_id: str, turn_id: str):
@@ -1213,7 +1239,10 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: A
         tool_name = str(tool_name or "")
         from clawchat_gateway.tool_grants import GRANT_TOOL_NAMES, GRANT_BLOCK_MESSAGE
 
-        if tool_name in (*GRANT_TOOL_NAMES, "clawchat_tool_request"):
+        if tool_name == "clawchat_tool_request":
+            snapshot = request_snapshot(kwargs.get("session_id", ""), kwargs.get("turn_id", ""))
+            return None if snapshot and snapshot.request_origin else _grant_block("not-granted")
+        if tool_name in GRANT_TOOL_NAMES:
             if management_snapshot(kwargs.get("session_id", ""), kwargs.get("turn_id", "")):
                 return None
             message = GRANT_BLOCK_MESSAGE

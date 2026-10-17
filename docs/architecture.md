@@ -160,7 +160,8 @@ snapshots intersect. Synthetic/unidentified input in the owner's direct chat
 removes verification until idle. Grant/revoke writes affect subsequent
 snapshots; expiry is checked again at execution.
 Only the one-time activation greeting, constructed from the stored owner pairing,
-retains legacy ordinary tools in the owner's direct chat. Other synthetic turns
+retains legacy ordinary tools in the owner's direct chat. Authorization-card
+wakeups use their trusted requester's current grants. Other synthetic turns
 use defaults, including permission receipts, contact/comment notifications,
 memory migration hints and sediment turns. No synthetic turn can manage grants.
 Speaker authority comes from parsed sender IDs and the coalescer's internal
@@ -211,12 +212,47 @@ to another chat can pass per-person authorization. Tool target/resource checks
 still apply, and non-owner local attachment restrictions remain. Hermes has no
 blanket current-chat-only gate; the pending policy interface
 `resolve_cross_chat_gate` currently returns `legacy`. Origin inheritance is
-unimplemented (`unconfigured`); missing trusted origin uses defaults.
+limited to authorization-card wakeups; other producers resolve to `unknown`
+under `ORIGIN_INHERITANCE_POLICY = "unconfigured"` and use defaults.
 
 Migration 14 rebuilds `tool_grants` around `what_kind + what` and preserves old
 exact-tool rows and modes. **After upgrading, do not downgrade; old and new
 plugin processes must not share a database.** See [storage upgrade and current
 policy defaults](./configuration.md#storage-upgrade-and-unimplemented-policy-choices).
+
+`tool_requests.py` owns fixed card/continuation/notice copy, sanitation and the
+rolling 24-hour quota policy interface. Migration 15 adds durable requests,
+shared pending-code references, rate indexes and one-time wake notice storage.
+The new schema cannot be downgraded; never share the DB with an old process.
+Quota checks, code insertion and request creation use one `BEGIN IMMEDIATE`;
+confirmation consumes the code, upserts the rule and queues the wake in another
+atomic transaction. Send failures retain rate quota and never report pending.
+
+`clawchat_tool_request` has its own `clawchat-requests` toolset, independently
+visible in non-owner turns even under `all:deny`. Its handler uses the exact
+nonce/session/turn binding and immutable `RequestOrigin`, while overlapping
+snapshots continue to restrict access. It accepts only capability and reason.
+All three confirmation commands are intercepted before model dispatch; only
+real owner-direct input can decide, including a `sending` card after a crash.
+Proactive cards still accept only `/clawchat-allow` for the frozen mode.
+
+Wake dispatch atomically claims a unique `wake_key`, resolves the original
+conversation and builds `InboundMessage.internal_synthetic(grant_origin=…)`.
+The process-local origin contains requester ID, request ID and card expiry;
+the parser ignores all wire origin/synthetic/requester fields. Grant speakers
+contain only the requester, never an owner identity, and current grants are
+loaded again. Wakeups wait for the original session to be idle before `_handle_inbound`;
+later real input retains the existing busy admission queues;
+expiry is checked again immediately before `handle_message`. This avoids
+newer host-only imports such as `admit_internal_event`, absent from the full
+v0.12.0+ compatibility contract.
+
+Startup recovers unexpired pending wakes. Dispatch failures and claims stuck
+for ten minutes become failed with a one-time, original-route-only notice on
+the requester's next real turn. Notice retrieval also recovers stale claims.
+Notices expire with the card. Ambiguous dispatches are never retried; the host
+does not provide guaranteed idempotent delivery. Unknown spontaneous producers
+retain default permissions and do not inherit owner or guest authority.
 
 ## Outbound chat_id validity gate
 

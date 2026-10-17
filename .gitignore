@@ -254,3 +254,5 @@ AGENTS.md
 CLAUDE.md
 
 !tests/test_tool_grants_v2.py
+
+!tests/test_tool_requests.py

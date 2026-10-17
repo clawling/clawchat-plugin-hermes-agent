@@ -1697,6 +1697,111 @@ async def orchestrate_get_connect_code(code: str) -> dict[str, Any]:
     return await _orchestrate(lambda c: c.orch_get_connect_code(code))
 
 
+def _tool_request_context(session_id):
+    from contextvars import copy_context
+    from clawchat_gateway.host_tools_guard import request_snapshot
+    try:
+        try:
+            from tools import approval_context as context
+        except ImportError:
+            from tools import approval as context
+        current = copy_context()
+        turn_id = current[context._approval_turn_id] if context._approval_turn_id in current else ''
+        snapshot = request_snapshot(session_id, turn_id)
+        sender = get_clawchat_sender()
+        if (snapshot and snapshot.request_origin and sender and sender._account_id() == snapshot.account_id
+                and sender._clawchat_config.tool_grants == 'on'
+                and snapshot.request_origin.requester_user_id != sender._owner_user_id()):
+            return snapshot, sender
+    except Exception:
+        pass
+    return None, None
+
+
+async def request_tool_access(params, *, session_id=''):
+    import time
+    from clawchat_gateway.host_tools_guard import host_tool_catalog, ask_grants_available
+    from clawchat_gateway.tool_capabilities import TOOL_CAPABILITIES
+    from clawchat_gateway.tool_requests import request_grant_block, request_guidance, build_request_card, sanitize_request_text
+    from clawchat_gateway.owner_language import resolve_owner_language
+
+    def blocked(reason):
+        return dict(status='blocked', reason=reason, sent=False, note=request_guidance('blocked', reason))
+    def failed(error):
+        return dict(status='failed', error=error, sent=False, note=request_guidance('failed'))
+    if (not isinstance(params, dict) or set(params) != {'capability', 'reason'}
+            or not isinstance(params.get('capability'), str) or not isinstance(params.get('reason'), str)
+            or not sanitize_request_text(params['reason'])):
+        return _validation_error('Supply only capability and one short reason')
+    capability = params['capability']
+    if capability not in TOOL_CAPABILITIES:
+        return blocked('not-available')
+    snapshot, sender = _tool_request_context(session_id)
+    if snapshot is None:
+        return blocked('context-unavailable')
+    origin = snapshot.request_origin
+
+    def current_block():
+        live, current_sender = _tool_request_context(session_id)
+        if live is None or live.nonce != snapshot.nonce or current_sender is not sender:
+            return 'context-unavailable'
+        _, available = host_tool_catalog()
+        return request_grant_block(live.grants, capability, len(live.non_owner_speakers),
+                                   available=available, now=int(time.time() * 1000))
+    try:
+        block = current_block()
+        if block:
+            return blocked(block)
+        owner_chat = sender._owner_direct_chat_id()
+        if not owner_chat or owner_chat == origin.source_chat_id:
+            return failed('send-failed')
+        client, error = _build_client()
+        if error or client is None:
+            return failed('send-failed')
+        try:
+            profile = await client.get_user_info(origin.requester_user_id)
+            profile = profile.get('user', profile)
+            name = profile.get('nickname')
+            if not isinstance(name, str) or not sanitize_request_text(name, 120):
+                return failed('send-failed')
+            if (profile.get('id') or profile.get('user_id') or origin.requester_user_id) != origin.requester_user_id:
+                return failed('send-failed')
+            source_name = None
+            if origin.source_chat_type == 'group':
+                detail = await client.get_conversation(origin.source_chat_id)
+                detail = detail.get('conversation', detail)
+                source_name = detail.get('title')
+                if detail.get('type') != 'group' or not isinstance(source_name, str) or not sanitize_request_text(source_name, 120):
+                    return failed('send-failed')
+        except Exception:
+            return failed('send-failed')
+        block = current_block()
+        if block:
+            return blocked(block)
+        if owner_chat != sender._owner_direct_chat_id():
+            return failed('send-failed')
+        store = sender._store
+        reservation = store.reserve_request(account_id=snapshot.account_id, owner_user_id=sender._owner_user_id(),
+            origin=origin, requester_name=name, capability_id=capability, reason=params['reason'])
+        if reservation['status'] == 'blocked':
+            return blocked(reservation['reason'])
+        if reservation['status'] == 'waiting':
+            return dict(status='waiting', sent=False, note=request_guidance('waiting'))
+        request = reservation['request']
+        try:
+            card = build_request_card(request, lang=resolve_owner_language(sender._owner_locale()),
+                                      ask_available=ask_grants_available(), source_name=source_name)
+            if not await sender._send_owner_text(owner_chat, card):
+                raise RuntimeError('send-failed')
+        except Exception:
+            store.mark_failed(account_id=snapshot.account_id, request_id=request['request_id'])
+            return failed('send-failed')
+        store.mark_sent(account_id=snapshot.account_id, request_id=request['request_id'])
+        return dict(status='pending', requestId=request['request_id'], sent=True, note=request_guidance('pending'))
+    except Exception:
+        return failed('storage-unavailable')
+
+
 def _grant_management_context(session_id: str):
     """Check the execution turn again inside the handler, never its arguments."""
     from contextvars import copy_context

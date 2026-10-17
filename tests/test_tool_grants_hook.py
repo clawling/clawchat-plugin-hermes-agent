@@ -149,7 +149,7 @@ def test_first_layer_adds_granted_toolset_and_explicit_mcp_server(host, monkeypa
     s = snapshot(grants={tool: "direct"})
     try:
         source = SimpleNamespace(chat_id=s.chat_id, chat_type="dm", user_id="usr_a", message_id=s.nonce)
-        assert set(guard.toolsets_for_source(source, owner_user_id="usr_owner")) == expected
+        assert set(guard.toolsets_for_source(source, owner_user_id="usr_owner")) == expected | {guard.GRANT_REQUEST_TOOLSET}
     finally:
         turns.release_turn(s.nonce)
 
@@ -159,7 +159,7 @@ def test_first_layer_resolution_error_keeps_original_nonempty_list(host, monkeyp
     try:
         source = SimpleNamespace(chat_id=s.chat_id, chat_type="dm", user_id="usr_a", message_id=s.nonce)
         monkeypatch.setattr(guard, "_registry_toolset", lambda _: (_ for _ in ()).throw(RuntimeError()))
-        assert guard.toolsets_for_source(source, owner_user_id="usr_owner") == ["web", "clawchat", guard.NO_MCP]
+        assert guard.toolsets_for_source(source, owner_user_id="usr_owner") == [guard.GRANT_REQUEST_TOOLSET, "web", "clawchat", guard.NO_MCP]
     finally:
         turns.release_turn(s.nonce)
 

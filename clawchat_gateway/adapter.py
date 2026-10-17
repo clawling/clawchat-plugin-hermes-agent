@@ -1171,6 +1171,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._grant_dispatching: dict[str, int] = {}
         self._grant_dispatching_grants: dict[str, bool] = {}
         self._grant_group_grants: dict[str, bool] = {}
+        self._request_wake_tasks: set[asyncio.Task] = set()
         self._grant_sessions: set[str] = set()
         self._grant_timeout_tasks: set[asyncio.Task[Any]] = set()
         self._grant_dispatch_started: dict[str, str] = {}
@@ -1237,6 +1238,9 @@ class ClawChatAdapter(BasePlatformAdapter):
         else:
             # Paired + ready: link the report row via the authenticated endpoint.
             self._spawn_plugin_report(authenticated=True)
+            task = asyncio.create_task(self._recover_request_wakes())
+            self._request_wake_tasks.add(task)
+            task.add_done_callback(self._request_wake_tasks.discard)
         return ready
 
     def _spawn_plugin_report(self, *, authenticated: bool) -> None:
@@ -1275,6 +1279,10 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
 
     async def disconnect(self) -> None:
+        for task in list(self._request_wake_tasks):
+            task.cancel()
+        if self._request_wake_tasks:
+            await asyncio.gather(*self._request_wake_tasks, return_exceptions=True)
         for task in list(self._stream_sweeps()):
             task.cancel()
         for task in list(self._sediment_tasks):
@@ -4386,7 +4394,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         try:
             speakers = inbound.grant_speakers
             trusted = bool(speakers) and all(isinstance(speaker, str) and speaker.strip() for speaker in speakers)
-            if trusted and owner and all(speaker == owner for speaker in speakers):
+            if trusted and owner and not inbound.grant_origin and all(speaker == owner for speaker in speakers):
                 return speakers, resolve_turn_grants(list(speakers), owner, [], now), frozenset()
             _, available = host_tool_catalog()
             public = public_tool_names(available)
@@ -4519,6 +4527,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             busy = True
         if not busy:
             return False
+        if inbound.grant_origin:
+            raise RuntimeError('host-rejected')
         if not (snapshot and snapshot.grants) and not self._grant_dispatching_grants.get(key) and not (
             self._grant_group_grants.get(inbound.chat_id)
         ) and not (self._turn_grant_values(inbound)[1] if new_grants is None else new_grants):
@@ -4530,6 +4540,84 @@ class ClawChatAdapter(BasePlatformAdapter):
         else:
             self._grant_admission_queue.enqueue(inbound)
         return True
+
+    async def _recover_request_wakes(self):
+        if self._clawchat_config.tool_grants != 'on':
+            return
+        try:
+            pending = self._store.recover_stale(account_id=self._account_id())
+            results = await asyncio.gather(
+                *(self._dispatch_request_wake(wake_key) for wake_key in pending), return_exceptions=True,
+            )
+            if any(isinstance(result, BaseException) for result in results):
+                logger.warning('clawchat access wake recovery had an unsuccessful dispatch')
+        except Exception:
+            logger.warning('clawchat access wake recovery failed', exc_info=True)
+
+    async def _dispatch_request_wake(self, wake_key):
+        from clawchat_gateway.tool_requests import build_request_continuation
+        request = self._store.claim_wake(account_id=self._account_id(), wake_key=wake_key)
+        if request is None:
+            return
+        try:
+            if self._clawchat_config.tool_grants != 'on':
+                raise RuntimeError('host-rejected')
+            # Resolve the original conversation before admission; never take routing
+            # from model arguments or infer an owner-side destination.
+            from clawchat_gateway.tools import _build_client
+            client, error = _build_client()
+            if error or client is None:
+                raise RuntimeError('session-unavailable')
+            detail = await client.get_conversation(request['source_chat_id'])
+            detail = detail.get('conversation', detail)
+            if (detail.get('id', request['source_chat_id']) != request['source_chat_id']
+                    or detail.get('type') != request['source_chat_type']):
+                raise RuntimeError('session-unavailable')
+            if request['requester_user_id'] == self._owner_user_id():
+                raise RuntimeError('host-rejected')
+            inbound = InboundMessage.internal_synthetic(
+                grant_origin=(request['requester_user_id'], request['request_id'], request['expires_at']),
+                chat_id=request['source_chat_id'], chat_type=request['source_chat_type'],
+                sender_id=request['requester_user_id'], sender_name=request['requester_name'],
+                text=build_request_continuation(request), raw_message={}, was_mentioned=True,
+            )
+            if self._grant_session_key(inbound) != request['source_session_key']:
+                raise RuntimeError('session-unavailable')
+            # Keep continuation events out of coalesced real-message batches.
+            # The ordinary inbound path will then serialize later input behind
+            # this dispatch and preserve the requester as its sole speaker.
+            key = self._grant_session_key(inbound)
+            while self._grant_session_busy(key) or inbound.chat_id in self._group_dispatching:
+                self._check_request_wake(inbound)
+                await asyncio.sleep(0.1)
+            await self._handle_inbound(inbound)
+        except BaseException as exc:
+            error = str(exc) if str(exc) in ('session-unavailable', 'host-rejected') else 'dispatch-failed'
+            self._store.fail_wake(account_id=self._account_id(), wake_key=wake_key, error=error)
+            if not isinstance(exc, Exception):
+                raise
+
+    def _check_request_wake(self, inbound):
+        if not inbound.grant_origin:
+            return
+        _, request_id, expires_at = inbound.grant_origin
+        request = self._store.get_request(account_id=self._account_id(), request_id=request_id)
+        if (self._clawchat_config.tool_grants != 'on' or expires_at <= int(time.time() * 1000)
+                or request is None or request['expires_at'] <= int(time.time() * 1000)
+                or request['wake_state'] != 'dispatching' or request['status'] not in ('allowed', 'asked', 'denied')
+                or request['requester_user_id'] != inbound.sender_id
+                or request['source_chat_id'] != inbound.chat_id or request['source_chat_type'] != inbound.chat_type
+                or request['source_session_key'] != self._grant_session_key(inbound)):
+            raise RuntimeError('host-rejected')
+
+    def _finish_request_wake(self, inbound, error=None):
+        if inbound.grant_origin:
+            request = self._store.get_request(account_id=self._account_id(), request_id=inbound.grant_origin[1])
+            if request:
+                if error:
+                    self._store.fail_wake(account_id=self._account_id(), wake_key=request['wake_key'], error=error)
+                else:
+                    self._store.finish_wake(account_id=self._account_id(), wake_key=request['wake_key'])
 
     async def _consume_grant_confirmation(self, inbound: InboundMessage) -> bool:
         from clawchat_gateway.tool_grants import (
@@ -4553,10 +4641,15 @@ class ClawChatAdapter(BasePlatformAdapter):
         except Exception:  # noqa: BLE001 - cold owner metadata uses English
             lang = "en"
         lang = lang if lang in ("zh", "zh_Hant") else "en"
+        decision = None
         try:
             from clawchat_gateway.host_tools_guard import ask_grants_available
-            rows = self._store.confirm_pending_grant(account_id=self._account_id(), code=match[1],
-                                                      ask_available=ask_grants_available())
+            mode = {'allow': 'direct', 'ask': 'ask', 'deny': 'deny'}[match[1]]
+            decision = self._store.confirm_request(account_id=self._account_id(), code=match[2], mode=mode,
+                decided_by_user_id=inbound.sender_id, ask_available=ask_grants_available())
+            rows = decision['rows'] if decision else (
+                self._store.confirm_pending_grant(account_id=self._account_id(), code=match[2],
+                    ask_available=ask_grants_available()) if match[1] == 'allow' else None)
         except ValueError as exc:
             text = GRANT_ASK_UNAVAILABLE_RECEIPT[lang] if str(exc) == "ask-unavailable" else GRANT_WRITE_FAILED_MESSAGE[lang]
         except Exception:  # noqa: BLE001 - never acknowledge a failed write as active
@@ -4578,10 +4671,21 @@ class ClawChatAdapter(BasePlatformAdapter):
                 except Exception:  # noqa: BLE001 - the transaction has already committed
                     logger.warning("clawchat grant receipt rendering failed after successful write", exc_info=True)
                     text = GRANT_APPLIED_MESSAGE[lang]
-        await self._send_owner_text(inbound.chat_id, text)
+        try:
+            await self._send_owner_text(inbound.chat_id, text)
+        finally:
+            if decision:
+                task = asyncio.create_task(self._dispatch_request_wake(decision['request']['wake_key']))
+                self._request_wake_tasks.add(task)
+                task.add_done_callback(self._request_wake_tasks.discard)
         return True
 
     async def _handle_inbound(self, inbound: InboundMessage) -> None:
+        try:
+            self._check_request_wake(inbound)
+        except Exception:
+            self._finish_request_wake(inbound, 'host-rejected')
+            return
         key = self._grant_session_key(inbound)
         if self._verified_owner_inbound(inbound):
             # Owner input stays immediate; idle only determines verification.
@@ -4590,6 +4694,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         if await self._consume_grant_confirmation(inbound):
             return
         if self._refuses_turn(inbound):
+            self._finish_request_wake(inbound, 'host-rejected')
             return
         if not self._is_owner_turn(inbound) and self._hold_granted_inbound(inbound, from_dispatch=True):
             return
@@ -4606,6 +4711,9 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
         try:
             await self._handle_inbound_now(inbound)
+        except BaseException:
+            self._finish_request_wake(inbound, 'dispatch-failed')
+            raise
         finally:
             remaining = self._grant_dispatching[key] - 1
             if remaining:
@@ -4615,7 +4723,13 @@ class ClawChatAdapter(BasePlatformAdapter):
                 self._grant_dispatching_grants.pop(key, None)
 
     async def _handle_inbound_now(self, inbound: InboundMessage) -> None:
+        try:
+            self._check_request_wake(inbound)
+        except Exception:
+            self._finish_request_wake(inbound, 'host-rejected')
+            return
         if self._refuses_turn(inbound):
+            self._finish_request_wake(inbound, 'host-rejected')
             return
         if inbound.chat_id and not self._inbound_trigger_id(inbound.raw_message):
             # A synthetic inbound (awareness / moment-comment note, permission
@@ -4673,12 +4787,16 @@ class ClawChatAdapter(BasePlatformAdapter):
         source_kwargs: dict[str, Any] = {}
         snapshot = None
         if inbound.chat_id:
-            from clawchat_gateway.turn_grants import get_snapshot, register_turn
+            from clawchat_gateway.turn_grants import get_snapshot, register_turn, RequestOrigin
 
             key = self._grant_session_key(inbound)
             snapshot = register_turn(
                 account_id=self._account_id(), chat_id=inbound.chat_id,
                 speakers=speakers, grants=grants, any_granted_tools=any_tools, session_key=key,
+                request_origin=(RequestOrigin(inbound.sender_id, inbound.chat_id, inbound.chat_type, key,
+                    self._inbound_trigger_id(inbound.raw_message), inbound.text)
+                    if not inbound.is_internal_synthetic and inbound.sender_id
+                    and inbound.sender_id != self._owner_user_id() else None),
                 speaker_names=self._grant_speaker_names(inbound, speakers),
                 owner_verified=self._verified_owner_inbound(inbound),
                 owner_side=getattr(grants, "owner_only", False),
@@ -4753,6 +4871,17 @@ class ClawChatAdapter(BasePlatformAdapter):
             reply_to_text=reply_to_text,
         )
         channel_prompt_parts = self._compose_channel_prompt_parts(inbound)
+        if (not inbound.is_internal_synthetic and self._clawchat_config.tool_grants == 'on'
+                and hasattr(self._store, 'take_pending_notice')):
+            from clawchat_gateway.tool_requests import build_request_notice
+            try:
+                notices = self._store.take_pending_notice(account_id=self._account_id(), requester_ids=speakers,
+                    session_key=self._grant_session_key(inbound), chat_id=inbound.chat_id, chat_type=inbound.chat_type)
+                if notices:
+                    channel_prompt_parts.append(self._channel_prompt_part('access-request-notice', 'platform',
+                        '\n'.join(build_request_notice(request) for request in notices)))
+            except Exception:
+                logger.warning('clawchat access notice lookup failed', exc_info=True)
         channel_prompt = self._render_channel_prompt_parts(channel_prompt_parts)
         if channel_prompt:
             event.channel_prompt = channel_prompt
@@ -4807,8 +4936,13 @@ class ClawChatAdapter(BasePlatformAdapter):
             reply_to_message_id,
         )
         try:
+            self._check_request_wake(inbound)
             await self.handle_message(event)
+            if inbound.grant_origin and getattr(event, '_gateway_accepted', None) is False:
+                raise RuntimeError('host-rejected')
+            self._finish_request_wake(inbound)
         except BaseException:
+            self._finish_request_wake(inbound, 'dispatch-failed')
             if snapshot is not None:
                 from clawchat_gateway.turn_grants import release_turn
 

@@ -149,7 +149,7 @@ def _approve(monkeypatch):
 def test_override_drops_session_search_and_connections(where):
     turn = TURNS[where]
     kept = guard.toolsets_for_source(Source(turn["chat_id"], turn["chat_type"], turn["user_id"]), owner_user_id=OWNER)
-    assert kept == ["clarify", "clawchat", "todo", "web", guard.NO_MCP]
+    assert kept == [guard.GRANT_REQUEST_TOOLSET, "clarify", "clawchat", "todo", "web", guard.NO_MCP]
     for name in ("session_search", "connections", "core"):
         assert name not in kept
 

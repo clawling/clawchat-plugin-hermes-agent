@@ -24,7 +24,7 @@ GRANT_TOOL_NAMES = (
 TOOL_GRANTS_CONFIG_KEY = "tool-grants"
 PENDING_TTL_MS = 600_000
 # Apply to trimmed inbound text; use fullmatch to require the whole command.
-GRANT_CONFIRM_COMMAND = re.compile(r"^/clawchat-allow\s+(\d{6})$", re.ASCII)
+GRANT_CONFIRM_COMMAND = re.compile(r"^/clawchat-(allow|ask|deny)\s+([0-9]{6})$", re.ASCII)
 
 # Host registrations across the supported range: hosts up to 0.21.x name the
 # process and cron tools ``process`` / ``cronjob``; later ones ``*_manage``.
@@ -42,8 +42,8 @@ BASELINE_CATEGORY = {
     "browser_vault": "browser", "browser_vision": "browser", "computer_use": "browser",
 }
 
-NON_OWNER_GRANTS_HINT = "Explain only the requested ability in the conversation's language. For missing access, tell them the owner can allow it in their direct chat. For a mixed-turn block, an allowed person can ask again alone. Do not invent reasons or reveal others' access, settings, paths, or versions."
-GRANT_BLOCK_MESSAGE = 'This tool is not available to the caller yet. Do not try another way. Explain that the owner can allow this ability in their direct chat.'
+NON_OWNER_GRANTS_HINT = "For missing access, call clawchat_tool_request with the ability ID and one short reason. Do not request after a denial or mixed-turn block. Explain only the requested ability in the conversation's language. Do not invent reasons or reveal others' access, settings, paths, or versions."
+GRANT_BLOCK_MESSAGE = 'This tool is not available to the caller yet. Do not try another way. Call clawchat_tool_request with the ability ID and one short reason.'
 GRANT_INTERSECTION_BLOCK_MESSAGE = 'Someone in this turn is not allowed to use this tool, so it did not run. Do not retry. Say that an allowed person can call you again alone.'
 GRANT_ASK_DENIED_MESSAGE = 'The owner did not approve this call or has not answered yet, so it did not run. Do not retry this request. They can try later or ask the owner directly.'
 GRANT_DENIED_MESSAGE = 'The owner has not opened access to this ability. Do not retry or send another access request.'

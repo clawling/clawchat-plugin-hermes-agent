@@ -41,7 +41,7 @@ def test_migration_13_upgrades_12_and_is_idempotent(tmp_path):
     ClawChatStore(path).initialize()
     ClawChatStore(path).initialize()
     with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1").fetchone() == (14, "tool_grants_v2")
+        assert conn.execute("SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1").fetchone() == (15, "tool_grant_requests")
         for table, columns, primary in (
             ("tool_grants", ["account_id", "grantee_user_id", "grantee_name", "what_kind", "what", "mode", "label", "expires_at", "created_at"], ["account_id", "grantee_user_id", "what_kind", "what"]),
             ("tool_grant_pending", ["account_id", "code", "payload_json", "created_at", "expires_at", "consumed_at", "purpose", "payload_version"], ["account_id", "code"]),
@@ -49,7 +49,7 @@ def test_migration_13_upgrades_12_and_is_idempotent(tmp_path):
             info = conn.execute("PRAGMA table_info(" + table + ")").fetchall()
             assert [item[1] for item in info] == columns
             assert [item[1] for item in sorted(info, key=lambda item: item[5]) if item[5]] == primary
-        assert conn.execute("SELECT count(*) FROM schema_migrations").fetchone()[0] == 14
+        assert conn.execute("SELECT count(*) FROM schema_migrations").fetchone()[0] == 15
 
 
 def test_pending_only_then_confirm_in_one_explicit_transaction(store, monkeypatch):

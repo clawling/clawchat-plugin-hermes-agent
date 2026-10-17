@@ -1083,7 +1083,7 @@ ask you first every time.” When per-call approval is unavailable, cards say
 “This machine cannot ask you each time. You can only choose Use directly or
 Deny.” Ask is not offered: an ask grant returns `ask-unavailable` without a
 card; direct cards include that explanation. The current proactive card
-confirms a preselected mode; guest request cards are not implemented.
+confirms a preselected mode; guest request cards instead select direct/ask/deny.
 Profile names and labels neutralize Markdown markers, backticks and slashes
 with fullwidth characters; only the code-generated confirmation command is clickable.
 
@@ -1102,7 +1102,7 @@ local-path check. Attachment delivery retains its separate resource checks.
 #### Management and turn snapshots
 
 [Tool parameters and return shapes](./reference/tools.md#per-person-tool-grants)
-cover grant, revoke and list. All three require `tool-grants: on`, ClawChat,
+cover grant, revoke, list and request. The three management tools require `tool-grants: on`, ClawChat,
 the activation direct chat, a real owner sender and a live nonce bound to the
 host's exact `(session_id, turn_id)`. Hook and handler both verify them.
 Groups (even owner-only batches), friends, other platforms and synthetic
@@ -1117,7 +1117,7 @@ snapshots; they do not rewrite an already running snapshot. List includes
 unexpired deny rows.
 
 With `tool-grants: off`, stored rules are retained but ignored, management
-tools are not registered and the grants hint is omitted. If registration cannot
+and request tools are not registered and the grants hint is omitted. If registration cannot
 read configuration, tools remain discoverable by the owner, but execution still
 enforces off. The independent `non-owner-host-tools` policy keeps its behavior,
 including legacy approve when an old host cannot bind grants to an execution
@@ -1143,9 +1143,9 @@ members the caller cannot yet use, as English display names plus IDs, e.g.
 It omits uninstalled/globally disabled capabilities and omits the list sentence
 when empty. Catalog lookup failure emits only generic guidance. Mixed batches
 describe shared availability without identifying who lacks access. The rest
-says to explain only the requested ability in the chat's language, tell the
-caller the owner can allow it in their direct chat, and let an allowed person
-ask alone after a mixed-turn block. It forbids inventing reasons or revealing
+says to call `clawchat_tool_request` with the ability ID and one short reason
+for missing access, never request after denial or a mixed-turn block, and
+explain only the requested ability in the chat's language. It forbids inventing reasons or revealing
 others' access, settings, paths or versions.
 
 Refusals carry `reasonCode` and fixed English guidance in `blockReason` /
@@ -1153,7 +1153,7 @@ Refusals carry `reasonCode` and fixed English guidance in `blockReason` /
 
 | Reason code | Meaning and guidance |
 |---|---|
-| `not-granted` | Missing access; the owner can allow the ability in their direct chat. Do not try another route. |
+| `not-granted` | Missing access; call `clawchat_tool_request` with the ability ID and one short reason. Do not try another route. |
 | `denied` | The owner has not opened this ability. Do not retry or request it again. |
 | `batch-intersection` | Multiple non-owner speakers lack a common permission. An allowed person can ask again alone; do not reveal who lacks it. |
 | `ask-declined` | The owner rejected or has not answered this call. Do not retry this request; try later or contact the owner. |
@@ -1227,15 +1227,66 @@ epoch milliseconds; `NULL` means no limit and `expires_at <= now` is inactive.
 processes must not share one database.** Old queries are incompatible with
 the rebuilt table.
 
-Guest access requests, request cards/commands, automatic resumption and
-request-rate limiting are **not implemented**. `clawchat_tool_request` is a
-reserved exclusion, not a registered tool; the three management tools remain
-the public API. Spontaneous task origin/grant inheritance is unimplemented
-(`unconfigured`): missing trusted origin uses defaults, never owner authority.
-Cross-chat policy is pending with current default `legacy`; deny-removal
-confirmation is pending with current default `immediate`. A future request
-quota's day boundary is undecided (specified provisional policy:
-`rolling-24h`); no request quota runs today. No public-tools override
+Migration **15** (`tool_grant_requests`) adds durable requests and wake notices.
+It records the trusted requester and original chat/session/message, one opaque
+request ID, one shared six-digit pending code, capability, sanitized reason and
+summary, timestamps, decision/decider, unique wake key, wake state and notice
+consumption time. Indexes cover person/capability/time, account/time and
+status/expiry. Migration 15 includes notice storage; no migration 16 is needed.
+**Migrations 14 and 15 cannot be downgraded. New and old processes must not share a DB.**
+
+#### Guest access requests and resumption
+
+`clawchat_tool_request({capability, reason})` is independently visible to every
+non-owner turn, even under `all:deny`. It does not inherit from `all` and cannot
+specify a user or destination. Deny, mixed-turn blocks, unavailable capabilities
+and existing access send no card. Unclassified tools require an owner-created
+exact-tool grant. Model arguments never determine requester identity or routing.
+
+One transaction checks the person × capability six-hour cooldown and account
+rolling 24-hour limit of 20, reserves a code in `tool_grant_pending` and creates
+`sending`. Code collisions retry at most five times after the initial attempt.
+A successful send changes it to `pending`; failure changes it to `failed` and
+never claims the owner was asked. Pending cards and throttled calls return
+`waiting`. Failed sends retain the daily quota but do not impose the person cooldown. `REQUEST_DAILY_WINDOW_POLICY` is
+`rolling-24h`; `resolve_request_daily_window(now, owner_time_zone)` isolates the
+pending calendar-day decision without using the owner's timezone today.
+
+Only the owner's activation direct chat receives a code-generated card.
+Profile names, group names and the relayed reason are cleaned, with links,
+controls and hidden characters removed and Markdown/slash commands neutralized;
+reasons are limited to 60 Unicode code points and marked “Their words, relayed”.
+A request card lasts 24 hours. `/clawchat-allow`, `/clawchat-ask` and
+`/clawchat-deny` select direct/ask/deny without another confirmation card.
+Ask is absent and refused when the actual approval route cannot ask reliably.
+A proactive 10-minute card still accepts only `/clawchat-allow` for its frozen
+mode. Every matching command is consumed before model dispatch; only a real,
+platform-identified owner in this account's owner direct chat may confirm.
+A card left in `sending` is also decidable: receiving the code proves delivery.
+
+Confirmation atomically consumes the code, writes the capability rule, records
+allowed/asked/denied with the decider and sets `wake_state=pending`. Write errors
+roll back all of it. Receipt rendering failure after commit still reports success.
+A unique `wake_key` serializes `pending → dispatching` before asynchronous work.
+The plugin dispatches an internal continuation through `_handle_inbound` into
+exactly the original session; the sole speaker is the requester. It re-reads
+current grants and rechecks expiry at host dispatch. Deny wakes only to explain
+the refusal. No caller becomes owner-side or gains legacy owner tools.
+
+Startup dispatches unexpired pending wakes. A dispatching claim older than ten
+minutes becomes failed, with a pending notice; taking notices also recovers
+stale claims. Failed wakes retain the effective grant and inject one short
+English notice only on that requester's next real turn in the original
+chat/session, expiring with the card. Ambiguous dispatches are not retried;
+the host has no guaranteed idempotent delivery, so this is one claimed dispatch,
+not a promise of strict end-to-end exactly-once delivery.
+
+Only authorization-card wakeups inherit a trusted origin. Other spontaneous
+producers (cron, delegated agents, Kanban and process completions) resolve to
+`unknown` through `resolve_origin_grant_context`; `ORIGIN_INHERITANCE_POLICY`
+remains `unconfigured`. Missing origin uses defaults, never owner authority.
+Cross-chat policy remains pending with default `legacy`; deny-removal
+confirmation remains pending with default `immediate`. No public-tools override
 configuration key is implemented.
 
 ## Reconnect, heartbeat, ack
