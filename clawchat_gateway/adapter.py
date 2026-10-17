@@ -355,7 +355,6 @@ class _OwnerApprovalRoute:
     session_key: str
     group_id: str
     expires_at: float
-    grant_nonce: str = ""
 LEGACY_EMPTY_RESPONSE_TOKEN = '""'
 CONVERSATION_SEMANTICS = """## ClawChat Conversation Semantics
 - Direct messages and group messages are routed by the runtime.
@@ -4343,23 +4342,6 @@ class ClawChatAdapter(BasePlatformAdapter):
         else:
             await self._route_inbound(inbound)
 
-    def _grant_speaker_names(self, inbound: InboundMessage, speakers: tuple[str, ...]) -> tuple[str, ...]:
-        names = {inbound.sender_id: inbound.sender_name or inbound.sender_id}
-
-        def collect(raw: Any) -> None:
-            if not isinstance(raw, dict):
-                return
-            for item in raw.get("messages", []) if isinstance(raw.get("messages"), list) else []:
-                collect(item)
-            sender = raw.get("sender")
-            if isinstance(sender, dict) and isinstance(sender.get("id"), str):
-                name = sender.get("nick_name") or sender.get("nickname") or sender.get("name")
-                if isinstance(name, str) and name.strip():
-                    names[sender["id"]] = name
-
-        collect(inbound.raw_message)
-        return tuple(names.get(speaker) or speaker for speaker in speakers)
-
     def _turn_grant_values(self, inbound: InboundMessage) -> tuple[tuple[str, ...], dict[str, str], frozenset[str]]:
         from clawchat_gateway.tool_grants import resolve_turn_grants
 
@@ -4463,7 +4445,7 @@ class ClawChatAdapter(BasePlatformAdapter):
 
     def _hold_granted_inbound(self, inbound: InboundMessage, *, from_dispatch: bool = False,
                               ignore_dispatch: bool = False, new_grants: dict[str, str] | None = None) -> bool:
-        if (self._clawchat_config.tool_grants != "on"
+        if (self._is_owner_turn(inbound) or self._clawchat_config.tool_grants != "on"
                 or asyncio.current_task() in self._grant_timeout_tasks):
             return False
         from clawchat_gateway.turn_grants import active_snapshot
@@ -4475,7 +4457,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             busy = True
         if not busy:
             return False
-        if not (snapshot and (snapshot.grants or snapshot.owner_verified)) and not self._grant_dispatching_grants.get(key) and not (
+        if not (snapshot and snapshot.grants) and not self._grant_dispatching_grants.get(key) and not (
             self._grant_group_grants.get(inbound.chat_id)
         ) and not (self._turn_grant_values(inbound)[1] if new_grants is None else new_grants):
             return False
@@ -4604,19 +4586,13 @@ class ClawChatAdapter(BasePlatformAdapter):
             return
         source_kwargs: dict[str, Any] = {}
         snapshot = None
-        if inbound.chat_id:
+        if not owner_turn:
             from clawchat_gateway.turn_grants import get_snapshot, register_turn
 
             key = self._grant_session_key(inbound)
             snapshot = register_turn(
                 account_id=self._account_id(), chat_id=inbound.chat_id,
                 speakers=speakers, grants=grants, any_granted_tools=any_tools, session_key=key,
-                speaker_names=self._grant_speaker_names(inbound, speakers),
-                owner_verified=(inbound.chat_type == "direct"
-                                and bool(inbound.sender_id)
-                                and inbound.sender_id == self._owner_user_id()
-                                and inbound.chat_id == self._owner_direct_chat_id()
-                                and not inbound.raw_message.get("synthetic")),
             )
             self._grant_dispatch_started[key] = snapshot.nonce
             self._grant_sessions.add(key)
@@ -6217,12 +6193,6 @@ class ClawChatAdapter(BasePlatformAdapter):
         # call raised TypeError and fell back to a plain-text send that recorded
         # no route, so the owner's reply never reached the group session.
         # `**kwargs` keeps a future host flag from reopening that failure.
-        from clawchat_gateway.turn_grants import route_approval
-
-        grant_approval = route_approval(str(session_key or ""), chat_id, description)
-        if grant_approval:
-            description = grant_approval.description
-            allow_permanent = allow_session = False
         chat_type = self._resolve_chat_type(chat_id, metadata, kwargs)
         non_owner_direct = chat_type != "group" and self._is_non_owner_direct_chat(
             chat_id, metadata, kwargs
@@ -6238,7 +6208,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             allow_session=allow_session,
             smart_denied=smart_denied,
         )
-        if non_owner_direct and not grant_approval:
+        if non_owner_direct:
             # A non-owner cannot approve (their reply never reaches
             # tools.approval), so waiting would only block their session
             # until the approval timeout. Deny it now through the host's
@@ -6254,11 +6224,9 @@ class ClawChatAdapter(BasePlatformAdapter):
             fallback_text = (
                 _NON_OWNER_EXEC_DENIED_TEXT if denied else _NON_OWNER_EXEC_APPROVAL_TEXT
             )
-        if chat_type == "group" or grant_approval:
+        if chat_type == "group":
             owner_chat_id = self._owner_direct_chat_id()
             if not owner_chat_id:
-                if grant_approval:
-                    self._resolve_gateway_approval(session_key, "deny", resolve_all=False, grant_nonce=grant_approval.nonce)
                 logger.error(
                     "clawchat exec approval suppressed reason=missing_owner_direct_chat_id group=%s",
                     chat_id,
@@ -6271,12 +6239,9 @@ class ClawChatAdapter(BasePlatformAdapter):
             # Reserve before the send's await so two groups forwarding at once
             # cannot draw the same code.
             approval_code = self._reserve_owner_approval_code(
-                owner_chat_id, session_key, chat_id,
-                **({"grant_nonce": grant_approval.nonce} if grant_approval else {}),
+                owner_chat_id, session_key, chat_id
             ) or ""
             if not approval_code:
-                if grant_approval:
-                    self._resolve_gateway_approval(session_key, "deny", resolve_all=False, grant_nonce=grant_approval.nonce)
                 logger.error(
                     "clawchat exec approval suppressed reason=approval_codes_exhausted group=%s",
                     chat_id,
@@ -6309,14 +6274,10 @@ class ClawChatAdapter(BasePlatformAdapter):
         try:
             sent = await self._connection.send_frame(frame, wait_for_ack=True)
         except BaseException:
-            if grant_approval:
-                self._resolve_gateway_approval(session_key, "deny", resolve_all=False, grant_nonce=grant_approval.nonce)
             if approval_code:
                 self._release_owner_approval_code(target_chat_id, approval_code)
             raise
         if not sent:
-            if grant_approval:
-                self._resolve_gateway_approval(session_key, "deny", resolve_all=False, grant_nonce=grant_approval.nonce)
             # Keep a route only for a card that is actually on its way,
             # otherwise a later owner reply gets matched to an approval that
             # never arrived.
@@ -6327,10 +6288,6 @@ class ClawChatAdapter(BasePlatformAdapter):
                 error="clawchat exec approval dropped",
                 message_id=message_id,
             )
-        if grant_approval:
-            from clawchat_gateway.turn_grants import mark_approval_delivered
-
-            mark_approval_delivered(grant_approval.nonce)
         return SendResult(success=True, message_id=message_id)
 
     def _deny_non_owner_exec_approval(
@@ -7659,7 +7616,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         session_key: str,
     ) -> dict[str, Any]:
         fallback_text = _exec_approval_fallback_text(command, description)
-        fragment = {
+        return {
             "kind": "approval_request",
             "title": "Command approval required",
             "fallback_text": fallback_text,
@@ -7707,18 +7664,6 @@ class ClawChatAdapter(BasePlatformAdapter):
                 },
             ],
         }
-        from clawchat_gateway.turn_grants import approval_by_nonce, approval_nonce_for_session
-
-        record = approval_by_nonce(approval_nonce_for_session(session_key))
-        if record and description.endswith("\nApproval: " + record.nonce):
-            fragment["fallback_text"] = _exec_approval_fallback_text(
-                command, record.description, allow_session=False, allow_permanent=False,
-            )
-            fragment["actions"] = [action for action in fragment["actions"]
-                                   if action["payload"]["decision"] in {"once", "deny"}]
-            for action in fragment["actions"]:
-                action["payload"]["grant_nonce"] = record.nonce
-        return fragment
 
     def _owner_approval_route_table(self) -> dict[str, dict[str, _OwnerApprovalRoute]]:
         """Lazily-initialised route table (several test harnesses build the
@@ -7778,7 +7723,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._drop_owner_approval_routes_where(stale)
 
     def _reserve_owner_approval_code(
-        self, owner_chat_id: str, session_key: str, group_id: str, *, grant_nonce: str = ""
+        self, owner_chat_id: str, session_key: str, group_id: str
     ) -> str | None:
         """Allocate a code unique among the owner's pending approvals."""
         self._prune_owner_approval_routes()
@@ -7797,7 +7742,6 @@ class ClawChatAdapter(BasePlatformAdapter):
             session_key=session_key,
             group_id=group_id,
             expires_at=time.monotonic() + OWNER_APPROVAL_ROUTE_TTL_SECONDS,
-            grant_nonce=grant_nonce,
         )
         return code
 
@@ -7920,21 +7864,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
             return True
         choice, resolve_all = self._approval_choice_from_text(command_name, inbound.text)
-        scope_words = {"always", "permanent", "permanently", "session", "ses", "a", "s", "all"}
-        if route.grant_nonce and (
-            any(word.lower() in scope_words for word in inbound.text.split()[1:])
-            or inbound.raw_message.get("synthetic")
-            or inbound.chat_id != self._owner_direct_chat_id()
-        ):
-            choice = "deny"
-        if route.grant_nonce:
-            from clawchat_gateway.turn_grants import approval_decision
-
-            choice = approval_decision(route.session_key, choice, route.grant_nonce)
-            resolve_all = False
         resolved = self._resolve_gateway_approval(
-            route.session_key, choice, resolve_all=resolve_all,
-            **({"grant_nonce": route.grant_nonce} if route.grant_nonce else {}),
+            route.session_key, choice, resolve_all=resolve_all
         )
         if resolve_all or not resolved:
             self._forget_owner_approval_route(route.session_key)
@@ -7970,27 +7901,11 @@ class ClawChatAdapter(BasePlatformAdapter):
             return True
         session_key = str(payload.get("session_key") or "")
         decision = str(payload.get("decision") or "")
-        from clawchat_gateway.turn_grants import approval_nonce_for_session, has_grant_approval
-
-        grant_nonce = ""
-        if has_grant_approval(session_key):
-            grant_nonce = approval_nonce_for_session(session_key)
-            if not grant_nonce:
-                return True  # ambiguous asks remain denied until their host timeout
-            decision = decision.lower()
-            if (frame.get("synthetic") or frame.get("chat_id") != self._owner_direct_chat_id()
-                    or payload.get("grant_nonce") != grant_nonce):
-                decision = "deny"
         if decision == "approve":
             decision = "once"
-        if grant_nonce and decision not in {"once", "approve"}:
-            decision = "deny"
         if decision not in {"once", "session", "always", "deny"} or not session_key:
             return False
-        resolved = self._resolve_gateway_approval(
-            session_key, decision, resolve_all=False,
-            **({"grant_nonce": grant_nonce} if grant_nonce else {}),
-        )
+        resolved = self._resolve_gateway_approval(session_key, decision, resolve_all=False)
         if not resolved:
             return True
         # Resolve the reply's conversation BEFORE forgetting the route — the
@@ -8064,31 +7979,11 @@ class ClawChatAdapter(BasePlatformAdapter):
         choice: str,
         *,
         resolve_all: bool,
-        grant_nonce: str = "",
     ) -> int:
         from tools.approval import has_blocking_approval, resolve_gateway_approval
-        from clawchat_gateway.turn_grants import approval_decision
 
         if not has_blocking_approval(session_key):
             return 0
-        if grant_nonce:
-            choice = approval_decision(session_key, choice, grant_nonce)
-            # The host can queue different approval types in the same session.
-            # Target the nonce's request, never the oldest unrelated entry.
-            try:
-                from tools.approval import list_gateway_approvals
-
-                key = "plugin_rule:clawchat-grant-ask:" + grant_nonce
-                pending = [item for item in list_gateway_approvals(session_key)
-                           if item.get("pattern_key") == key]
-                if len(pending) != 1 or not pending[0].get("request_id"):
-                    approval_decision(session_key, "deny", grant_nonce)
-                    return 0
-                return int(resolve_gateway_approval(session_key, choice, resolve_all=False,
-                                                    request_id=pending[0]["request_id"]) or 0)
-            except Exception:  # noqa: BLE001 - never resolve an unrelated request
-                approval_decision(session_key, "deny", grant_nonce)
-                return 0
         return int(resolve_gateway_approval(session_key, choice, resolve_all=resolve_all) or 0)
 
     def _approval_resolution_text(self, choice: str, count: int) -> str:

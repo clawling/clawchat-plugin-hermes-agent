@@ -10,9 +10,6 @@ provides_hooks:
   - pre_gateway_dispatch
   - pre_tool_call
 provides_tools:
-  - clawchat_tool_grant
-  - clawchat_tool_revoke
-  - clawchat_tool_grants_list
   - clawchat_get_account_profile
   - clawchat_get_user_profile
   - clawchat_list_account_friends

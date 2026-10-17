@@ -835,52 +835,7 @@ _ORCHESTRATION_HANDLERS = {
 }
 
 
-
-async def handle_clawchat_tool_grant(args, **kw):
-    from clawchat_gateway.tools import manage_tool_grants
-
-    return _tool_result(await manage_tool_grants("grant", args, session_id=kw.get("session_id", "")))
-
-
-async def handle_clawchat_tool_revoke(args, **kw):
-    from clawchat_gateway.tools import manage_tool_grants
-
-    return _tool_result(await manage_tool_grants("revoke", args, session_id=kw.get("session_id", "")))
-
-
-async def handle_clawchat_tool_grants_list(args, **kw):
-    from clawchat_gateway.tools import manage_tool_grants
-
-    return _tool_result(await manage_tool_grants("list", args, session_id=kw.get("session_id", "")))
-
 def register_tools(ctx) -> None:
-    grant_tools = {
-        "type": "array", "items": {"type": "string"}, "minItems": 1,
-        "description": "Exact tool names; no wildcards or grant management tools.",
-    }
-    schemas = [
-        ("clawchat_tool_grant", handle_clawchat_tool_grant,
-         "Prepare a tool grant confirmation card for the owner. Wait for confirmation; do not say it is active. Commands, files, code, sub-agents, scheduled tasks and browser tools always ask each time.",
-         {"userIds": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-          "groupId": {"type": "string", "description": "Grant to the current group members, excluding this Agent and the owner; use either userIds or groupId."},
-          "tools": grant_tools, "mode": {"type": "string", "enum": ["direct", "ask"]},
-          "expiresAt": {"type": "string", "description": "Optional future ISO 8601 expiry."},
-          "label": {"type": "string", "maxLength": 40}}, ["tools", "mode"]),
-        ("clawchat_tool_revoke", handle_clawchat_tool_revoke,
-         "Revoke selected tools or all tool grants for a person. Takes effect next turn.",
-         {"userId": {"type": "string"}, "tools": grant_tools}, ["userId"]),
-        ("clawchat_tool_grants_list", handle_clawchat_tool_grants_list,
-         "List unexpired tool grants by person, including names, ids, tools, modes and expiry.", {}, []),
-    ]
-    for name, handler, description, properties, required in schemas:
-        ctx.register_tool(
-            name, "clawchat",
-            {"name": name, "description": "Only available on a real owner message in the owner's ClawChat direct chat. " + description,
-             "parameters": {"type": "object", "additionalProperties": False,
-                            "properties": properties, "required": required}},
-            handler, is_async=True, description=description, emoji="G",
-        )
-
     target_properties = {
         "targetType": {
             "type": "string",

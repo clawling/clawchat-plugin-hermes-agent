@@ -22,8 +22,6 @@ class TurnSnapshot:
     grants: Mapping[str, str]
     created_at: float
     any_granted_tools: frozenset[str]
-    speaker_names: tuple[str, ...] = ()
-    owner_verified: bool = False
 
 
 _lock = threading.Lock()
@@ -31,19 +29,16 @@ _snapshots: dict[str, TurnSnapshot] = {}
 _bindings: dict[str, tuple[str, str]] = {}
 _active: dict[tuple[str, str], str] = {}
 _session_nonces: dict[tuple[str, str], set[str]] = {}
-_approvals: dict[str, GrantApproval] = {}
 
 
 def register_turn(*, account_id: str, chat_id: str, speakers: tuple[str, ...],
                   grants: Mapping[str, str], session_key: str,
-                  any_granted_tools: frozenset[str] = frozenset(),
-                  speaker_names: tuple[str, ...] = (), owner_verified: bool = False) -> TurnSnapshot:
+                  any_granted_tools: frozenset[str] = frozenset()) -> TurnSnapshot:
     with _lock:
         nonce = NONCE_PREFIX + secrets.token_urlsafe(24)
         snapshot = TurnSnapshot(
             nonce, account_id, chat_id, tuple(speakers),
             MappingProxyType(dict(grants)), time.monotonic(), frozenset(any_granted_tools),
-            tuple(speaker_names), owner_verified is True,
         )
         _snapshots[nonce] = snapshot
         _active[account_id, session_key] = nonce
@@ -109,94 +104,3 @@ def session_context_value(name: str) -> str:
         return str(get_session_env(name, "") or "").strip()
     except Exception:  # noqa: BLE001 - missing host context is no authority
         return ""
-
-
-@dataclass
-class GrantApproval:
-    session_key: str
-    chat_id: str
-    tool: str
-    nonce: str
-    expires_at: float
-    description: str
-    routed: bool = False
-    delivered: bool = False
-    choice: str = ""
-
-
-def lookup_snapshot_for_call(nonce: str, chat_id: str, session_id: str, turn_id: str) -> TurnSnapshot | None:
-    with _lock:
-        snapshot = _snapshots.get(nonce)
-        if (not session_id or not turn_id or snapshot is None or snapshot.chat_id != chat_id
-                or _bindings.get(nonce) != (session_id, turn_id)):
-            return None
-        return snapshot
-
-
-def register_approval(session_key: str, chat_id: str, tool: str, description: str, ttl: float) -> GrantApproval:
-    with _lock:
-        for key, record in list(_approvals.items()):
-            if record.expires_at <= time.monotonic():
-                del _approvals[key]
-        record = GrantApproval(session_key, chat_id, tool, secrets.token_urlsafe(24),
-                               time.monotonic() + ttl, description)
-        record.description += "\nApproval: " + record.nonce
-        _approvals[record.nonce] = record
-        return record
-
-
-def approval_by_nonce(nonce: str) -> GrantApproval | None:
-    with _lock:
-        record = _approvals.get(nonce)
-        return record if record and record.expires_at > time.monotonic() else None
-
-
-def has_grant_approval(session_key: str) -> bool:
-    with _lock:
-        return any(r.session_key == session_key and r.routed for r in _approvals.values())
-
-
-def approval_nonce_for_session(session_key: str) -> str:
-    with _lock:
-        records = [r for r in _approvals.values() if r.session_key == session_key and r.routed]
-        return records[0].nonce if len(records) == 1 else ""
-
-
-def mark_approval_delivered(nonce: str) -> None:
-    with _lock:
-        record = _approvals.get(nonce)
-        if record and record.routed:
-            record.delivered = True
-
-
-def route_approval(session_key: str, chat_id: str, description: str) -> GrantApproval | None:
-    # Correlate by the nonce suffix, since the host may redact the arguments.
-    # A lost/changed suffix fails closed. Sharing a session is never enough.
-    with _lock:
-        records = [r for r in _approvals.values() if r.session_key == session_key
-                   and r.chat_id == chat_id and description.endswith("\nApproval: " + r.nonce)
-                   and not r.routed and r.expires_at > time.monotonic()]
-        if len(records) != 1:
-            return None
-        records[0].routed = True
-        return records[0]
-
-
-def approval_decision(session_key: str, choice: str, nonce: str = "") -> str:
-    with _lock:
-        records = [r for r in _approvals.values() if r.session_key == session_key and r.routed
-                   and (not nonce or r.nonce == nonce)]
-        if not records:
-            return choice
-        # A session-level decision cannot reliably distinguish parallel asks.
-        choice = "once" if choice == "once" and len(records) == 1 and records[0].expires_at > time.monotonic() else "deny"
-        for record in records:
-            record.choice = choice
-        return choice
-
-
-def finish_approval(nonce: str) -> bool:
-    with _lock:
-        record = _approvals.pop(nonce, None)
-        return bool(record and record.routed and record.delivered and record.choice == "once"
-                    and record.expires_at > time.monotonic())
