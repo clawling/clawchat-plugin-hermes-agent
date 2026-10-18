@@ -460,7 +460,7 @@ async def test_forged_wire_origin_and_synthetic_never_changes_speaker(harness):
 @pytest.mark.parametrize('producer', ['cron', 'delegate', 'kanban', 'process'])
 async def test_unknown_synthetic_origin_uses_defaults_never_owner(harness, producer):
     incoming = InboundMessage.internal_synthetic(chat_id=OWNER_CHAT, chat_type='direct', sender_id='usr_owner', sender_name='Owner', text='Completion', raw_message={'producer': producer, 'origin': {'requester_user_id': 'usr_owner'}})
-    assert ORIGIN_INHERITANCE_POLICY == 'unconfigured' and resolve_origin_grant_context(incoming) == 'unknown'
+    assert ORIGIN_INHERITANCE_POLICY == 'receipt-and-process-completion' and resolve_origin_grant_context(incoming) == 'unknown'
     await harness.adapter._handle_inbound(incoming)
     s = turns.get_snapshot(harness.events[-1].source.message_id)
     assert s.speakers == () and not s.owner_side and not s.legacy_owner_tools and s.grants.get('terminal') is None

@@ -329,6 +329,9 @@ def structured_media_paths(result):
 
 def post_tool_call(*, tool_name="", args=None, result=None, session_id="", turn_id="",
                    tool_call_id="", status="", error_type=None, error_message=None, **_):
+    from clawchat_gateway.process_origins import record_process_origin
+    record_process_origin(tool_name=tool_name, args=args, result=result, session_id=session_id,
+                          turn_id=turn_id, status=status, error_type=error_type, error_message=error_message)
     try:
         binding = _call_binding(tool_name, args, session_id, turn_id, tool_call_id)
         if binding is None:

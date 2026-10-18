@@ -1588,13 +1588,14 @@ def _clawchat_pre_tool_decision(*, tool_name: str = "", args: Any = None, **kwar
                 from clawchat_gateway.local_paths import LOCAL_PATH_REFUSAL
                 return {"action": "block", "message": LOCAL_PATH_REFUSAL}
             return None
-        if non_owner_host_tools() == SETTING_APPROVE:
+        allow_approve = (snapshot is not None or not can_bind_call and not _host_supports_pre_llm_call())
+        if allow_approve and non_owner_host_tools() == SETTING_APPROVE:
             route_block = _cross_session_decision(tool_name, args, kwargs.get("session_id", ""))
             if route_block:
                 return route_block
         return _ordinary_non_owner_decision(tool_name, args, grants_enabled=False,
                                            approve=non_owner_host_tools() == SETTING_APPROVE
-                                           and (snapshot is not None or not _host_supports_pre_llm_call()))
+                                           and allow_approve)
     except Exception as exc:  # noqa: BLE001 - the host would ignore us and run the tool
         logger.warning("clawchat host tools: pre_tool_call check failed (%s); blocking %s", exc, tool_name)
         return {"action": "block", "message": BLOCK_MESSAGE}

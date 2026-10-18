@@ -4421,6 +4421,101 @@ class ClawChatAdapter(BasePlatformAdapter):
             logger.warning("clawchat turn grants: lookup failed", exc_info=True)
             return speakers, resolve_turn_grants([], owner, [], now, public_tools=public), frozenset()
 
+    def _process_completion_grants(self, speakers: tuple[str, ...]):
+        from clawchat_gateway.tool_grants import resolve_turn_grants
+        from clawchat_gateway.host_tools_guard import host_tool_catalog, public_tool_names
+
+        owner, now = self._owner_user_id(), int(time.time() * 1000)
+        public = frozenset()
+        try:
+            _, available = host_tool_catalog()
+            public = public_tool_names(available)
+            rows = self._store.load_grants_for_users(
+                account_id=self._account_id(), user_ids=list(speakers), now=now)
+            defaults = dict(public_tools=public, available_tools=available, unmatched="none")
+            grants = resolve_turn_grants(list(speakers), owner, rows, now, **defaults)
+            any_tools = frozenset(tool for speaker in speakers for tool in
+                                  resolve_turn_grants([speaker], owner, rows, now, **defaults))
+            return grants, any_tools
+        except Exception:  # noqa: BLE001 - failed reads use defaults, never group approve
+            logger.warning("clawchat process grants: lookup failed", exc_info=True)
+            return resolve_turn_grants([], owner, [], now, public_tools=public), frozenset()
+
+    async def handle_message(self, event: Any) -> None:
+        """Bind only trusted host internal events before the host starts work."""
+        if getattr(event, "internal", False) is not True:
+            return await super().handle_message(event)
+        from clawchat_gateway.tool_capabilities import resolve_origin_grant_context
+        from clawchat_gateway.process_origins import lookup_process_origin
+        from clawchat_gateway.turn_grants import get_snapshot, register_turn, release_turn
+        from clawchat_gateway.tool_grants import resolve_turn_grants
+
+        snapshot = None
+        key = ""
+        try:
+            source = getattr(event, "source", None)
+            # An already registered plugin snapshot must not gain host authority.
+            existing = get_snapshot(str(getattr(source, "message_id", "") or ""))
+            context = resolve_origin_grant_context(event) if existing is None else "unknown"
+            origin = (lookup_process_origin(event, account_id=self._account_id(), consume=True)
+                      if isinstance(context, dict) and context.get("source") == "process-completion"
+                      and self._clawchat_config.tool_grants == "on" else None)
+            if origin is not None:
+                speakers = tuple(sorted(origin.non_owner_speakers))
+                grants, any_tools = self._process_completion_grants(speakers)
+                key = origin.session_key
+                snapshot = register_turn(account_id=self._account_id(), chat_id=origin.chat_id,
+                    speakers=speakers, grants=grants, any_granted_tools=any_tools, session_key=key,
+                    non_owner_speakers=origin.non_owner_speakers, owner_side=False, owner_verified=False)
+            elif existing is None:
+                platform = getattr(source, "platform", None)
+                chat_id = getattr(source, "chat_id", "")
+                owner_chat, owner = self._owner_direct_chat_id(), self._owner_user_id()
+                if (getattr(platform, "value", platform) == "clawchat" and chat_id and owner_chat
+                        and chat_id == owner_chat and owner
+                        and getattr(source, "chat_type", "") in {"dm", "direct"}):
+                    # This exception relies on cross-session gates keeping guests
+                    # in their own session. A new host tool that starts another
+                    # session breaks it unless host_tool_targets_current_session
+                    # is audited too. Outbound mention delivery does not start turns.
+                    key = chat_id + ":__direct__"
+                    snapshot = register_turn(account_id=self._account_id(), chat_id=chat_id,
+                        speakers=(owner,), grants=resolve_turn_grants([owner], owner, [], int(time.time() * 1000)),
+                        session_key=key, owner_side=True, owner_verified=False)
+            if snapshot is not None:
+                try:
+                    from gateway.session_identity import replace_source
+                except ImportError:
+                    from dataclasses import replace as replace_source
+                event.source = replace_source(source, message_id=snapshot.nonce)
+                self._grant_reply_anchors[snapshot.nonce] = ""
+                self._grant_dispatch_started[key] = snapshot.nonce
+                self._grant_sessions.add(key)
+                if len(self._grant_reply_anchors) > 4096:
+                    for nonce in list(self._grant_reply_anchors):
+                        if len(self._grant_reply_anchors) <= 4096:
+                            break
+                        if get_snapshot(nonce) is None:
+                            self._grant_reply_anchors.pop(nonce, None)
+        except Exception:  # noqa: BLE001 - malformed internal events inherit nothing
+            if snapshot is not None:
+                release_turn(snapshot.nonce)
+                if self._grant_dispatch_started.get(key) == snapshot.nonce:
+                    self._grant_dispatch_started.pop(key, None)
+            snapshot = None
+            logger.warning("clawchat internal origin: lookup failed", exc_info=True)
+        accepted = False
+        try:
+            await super().handle_message(event)
+            accepted = getattr(event, "_gateway_accepted", None) is not False
+        finally:
+            # Rejection may return normally; no processing-complete callback
+            # will release a snapshot that the host never admitted.
+            if snapshot is not None and not accepted:
+                release_turn(snapshot.nonce)
+                if self._grant_dispatch_started.get(key) == snapshot.nonce:
+                    self._grant_dispatch_started.pop(key, None)
+
     def _grant_session_key(self, inbound: InboundMessage) -> str:
         # Hermes DMs are keyed by chat, including plugin-started messages with
         # a synthetic sender. Groups follow the configured per-speaker choice.

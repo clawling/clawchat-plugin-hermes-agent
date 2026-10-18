@@ -256,9 +256,20 @@ def plan_deny_removal(rows) -> str:
     return "immediate"
 
 
-ORIGIN_INHERITANCE_POLICY = "unconfigured"
+ORIGIN_INHERITANCE_POLICY = "receipt-and-process-completion"
 
 def resolve_origin_grant_context(event):
-    """Only access-card wakeups carry a trusted origin; other producers default."""
+    """Only plugin receipts and registered host process completions inherit."""
     from clawchat_gateway.inbound import InboundMessage
-    return (event.grant_origin or "unknown") if isinstance(event, InboundMessage) else "unknown"
+    if isinstance(event, InboundMessage):
+        return ({"kind": "trusted-origin", "source": "grant-receipt",
+                 "requester_user_id": event.grant_origin[0]} if event.grant_origin else "unknown")
+    from clawchat_gateway.process_origins import lookup_process_origin
+    origin = lookup_process_origin(event)
+    if origin is None:
+        return "unknown"
+    ids = tuple(sorted(origin.non_owner_speakers))
+    result = {"kind": "trusted-origin", "source": "process-completion", "requester_user_id": ids[0]}
+    if len(ids) > 1:
+        result["requester_user_ids"] = ids
+    return result

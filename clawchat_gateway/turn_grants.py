@@ -95,6 +95,13 @@ def get_snapshot(nonce: str) -> TurnSnapshot | None:
         return _snapshots.get(nonce)
 
 
+def session_key_for_nonce(account_id: str, nonce: str) -> str:
+    """Read the plugin session identity; never infer it from host/user text."""
+    with _lock:
+        return next((key for (account, key), nonces in _session_nonces.items()
+                     if account == account_id and nonce in nonces), "")
+
+
 def active_snapshot(account_id: str, session_key: str) -> TurnSnapshot | None:
     with _lock:
         return _snapshots.get(_active.get((account_id, session_key), ""))

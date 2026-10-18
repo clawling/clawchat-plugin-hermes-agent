@@ -1358,7 +1358,11 @@ async def test_unattributed_synthetic_owner_chat_uses_defaults_on_all_hosts(harn
     if binding:
         turns.bind_turn(snapshot.nonce, "s", "t")
     with host(**dict(context(snapshot), HERMES_SESSION_USER_ID=sender)):
-        assert call("terminal", turn_id="t")["action"] == ("block" if setting == "on" else "approve")
+        # Calls carrying execution IDs need a matching binding even when the
+        # mocked host lacks pre_llm_call. Only the old no-ID path keeps approve.
+        assert call("terminal", turn_id="t")["action"] == ("block" if setting == "on" or not binding else "approve")
+        if not binding:
+            assert guard.clawchat_pre_tool_call(tool_name="terminal", args={})["action"] == "approve"
         assert call("web_search", turn_id="t") is None
         for tool in grants.GRANT_TOOL_NAMES:
             assert call(tool, turn_id="t")["action"] == "block"
