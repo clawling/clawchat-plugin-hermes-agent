@@ -432,7 +432,7 @@ def _filter_grant_definitions(definitions, snapshot):
         if not _host_supports_pre_llm_call():
             # A nonce can exist on an old host without an execution binding.
             # Its explicit grants cannot replace the legacy approval policy.
-            return default or non_owner_host_tools() == SETTING_APPROVE
+            return default or bool(snapshot and snapshot.speakers) and non_owner_host_tools() == SETTING_APPROVE
         if snapshot is None:
             return default
         if not _tool_grants_enabled():
@@ -1070,11 +1070,13 @@ def _toolsets_for_source(source: Any, *, owner_user_id: str | Callable[[], str],
                 str(getattr(source, "user_id", "") or ""), str(owner or ""), owner_direct_chat_id):
             return None
         narrowed = _narrowed_toolsets()
+        # Approve needs an attributed plugin turn; host-started turns have none.
+        attributed = bool(snapshot is not None and snapshot.speakers)
         if not _tool_grants_enabled():
             return (_legacy_approve_toolsets() if non_owner_host_tools() == SETTING_APPROVE
-                    and (snapshot is not None or not _host_supports_pre_llm_call()) else narrowed)
+                    and attributed else narrowed)
         if not _host_supports_pre_llm_call():
-            return _legacy_approve_toolsets() if non_owner_host_tools() == SETTING_APPROVE else narrowed
+            return _legacy_approve_toolsets() if non_owner_host_tools() == SETTING_APPROVE and attributed else narrowed
         if snapshot is None:
             # A modern unattributed turn has public defaults, never approve.
             return narrowed
@@ -1438,9 +1440,13 @@ def _clawchat_pre_tool_decision(*, tool_name: str = "", args: Any = None, **kwar
                 return None
         # Bound snapshots, including mixed overlaps and unattributed events in
         # the owner's chat, override the host's session-level owner inference.
-        # An old host with no execution IDs keeps its legacy approval policy.
+        # An old host with no execution IDs keeps approve only for attributed plugin turns.
         session_turn = _session_turn()
         pending_snapshot = get_snapshot(nonce)
+        # Old hosts cannot bind a call, but a plugin turn still names its
+        # speakers. Host-started turns carry no plugin nonce: no approve.
+        legacy_attributed = bool(not _host_supports_pre_llm_call() and pending_snapshot
+                                 and pending_snapshot.chat_id == chat_id and pending_snapshot.speakers)
         if session_context_value("HERMES_SESSION_PLATFORM") == "clawchat" and (
                 snapshot or can_bind_call or pending_snapshot and pending_snapshot.chat_id == chat_id):
             session_turn = "other"
@@ -1534,7 +1540,7 @@ def _clawchat_pre_tool_decision(*, tool_name: str = "", args: Any = None, **kwar
                 if route_block:
                     return route_block
             return _ordinary_non_owner_decision(tool_name, args, grants_enabled=True,
-                approve=not _host_supports_pre_llm_call() and non_owner_host_tools() == SETTING_APPROVE)
+                approve=legacy_attributed and non_owner_host_tools() == SETTING_APPROVE)
         if grants_enabled:
             # Missing IDs on modern hosts use only the recovered bound snapshot;
             # an unattributed call gets defaults without group approve fallback.
@@ -1588,7 +1594,9 @@ def _clawchat_pre_tool_decision(*, tool_name: str = "", args: Any = None, **kwar
                 from clawchat_gateway.local_paths import LOCAL_PATH_REFUSAL
                 return {"action": "block", "message": LOCAL_PATH_REFUSAL}
             return None
-        allow_approve = (snapshot is not None or not can_bind_call and not _host_supports_pre_llm_call())
+        # Approve needs named speakers, also with grants off: host-started and
+        # plugin synthetic turns are unattributed and keep only defaults.
+        allow_approve = bool(snapshot is not None and snapshot.speakers) or (not can_bind_call and legacy_attributed)
         if allow_approve and non_owner_host_tools() == SETTING_APPROVE:
             route_block = _cross_session_decision(tool_name, args, kwargs.get("session_id", ""))
             if route_block:

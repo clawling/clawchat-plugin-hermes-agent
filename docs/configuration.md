@@ -818,9 +818,9 @@ Who loses or regains access with these boundaries:
   current conversation.
 - A guest-started background process's completion turn uses the starters'
   **current** grants only when its trusted host event matches the plugin's
-  registration; otherwise it gets only default tools. On hosts with execution
-  binding, unattributed host turns in groups no longer get approve as a fallback,
-  including with `tool-grants: off` (see the old-host exception below).
+  registration; otherwise it gets only default tools. Unattributed host turns
+  in groups no longer get approve as a fallback on any host, including with
+  `tool-grants: off`.
 - Host-generated turns in the owner's direct chat regain ordinary owner tools
   for the owner's own scheduled tasks, heartbeats, process completions and
   sub-agent reports. The four authorization tools remain unavailable.
@@ -955,8 +955,8 @@ human-approval gate, which smart never answers. A friend's direct chat declines
 these ungranted calls on the spot (above); a group's approval goes to the owner.
 Cross-session execution routes remain blocked even under approve.
 Cross-chat delivery requires an explicit matching grant; approve covers only
-the current chat. On hosts with execution binding, unattributed spontaneous
-turns get defaults without group approve, including with `tool-grants: off`.
+the current chat. Unattributed spontaneous turns get defaults without group
+approve, including with `tool-grants: off`.
 Effective per-person rules take precedence over `non-owner-host-tools`:
 deny refuses; direct executes without this gate, while ask routes each call to
 the owner's direct chat, including normally open tools such as `web_search`.
@@ -1085,7 +1085,7 @@ row defaults to ask for that person, then participates in the intersection.
 This fallback is **per tool**, not per person: a grant for Feishu does not
 remove approval fallback for an unrelated tool. Friend direct chats do not get
 that fallback. Neither cross-chat delivery nor unattributed spontaneous turns
-on hosts with execution binding get it. Explicit deny and failed resolution
+get it. Explicit deny and failed resolution
 cannot be bypassed by approve.
 
 Resolve each non-owner speaker first, then intersect: any deny refuses; any
@@ -1196,11 +1196,11 @@ With `tool-grants: off`, stored rules are retained but ignored, management
 and request tools are not registered and the grants hint is omitted. If registration cannot
 read configuration, tools remain discoverable by the owner, but execution still
 enforces off. The independent `non-owner-host-tools` policy keeps its behavior,
-including legacy approve when an old host cannot bind grants to an execution
-turn. A capable host with a missing/bad binding cannot use approve to bypass
+including approve when an old host cannot bind grants to an execution turn,
+as long as the plugin turn names its speakers. A capable host with a missing/bad binding cannot use approve to bypass
 potentially unseen deny rows.
-On hosts with execution binding, unattributed spontaneous turns have no group
-approve fallback, also when `tool-grants: off`. With grants off, non-owner cross-chat delivery is refused
+Unattributed spontaneous turns have no group approve fallback on any host,
+also when `tool-grants: off`. With grants off, non-owner cross-chat delivery is refused
 as `not-granted`; `public-tools` still supplies default tools for the current chat.
 
 The adapter freezes grants before dispatch and carries a nonce in the source
@@ -1217,9 +1217,10 @@ Read failures, expired grants and missing snapshots add no authority.
 Inner calls without execution IDs, such as `execute_code` RPC calls, use the
 snapshot already bound to `HERMES_SESSION_MESSAGE_ID`; an explicit deny on a
 default tool still applies. On a host supporting execution binding, failure to
-recover it means defaults without approve. Hosts lacking `pre_llm_call` retain
-their old approve path for calls without execution IDs, including unattributed
-turns and `tool-grants: off`; the no-approve guarantee requires binding support.
+recover it means defaults without approve. Hosts lacking `pre_llm_call` keep
+approve for calls without execution IDs only when the turn id the host passes
+names a plugin turn with speakers; host-started and plugin synthetic turns get
+defaults without approve.
 
 With grants enabled, a bound non-owner turn can use `tool_search` and
 `tool_describe` only when the grants catalog filter is installed and the
@@ -1492,7 +1493,8 @@ requester's grants:
   host `internal=True` event can match: metadata `notification_origin` must be
   `process_registry_synthetic`, `original_trigger_message_id` must equal that
   starting turn's plugin nonce, and the source chat and recorded
-  `gateway_session_key` must match. The completion's first-line process ID
+  `gateway_session_key` must match. Both ends need the host session key; a host
+  that does not expose `HERMES_SESSION_KEY` to tool hooks gets no inheritance. The completion's first-line process ID
   narrows the match to one registered process; message text never identifies
   the requester. The registration is consumed once. Current grants are loaded
   again into a new turn snapshot, intersecting multiple starters' permissions.
@@ -1504,10 +1506,9 @@ seven-day lifetime. Restart, expiry or eviction loses inheritance. Watch and
 heartbeat notifications, batched completions and mismatched or missing records
 use only defaults. Process-completion inheritance is disabled with
 `tool-grants: off`. Scheduled tasks, sub-agent reports and Kanban work do not
-inherit the requester's grants. On hosts with execution binding, an unattributed
-spontaneous turn is treated as a person without grants and has no group approve
-fallback, also with grants off. Hosts without binding retain the no-execution-ID
-approve compatibility path described under Management and turn snapshots.
+inherit the requester's grants. An unattributed spontaneous turn is treated as
+a person without grants and has no group approve fallback on any host, also
+with grants off.
 
 There is one separate owner-chat rule: a host `internal=True` turn in the
 activation owner's direct chat, without an existing plugin snapshot, uses

@@ -67,6 +67,10 @@ def record_process_origin(*, tool_name="", args=None, result=None, session_id=""
         if not key:
             return
         gateway_key = turn_grants.session_context_value("HERMES_SESSION_KEY")
+        if not gateway_key:
+            # The completion must name the same host session; without it there
+            # is nothing trusted to compare, so the completion stays unknown.
+            return
         now = time.monotonic()
         with _lock:
             _expire(now)
@@ -122,7 +126,8 @@ def lookup_process_origin(event, *, account_id: str | None = None, consume: bool
             return None
         origin = candidates[0]
         if (getattr(source, "chat_id", None) != origin.chat_id or proc_id not in origin.proc_ids
-                or origin.gateway_session_key and metadata.get("gateway_session_key") != origin.gateway_session_key):
+                or not origin.gateway_session_key
+                or metadata.get("gateway_session_key") != origin.gateway_session_key):
             return None
         if consume:
             key = (origin.account_id, nonce)

@@ -178,10 +178,9 @@ days; restart, expiry, eviction, watch/heartbeat or batched events and mismatche
 leave only default tools. Process inheritance is disabled with grants off.
 Scheduled tasks, sub-agent reports and Kanban work do not inherit requester grants.
 
-On hosts with execution binding, unattributed spontaneous turns get defaults
-without group approve, including with `tool-grants: off`. Hosts lacking
-`pre_llm_call` keep the old approve path for calls without execution IDs,
-including unattributed turns. Separately, host `internal=True` turns in the owner's
+Unattributed spontaneous turns get defaults without group approve on every
+host, including with `tool-grants: off`. Hosts lacking `pre_llm_call` keep
+approve only for plugin turns that name their speakers. Separately, host `internal=True` turns in the owner's
 direct chat without a plugin snapshot use ordinary owner tools for the owner's
 own jobs, heartbeats, exec completions and sub-agent reports, excluding the four
 authorization tools. This relies on `cross-session` checks preventing guest

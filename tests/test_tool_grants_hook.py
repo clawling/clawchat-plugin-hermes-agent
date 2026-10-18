@@ -411,13 +411,19 @@ async def test_wire_prose_cannot_inherit(harness, host, text):
     assert snapshot and not snapshot.owner_side and snapshot.grants.get("terminal") is None
 
 
+@pytest.mark.parametrize("binding_hook", [True, False])
 @pytest.mark.parametrize("setting", ["on", "off"])
-def test_unknown_group_host_turn_has_no_approve(host, monkeypatch, setting):
+def test_unknown_group_host_turn_has_no_approve(host, monkeypatch, setting, binding_hook):
     monkeypatch.setattr(guard, "_config_extra", lambda: {"tool-grants": setting, "non-owner-host-tools": "approve"})
     monkeypatch.setattr(guard, "_host_supports_approve", lambda: True)
+    monkeypatch.setattr(guard, "_host_supports_pre_llm_call", lambda: binding_hook)
     with host(HERMES_SESSION_PLATFORM="clawchat", HERMES_SESSION_CHAT_ID="cnv_group",
               HERMES_SESSION_CHAT_TYPE="group"):
         assert call("terminal", turn_id="t")["action"] == "block"
+        # Old hosts without execution IDs: still no plugin speaker, no approve.
+        assert guard.clawchat_pre_tool_call(tool_name="terminal", args={})["action"] == "block"
+        source = SimpleNamespace(chat_id="cnv_group", chat_type="group", user_id="usr_guest", message_id="")
+        assert guard.toolsets_for_source(source, owner_user_id="usr_owner") != guard._legacy_approve_toolsets()
         if setting == "off":
             monkeypatch.setattr(guard, "_cross_session_decision", lambda *_: pytest.fail("unknown turn must not enter approve route"))
             assert call("terminal", turn_id="t")["action"] == "block"
@@ -519,11 +525,20 @@ async def test_completion_grant_read_failure_never_uses_group_approve(origins, d
 
 @pytest.mark.asyncio
 async def test_missing_gateway_key_and_multiple_processes_on_one_nonce(origins, dispatch, harness, host):
-    # Missing host session context is optional; chat and original nonce remain required.
+    # Both ends must name the same host session: a missing key is not a match.
     nonce = origins(gateway_key="")
     first = completion(nonce)
+    assert resolve_origin_grant_context(first) == "unknown"
     await dispatch(first)
-    assert turns.get_snapshot(first.source.message_id)
+    assert turns.get_snapshot(first.source.message_id) is None
+    nonce = origins()
+    for metadata_key in (None, ""):
+        event = completion(nonce)
+        if metadata_key is None:
+            event.metadata.pop("gateway_session_key")
+        else:
+            event.metadata["gateway_session_key"] = metadata_key
+        assert resolve_origin_grant_context(event) == "unknown"
     s = turns.register_turn(account_id="usr_agent", chat_id="cnv_guest", speakers=("usr_guest",),
                             grants={}, session_key="cnv_guest:__direct__")
     try:

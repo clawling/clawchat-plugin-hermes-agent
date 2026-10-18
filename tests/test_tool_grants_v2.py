@@ -1091,12 +1091,13 @@ def test_dedicated_limited_message_survives_without_explicit_grant_rows(host, mo
         assert result == expected_result
 
 
-def test_legacy_catalog_preserves_approve_but_capable_missing_nonce_stays_narrowed(host, monkeypatch):
+def test_catalog_without_attributed_snapshot_stays_narrowed_on_all_hosts(host, monkeypatch):
     monkeypatch.setattr(guard, "_config_extra", lambda: {"non-owner-host-tools": "approve"})
     monkeypatch.setattr(guard, "_host_supports_pre_llm_call", lambda: False)
     definitions = [{"function": {"name": tool}} for tool in ("terminal", "web_search", *AUTHORIZATION_TOOLS)]
     with host(HERMES_SESSION_PLATFORM="clawchat", HERMES_SESSION_CHAT_ID="cnv_rules"):
-        assert guard._filter_grant_definitions(definitions, None) == definitions[:2] + definitions[-1:]
+        # No plugin snapshot means no attributed speaker: no approve catalog.
+        assert guard._filter_grant_definitions(definitions, None) == definitions[1:2] + definitions[-1:]
         monkeypatch.setattr(guard, "_host_supports_pre_llm_call", lambda: True)
         assert guard._filter_grant_definitions(definitions, None) == definitions[1:2] + definitions[-1:]
     monkeypatch.setattr(guard, "_platform_toolsets", lambda: {"terminal", "web"})
@@ -1354,15 +1355,14 @@ async def test_unattributed_synthetic_owner_chat_uses_defaults_on_all_hosts(harn
     snapshot = turns.get_snapshot(harness.events[-1].source.message_id)
     assert not snapshot.owner_side and not snapshot.speakers and not snapshot.legacy_owner_tools
     definitions = [{"function": {"name": tool}} for tool in ("terminal", "web_search", *AUTHORIZATION_TOOLS)]
-    assert guard._filter_grant_definitions(definitions, snapshot) == (definitions[1:2] if binding else definitions[:2]) + (definitions[-1:] if setting == "on" else [])
+    assert guard._filter_grant_definitions(definitions, snapshot) == definitions[1:2] + (definitions[-1:] if setting == "on" else [])
     if binding:
         turns.bind_turn(snapshot.nonce, "s", "t")
     with host(**dict(context(snapshot), HERMES_SESSION_USER_ID=sender)):
-        # Calls carrying execution IDs need a matching binding even when the
-        # mocked host lacks pre_llm_call. Only the old no-ID path keeps approve.
-        assert call("terminal", turn_id="t")["action"] == ("block" if setting == "on" or not binding else "approve")
+        # Unattributed turns never get approve, on any host or setting.
+        assert call("terminal", turn_id="t")["action"] == "block"
         if not binding:
-            assert guard.clawchat_pre_tool_call(tool_name="terminal", args={})["action"] == "approve"
+            assert guard.clawchat_pre_tool_call(tool_name="terminal", args={})["action"] == "block"
         assert call("web_search", turn_id="t") is None
         for tool in grants.GRANT_TOOL_NAMES:
             assert call(tool, turn_id="t")["action"] == "block"
@@ -1784,6 +1784,10 @@ def test_process_list_needs_no_registry_and_old_approve_cannot_bypass_target(hos
     monkeypatch.setattr(guard, "_host_supports_approve", lambda: True)
     with host(HERMES_SESSION_PLATFORM="clawchat", HERMES_SESSION_CHAT_ID="cnv_group", HERMES_SESSION_CHAT_TYPE="group"):
         assert guard.clawchat_pre_tool_call(tool_name=tool, args={"action": "kill", "session_id": "proc-other"}) == guard._grant_block("cross-session")
+        # No plugin turn names a speaker here: approve is not offered.
+        assert guard.clawchat_pre_tool_call(tool_name=tool, args={"action": "list"})["action"] == "block"
+    with bound_rules([]) as snapshot, host(**context(snapshot, group=True)):
+        assert guard.clawchat_pre_tool_call(tool_name=tool, args={"action": "kill", "session_id": "proc-other"}) == guard._grant_block("cross-session")
         assert guard.clawchat_pre_tool_call(tool_name=tool, args={"action": "list"})["action"] == "approve"
 
 
@@ -1939,7 +1943,7 @@ def test_guest_assembly_skips_catalog_summaries_when_search_guard_is_incomplete(
     finally:
         turns.release_turn(owner.nonce)
 
-# T137.8 final cross-chat/public policy regressions.
+# Final cross-chat and public-tools policy regressions.
 @pytest.mark.parametrize('tool,key', [('clawchat_mention_message', 'chatId'),
     ('clawchat_react_message', 'chatId'), ('clawchat_send_file', 'chat_id'), ('send_message', 'target')])
 @pytest.mark.parametrize('fallback', ['default', 'public', 'approve'])

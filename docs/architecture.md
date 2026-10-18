@@ -156,11 +156,11 @@ selectors. `tool_grants.py` resolves exact tool > capability > all, with
 same-level deny > ask > direct. An explicit ask or deny overrides ordinary
 public access. Group `non-owner-host-tools: approve` fills only a particular
 tool's unmatched restricted permission with ask before intersection; friend
-direct chats and cross-chat delivery do not get this fallback. On hosts with
-execution binding, unattributed spontaneous turns do not get it either,
-including with `tool-grants: off`. Old hosts without execution binding retain
-their legacy approve behavior for calls without execution IDs, including
-unattributed turns. Ask never becomes direct when per-call
+direct chats and cross-chat delivery do not get this fallback. Unattributed
+turns (host-started, or plugin synthetic turns with no speaker) do not get it
+either, on any host and including with `tool-grants: off`. Old hosts without
+execution binding keep approve only for plugin turns that name their speakers.
+Ask never becomes direct when per-call
 approval is unavailable. See [rule and card details](./configuration.md#per-person-tool-grants).
 
 `platforms.clawchat.extra.public-tools` adds validated exact names to the same
@@ -283,8 +283,8 @@ or eviction loses inheritance. Watches, heartbeats, batched completions and
 mismatches use defaults, as do scheduled tasks, sub-agent reports and Kanban
 work without requester inheritance, subject to the separate owner-direct-chat
 rule above. Process inheritance is off with `tool-grants: off`. Unattributed
-spontaneous turns on hosts with execution binding get defaults without group
-approve, including with grants off; the old-host compatibility path is described above.
+spontaneous turns get defaults without group approve on every host, including
+with grants off.
 
 Migration 14 rebuilds `tool_grants` around `what_kind + what` and preserves old
 exact-tool rows and modes. **After upgrading, do not downgrade; old and new
