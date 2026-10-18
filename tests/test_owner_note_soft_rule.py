@@ -402,3 +402,15 @@ def test_non_owner_turn_prompt_has_no_owner_md_line(monkeypatch):
     section = a._non_owner_turn_section(_direct(FRIEND))
     assert NON_OWNER_GRANTS_HINT in section  # the old-host hint is still there
     assert "owner.md" not in section
+
+
+@pytest.mark.parametrize(
+    "scope,target",
+    [
+        (memory_scope.MemoryScope(kind="direct", chat_id=DM, members=frozenset({FRIEND})), ("user", "usr_other")),
+        (memory_scope.MemoryScope(kind="group", chat_id=GROUP, members=frozenset({FRIEND})), ("group", "cnv_other")),
+        (memory_scope.MemoryScope(kind="group", chat_id=GROUP, members=frozenset({FRIEND})), ("user", "usr_other")),
+    ],
+)
+def test_read_refusals_name_owner_md_as_readable(scope, target):
+    assert "owner.md" in scope.refusal(*target)["message"]

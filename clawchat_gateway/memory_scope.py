@@ -103,19 +103,19 @@ class MemoryScope:
         elif self.kind == "direct":
             message = (
                 f"{'groups' if target_type == 'group' else 'users'}/{target_id}.md is not readable in this "
-                "direct chat: here you can only read the note about the person you are talking to, "
+                "direct chat: here you can only read owner.md and the note about the person you are talking to, "
                 "because another person's or a group's note can hold what was said where they were "
                 "not present."
             )
         elif target_type == "group":
             message = (
                 f"groups/{target_id}.md is another group's note; in a group you can only read "
-                "that group's own note."
+                "owner.md and that group's own note."
             )
         else:
             message = (
                 f"users/{target_id}.md is about someone who is not a member of this group; in a "
-                "group you can only read the notes of its members."
+                "group you can only read owner.md and the notes of its members."
             )
         return {"error": "not_readable_here", "code": "memory_scope", "message": message}
 
