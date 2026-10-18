@@ -622,3 +622,27 @@ def test_guest_owner_dm_route_boundary(host, monkeypatch, tool, args, capability
                 assert result == guard._grant_block("cross-session")
     finally:
         turns.release_turn(s.nonce)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("binding_hook", [True, False])
+async def test_completion_turn_never_uses_approve_after_grants_turn_off(origins, dispatch, harness, host,
+                                                                         monkeypatch, binding_hook):
+    nonce = origins()
+    event = completion(nonce)
+    await dispatch(event)
+    snapshot = turns.get_snapshot(event.source.message_id)
+    assert snapshot and snapshot.speakers and not snapshot.approve_eligible
+    # Mid-turn: grants switched off and group approve configured.
+    monkeypatch.setattr(guard, "_config_extra", lambda: {"tool-grants": "off", "non-owner-host-tools": "approve"})
+    monkeypatch.setattr(guard, "_host_supports_approve", lambda: True)
+    monkeypatch.setattr(guard, "_host_supports_pre_llm_call", lambda: binding_hook)
+    with host(**context(snapshot, group=True)):
+        guard.clawchat_pre_llm_call(session_id="s", turn_id="t")
+        assert call("terminal", turn_id="t")["action"] == "block"
+        assert guard.clawchat_pre_tool_call(tool_name="terminal", args={})["action"] == "block"
+        definitions = [{"function": {"name": "terminal"}}]
+        assert guard._filter_grant_definitions(definitions, snapshot) == []
+    source = SimpleNamespace(chat_id=snapshot.chat_id, chat_type="group", user_id="usr_guest",
+                             message_id=snapshot.nonce)
+    assert guard.toolsets_for_source(source, owner_user_id="usr_owner") != guard._legacy_approve_toolsets()

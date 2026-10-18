@@ -4466,7 +4466,8 @@ class ClawChatAdapter(BasePlatformAdapter):
                 key = origin.session_key
                 snapshot = register_turn(account_id=self._account_id(), chat_id=origin.chat_id,
                     speakers=speakers, grants=grants, any_granted_tools=any_tools, session_key=key,
-                    non_owner_speakers=origin.non_owner_speakers, owner_side=False, owner_verified=False)
+                    non_owner_speakers=origin.non_owner_speakers, owner_side=False, owner_verified=False,
+                    approve_eligible=False)
             elif existing is None:
                 platform = getattr(source, "platform", None)
                 chat_id = getattr(source, "chat_id", "")

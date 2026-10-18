@@ -2182,3 +2182,20 @@ def test_final_public_on_old_host_keeps_local_path_check(host, monkeypatch):
     with host(HERMES_SESSION_PLATFORM='clawchat', HERMES_SESSION_CHAT_ID='cnv_chat', HERMES_SESSION_CHAT_TYPE='group'):
         assert guard.clawchat_pre_tool_call(tool_name='memory', args={}) is None
         assert guard.clawchat_pre_tool_call(tool_name='memory', args={'path': '/tmp/private'}) is not None
+
+
+@pytest.mark.parametrize("listed", [True, False])
+def test_public_mcp_server_survives_narrowed_toolsets(monkeypatch, listed):
+    from clawchat_gateway import memory_scope
+    monkeypatch.setattr(memory_scope, '_config_extra', lambda: {'public-tools': ['mcp_docs_lookup'] if listed else []})
+    monkeypatch.setattr(guard, 'public_tool_names', _public_tool_names)
+    monkeypatch.setattr(guard, '_narrowed_toolsets', _narrowed_toolsets)
+    monkeypatch.setattr(guard, 'host_tool_catalog', lambda: (frozenset({'web_search', 'mcp_docs_lookup'}),) * 2)
+    monkeypatch.setattr(guard, '_platform_toolsets', lambda: {'web', 'mcp-docs'})
+    monkeypatch.setattr(guard, '_resolve_tools', lambda name: ['web_search'] if name == 'web' else ['mcp_docs_lookup'])
+    monkeypatch.setattr(guard, '_mcp_server_names', lambda: {'docs'})
+    kept = guard._narrowed_toolsets()
+    if listed:
+        assert 'docs' in kept and guard.NO_MCP not in kept
+    else:
+        assert 'docs' not in kept and 'mcp-docs' not in kept and guard.NO_MCP in kept

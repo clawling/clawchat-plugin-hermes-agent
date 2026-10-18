@@ -432,11 +432,11 @@ def _filter_grant_definitions(definitions, snapshot):
         if not _host_supports_pre_llm_call():
             # A nonce can exist on an old host without an execution binding.
             # Its explicit grants cannot replace the legacy approval policy.
-            return default or bool(snapshot and snapshot.speakers) and non_owner_host_tools() == SETTING_APPROVE
+            return default or _approve_attributed(snapshot) and non_owner_host_tools() == SETTING_APPROVE
         if snapshot is None:
             return default
         if not _tool_grants_enabled():
-            return default or bool(snapshot and snapshot.speakers and non_owner_host_tools() == SETTING_APPROVE)
+            return default or _approve_attributed(snapshot) and non_owner_host_tools() == SETTING_APPROVE
         return tool_grant_visible(snapshot.grants, tool, default_allowed=default, now=time.time() * 1000)
     return [item for item in definitions if allowed(item["function"]["name"])]
 
@@ -1020,7 +1020,18 @@ def _narrowed_toolsets() -> list[str]:
         kept.append(name)
     if not kept:
         return list(FALLBACK_TOOLSETS)
+    # Same rule as the per-turn override: the host enables an MCP server by
+    # its name, and no_mcp would remove a server kept for public tools.
+    kept = sorted({name[len(_MCP_TOOLSET_PREFIX):] if name.startswith(_MCP_TOOLSET_PREFIX)
+                   and name[len(_MCP_TOOLSET_PREFIX):] in mcp_servers else name for name in kept})
+    if set(kept) & mcp_servers:
+        return kept
     return kept + [NO_MCP]
+
+
+def _approve_attributed(snapshot) -> bool:
+    """Approve needs a plugin turn naming its speakers, not an inherited host turn."""
+    return bool(snapshot is not None and snapshot.speakers and getattr(snapshot, "approve_eligible", False))
 
 
 def _legacy_approve_toolsets():
@@ -1071,7 +1082,7 @@ def _toolsets_for_source(source: Any, *, owner_user_id: str | Callable[[], str],
             return None
         narrowed = _narrowed_toolsets()
         # Approve needs an attributed plugin turn; host-started turns have none.
-        attributed = bool(snapshot is not None and snapshot.speakers)
+        attributed = _approve_attributed(snapshot)
         if not _tool_grants_enabled():
             return (_legacy_approve_toolsets() if non_owner_host_tools() == SETTING_APPROVE
                     and attributed else narrowed)
@@ -1446,7 +1457,7 @@ def _clawchat_pre_tool_decision(*, tool_name: str = "", args: Any = None, **kwar
         # Old hosts cannot bind a call, but a plugin turn still names its
         # speakers. Host-started turns carry no plugin nonce: no approve.
         legacy_attributed = bool(not _host_supports_pre_llm_call() and pending_snapshot
-                                 and pending_snapshot.chat_id == chat_id and pending_snapshot.speakers)
+                                 and pending_snapshot.chat_id == chat_id and _approve_attributed(pending_snapshot))
         if session_context_value("HERMES_SESSION_PLATFORM") == "clawchat" and (
                 snapshot or can_bind_call or pending_snapshot and pending_snapshot.chat_id == chat_id):
             session_turn = "other"
@@ -1596,7 +1607,7 @@ def _clawchat_pre_tool_decision(*, tool_name: str = "", args: Any = None, **kwar
             return None
         # Approve needs named speakers, also with grants off: host-started and
         # plugin synthetic turns are unattributed and keep only defaults.
-        allow_approve = bool(snapshot is not None and snapshot.speakers) or (not can_bind_call and legacy_attributed)
+        allow_approve = _approve_attributed(snapshot) or (not can_bind_call and legacy_attributed)
         if allow_approve and non_owner_host_tools() == SETTING_APPROVE:
             route_block = _cross_session_decision(tool_name, args, kwargs.get("session_id", ""))
             if route_block:

@@ -39,6 +39,8 @@ class TurnSnapshot:
     owner_side: bool = False
     legacy_owner_tools: bool = False
     request_origin: RequestOrigin | None = None
+    # Host-started turns that inherit a starter's grants never use approve.
+    approve_eligible: bool = True
 
 
 _lock = threading.Lock()
@@ -55,7 +57,8 @@ def register_turn(*, account_id: str, chat_id: str, speakers: tuple[str, ...],
                   any_granted_tools: frozenset[str] = frozenset(),
                   speaker_names: tuple[str, ...] = (), owner_verified: bool = False,
                   owner_side: bool = False, non_owner_speakers: frozenset[str] | None = None,
-                  legacy_owner_tools: bool = False, request_origin: RequestOrigin | None = None) -> TurnSnapshot:
+                  legacy_owner_tools: bool = False, request_origin: RequestOrigin | None = None,
+                  approve_eligible: bool = True) -> TurnSnapshot:
     with _lock:
         nonce = NONCE_PREFIX + secrets.token_urlsafe(24)
         owner_side = bool(owner_side and speakers and all(isinstance(id_, str) and id_.strip() for id_ in speakers))
@@ -82,7 +85,7 @@ def register_turn(*, account_id: str, chat_id: str, speakers: tuple[str, ...],
             frozen, time.monotonic(), frozenset(any_granted_tools),
             tuple(speaker_names), owner_verified is True and (account_id, session_key) not in _unverified_inputs,
             ids, owner_side and all(item.owner_side for item in overlaps),
-            legacy_owner_tools, request_origin if not owner_side else None,
+            legacy_owner_tools, request_origin if not owner_side else None, bool(approve_eligible),
         )
         _snapshots[nonce] = snapshot
         _active[account_id, session_key] = nonce
