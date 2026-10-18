@@ -20,7 +20,7 @@ fifty-one `clawchat_*` tools to the agent.
 | Look up an env var or `platforms.clawchat.extra` field       | [`./configuration.md`](./configuration.md)              |
 | Set per-person direct / ask / deny rules, capabilities or all tools | [Tool grants](./configuration.md#per-person-tool-grants) |
 | Check cross-session execution limits and cross-chat messaging | [Routing limits](./configuration.md#cross-session-routing-and-known-limits) |
-| Upgrade the grant database safely / check unimplemented features | [Storage and current defaults](./configuration.md#storage-upgrade-and-unimplemented-policy-choices) |
+| Upgrade the grant database safely | [Storage upgrade](./configuration.md#storage-upgrade) |
 | Find a specific `clawchat_*` tool                            | [`./reference/tools.md`](./reference/tools.md)          |
 | See every outbound HTTP / WS endpoint the plugin calls       | [`./reference/http-endpoints.md`](./reference/http-endpoints.md) |
 | Use one of the activation CLIs                               | [`./reference/cli.md`](./reference/cli.md)              |

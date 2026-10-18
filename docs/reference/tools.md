@@ -63,6 +63,16 @@ access or denial is supported (English fallback), without a card or grant write.
 Runtime never converts ask to direct. Lookup, storage or send failures
 return an error, never success.
 
+Proactive direct/ask cards for `cap:schedule`, `cap:subagent`, `all` or any exact
+member of those capabilities (including host aliases) include the self-running
+consequence line (R); deny does not:
+
+> Scheduled tasks, sub-agents, and kanban tasks that {names} starts run with the owner's configuration and all tools.
+
+This accompanies the Hermes restriction copy: non-owner turns cannot start
+the cross-session work those tools normally launch. Request cards for
+`schedule` or `subagent` show both lines as well.
+
 Deny saves immediately without a confirmation card:
 
 ```json
@@ -71,8 +81,8 @@ Deny saves immediately without a confirmation card:
 
 `count` is the number of person-selector rows written; a deny result must not
 be described as permission to use tools. Revoke saves immediately and returns
-`{"revoked": 2}` (deleted row count), including when deleting deny. Its pending
-policy interface currently defaults to `immediate`, with no confirmation card;
+`{"revoked": 2}` (deleted row count), including when deleting deny.
+`plan_deny_removal` returns `immediate`, with no confirmation card;
 removal returns to remaining rules or defaults. Grant/revoke changes affect
 subsequent turn snapshots, not a running snapshot.
 
@@ -111,7 +121,9 @@ real owner message in that account's activation direct chat can decide a card.
 Proactive cards still accept only `/clawchat-allow`, preserving the frozen mode.
 
 Request cards last 24 hours. A persistent six-hour person × capability cooldown
-and rolling 24-hour account limit of 20 serialize quota and code allocation.
+and Agent-wide limit of 20 request cards in any rolling 24 hours serialize quota
+and code allocation (`REQUEST_DAILY_WINDOW_POLICY = "rolling-24h"`, window
+`(now − 24h, now]`, independent of owner timezone).
 Existing pending cards and any non-failed request within the six-hour cooldown,
 including a decided card, return `waiting`, `sent:false` with the same waiting
 guidance, without a new card, code or grant write. Daily quota exhaustion returns
@@ -126,14 +138,56 @@ Notices use a ten-minute claim lease and are consumed only after host acceptance
 rejected or failed events release the notice for the next real turn.
 A group batch with the owner and one non-owner always requests for that
 non-owner; batches with multiple non-owners create no request context.
-Subagent and schedule cards also display the proactive card's Hermes limits.
+Subagent and schedule cards also display the proactive card's Hermes limits
+and self-running consequence line (R).
 With `tool-grants: off`, all four authorization tools stop and rules are retained.
 
-Cross-chat grants can allow mention, reaction and file sends to another chat,
-subject to existing resource checks; they do not open local attachments.
-No grant allows a non-owner turn to start work in another execution session.
+Non-owner mention, reaction and file sends to another chat need an explicit
+matching grant (`CROSS_CHAT_GATE_POLICY = "grant"`): direct runs, ask asks the
+owner per call (`ask-unavailable` if that cannot be done), and missing/deny/batch
+failures return `not-granted`, `denied` or `batch-intersection`. Missing or
+unresolvable targets count as cross-chat. Default tools, `public-tools` and
+group approve cover only the current chat; with grants off or no execution
+binding, non-owner cross-chat sends are `not-granted`. Owner-side turns are
+exempt. Target and resource checks remain, including local attachment limits.
+No grant allows a non-owner turn to start or continue another execution session;
+such calls still return `cross-session`, even with cross-chat access.
 In particular, subagent/schedule grants currently allow only non-routing read
 or management actions. See the [audited route list](../configuration.md#cross-session-routing-and-known-limits).
+
+[`public-tools`](../configuration.md#public-tools) is a configuration-only
+exact-name array added to non-owner defaults, including turns without snapshots
+and grants-off turns. Invalid entries reject the whole list; sensitive and
+authorization tools cannot be public. It is absent from grant listings and
+cannot be changed in chat. Explicit matching deny still applies when grants
+are on, and per-call skill, media and output-path limits remain.
+
+Only authorization-card wakeups and registered process completions inherit
+requester grants (`ORIGIN_INHERITANCE_POLICY = "receipt-and-process-completion"`).
+For a successful guest `terminal` call with `background: true` and
+`notify_on_complete: true`, `post_tool_call` records the process, starting turn's
+plugin nonce, speakers and source session. A host `internal=True` completion
+must match metadata `notification_origin=process_registry_synthetic`,
+`original_trigger_message_id` equal to that nonce, the recorded
+`gateway_session_key` and source chat. The first-line process ID narrows the
+match; text never supplies the requester. The match is consumed once and current
+grants are re-read into a new non-owner turn snapshot, intersecting multiple
+starters. Revoked/expired grants are ineffective and group approve never fills
+unmatched permissions. The in-memory registry holds 512 origins for up to seven
+days; restart, expiry, eviction, watch/heartbeat or batched events and mismatches
+leave only default tools. Process inheritance is disabled with grants off.
+Scheduled tasks, sub-agent reports and Kanban work do not inherit requester grants.
+
+On hosts with execution binding, unattributed spontaneous turns get defaults
+without group approve, including with `tool-grants: off`. Hosts lacking
+`pre_llm_call` keep the old approve path for calls without execution IDs,
+including unattributed turns. Separately, host `internal=True` turns in the owner's
+direct chat without a plugin snapshot use ordinary owner tools for the owner's
+own jobs, heartbeats, exec completions and sub-agent reports, excluding the four
+authorization tools. This relies on `cross-session` checks preventing guest
+turns from reaching that chat; newly added host execution routes require an
+updated plugin audit to preserve the boundary. Plugin synthetic-turn rules are
+unchanged. See [origin inheritance](../configuration.md#spontaneous-turns-and-origin-inheritance).
 
 ## Users and friends
 

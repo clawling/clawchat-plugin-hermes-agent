@@ -145,8 +145,10 @@ A nonempty batch containing only the owner's real messages is owner-side and
 keeps ordinary host tools, including in groups. Owner messages are neutral in
 mixed batches: resolve each non-owner's rules, then intersect. Missing trusted
 speakers or grant-store failures use defaults, never owner authority or an
-approve fallback that might miss deny. Synthetic input does not establish an
-owner-side batch. Grant management additionally requires a verified real owner
+approve fallback that might miss deny. Plugin synthetic input does not establish
+an owner-side batch, apart from the activation greeting's ordinary tool access.
+Trusted host-internal turns follow the origin rules below.
+Grant management additionally requires a verified real owner
 in the activation direct chat; owner-only group batches cannot manage grants.
 
 `tool_capabilities.py` defines 12 capabilities and exact/capability/all
@@ -154,22 +156,43 @@ selectors. `tool_grants.py` resolves exact tool > capability > all, with
 same-level deny > ask > direct. An explicit ask or deny overrides ordinary
 public access. Group `non-owner-host-tools: approve` fills only a particular
 tool's unmatched restricted permission with ask before intersection; friend
-direct chats do not get this fallback. Old hosts without execution binding
-retain their legacy approve behavior. Ask never becomes direct when per-call
+direct chats and cross-chat delivery do not get this fallback. On hosts with
+execution binding, unattributed spontaneous turns do not get it either,
+including with `tool-grants: off`. Old hosts without execution binding retain
+their legacy approve behavior for calls without execution IDs, including
+unattributed turns. Ask never becomes direct when per-call
 approval is unavailable. See [rule and card details](./configuration.md#per-person-tool-grants).
+
+`platforms.clawchat.extra.public-tools` adds validated exact names to the same
+non-owner default row used by dispatch, execution, short hints, missing-snapshot
+turns and `tool-grants: off`. Any invalid item rejects the whole list with one
+warning naming only the first problem item and reason; omitted/empty lists are
+silent. Sensitive tools and authorization tools cannot be public. Explicit
+matching deny still wins when grants are enabled, and per-call skill, media and
+output-path restrictions remain. The list is configuration only, absent from
+grant listings and unchangeable in chat; see [Public tools](configuration.md#public-tools).
 
 The adapter freezes speaker rules into a nonce in the source message id.
 `pre_llm_call` binds it to the exact host session and turn; the tool hook checks
 nonce, chat, session and turn without a latest-session fallback. Overlapping
-snapshots intersect. Synthetic/unidentified input in the owner's direct chat
-removes verification until idle. Grant/revoke writes affect subsequent
-snapshots; expiry is checked again at execution.
+snapshots intersect. Plugin synthetic/unidentified input in the owner's direct
+chat removes verification until idle. Grant/revoke writes affect subsequent
+snapshots; expiry is checked again at execution. Inner calls without execution
+IDs use the already bound `HERMES_SESSION_MESSAGE_ID` snapshot, preserving deny
+on default tools; failure to recover that binding on a capable host means
+defaults without approve.
 Local attachment policy is shared by replies and file tools: every Files member must be direct, or a successful `post_tool_call` must consume that call's permit and declare a structured artifact bound to the live account/session/turn/callers/target; guest uploads use one checked file descriptor and all artifact authority expires at turn completion.
-Only the one-time activation greeting, constructed from the stored owner pairing,
-retains legacy ordinary tools in the owner's direct chat. Authorization-card
-wakeups use their trusted requester's current grants. Other synthetic turns
-use defaults, including permission receipts, contact/comment notifications,
-memory migration hints and sediment turns. No synthetic turn can manage grants.
+The plugin's one-time activation greeting, constructed from the stored owner
+pairing, retains ordinary owner tools. Its permission receipts, contact/comment
+notifications, memory migration hints and sediment turns use defaults.
+Authorization-card wakeups and registered process completions use current
+requester grants as described below. Host `internal=True` turns in the owner's
+direct chat without an existing plugin snapshot use ordinary owner tools for
+the owner's own jobs, heartbeats, process completions and sub-agent reports,
+but never the four authorization tools (`owner_verified=False`). This relies on
+cross-session checks keeping guests out of that chat; a newly introduced host
+route can break the premise unless the plugin's routing inventory is updated.
+No synthetic turn can manage grants.
 Speaker authority comes from parsed sender IDs and the coalescer's internal
 speaker tuple; envelope `messages` fields never establish authority.
 Exact-name resolution canonicalizes verified host aliases without rewriting storage.
@@ -226,21 +249,56 @@ New host tools/actions that start workers or wake subscribers must be added to
 the audited inventory in `host_tool_targets_current_session`; parent grants
 are not inherited into children or sessions created after compression.
 
-Cross-chat sending is a separate capability: mention, reaction and file sends
-to another chat can pass per-person authorization. Tool target/resource checks
-still apply, and non-owner local attachment restrictions remain. Hermes has no
-blanket current-chat-only gate; the pending policy interface
-`resolve_cross_chat_gate` currently returns `legacy`. Origin inheritance is
-limited to authorization-card wakeups; other producers resolve to `unknown`
-under `ORIGIN_INHERITANCE_POLICY = "unconfigured"` and use defaults.
+Cross-chat sending is separate from starting execution sessions.
+`CROSS_CHAT_GATE_POLICY = "grant"`: non-owner mention, reaction and file sends
+(`clawchat_mention_message`, `clawchat_react_message`, `clawchat_send_file`, plus
+`send_message` where a host registers it) to another chat require an explicit
+matching grant. Missing or unresolvable targets count as cross-chat. Direct
+allows, ask requires per-call approval (`ask-unavailable` if unsupported), and
+missing/deny/intersection failures return `not-granted`, `denied` or
+`batch-intersection`. Default tools, `public-tools` and group approve cover only
+the current chat. Grants off or hosts without execution binding cannot open
+non-owner cross-chat delivery. Owner-side turns are exempt. Target, resource
+and local attachment checks remain. A cross-chat grant cannot bypass
+`cross-session` refusal of tools that start or continue another session.
+
+`ORIGIN_INHERITANCE_POLICY = "receipt-and-process-completion"` recognizes only
+authorization-card wakeups and registered background process completions for
+requester inheritance. `turn_attachments.post_tool_call` calls
+`process_origins.record_process_origin` after a successful non-owner `terminal`
+call with `background: true` and `notify_on_complete: true`, recording process
+ID, plugin turn nonce, speakers, account, chat and session route. The adapter
+matches only host `internal=True` events whose metadata has
+`notification_origin=process_registry_synthetic`,
+`original_trigger_message_id` equal to that starting turn's plugin nonce, and
+a matching recorded `gateway_session_key`, in the same source chat. The first
+line's process ID narrows the match to a registered process; text cannot supply
+speaker authority. The adapter consumes that process registration, re-reads
+the starters' current grants (intersecting multiple starters), and registers a
+fresh non-owner, unverified turn snapshot with no group approve fallback.
+Revocation and expiry therefore apply to the completion turn.
+
+Registrations are in memory (512 origins, seven-day expiry); restart, expiry
+or eviction loses inheritance. Watches, heartbeats, batched completions and
+mismatches use defaults, as do scheduled tasks, sub-agent reports and Kanban
+work without requester inheritance, subject to the separate owner-direct-chat
+rule above. Process inheritance is off with `tool-grants: off`. Unattributed
+spontaneous turns on hosts with execution binding get defaults without group
+approve, including with grants off; the old-host compatibility path is described above.
 
 Migration 14 rebuilds `tool_grants` around `what_kind + what` and preserves old
 exact-tool rows and modes. **After upgrading, do not downgrade; old and new
-plugin processes must not share a database.** See [storage upgrade and current
-policy defaults](./configuration.md#storage-upgrade-and-unimplemented-policy-choices).
+plugin processes must not share a database.** See
+[storage upgrade details](./configuration.md#storage-upgrade).
 
 `tool_requests.py` owns fixed card/continuation/notice copy, sanitation and the
-rolling 24-hour quota policy interface. Migration 15 adds durable requests,
+Agent-wide quota of 20 request cards in any rolling 24 hours, including failed
+sends (`REQUEST_DAILY_WINDOW_POLICY = "rolling-24h"`, window `(now − 24h, now]`).
+Removing deny is immediate without a card (`plan_deny_removal` returns `immediate`).
+Proactive direct/ask cards for schedule/subagent, their exact members or `all`,
+and guest request cards for schedule/subagent, append the self-running
+consequence line (R) alongside the Hermes routing limitation copy.
+Migration 15 adds durable requests,
 shared pending-code references, rate indexes and one-time wake notice storage.
 Migration 16 adds durable notice claim tokens and timestamps; pending requests
 and decisions survive the upgrade.
@@ -281,7 +339,9 @@ only after host acceptance and releases claims on rejection or exceptions.
 Tokens prevent stale acknowledgements from consuming replacement claims.
 Notices expire with the card. Ambiguous dispatches are never retried; the host
 does not provide guaranteed idempotent delivery. Unknown spontaneous producers
-retain default permissions and do not inherit owner or guest authority.
+retain default permissions without group approve on hosts with execution
+binding, subject to the separate trusted host-internal owner-direct-chat rule
+and old-host compatibility path above.
 
 ## Outbound chat_id validity gate
 
