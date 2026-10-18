@@ -196,3 +196,37 @@ def _restore_clawchat_senders():
     yield
     terminal_send._senders.clear()
     terminal_send._senders.update(saved)
+
+
+@pytest.fixture
+def legacy_plugin_turn(monkeypatch):
+    """An attributed plugin turn on a host with no execution-ID binding hook."""
+    from clawchat_gateway import host_tools_guard as guard, turn_grants
+
+    session = {}
+    nonces = []
+    monkeypatch.setattr(guard, "_host_supports_pre_llm_call", lambda: False)
+    monkeypatch.setattr(guard, "_session_value", lambda key: session.get(key, ""))
+    monkeypatch.setattr(turn_grants, "session_context_value", lambda key: session.get(key, ""))
+
+    def start(*, chat_id, chat_type, user_id, with_snapshot=True):
+        nonce = ""
+        if with_snapshot:
+            snapshot = turn_grants.register_turn(
+                account_id="usr_agent", chat_id=chat_id, speakers=(user_id,),
+                grants={}, session_key=f"legacy-test:{chat_type}:{chat_id}",
+            )
+            nonce = snapshot.nonce
+            nonces.append(nonce)
+        session.update({
+            "HERMES_SESSION_PLATFORM": "clawchat",
+            "HERMES_SESSION_CHAT_ID": chat_id,
+            "HERMES_SESSION_CHAT_TYPE": chat_type,
+            "HERMES_SESSION_USER_ID": user_id,
+            "HERMES_SESSION_MESSAGE_ID": nonce,
+        })
+        return nonce
+
+    yield start
+    for nonce in nonces:
+        turn_grants.release_turn(nonce)

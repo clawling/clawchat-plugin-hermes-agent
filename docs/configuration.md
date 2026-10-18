@@ -1218,9 +1218,11 @@ Inner calls without execution IDs, such as `execute_code` RPC calls, use the
 snapshot already bound to `HERMES_SESSION_MESSAGE_ID`; an explicit deny on a
 default tool still applies. On a host supporting execution binding, failure to
 recover it means defaults without approve. Hosts lacking `pre_llm_call` keep
-approve for calls without execution IDs only when the turn id the host passes
-names a plugin turn with speakers; host-started and plugin synthetic turns get
-defaults without approve.
+approve for calls without execution IDs only when the plugin turn nonce in the
+host's trusted `HERMES_SESSION_MESSAGE_ID` context names a turn with speakers;
+host-started and plugin synthetic turns get defaults without approve. Hosts
+that do not expose `HERMES_SESSION_MESSAGE_ID` to tools cannot attribute any
+turn, so group approve is unavailable there.
 
 With grants enabled, a bound non-owner turn can use `tool_search` and
 `tool_describe` only when the grants catalog filter is installed and the

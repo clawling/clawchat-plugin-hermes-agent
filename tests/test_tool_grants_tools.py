@@ -393,7 +393,7 @@ def test_management_schema_manifest_and_nonowner_whitelist(monkeypatch):
 @pytest.mark.parametrize("policy", ["off", "approve"])
 @pytest.mark.parametrize("chat_type,user_id", [("dm", "usr_a"), ("group", "usr_a"), ("group", "usr_owner")])
 @pytest.mark.parametrize("with_alias", [False, True])
-def test_management_toolset_hidden_from_nonowner_schema_and_catalog(monkeypatch, policy, chat_type, user_id, with_alias):
+def test_management_toolset_hidden_from_nonowner_schema_and_catalog(monkeypatch, legacy_plugin_turn, policy, chat_type, user_id, with_alias):
     registered = {}
     monkeypatch.setattr(guard, "_config_extra", lambda: {"non-owner-host-tools": policy})
     plugin_tools.register_tools(SimpleNamespace(register_tool=lambda name, group, schema, handler, **kw:
@@ -415,7 +415,8 @@ def test_management_toolset_hidden_from_nonowner_schema_and_catalog(monkeypatch,
     monkeypatch.setattr(guard, "_resolve_tools", resolve)
     monkeypatch.setattr(guard, "_mcp_server_names", lambda: set())
     monkeypatch.setattr(guard, "memory_provider_tools", lambda: frozenset())
-    source = SimpleNamespace(chat_id=CHAT, chat_type=chat_type, user_id=user_id)
+    nonce = legacy_plugin_turn(chat_id=CHAT, chat_type=chat_type, user_id=user_id)
+    source = SimpleNamespace(chat_id=CHAT, chat_type=chat_type, user_id=user_id, message_id=nonce)
     kept = guard.toolsets_for_source(source, owner_user_id="usr_owner")
     assert kept and guard.GRANT_MANAGEMENT_TOOLSET not in kept
     assert "custom-clawchat" not in kept
@@ -427,6 +428,22 @@ def test_management_toolset_hidden_from_nonowner_schema_and_catalog(monkeypatch,
     owner = SimpleNamespace(chat_id=OWNER_CHAT, chat_type="dm", user_id="usr_owner")
     assert guard.toolsets_for_source(owner, owner_user_id="usr_owner") is None
     assert set(GRANT_TOOL_NAMES) <= {name for group in groups for name in resolve(group)}
+
+
+def test_approve_without_plugin_snapshot_hides_host_and_management_tools(monkeypatch, legacy_plugin_turn):
+    monkeypatch.setattr(guard, "_config_extra", lambda: {"non-owner-host-tools": "approve"})
+    monkeypatch.setattr(guard, "_platform_toolsets", lambda: {"web", "terminal", guard.GRANT_MANAGEMENT_TOOLSET})
+    monkeypatch.setattr(guard, "_resolve_tools", lambda group: {
+        "web": ["web_search"], "terminal": ["terminal"],
+        guard.GRANT_MANAGEMENT_TOOLSET: list(GRANT_TOOL_NAMES),
+    }.get(group, []))
+    monkeypatch.setattr(guard, "_mcp_server_names", lambda: set())
+    monkeypatch.setattr(guard, "memory_provider_tools", lambda: frozenset())
+    legacy_plugin_turn(chat_id=CHAT, chat_type="group", user_id="usr_a", with_snapshot=False)
+    source = SimpleNamespace(chat_id=CHAT, chat_type="group", user_id="usr_a")
+    kept = guard.toolsets_for_source(source, owner_user_id="usr_owner")
+    assert kept and "web" in kept
+    assert "terminal" not in kept and guard.GRANT_MANAGEMENT_TOOLSET not in kept
 
 
 @pytest.mark.parametrize("setting", ["off", "on", "read_error"])

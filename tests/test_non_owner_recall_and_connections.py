@@ -158,11 +158,22 @@ def test_owner_direct_chat_keeps_them():
     assert guard.toolsets_for_source(Source(OWNER_DM, "dm", OWNER), owner_user_id=OWNER) is None
 
 
-def test_approve_keeps_them_visible_for_the_gate(monkeypatch):
+def test_approve_keeps_them_visible_for_the_gate(monkeypatch, legacy_plugin_turn):
     _approve(monkeypatch)
     for turn in TURNS.values():
+        nonce = legacy_plugin_turn(**turn)
         source = Source(turn["chat_id"], turn["chat_type"], turn["user_id"])
+        source.message_id = nonce
         assert guard.toolsets_for_source(source, owner_user_id=OWNER) is None
+
+
+def test_approve_without_plugin_snapshot_blocks_and_narrows(monkeypatch, legacy_plugin_turn):
+    _approve(monkeypatch)
+    turn = TURNS["group_friend"]
+    legacy_plugin_turn(**turn, with_snapshot=False)
+    assert guard.clawchat_pre_tool_call(tool_name="session_search", args={})["action"] == "block"
+    kept = guard.toolsets_for_source(Source(**turn), owner_user_id=OWNER)
+    assert kept and "session_search" not in kept and "connections" not in kept
 
 
 def test_static_list_covers_them_without_the_host_resolver(monkeypatch):
@@ -220,18 +231,20 @@ def test_tools_with_nothing_of_the_owners_stay(monkeypatch, tool, args, where):
 
 @pytest.mark.parametrize("tool,args", RECALL_AND_ACCOUNT_CALLS)
 @pytest.mark.parametrize("where", list(TURNS))
-def test_approve_escalates_them(monkeypatch, tool, args, where):
+def test_approve_escalates_them(monkeypatch, legacy_plugin_turn, tool, args, where):
     _approve(monkeypatch)
     _session(monkeypatch, **TURNS[where])
+    legacy_plugin_turn(**TURNS[where])
     result = guard.clawchat_pre_tool_call(tool_name=tool, args=args)
     assert result["action"] == "approve"
     assert result["rule_key"] == f"clawchat-non-owner:{tool}"
 
 
-def test_approve_blocks_when_the_host_cannot_escalate(monkeypatch):
+def test_approve_blocks_when_the_host_cannot_escalate(monkeypatch, legacy_plugin_turn):
     _approve(monkeypatch)
     monkeypatch.setattr(guard, "_host_supports_approve", lambda: False)
     _session(monkeypatch, **TURNS["friend_dm"])
+    legacy_plugin_turn(**TURNS["friend_dm"])
     result = guard.clawchat_pre_tool_call(tool_name="session_search", args={"query": "x"})
     assert result == {"action": "block", "message": GRANT_BLOCK_MESSAGE}
 
@@ -398,9 +411,10 @@ def test_owner_direct_chat_keeps_every_limited_call(monkeypatch, media, chat_typ
 
 
 @pytest.mark.parametrize("where", list(TURNS))
-def test_approve_escalates_limited_calls(monkeypatch, media, where):
+def test_approve_escalates_limited_calls(monkeypatch, legacy_plugin_turn, media, where):
     _approve(monkeypatch)
     monkeypatch.setattr(guard, "_config_extra", lambda: {"non-owner-host-tools": "approve"})
+    legacy_plugin_turn(**TURNS[where])
     result = _limited(monkeypatch, where, "skill_manage", {"action": "create"})
     assert result["action"] == "approve"
 
@@ -449,9 +463,10 @@ def test_owner_direct_chat_keeps_the_provider(monkeypatch, chat_type):
     assert guard.clawchat_pre_tool_call(tool_name="honcho_search", args={}) is None
 
 
-def test_approve_escalates_provider_tools(monkeypatch):
+def test_approve_escalates_provider_tools(monkeypatch, legacy_plugin_turn):
     monkeypatch.setattr(guard, "memory_provider_tools", lambda: PROVIDER_TOOLS)
     _approve(monkeypatch)
+    legacy_plugin_turn(**TURNS["group_owner"])
     assert _limited(monkeypatch, "group_owner", "honcho_conclude", {})["action"] == "approve"
 
 
@@ -467,9 +482,10 @@ def test_unknown_provider_blocks_unregistered_tools_without_the_override(monkeyp
         assert _limited(monkeypatch, where, tool, args) is None, tool
 
 
-def test_unknown_provider_under_approve_escalates_unregistered_tools(monkeypatch):
+def test_unknown_provider_under_approve_escalates_unregistered_tools(monkeypatch, legacy_plugin_turn):
     monkeypatch.setattr(guard, "memory_provider_tools", lambda: None)
     _approve(monkeypatch)
+    legacy_plugin_turn(**TURNS["friend_dm"])
     assert _limited(monkeypatch, "friend_dm", "honcho_search", {})["action"] == "approve"
 
 

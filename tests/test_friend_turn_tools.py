@@ -181,9 +181,20 @@ def test_owner_lookup_failure_fails_closed(monkeypatch):
     assert guard.toolsets_for_source(Source(DM, "dm", OWNER), owner_user_id=boom) is not None
 
 
-def test_approve_setting_keeps_the_toolset(monkeypatch):
+def test_approve_setting_keeps_the_toolset(monkeypatch, legacy_plugin_turn):
     _approve(monkeypatch)
-    assert guard.toolsets_for_source(Source(GROUP, "group", FRIEND), owner_user_id=OWNER) is None
+    nonce = legacy_plugin_turn(chat_id=GROUP, chat_type="group", user_id=FRIEND)
+    source = Source(GROUP, "group", FRIEND)
+    source.message_id = nonce
+    assert guard.toolsets_for_source(source, owner_user_id=OWNER) is None
+
+
+def test_approve_without_plugin_snapshot_blocks_and_narrows(monkeypatch, legacy_plugin_turn):
+    _approve(monkeypatch)
+    legacy_plugin_turn(chat_id=GROUP, chat_type="group", user_id=FRIEND, with_snapshot=False)
+    assert guard.clawchat_pre_tool_call(tool_name="terminal", args={})["action"] == "block"
+    kept = guard.toolsets_for_source(Source(GROUP, "group", FRIEND), owner_user_id=OWNER)
+    assert kept and "terminal" not in kept and guard.NO_MCP in kept
 
 
 # --- pre_tool_call ----------------------------------------------------------
@@ -245,9 +256,10 @@ def test_other_platforms_and_local_runs_are_not_ours(monkeypatch, platform):
 
 
 @pytest.mark.parametrize("tool", ["terminal", *KANBAN_TOOLS, "kanban_future_tool", "message_agent"])
-def test_approve_setting_escalates_to_the_human_gate(monkeypatch, tool):
+def test_approve_setting_escalates_to_the_human_gate(monkeypatch, legacy_plugin_turn, tool):
     _approve(monkeypatch)
     _session(monkeypatch, chat_id=GROUP, chat_type="group", user_id=FRIEND)
+    legacy_plugin_turn(chat_id=GROUP, chat_type="group", user_id=FRIEND)
     result = guard.clawchat_pre_tool_call(tool_name=tool, args={})
     from clawchat_gateway.tool_capabilities import KANBAN_SESSION_ROUTES
     if tool in KANBAN_SESSION_ROUTES or tool == "message_agent":
@@ -258,11 +270,12 @@ def test_approve_setting_escalates_to_the_human_gate(monkeypatch, tool):
 
 
 @pytest.mark.parametrize("tool", ["terminal", "kanban_create", "kanban_future_tool", "message_agent"])
-def test_approve_setting_blocks_when_the_host_cannot_escalate(monkeypatch, tool):
+def test_approve_setting_blocks_when_the_host_cannot_escalate(monkeypatch, legacy_plugin_turn, tool):
     # An older host ignores "approve" — the tool would then just run.
     _approve(monkeypatch)
     monkeypatch.setattr(guard, "_host_supports_approve", lambda: False)
     _session(monkeypatch, chat_id=GROUP, chat_type="group", user_id=FRIEND)
+    legacy_plugin_turn(chat_id=GROUP, chat_type="group", user_id=FRIEND)
     assert guard.clawchat_pre_tool_call(tool_name=tool, args={})["action"] == "block"
 
 

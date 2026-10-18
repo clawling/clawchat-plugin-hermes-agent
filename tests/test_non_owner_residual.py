@@ -158,9 +158,22 @@ def test_owner_direct_chat_keeps_mcp_and_memory():
     assert guard.toolsets_for_source(Source(OWNER_DM, "dm", "clawchat-maintenance"), owner_user_id=OWNER) is None
 
 
-def test_approve_keeps_them_visible_for_the_gate(monkeypatch):
+def test_approve_keeps_them_visible_for_the_gate(monkeypatch, legacy_plugin_turn):
     _approve(monkeypatch)
-    assert guard.toolsets_for_source(Source(GROUP, "group", FRIEND), owner_user_id=OWNER) is None
+    nonce = legacy_plugin_turn(**TURNS["group_friend"])
+    source = Source(GROUP, "group", FRIEND)
+    source.message_id = nonce
+    assert guard.toolsets_for_source(source, owner_user_id=OWNER) is None
+
+
+def test_approve_without_plugin_snapshot_blocks_and_narrows(monkeypatch, legacy_plugin_turn):
+    _approve(monkeypatch)
+    turn = TURNS["group_friend"]
+    legacy_plugin_turn(**turn, with_snapshot=False)
+    for tool, args in MCP_CALLS + MEMORY_CALLS:
+        assert guard.clawchat_pre_tool_call(tool_name=tool, args=args)["action"] == "block"
+    kept = guard.toolsets_for_source(Source(**turn), owner_user_id=OWNER)
+    assert kept and "memory" not in kept and guard.NO_MCP in kept
 
 
 # --- layer 2: the pre_tool_call hook (every supported host) ------------------
@@ -223,17 +236,19 @@ def test_plugin_tools_are_not_mcp():
 
 @pytest.mark.parametrize("tool,args", MCP_CALLS + MEMORY_CALLS)
 @pytest.mark.parametrize("where", list(TURNS))
-def test_approve_escalates_mcp_and_memory(monkeypatch, tool, args, where):
+def test_approve_escalates_mcp_and_memory(monkeypatch, legacy_plugin_turn, tool, args, where):
     _approve(monkeypatch)
     _session(monkeypatch, **TURNS[where])
+    legacy_plugin_turn(**TURNS[where])
     result = guard.clawchat_pre_tool_call(tool_name=tool, args=args)
     assert result["action"] == "approve"
     assert result["rule_key"] == f"clawchat-non-owner:{tool}"
 
 
-def test_approve_blocks_when_the_host_cannot_escalate(monkeypatch):
+def test_approve_blocks_when_the_host_cannot_escalate(monkeypatch, legacy_plugin_turn):
     _approve(monkeypatch)
     monkeypatch.setattr(guard, "_host_supports_approve", lambda: False)
+    legacy_plugin_turn(**TURNS["group_friend"])
     _session(monkeypatch, **TURNS["group_friend"])
     for tool, args in MCP_CALLS + MEMORY_CALLS:
         assert guard.clawchat_pre_tool_call(tool_name=tool, args=args)["action"] == "block"
