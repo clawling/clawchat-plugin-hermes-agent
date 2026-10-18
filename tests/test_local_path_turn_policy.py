@@ -54,6 +54,9 @@ def policy(monkeypatch, tmp_path):
     session = {}
     monkeypatch.setattr(guard, "_session_value", lambda key: session.get(key, ""))
     monkeypatch.setattr(memory_scope, "_session_value", lambda key: session.get(key, ""))
+    # The guard reads the bound chat through the same host context as the session.
+    from clawchat_gateway import turn_grants
+    monkeypatch.setattr(turn_grants, "session_context_value", lambda key: session.get(key, ""))
     for name in FILES:
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
