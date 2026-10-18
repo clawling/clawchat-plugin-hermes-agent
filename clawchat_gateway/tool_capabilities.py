@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import json
 from types import MappingProxyType
 from typing import NamedTuple
 
@@ -132,6 +133,7 @@ def selector_display(value: str, lang: str) -> str:
 
 
 def is_sensitive_tool(name: str) -> bool:
+    name = canonical_tool_name(name)
     return name.startswith("browser_") or any(
         cap["sensitive"] and name in cap["tools"] for cap in TOOL_CAPABILITIES.values())
 
@@ -199,13 +201,58 @@ def host_tool_targets_current_session(tool_name: str, args, *, session_id="", pr
     return True
 
 
+CROSS_CHAT_GATE_POLICY = "grant"
+PUBLIC_TOOLS_CONFIG_KEY = "public-tools"
+SELF_RUNNING_CAPABILITIES = ("schedule", "subagent")
+_PUBLIC_TOOLS_WARNED: set[str] = set()
+
+
+def get_public_tools_override(raw_list, logger=None) -> frozenset[str] | None:
+    """Validate atomically; diagnostics disclose only the first problem item."""
+    if raw_list is None or isinstance(raw_list, list) and not raw_list:
+        return None
+    problem = None
+    tools = set()
+    if not isinstance(raw_list, list):
+        problem = "<list>: expected an array"
+    else:
+        for item in raw_list:
+            name = item.strip() if isinstance(item, str) else "<non-string>"
+            reason = None
+            if not isinstance(item, str):
+                reason = "expected a string"
+            elif not name or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.:/-]*", name):
+                reason = "invalid exact tool name"
+            elif name == "all" or name.startswith(("cap:", "tool:", "group:")):
+                reason = "selectors are not exact tool names"
+            elif canonical_tool_name(name) in AUTHORIZATION_TOOLS:
+                reason = "authorization tool"
+            elif is_sensitive_tool(name):
+                reason = "sensitive tool"
+            if reason:
+                problem = f"{json.dumps(name)}: {reason}"
+                break
+            tools.add(name)
+    if problem:
+        # Config is YAML data. Cache by value so live reads and copied lists do
+        # not repeat warnings; never include this cache key in diagnostics.
+        key = repr(raw_list)
+        if logger is not None and key not in _PUBLIC_TOOLS_WARNED:
+            _PUBLIC_TOOLS_WARNED.add(key)
+            logger.warning("clawchat public-tools ignored: %s", problem)
+        return None
+    return frozenset(tools)
+
+
 def resolve_cross_chat_gate(context=None, effective_grant=None) -> str:
-    """Pending product decision; retain the host's existing cross-chat checks."""
-    return "legacy"
+    """Only an explicit grant opens cross-chat delivery for non-owner turns."""
+    if not (context or {}).get("cross_chat") or effective_grant == "direct":
+        return "allow"
+    return "ask" if effective_grant == "ask" else "block"
 
 
 def plan_deny_removal(rows) -> str:
-    """Pending product decision; revocation returns to the ordinary default."""
+    """Removing deny takes effect immediately, without a confirmation card."""
     return "immediate"
 
 

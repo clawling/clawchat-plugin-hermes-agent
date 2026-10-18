@@ -8,7 +8,7 @@ import unicodedata
 from clawchat_gateway.tool_capabilities import TOOL_CAPABILITIES
 from clawchat_gateway.tool_grants import (
     CARD_COPY, GRANT_ASK_UNAVAILABLE_RECEIPT, GRANT_FAILURE_MESSAGES, HERMES_LIMIT_COPY, _clean_text,
-    evaluate_tool_grant,
+    evaluate_tool_grant, grant_self_running_consequence,
 )
 
 REQUEST_CARD_TTL_MS = 24 * 60 * 60 * 1000
@@ -17,6 +17,7 @@ REQUEST_DAILY_LIMIT = 20
 REQUEST_WAKE_STALE_MS = 10 * 60 * 1000
 REQUEST_NOTICE_CLAIM_TTL_MS = 10 * 60 * 1000
 REQUEST_RATE_LIMITED_MESSAGE = "The access request was not sent because the request limit was reached. Do not say the owner was asked. Tell them they can ask the owner directly."
+# Final quota: at most 20 cards in (now - 24h, now], including failed sends.
 REQUEST_DAILY_WINDOW_POLICY = "rolling-24h"
 
 
@@ -78,6 +79,7 @@ def build_request_card(request, *, lang, ask_available, source_name=None):
              copy['allow'] + ': `/clawchat-allow ' + code + '`']
     if request['capability_id'] in ('subagent', 'schedule'):
         lines.append(HERMES_LIMIT_COPY[lang])
+        lines.append(grant_self_running_consequence(lang, name))
     if cap['sensitive']:
         lines.append(CARD_COPY['sensitive'][lang].format(names=name))
     lines.append(copy['ask'] + ': `/clawchat-ask ' + code + '`' if ask_available else GRANT_ASK_UNAVAILABLE_RECEIPT[lang])

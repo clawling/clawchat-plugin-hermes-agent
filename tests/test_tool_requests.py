@@ -66,6 +66,7 @@ def test_reserve_cooldown_daily_rolling_limit_and_denied(store):
     for index in range(19):
         assert reserve(store, user=f'usr_other{index}')['status'] == 'sending'
     assert reserve(store, user='usr_twentyfirst') == {'status': 'blocked', 'reason': 'rate-limited'}
+    assert reserve(store, user='usr_twentyfirst', now=NOW + REQUEST_CARD_TTL_MS - 1) == {'status': 'blocked', 'reason': 'rate-limited'}
     assert reserve(store, user='usr_twentyfirst', now=NOW + REQUEST_CARD_TTL_MS)['status'] == 'sending'
     assert REQUEST_DAILY_WINDOW_POLICY == 'rolling-24h'
     assert resolve_request_daily_window(NOW, 'UTC') == {'start': NOW - REQUEST_CARD_TTL_MS, 'end': NOW}

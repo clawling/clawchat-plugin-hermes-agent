@@ -15,7 +15,7 @@ from clawchat_gateway.tool_capabilities import (
     AUTHORIZATION_TOOLS, TOOL_CAPABILITIES, parse_grant_selector,
     normalize_grant_selectors, selector_display, selector_is_sensitive,
     is_sensitive_tool, is_cross_chat_call, plan_deny_removal,
-    canonical_tool_name,
+    canonical_tool_name, SELF_RUNNING_CAPABILITIES,
 )
 
 GRANT_TOOL_NAMES = (
@@ -42,6 +42,7 @@ BASELINE_CATEGORY = {
     "browser_vault": "browser", "browser_vision": "browser", "computer_use": "browser",
 }
 
+NON_OWNER_GRANTS_HINT_A = "Explain only the requested ability in the conversation's language. For missing access, tell them the owner can allow it in their direct chat. For a mixed-turn block, an allowed person can ask again alone. Do not invent reasons or reveal others' access, settings, paths, or versions."
 NON_OWNER_GRANTS_HINT = "For missing access, call clawchat_tool_request with the ability ID and one short reason. Do not request after a denial or mixed-turn block. Explain only the requested ability in the conversation's language. Do not invent reasons or reveal others' access, settings, paths, or versions."
 GRANT_BLOCK_MESSAGE = 'This tool is not available to the caller yet. Do not try another way. Call clawchat_tool_request with the ability ID and one short reason.'
 GRANT_INTERSECTION_BLOCK_MESSAGE = 'Someone in this turn is not allowed to use this tool, so it did not run. Do not retry. Say that an allowed person can call you again alone.'
@@ -120,6 +121,11 @@ class _SpeakerPlan:
             priority = {"tool": 3, "capability": 2, "all": 1}[kind]
             if matches and (priority > level or priority == level and _RANK[mode] > _RANK.get(result, 0)):
                 level, result = priority, mode
+        # Explicit rules alone authorize outbound delivery to another chat.
+        # Catalog queries have no call arguments and retain current-chat visibility.
+        if (result is None and context is not None and (args is not None or "chat_id" in context)
+                and is_cross_chat_call(tool, args, context)):
+            return None
         public = tool in {canonical_tool_name(name) for name in self.public_tools}
         default_allowed = context.get("default_allowed", public) if context else public
         return result or ("direct" if default_allowed else
@@ -281,12 +287,17 @@ def grant_failure_code(grants, tool, *, available=True, args=None, context=None,
     return "denied" if mode == "deny" else "not-granted"
 
 
-def build_non_owner_grants_hint(grants, available_tools):
+def build_non_owner_grants_hint(grants, available_tools, *, public_tools=None, request_available=True):
+    def accessible(tool):
+        if public_tools is None:
+            return evaluate_tool_grant(grants, tool) in ("direct", "ask")
+        return tool_grant_visible(grants, tool, default_allowed=tool in public_tools, now=None)
+
     blocked = [f"{cap['names']['en']} ({id_})" for id_, cap in TOOL_CAPABILITIES.items()
                if any(tool in available_tools for tool in cap["tools"])
-               and all(evaluate_tool_grant(grants, tool) not in ("direct", "ask")
-                       for tool in cap["tools"] if tool in available_tools)]
-    return ("Not available to the caller yet: " + ", ".join(blocked) + ". " if blocked else "") + NON_OWNER_GRANTS_HINT
+               and all(not accessible(tool) for tool in cap["tools"] if tool in available_tools)]
+    guidance = NON_OWNER_GRANTS_HINT if request_available else NON_OWNER_GRANTS_HINT_A
+    return ("Not available to the caller yet: " + ", ".join(blocked) + ". " if blocked else "") + guidance
 
 
 def generate_grant_code() -> str:
@@ -426,6 +437,25 @@ def selectors_have_host_limits(tools):
     return False
 
 
+SELF_RUNNING_COPY = {
+    "zh": "{names}派出去的定时任务、子 Agent 和看板任务会用主人的配置带全部工具执行。",
+    "zh_Hant": "{names}派出去的定時任務、子 Agent 和看板任務會用主人的設定帶全部工具執行。",
+    "en": "Scheduled tasks, sub-agents, and kanban tasks that {names} starts run with the owner's configuration and all tools.",
+}
+
+
+def selector_starts_self_running_work(value):
+    selector = parse_grant_selector(value)
+    return selector.what_kind == "all" or any(
+        selector.what == capability if selector.what_kind == "capability" else
+        canonical_tool_name(selector.what) in TOOL_CAPABILITIES[capability]["tools"]
+        for capability in SELF_RUNNING_CAPABILITIES)
+
+
+def grant_self_running_consequence(lang, names):
+    return SELF_RUNNING_COPY[_card_language(lang)].format(names=names)
+
+
 CARD_COPY = {'sensitive': {'zh': '{names}能在这台机器上跑任何命令、读写任何文件，包括这个 Agent 的登录凭据、你的模型 key 和这张授权列表。拿到凭据的人可以冒充这个 Agent '
                      '跟别人说话。只给你完全信任的人。',
                'zh_Hant': '{names}能在這台機器上執行任何命令、讀寫任何檔案，包括這個 Agent 的登入憑證、你的模型 key 和這張授權列表。拿到憑證的人可以冒充這個 Agent '
@@ -515,6 +545,8 @@ def build_grant_card(*, grantees, tools, mode, lang, code, now, label=None,
         lines.append(HERMES_LIMIT_COPY[lang])
     if mode == "direct" and any(selector_is_sensitive(tool) for tool in tools):
         lines.append(copy("sensitive", names=names))
+    if mode in ("direct", "ask") and any(selector_starts_self_running_work(tool) for tool in tools):
+        lines.append(grant_self_running_consequence(lang, names))
     if mode == "ask":
         lines.append(copy("ask"))
     if not ask_available:

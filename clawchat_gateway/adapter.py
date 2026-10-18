@@ -2703,8 +2703,9 @@ class ClawChatAdapter(BasePlatformAdapter):
 
         lines: list[str] = []
         from clawchat_gateway.tool_grants import NON_OWNER_GRANTS_HINT, build_non_owner_grants_hint
-        from clawchat_gateway.host_tools_guard import host_tool_catalog
+        from clawchat_gateway.host_tools_guard import host_tool_catalog, public_tool_names
         grants_hint = None
+        public = frozenset()
         if self._clawchat_config.tool_grants == "on":
             try:
                 if snapshot is not None:
@@ -2714,10 +2715,17 @@ class ClawChatAdapter(BasePlatformAdapter):
                     if getattr(grants, "owner_only", False):
                         return None
                 _, available = host_tool_catalog()
-                grants_hint = build_non_owner_grants_hint(grants, available)
+                public = public_tool_names(available)
+                grants_hint = build_non_owner_grants_hint(grants, available, public_tools=public)
             except Exception:  # noqa: BLE001 - no catalog evidence means no capability list
                 grants_hint = NON_OWNER_GRANTS_HINT
-        for hint in (grants_hint or blocked_tools_hint(), limited_tools_hint()):
+        else:
+            try:
+                _, available = host_tool_catalog()
+                public = public_tool_names(available)
+            except Exception:  # noqa: BLE001 - keep the ordinary hint when catalog evidence is missing
+                pass
+        for hint in (grants_hint or blocked_tools_hint(public_tools=public), limited_tools_hint(public_tools=public)):
             if hint:
                 lines.append(hint)
         return "\n".join(lines) or None

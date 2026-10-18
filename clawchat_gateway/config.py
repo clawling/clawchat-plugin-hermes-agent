@@ -366,6 +366,16 @@ def tool_grants() -> str:
         return "on"
 
 
+def public_tools_override() -> frozenset[str] | None:
+    """Read the same profile extra live, including edits made during a turn."""
+    try:
+        from clawchat_gateway.memory_scope import _config_extra
+        from clawchat_gateway.tool_capabilities import PUBLIC_TOOLS_CONFIG_KEY, get_public_tools_override
+        return get_public_tools_override((_config_extra() or {}).get(PUBLIC_TOOLS_CONFIG_KEY), logger)
+    except Exception:  # noqa: BLE001 - an unreadable override adds no public tools
+        return None
+
+
 def _read_group_command_mode(value: Any) -> str:
     return value if value in {"owner", "all", "off"} else "owner"
 

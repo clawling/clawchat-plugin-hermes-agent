@@ -55,7 +55,7 @@ async def harness(monkeypatch, tmp_path):
     from clawchat_gateway.tool_capabilities import CAPABILITY_TOOL_NAMES, AUTHORIZATION_TOOLS
     catalog = frozenset(CAPABILITY_TOOL_NAMES) | {TOOL, *AUTHORIZATION_TOOLS}
     monkeypatch.setattr(guard, "host_tool_catalog", lambda: (catalog, catalog))
-    monkeypatch.setattr(guard, "public_tool_names", lambda _: frozenset())
+    monkeypatch.setattr(guard, "public_tool_names", lambda _, **kw: frozenset())
     a = ClawChatAdapter({})
     a._clawchat_config = replace(a._clawchat_config, user_id="usr_agent", owner_user_id="usr_owner",
                                sediment_on_reset=False, sediment_on_compact=False)

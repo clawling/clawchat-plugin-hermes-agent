@@ -23,6 +23,9 @@ from test_tool_grants_ask import approval
 from test_tool_grants_tools import management, PARAMS
 from test_tool_grants_admission import harness, message, coalesced
 
+_public_tool_names = guard.public_tool_names
+_narrowed_toolsets = guard._narrowed_toolsets
+
 NOW = 1_800_000_000_000
 
 
@@ -143,7 +146,8 @@ def test_all_excludes_authorization_and_prefixes_never_authorize():
     assert resolve([row("browser", kind="capability")]).get("browser_third_party") is None
     assert resolve([row("subagent", kind="capability")]).get("kanban_third_party") is None
     assert "clawchat_memory_read" not in TOOL_CAPABILITIES["memory"]["tools"]
-    assert resolve_cross_chat_gate({}, "direct") == "legacy"
+    assert resolve_cross_chat_gate({}, "direct") == "allow"
+    assert resolve_cross_chat_gate({"cross_chat": True}, None) == "block"
     assert plan_deny_removal([row(mode="deny")]) == "immediate"
 
 
@@ -343,6 +347,9 @@ async def test_deny_management_writes_immediately_lists_camel_case_and_revokes(m
                and item["mode"] == "deny" for item in listed["grants"])
     assert await tools.manage_tool_grants("revoke", dict(userId="usr_a", tools=["terminal"]), session_id="s") == {"revoked": 1}
     assert await tools.manage_tool_grants("revoke", dict(userId="usr_a"), session_id="s") == {"revoked": 1}
+    h.adapter._send_owner_text.assert_not_awaited()
+    with sqlite3.connect(h.adapter._store.db_path) as conn:
+        assert conn.execute('SELECT count(*) FROM tool_grant_pending').fetchone()[0] == 0
 
 
 @pytest.mark.asyncio
@@ -779,6 +786,7 @@ ALL_CARDS = {('zh', 'direct'): '授权确认（码 000123）\n'
                    '在这台机器上，别人发起的回合不能派子 Agent、建或运行定时任务、创建看板任务，只能查看和停止已有的。\n'
                    'Person能在这台机器上跑任何命令、读写任何文件，包括这个 Agent 的登录凭据、你的模型 key 和这张授权列表。拿到凭据的人可以冒充这个 Agent '
                    '跟别人说话。只给你完全信任的人。\n'
+                   'Person派出去的定时任务、子 Agent 和看板任务会用主人的配置带全部工具执行。\n'
                    '确认请点：`/clawchat-allow 000123`（10 分钟内有效；不确认就不会生效）',
  ('zh', 'ask'): '授权确认（码 000123）\n'
                 '允许：Person（usr_alice）\n'
@@ -792,6 +800,7 @@ ALL_CARDS = {('zh', 'direct'): '授权确认（码 000123）\n'
                 '包括敏感工具。\n'
                 '不包括授权、收回、列出授权和申请授权这四个工具。\n'
                    '在这台机器上，别人发起的回合不能派子 Agent、建或运行定时任务、创建看板任务，只能查看和停止已有的。\n'
+                'Person派出去的定时任务、子 Agent 和看板任务会用主人的配置带全部工具执行。\n'
                 '这类操作每次都会先问你。\n'
                 '确认请点：`/clawchat-allow 000123`（10 分钟内有效；不确认就不会生效）',
  ('zh_Hant', 'direct'): '授權確認（碼 000123）\n'
@@ -808,6 +817,7 @@ ALL_CARDS = {('zh', 'direct'): '授权确认（码 000123）\n'
                    '在這台機器上，別人發起的回合不能派子 Agent、建立或執行定時任務、建立看板任務，只能查看和停止現有的。\n'
                         'Person能在這台機器上執行任何命令、讀寫任何檔案，包括這個 Agent 的登入憑證、你的模型 key 和這張授權列表。拿到憑證的人可以冒充這個 '
                         'Agent 跟別人說話。只給你完全信任的人。\n'
+                        'Person派出去的定時任務、子 Agent 和看板任務會用主人的設定帶全部工具執行。\n'
                         '確認請點：`/clawchat-allow 000123`（10 分鐘內有效；不確認就不會生效）',
  ('zh_Hant', 'ask'): '授權確認（碼 000123）\n'
                      '允許：Person（usr_alice）\n'
@@ -821,6 +831,7 @@ ALL_CARDS = {('zh', 'direct'): '授权确认（码 000123）\n'
                      '包括敏感工具。\n'
                      '不包括授權、收回、列出授權和申請授權這四個工具。\n'
                    '在這台機器上，別人發起的回合不能派子 Agent、建立或執行定時任務、建立看板任務，只能查看和停止現有的。\n'
+                     'Person派出去的定時任務、子 Agent 和看板任務會用主人的設定帶全部工具執行。\n'
                      '這類操作每次都會先問你。\n'
                      '確認請點：`/clawchat-allow 000123`（10 分鐘內有效；不確認就不會生效）',
  ('en', 'direct'): 'Grant confirmation (code 000123)\n'
@@ -841,6 +852,7 @@ ALL_CARDS = {('zh', 'direct'): '授权确认（码 000123）\n'
                    "this Agent's login credentials, your model API key, and this grant list. Anyone "
                    'with the credentials can impersonate this Agent when talking to others. Only allow '
                    'people you trust completely.\n'
+                   "Scheduled tasks, sub-agents, and kanban tasks that Person starts run with the owner's configuration and all tools.\n"
                    'Click to confirm: `/clawchat-allow 000123` (valid for 10 minutes; it will not take '
                    'effect without confirmation)',
  ('en', 'ask'): 'Grant confirmation (code 000123)\n'
@@ -857,6 +869,7 @@ ALL_CARDS = {('zh', 'direct'): '授权确认（码 000123）\n'
                 'Includes sensitive tools.\n'
                 'Excludes the four tools for granting, revoking, listing, and requesting access.\n'
                    'On this machine, turns started by others cannot dispatch sub-agents, create or run scheduled tasks, or create Kanban tasks; they can only view and stop existing ones.\n'
+                "Scheduled tasks, sub-agents, and kanban tasks that Person starts run with the owner's configuration and all tools.\n"
                 'These operations will ask you first every time.\n'
                 'Click to confirm: `/clawchat-allow 000123` (valid for 10 minutes; it will not take '
                 'effect without confirmation)'}
@@ -1009,6 +1022,7 @@ def test_search_assembly_only_receives_authorized_schemas(host, monkeypatch):
 @pytest.mark.parametrize("ids", [{}, {"session_id": "s"}, {"turn_id": "t"}])
 @pytest.mark.parametrize("policy", ["off", "approve"])
 def test_legacy_host_without_execution_ids_keeps_ordinary_approval(host, monkeypatch, ids, policy):
+    monkeypatch.setattr(guard, "_host_supports_pre_llm_call", lambda: False)
     monkeypatch.setattr(guard, "_config_extra", lambda: {"non-owner-host-tools": policy})
     monkeypatch.setattr(guard, "_host_supports_approve", lambda: True)
     with bound_rules([row(mode="deny")]) as snapshot, host(**context(snapshot, group=True)):
@@ -1039,10 +1053,11 @@ def test_capable_host_cannot_approve_a_missing_or_unreadable_snapshot(host, monk
             result = guard.clawchat_pre_tool_call(tool_name="terminal", args={},
                 session_id="" if failure == "empty_ids" else "s",
                 turn_id="" if failure == "empty_ids" else "other" if failure == "unbound" else "t")
-        expected = guard.BLOCK_MESSAGE if failure == "read_error" else grants.GRANT_BLOCK_MESSAGE
+        expected = (guard.BLOCK_MESSAGE if failure == "read_error" else
+                    grants.GRANT_DENIED_MESSAGE if failure == "empty_ids" else grants.GRANT_BLOCK_MESSAGE)
         assert result["action"] == "block" and result["message"] == expected
         if failure != "read_error":
-            assert result["reasonCode"] == "not-granted"
+            assert result["reasonCode"] == ("denied" if failure == "empty_ids" else "not-granted")
 
 
 @pytest.mark.parametrize("rows", [[], [row("feishu-docs", kind="capability")]])
@@ -1087,7 +1102,7 @@ def test_legacy_catalog_preserves_approve_but_capable_missing_nonce_stays_narrow
     monkeypatch.setattr(guard, "_platform_toolsets", lambda: {"terminal", "web"})
     monkeypatch.setattr(guard, "_resolve_tools", lambda name: ["terminal"] if name == "terminal" else ["web_search"])
     legacy = SimpleNamespace(chat_id="cnv_rules", chat_type="group", user_id="usr_alice")
-    assert guard.toolsets_for_source(legacy, owner_user_id="usr_owner") is None
+    assert "terminal" not in guard.toolsets_for_source(legacy, owner_user_id="usr_owner")
     modern = SimpleNamespace(**vars(legacy), message_id="missing")
     assert "terminal" not in guard.toolsets_for_source(modern, owner_user_id="usr_owner")
 
@@ -1156,6 +1171,7 @@ def test_audited_routes_cannot_use_authorization_to_start_another_session(host, 
 
 @pytest.mark.parametrize("tool,args", ROUTED_CALLS)
 def test_legacy_approve_cannot_bypass_audited_routes(host, monkeypatch, tool, args):
+    monkeypatch.setattr(guard, "_host_supports_pre_llm_call", lambda: False)
     monkeypatch.setattr(guard, "_config_extra", lambda: {"non-owner-host-tools": "approve"})
     monkeypatch.setattr(guard, "_host_supports_approve", lambda: True)
     with host(HERMES_SESSION_PLATFORM="clawchat", HERMES_SESSION_CHAT_ID="cnv_rules", HERMES_SESSION_CHAT_TYPE="group"):
@@ -1224,7 +1240,7 @@ async def test_actual_group_batches_use_only_trusted_nonowner_intersection(harne
 async def test_unattributed_batches_use_defaults_without_group_approve(harness, host, approval, monkeypatch, raw):
     from dataclasses import replace
     monkeypatch.setattr(guard, "_config_extra", lambda: {"non-owner-host-tools": "approve"})
-    monkeypatch.setattr(guard, "public_tool_names", lambda _: frozenset({"web_search"}))
+    monkeypatch.setattr(guard, "public_tool_names", lambda _, **kw: frozenset({"web_search"}))
     inbound = await coalesced([message("usr_owner", kind="group"),
                                replace(message("", kind="group"), raw_message=raw)])
     await harness.adapter._handle_inbound(inbound)
@@ -1327,7 +1343,7 @@ async def test_unattributed_synthetic_owner_chat_uses_defaults_on_all_hosts(harn
     from test_tool_grants_admission import OWNER_CHAT
     a = harness.adapter
     monkeypatch.setattr(a, "_is_owner_turn", ClawChatAdapter._is_owner_turn.__get__(a))
-    monkeypatch.setattr(guard, "public_tool_names", lambda _: frozenset({"web_search"}))
+    monkeypatch.setattr(guard, "public_tool_names", lambda _, **kw: frozenset({"web_search"}))
     monkeypatch.setattr(guard, "_config_extra", lambda: {"non-owner-host-tools": "approve", "tool-grants": setting})
     a._clawchat_config = replace(a._clawchat_config, tool_grants=setting)
     monkeypatch.setattr(guard, "_host_supports_pre_llm_call", lambda: binding)
@@ -1353,7 +1369,7 @@ async def test_failed_grant_read_uses_default_and_never_approve(harness, host, a
     def unreadable(**_):
         raise OSError("private storage detail")
     monkeypatch.setattr(harness.adapter._store, "load_grants_for_users", unreadable)
-    monkeypatch.setattr(guard, "public_tool_names", lambda _: frozenset({"web_search"}))
+    monkeypatch.setattr(guard, "public_tool_names", lambda _, **kw: frozenset({"web_search"}))
     monkeypatch.setattr(guard, "_config_extra", lambda: {"non-owner-host-tools": "approve"})
     await harness.adapter._handle_inbound(message(kind="group"))
     snapshot = turns.get_snapshot(harness.events[-1].source.message_id)
@@ -1759,6 +1775,7 @@ def test_process_list_needs_no_registry_and_old_approve_cannot_bypass_target(hos
     with bound_rules([row()]) as snapshot, host(**context(snapshot)):
         assert call(tool, turn_id="t", args={"action": "list"}) is None
         assert call(tool, turn_id="t", args={"action": "write", "session_id": "proc-unknown"}) == guard._grant_block("cross-session")
+    monkeypatch.setattr(guard, "_host_supports_pre_llm_call", lambda: False)
     monkeypatch.setattr(guard, "_config_extra", lambda: {"non-owner-host-tools": "approve"})
     monkeypatch.setattr(guard, "_host_supports_approve", lambda: True)
     with host(HERMES_SESSION_PLATFORM="clawchat", HERMES_SESSION_CHAT_ID="cnv_group", HERMES_SESSION_CHAT_TYPE="group"):
@@ -1808,7 +1825,7 @@ async def test_wire_synthetic_preserves_guest_deny_rows(harness, host, monkeypat
     harness.rows.append(row("web_search" if deny == "tool" else "all", "deny", user="usr_guest", kind=deny))
     load = Mock(wraps=a._store.load_grants_for_users)
     monkeypatch.setattr(a._store, "load_grants_for_users", load)
-    monkeypatch.setattr(guard, "public_tool_names", lambda _: frozenset({"web_search"}))
+    monkeypatch.setattr(guard, "public_tool_names", lambda _, **kw: frozenset({"web_search"}))
     monkeypatch.setattr(guard, "_config_extra", lambda: {"non-owner-host-tools": "approve"})
     frame = message("usr_guest", kind=kind).raw_message
     frame["synthetic"] = True
@@ -1917,3 +1934,243 @@ def test_guest_assembly_skips_catalog_summaries_when_search_guard_is_incomplete(
             assert "tool_search" in [item["function"]["name"] for item in model_tools.get_tool_definitions(quiet_mode=True)]
     finally:
         turns.release_turn(owner.nonce)
+
+# T137.8 final cross-chat/public policy regressions.
+@pytest.mark.parametrize('tool,key', [('clawchat_mention_message', 'chatId'),
+    ('clawchat_react_message', 'chatId'), ('clawchat_send_file', 'chat_id'), ('send_message', 'target')])
+@pytest.mark.parametrize('fallback', ['default', 'public', 'approve'])
+@pytest.mark.parametrize('target', ['cnv_other', None])
+def test_final_cross_chat_defaults_never_authorize(host, tool, key, fallback, target):
+    with bound_rules([], public={tool} if fallback == 'public' else (),
+                     unmatched='ask' if fallback == 'approve' else 'none') as s, host(**context(s, group=True)):
+        args = {} if target is None else {key: target}
+        assert call(tool, turn_id='t', args=args) == guard._grant_block('not-granted')
+        assert call(tool, turn_id='t', args={key: s.chat_id}) is None
+
+
+@pytest.mark.parametrize('mode', ['direct', 'ask', 'deny', None, 'mixed'])
+def test_final_cross_chat_explicit_gate(host, monkeypatch, mode):
+    rows = [row('cross-chat', mode if mode != 'mixed' else 'direct', kind='capability')] if mode else []
+    speakers = ('usr_alice', 'usr_bob') if mode == 'mixed' else ('usr_alice',)
+    directive = {'action': 'ask-test'}
+    monkeypatch.setattr(guard, '_ask_directive', lambda *a: directive)
+    with bound_rules(rows, speakers=speakers) as s, host(**context(s)):
+        result = call('clawchat_mention_message', turn_id='t', args={'chatId': 'cnv_other'})
+        expected = None if mode == 'direct' else directive if mode == 'ask' else guard._grant_block(
+            'denied' if mode == 'deny' else 'batch-intersection' if mode == 'mixed' else 'not-granted')
+        assert result == expected
+        for tool, args in [('delegate_task', {'action': 'spawn'}),
+                           ('cronjob_manage', {'action': 'create'}), ('message_agent', {})]:
+            assert call(tool, turn_id='t', args=args) is not None
+
+
+@pytest.mark.parametrize('path', ['off', 'legacy', 'missing'])
+def test_final_cross_chat_without_grant_context_blocks(host, monkeypatch, path):
+    with bound_rules([]) as s, host(**context(s, nonce='unknown' if path == 'missing' else None, group=True)):
+        if path == 'off':
+            monkeypatch.setattr(guard, '_tool_grants_enabled', lambda: False)
+        if path == 'legacy':
+            monkeypatch.setattr(guard, '_host_supports_pre_llm_call', lambda: False)
+        monkeypatch.setattr(guard, '_config_extra', lambda: {'non-owner-host-tools': 'approve'})
+        result = (call('clawchat_react_message', args={'chatId': 'cnv_other'}) if path == 'legacy' else
+                  call('clawchat_react_message', turn_id='t', args={'chatId': 'cnv_other'}))
+        assert result == guard._grant_block('not-granted')
+
+
+@pytest.mark.parametrize('bad', [42, '', 'all', 'cap:web', 'tool:web_search', 'group:x', 'bad*',
+    'terminal', 'read_file', 'browser_navigate', 'browser_new', 'cronjob', 'process',
+    'kanban_attach', *AUTHORIZATION_TOOLS])
+def test_final_public_tools_atomic_validation_and_private_warning(caplog, bad):
+    import logging
+    from clawchat_gateway import tool_capabilities as caps
+    raw = ['PrivateOtherEntry', bad]
+    caplog.clear()
+    logger = logging.getLogger('public-test-' + str(bad))
+    assert caps.get_public_tools_override(raw, logger) is None
+    assert caps.get_public_tools_override(list(raw), logger) is None
+    assert len(caplog.records) == 1
+    assert 'PrivateOtherEntry' not in caplog.text
+    assert 'clawchat public-tools ignored:' in caplog.text
+    assert json.dumps(str(bad).strip() if isinstance(bad, str) else '<non-string>') in caplog.text
+
+
+def test_final_public_tools_config_reads_live_and_validates(caplog, monkeypatch):
+    from clawchat_gateway import config, memory_scope, tool_capabilities as caps
+    current = {}
+    monkeypatch.setattr(memory_scope, '_config_extra', lambda: current)
+    assert caps.PUBLIC_TOOLS_CONFIG_KEY == 'public-tools'
+    assert caps.CROSS_CHAT_GATE_POLICY == 'grant'
+    assert caps.SELF_RUNNING_CAPABILITIES == ('schedule', 'subagent')
+    assert config.public_tools_override() is None
+    current['public-tools'] = []
+    assert config.public_tools_override() is None
+    assert not caplog.records
+    current['public-tools'] = [' memory ', 'Provider:Read', 'memory']
+    assert config.public_tools_override() == frozenset({'memory', 'Provider:Read'})
+    current['public-tools'] = 'memory'
+    assert config.public_tools_override() is None
+    assert '<list>' in caplog.text
+    assert '"memory"' not in caplog.text
+
+
+@pytest.mark.parametrize('selector', [None, 'tool', 'capability', 'all'])
+def test_final_public_default_and_deny_share_catalog_guard_hint(host, monkeypatch, selector):
+    from clawchat_gateway import memory_scope
+    monkeypatch.setattr(memory_scope, '_config_extra', lambda: {'public-tools': ['memory', 'unavailable']})
+    _, available = guard.host_tool_catalog()
+    public = guard.public_tool_names(available)
+    assert 'memory' in public and 'unavailable' not in public
+    rules = [row('memory' if selector != 'all' else 'all', 'deny', kind=selector)] if selector else []
+    with bound_rules(rules, public=public) as s, host(**context(s)):
+        result = call('memory', turn_id='t')
+        assert result == (guard._grant_block('denied') if selector else None)
+        definitions = [{'function': {'name': 'memory'}}]
+        assert guard._filter_grant_definitions(definitions, s) == ([] if selector else definitions)
+        hint = grants.build_non_owner_grants_hint(s.grants, {'memory'}, public_tools=public)
+        assert ('Host memory (memory)' in hint) is bool(selector)
+
+
+@pytest.mark.parametrize('state', ['guest-deny', 'guest-ask', 'owner', 'unbound', 'wrong-chat', 'wrong-platform'])
+def test_final_rpc_missing_ids_uses_only_matching_bound_snapshot(host, monkeypatch, state):
+    from test_turn_grants import snapshot
+    if state == 'owner':
+        s = turns.register_turn(account_id='usr_agent', chat_id='cnv_chat', session_key='owner',
+            speakers=('usr_owner',), grants={}, owner_side=True)
+    else:
+        s = snapshot(grants=resolve([row('clawchat_react_message', 'ask' if state == 'guest-ask' else 'deny', kind='tool')]))
+    directive = {'action': 'ask-test'}
+    monkeypatch.setattr(guard, '_ask_directive', lambda *a: directive)
+    try:
+        if state != 'unbound':
+            turns.bind_turn(s.nonce, 's', 't')
+        ctx = context(s)
+        if state == 'wrong-chat':
+            ctx['HERMES_SESSION_CHAT_ID'] = 'cnv_other'
+        if state == 'wrong-platform':
+            ctx['HERMES_SESSION_PLATFORM'] = 'other'
+        with host(**ctx):
+            result = guard.clawchat_pre_tool_call(tool_name='terminal' if state == 'owner' else 'clawchat_react_message',
+                args={'chatId': ctx['HERMES_SESSION_CHAT_ID']})
+            assert result == (guard._grant_block('denied') if state == 'guest-deny' else
+                              directive if state == 'guest-ask' else None)
+    finally:
+        turns.release_turn(s.nonce)
+
+
+FINAL_R = {
+    'zh': 'Person派出去的定时任务、子 Agent 和看板任务会用主人的配置带全部工具执行。',
+    'zh_Hant': 'Person派出去的定時任務、子 Agent 和看板任務會用主人的設定帶全部工具執行。',
+    'en': "Scheduled tasks, sub-agents, and kanban tasks that Person starts run with the owner's configuration and all tools.",
+}
+
+
+@pytest.mark.parametrize('lang', FINAL_R)
+@pytest.mark.parametrize('selector', ['all', 'cap:schedule', 'cap:subagent', 'tool:delegate_task',
+    'tool:cronjob_manage', 'tool:cronjob', 'tool:kanban_attach', 'cap:web', 'tool:message_agent', 'tool:kanban_future'])
+@pytest.mark.parametrize('mode', ['direct', 'ask'])
+def test_final_self_running_card_copy(lang, selector, mode):
+    card = grants.build_grant_card(grantees=[dict(id='usr_alice', name='Person')], tools=[selector],
+        mode=mode, lang=lang, code='000123', now=NOW)
+    assert (FINAL_R[lang] in card.splitlines()) is (selector not in {'cap:web', 'tool:message_agent', 'tool:kanban_future'})
+
+
+@pytest.mark.parametrize('lang', FINAL_R)
+@pytest.mark.parametrize('capability', ['schedule', 'subagent', 'web'])
+def test_final_request_self_running_card_copy(lang, capability):
+    from clawchat_gateway.tool_requests import build_request_card
+    card = build_request_card(dict(code='000123', requester_name='Person', requester_user_id='usr_alice',
+        source_chat_type='direct', capability_id=capability, reason='Please help'), lang=lang, ask_available=True)
+    assert (FINAL_R[lang] in card.splitlines()) is (capability != 'web')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('off', [False, True])
+async def test_final_public_dispatch_and_short_hint_use_live_default(harness, host, monkeypatch, off):
+    monkeypatch.setattr(guard, 'public_tool_names', _public_tool_names)
+    from clawchat_gateway import memory_scope
+    monkeypatch.setattr(memory_scope, '_config_extra', lambda: {'public-tools': ['memory', 'skill_manage']})
+    monkeypatch.setattr(guard, 'host_supports_toolset_override', lambda: False)
+    monkeypatch.setattr(guard, '_tool_grants_enabled', lambda: not off)
+    harness.adapter._clawchat_config = replace(harness.adapter._clawchat_config, tool_grants='off' if off else 'on')
+    await harness.adapter._handle_inbound(message('usr_alice'))
+    s = turns.get_snapshot(harness.events[-1].source.message_id)
+    assert s.grants.get('memory') == 'direct'
+    hint = harness.adapter._non_owner_turn_section(message('usr_alice'))
+    assert 'Host memory (memory)' not in hint and "Hermes' memory tool" not in hint
+    # Listing never lifts a per-call limit: skill writes stay blocked.
+    assert 'skill_manage is blocked' in hint
+    assert s.grants.get('skill_manage') is None
+    turns.bind_turn(s.nonce, 's', 't')
+    with host(**context(s)):
+        assert call('memory', turn_id='t') is None
+
+
+@pytest.mark.parametrize('off', [False, True])
+def test_final_public_without_snapshot_and_off(host, monkeypatch, off):
+    from clawchat_gateway import memory_scope
+    monkeypatch.setattr(memory_scope, '_config_extra', lambda: {'public-tools': ['memory']})
+    monkeypatch.setattr(guard, '_tool_grants_enabled', lambda: not off)
+    with host(HERMES_SESSION_PLATFORM='clawchat', HERMES_SESSION_MESSAGE_ID='missing',
+              HERMES_SESSION_CHAT_ID='cnv_chat', HERMES_SESSION_CHAT_TYPE='group'):
+        assert call('memory', turn_id='t') is None
+        defs = [{'function': {'name': name}} for name in ['memory', 'terminal']]
+        assert guard._filter_grant_definitions(defs, None) == defs[:1]
+        assert call('memory', turn_id='t', args={'path': '/tmp/private'}) is not None
+        monkeypatch.setattr(guard, '_config_extra', lambda: {'non-owner-host-tools': 'approve'})
+        monkeypatch.setattr(guard, '_host_supports_approve', lambda: True)
+        assert call('terminal', turn_id='t')['action'] == 'block'
+        assert guard.clawchat_pre_tool_call(tool_name='terminal', args={})['action'] == 'block'
+
+
+@pytest.mark.parametrize('args', [None, [], 'opaque'])
+def test_final_opaque_cross_chat_never_borrows_public(host, args):
+    with bound_rules([], public={'clawchat_mention_message'}) as s, host(**context(s)):
+        assert call('clawchat_mention_message', turn_id='t', args=args) == guard._grant_block('not-granted')
+
+
+@pytest.mark.parametrize('grant', [None, 'deny', 'ask', 'direct'])
+@pytest.mark.parametrize('cross_chat', [False, True])
+def test_final_gate_has_no_legacy_result(grant, cross_chat):
+    assert resolve_cross_chat_gate({'cross_chat': cross_chat}, grant) == (
+        'allow' if not cross_chat or grant == 'direct' else 'ask' if grant == 'ask' else 'block')
+
+
+def test_final_cross_chat_grant_does_not_bypass_cross_session(host, monkeypatch):
+    known, available = guard.host_tool_catalog()
+    monkeypatch.setattr(guard, 'host_tool_catalog', lambda: (known | {'message_agent'}, available | {'message_agent'}))
+    with bound_rules([row(), row('cross-chat', kind='capability')]) as s, host(**context(s)):
+        for tool, args in [('delegate_task', {'action': 'spawn'}),
+                           ('cronjob_manage', {'action': 'create'}), ('message_agent', {})]:
+            assert call(tool, turn_id='t', args=args) == guard._grant_block('cross-session')
+
+
+def test_final_cross_chat_ask_unavailable_and_expiry(host):
+    with bound_rules([row('cross-chat', 'ask', kind='capability')]) as s, host(**context(s)):
+        assert call('clawchat_react_message', turn_id='t', args={'chatId': 'cnv_other'}) == guard._grant_block('ask-unavailable')
+    with bound_rules([row('cross-chat', kind='capability', expires_at=NOW+1)]) as s, host(**context(s)):
+        from unittest.mock import patch
+        with patch.object(guard.time, 'time', return_value=(NOW+1)/1000):
+            assert call('clawchat_react_message', turn_id='t', args={'chatId': 'cnv_other'}) == guard._grant_block('not-granted')
+
+
+@pytest.mark.parametrize('off', [False, True])
+def test_final_public_toolset_with_no_snapshot(host, monkeypatch, off):
+    from clawchat_gateway import memory_scope
+    monkeypatch.setattr(memory_scope, '_config_extra', lambda: {'public-tools': ['memory']})
+    monkeypatch.setattr(guard, '_tool_grants_enabled', lambda: not off)
+    monkeypatch.setattr(guard, '_narrowed_toolsets', _narrowed_toolsets)
+    monkeypatch.setattr(guard, '_platform_toolsets', lambda: {'memory', 'web'})
+    monkeypatch.setattr(guard, '_resolve_tools', lambda name: {'memory': ['memory'], 'web': ['web_search']}.get(name, []))
+    source = SimpleNamespace(chat_id='cnv_chat', chat_type='group', user_id='usr_alice', message_id='missing')
+    assert 'memory' in guard.toolsets_for_source(source, owner_user_id='usr_owner')
+    monkeypatch.setattr(memory_scope, '_config_extra', lambda: {})
+    assert 'memory' not in guard.toolsets_for_source(source, owner_user_id='usr_owner')
+
+
+def test_final_public_on_old_host_keeps_local_path_check(host, monkeypatch):
+    from clawchat_gateway import memory_scope
+    monkeypatch.setattr(memory_scope, '_config_extra', lambda: {'public-tools': ['memory']})
+    monkeypatch.setattr(guard, '_host_supports_pre_llm_call', lambda: False)
+    with host(HERMES_SESSION_PLATFORM='clawchat', HERMES_SESSION_CHAT_ID='cnv_chat', HERMES_SESSION_CHAT_TYPE='group'):
+        assert guard.clawchat_pre_tool_call(tool_name='memory', args={}) is None
+        assert guard.clawchat_pre_tool_call(tool_name='memory', args={'path': '/tmp/private'}) is not None

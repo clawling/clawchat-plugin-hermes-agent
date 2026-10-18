@@ -419,6 +419,7 @@ def host_tool_catalog() -> tuple[frozenset[str], frozenset[str]]:
 def _filter_grant_definitions(definitions, snapshot):
     from clawchat_gateway.tool_capabilities import AUTHORIZATION_TOOLS
     from clawchat_gateway.tool_grants import tool_grant_visible
+    public = public_tool_names(item["function"]["name"] for item in definitions)
 
     def allowed(tool):
         if tool == "clawchat_tool_request":
@@ -427,13 +428,15 @@ def _filter_grant_definitions(definitions, snapshot):
             return bool(snapshot and snapshot.owner_side and snapshot.owner_verified and tool != "clawchat_tool_request")
         if snapshot and (snapshot.owner_side or snapshot.legacy_owner_tools):
             return True
-        default = not _guarded_call(tool, {})
+        default = tool in public
         if not _host_supports_pre_llm_call():
             # A nonce can exist on an old host without an execution binding.
             # Its explicit grants cannot replace the legacy approval policy.
             return default or non_owner_host_tools() == SETTING_APPROVE
         if snapshot is None:
             return default
+        if not _tool_grants_enabled():
+            return default or bool(snapshot and snapshot.speakers and non_owner_host_tools() == SETTING_APPROVE)
         return tool_grant_visible(snapshot.grants, tool, default_allowed=default, now=time.time() * 1000)
     return [item for item in definitions if allowed(item["function"]["name"])]
 
@@ -599,11 +602,6 @@ def _install_grant_catalog_filter() -> bool:
                 if (_UNNARROWED_CATALOG.get()
                         or session_context_value("HERMES_SESSION_PLATFORM") != "clawchat"):
                     return original(*args, **kwargs)
-                try:
-                    if not _tool_grants_enabled():
-                        return original(*args, **kwargs)
-                except Exception:  # noqa: BLE001 - unavailable policy cannot expose a broad catalog
-                    return []
                 snapshot = get_snapshot(session_context_value("HERMES_SESSION_MESSAGE_ID"))
                 if snapshot and snapshot.chat_id != session_context_value("HERMES_SESSION_CHAT_ID"):
                     snapshot = None
@@ -637,9 +635,15 @@ def _install_grant_catalog_filter() -> bool:
         return False
 
 
-def public_tool_names(available):
+def public_tool_names(available, *, args=None):
     from clawchat_gateway.tool_capabilities import AUTHORIZATION_TOOLS
-    return frozenset(tool for tool in available if tool not in AUTHORIZATION_TOOLS and not _guarded_call(tool, {}))
+    from clawchat_gateway.config import public_tools_override
+    override = public_tools_override() or frozenset()
+    call = {} if args is None else args
+    # Listing a tool never lifts the plugin's per-call limits (skill writes,
+    # inline-shell skill views, local-file media): those reach the owner's host.
+    return frozenset(tool for tool in available if tool not in AUTHORIZATION_TOOLS
+                     and (tool in override and not _limited_call(tool, call) or not _guarded_call(tool, call)))
 
 
 def can_ask_each_time(rule_key: str = "clawchat-grant-ask:probe") -> bool:
@@ -984,12 +988,24 @@ def _narrowed_toolsets() -> list[str]:
 
     restricted_tools = restricted_tool_names() | set(AUTHORIZATION_TOOLS)
     try:
+        _, available = host_tool_catalog()
+    except Exception:  # noqa: BLE001 - old hosts may not expose a catalog
+        available = ()
+    public = public_tool_names(available)
+    try:
         mcp_servers = _mcp_server_names()
     except Exception:  # noqa: BLE001 - NO_MCP still drops them host-side
         mcp_servers = set()
     kept = []
     for name in sorted(_platform_toolsets()):
-        if (
+        try:
+            tools = set(_resolve_tools(name))
+        except Exception:  # noqa: BLE001 - cannot see inside: drop it
+            continue
+        resolved_public = tools & public
+        if tools & set(AUTHORIZATION_TOOLS):
+            continue
+        if not resolved_public and (
             name in RESTRICTED_TOOLSETS
             or name == GRANT_MANAGEMENT_TOOLSET
             or name == NO_MCP
@@ -997,13 +1013,9 @@ def _narrowed_toolsets() -> list[str]:
             or name.startswith(_MCP_TOOLSET_PREFIX)
         ):
             continue
-        try:
-            tools = set(_resolve_tools(name))
-        except Exception:  # noqa: BLE001 - cannot see inside: drop it
-            continue
-        if tools & restricted_tools or any(
+        if not resolved_public and (tools & restricted_tools or any(
             t.startswith(_RESTRICTED_TOOL_PREFIXES) or t.startswith(_MCP_TOOL_PREFIX) for t in tools
-        ):
+        )):
             continue
         kept.append(name)
     if not kept:
@@ -1059,14 +1071,12 @@ def _toolsets_for_source(source: Any, *, owner_user_id: str | Callable[[], str],
             return None
         narrowed = _narrowed_toolsets()
         if not _tool_grants_enabled():
-            return _legacy_approve_toolsets() if non_owner_host_tools() == SETTING_APPROVE else narrowed
+            return (_legacy_approve_toolsets() if non_owner_host_tools() == SETTING_APPROVE
+                    and (snapshot is not None or not _host_supports_pre_llm_call()) else narrowed)
         if not _host_supports_pre_llm_call():
             return _legacy_approve_toolsets() if non_owner_host_tools() == SETTING_APPROVE else narrowed
         if snapshot is None:
-            # Old sources have no grant nonce. A source that carries the field
-            # but loses its snapshot must keep the fail-closed catalog.
-            if not hasattr(source, "message_id") and non_owner_host_tools() == SETTING_APPROVE:
-                return _legacy_approve_toolsets()
+            # A modern unattributed turn has public defaults, never approve.
             return narrowed
         _, available = host_tool_catalog()
         public = public_tool_names(available)
@@ -1408,9 +1418,15 @@ def _clawchat_pre_tool_decision(*, tool_name: str = "", args: Any = None, **kwar
         )
         nonce = session_context_value("HERMES_SESSION_MESSAGE_ID")
         chat_id = session_context_value("HERMES_SESSION_CHAT_ID")
-        can_bind_call = "session_id" in kwargs and "turn_id" in kwargs
+        can_bind_call = bool(kwargs.get("session_id") and kwargs.get("turn_id"))
         snapshot = (lookup_snapshot_for_call(nonce, chat_id, kwargs.get("session_id"), kwargs.get("turn_id"))
                     if can_bind_call else None)
+        if not can_bind_call and _host_supports_pre_llm_call():
+            from clawchat_gateway.turn_grants import bound_snapshot
+            bound = bound_snapshot(nonce)
+            if (bound and bound.chat_id == chat_id
+                    and session_context_value("HERMES_SESSION_PLATFORM") == "clawchat"):
+                snapshot = bound
         if snapshot and (snapshot.owner_side or snapshot.legacy_owner_tools):
             return None
         if not _host_supports_pre_llm_call():
@@ -1432,6 +1448,22 @@ def _clawchat_pre_tool_decision(*, tool_name: str = "", args: Any = None, **kwar
         # send_message: only ClawChat turns the owner did not start, so another
         # platform's own sessions keep the host's behaviour.
         turn = session_turn if tool_name.startswith("clawchat_") or tool_name == "send_message" else ""
+        from clawchat_gateway.tool_capabilities import is_cross_chat_call, resolve_cross_chat_gate
+        cross_chat = session_turn == "other" and is_cross_chat_call(tool_name, args, {"chat_id": chat_id})
+        grants_enabled = _tool_grants_enabled()
+        now = time.time() * 1000
+        if cross_chat:
+            if snapshot is not None and grants_enabled:
+                _, available = host_tool_catalog()
+                if tool_name not in available:
+                    return _grant_block("not-available")
+            cross_grants = snapshot.grants if grants_enabled and snapshot is not None else {}
+            cross_context = {"chat_id": chat_id}
+            cross_mode = evaluate_tool_grant(cross_grants, tool_name, args, cross_context, now)
+            if resolve_cross_chat_gate({"cross_chat": True}, cross_mode) == "block":
+                reason = grant_failure_code(cross_grants, tool_name, args=args, context=cross_context, now=now,
+                    speakers=snapshot.non_owner_speakers if grants_enabled and snapshot else ())
+                return _grant_block(reason)
         attachment_permitted = False
         if (tool_name.startswith("clawchat_") and turn != "owner") or (
             tool_name == "send_message" and turn == "other"
@@ -1478,27 +1510,37 @@ def _clawchat_pre_tool_decision(*, tool_name: str = "", args: Any = None, **kwar
         strict = not guarded and _strict_unregistered(tool_name)
         if session_turn != "other":
             return None
-        grants_enabled = _tool_grants_enabled()
+        try:
+            _, available = host_tool_catalog()
+        except Exception:  # noqa: BLE001 - old hosts retain ordinary defaults
+            available = ()
+        default_allowed = (not guarded and not strict) or tool_name in public_tool_names(available, args=args)
         if strict:
             logger.warning(
                 "clawchat host tools: %s is not in the host registry and the memory provider's "
                 "tools are unknown; treating it as restricted", tool_name)
-        # Hosts without execution IDs cannot apply per-turn grants. Preserve
-        # their pre-existing approval opt-in, including the ordinary messages.
-        if grants_enabled and not can_bind_call:
-            if not guarded and not strict:
-                return _cross_session_decision(tool_name, args, kwargs.get("session_id", ""))
+        # Hosts without the binding hook keep their ordinary approval opt-in.
+        if grants_enabled and not can_bind_call and not _host_supports_pre_llm_call():
+            if default_allowed:
+                route_block = _cross_session_decision(tool_name, args, kwargs.get("session_id", ""))
+                if route_block:
+                    return route_block
+                if guarded and has_local_path(args, any_string=True):
+                    from clawchat_gateway.local_paths import LOCAL_PATH_REFUSAL
+                    return {"action": "block", "message": LOCAL_PATH_REFUSAL}
+                return None
             if non_owner_host_tools() == SETTING_APPROVE:
                 route_block = _cross_session_decision(tool_name, args, kwargs.get("session_id", ""))
                 if route_block:
                     return route_block
             return _ordinary_non_owner_decision(tool_name, args, grants_enabled=True,
-                approve=non_owner_host_tools() == SETTING_APPROVE)
+                approve=not _host_supports_pre_llm_call() and non_owner_host_tools() == SETTING_APPROVE)
         if grants_enabled:
-            # A capable host with a missing/bad snapshot may conceal deny.
+            # Missing IDs on modern hosts use only the recovered bound snapshot;
+            # an unattributed call gets defaults without group approve fallback.
             grants = snapshot.grants if snapshot is not None else {}
-            context = {"chat_id": chat_id, "default_allowed": not guarded and not strict}
-            mode = evaluate_tool_grant(grants, tool_name, args, context, time.time() * 1000)
+            context = {"chat_id": chat_id, "default_allowed": default_allowed}
+            mode = evaluate_tool_grant(grants, tool_name, args, context, now)
             if snapshot is not None:
                 _, available = host_tool_catalog()
                 if tool_name not in available:
@@ -1508,10 +1550,10 @@ def _clawchat_pre_tool_decision(*, tool_name: str = "", args: Any = None, **kwar
                         return None
                     return _grant_block("not-available")
             if mode == "deny":
-                reason = grant_failure_code(grants, tool_name, args=args, context=context,
+                reason = grant_failure_code(grants, tool_name, args=args, context=context, now=now,
                                             speakers=snapshot.non_owner_speakers if snapshot else ())
                 return _grant_block(reason)
-            if mode in ("ask", "direct") or not guarded and not strict:
+            if mode in ("ask", "direct") or default_allowed:
                 route_block = _cross_session_decision(tool_name, args, kwargs.get("session_id", ""))
                 if route_block:
                     return route_block
@@ -1528,9 +1570,9 @@ def _clawchat_pre_tool_decision(*, tool_name: str = "", args: Any = None, **kwar
                         and not (tool_name in {"clawchat_send_file", "send_message"} and attachment_permitted)):
                     return {"action": "block", "message": LOCAL_PATH_REFUSAL}
                 return None
-            if not guarded and not strict:
+            if default_allowed and not cross_chat:
                 return None
-            reason = grant_failure_code(grants, tool_name, args=args, context=context,
+            reason = grant_failure_code(grants, tool_name, args=args, context=context, now=now,
                                         speakers=snapshot.non_owner_speakers if snapshot else ())
             if snapshot is not None and reason == "not-granted":
                 from clawchat_gateway.tool_grants import has_grant_rows
@@ -1538,14 +1580,21 @@ def _clawchat_pre_tool_decision(*, tool_name: str = "", args: Any = None, **kwar
                     return {**_ordinary_non_owner_decision(tool_name, args, grants_enabled=True),
                             "reasonCode": reason}
             return _grant_block(reason)
-        if not guarded and not strict:
-            return _cross_session_decision(tool_name, args, kwargs.get("session_id", ""))
+        if default_allowed:
+            route_block = _cross_session_decision(tool_name, args, kwargs.get("session_id", ""))
+            if route_block:
+                return route_block
+            if guarded and has_local_path(args, any_string=True):
+                from clawchat_gateway.local_paths import LOCAL_PATH_REFUSAL
+                return {"action": "block", "message": LOCAL_PATH_REFUSAL}
+            return None
         if non_owner_host_tools() == SETTING_APPROVE:
             route_block = _cross_session_decision(tool_name, args, kwargs.get("session_id", ""))
             if route_block:
                 return route_block
         return _ordinary_non_owner_decision(tool_name, args, grants_enabled=False,
-                                           approve=non_owner_host_tools() == SETTING_APPROVE)
+                                           approve=non_owner_host_tools() == SETTING_APPROVE
+                                           and (snapshot is not None or not _host_supports_pre_llm_call()))
     except Exception as exc:  # noqa: BLE001 - the host would ignore us and run the tool
         logger.warning("clawchat host tools: pre_tool_call check failed (%s); blocking %s", exc, tool_name)
         return {"action": "block", "message": BLOCK_MESSAGE}
@@ -1570,7 +1619,20 @@ def is_owner_turn(
         return False
 
 
-def blocked_tools_hint() -> Optional[str]:
+def _blocked_tools_hint_text(public_tools=()) -> str:
+    """:data:`BLOCKED_TOOLS_HINT` without the ordinary tools the owner made public."""
+    optional = [text for tool, text in (("memory", "Hermes' memory tool"), ("session_search", "session_search"),
+                                        ("manage_connections", "manage_connections")) if tool not in public_tools]
+    if len(optional) == 3:
+        return BLOCKED_TOOLS_HINT
+    names = ["the terminal", "files", "code execution", "the browser", "sub-agents", "scheduled jobs",
+             "kanban tools", "MCP tools", *optional]
+    listed = ", ".join(names[:-1]) + " and " + names[-1]
+    return (f"Host tools in this turn: your owner did not start it, so {listed} are blocked even though "
+            "you can see them. Do not call them; use the ClawChat tools or answer without them.")
+
+
+def blocked_tools_hint(*, public_tools=()) -> Optional[str]:
     """:data:`BLOCKED_TOOLS_HINT` when a turn the owner did not start sees tools it cannot call.
 
     That is a host without the per-source override (the schema keeps the tools,
@@ -1583,21 +1645,24 @@ def blocked_tools_hint() -> Optional[str]:
         if approve and _host_supports_approve():
             return None
         if approve or not host_supports_toolset_override():
-            return BLOCKED_TOOLS_HINT
+            return _blocked_tools_hint_text(public_tools)
         return None
     except Exception:  # noqa: BLE001 - a hint only
         return BLOCKED_TOOLS_HINT
 
 
-def limited_tools_hint() -> Optional[str]:
+def limited_tools_hint(*, public_tools=()) -> Optional[str]:
     """:data:`LIMITED_TOOLS_HINT` for a turn the owner did not start, unless every
     limited call goes to the owner instead (``approve`` on a host that escalates)."""
     try:
         if non_owner_host_tools() == SETTING_APPROVE and _host_supports_approve():
             return None
-        if _skills_inline_shell():
-            return f"{LIMITED_TOOLS_HINT} {LIMITED_SKILL_VIEW_HINT}"
-        return LIMITED_TOOLS_HINT
+        hint = LIMITED_TOOLS_HINT
+        if _SKILL_WRITE_TOOL in public_tools:
+            hint = hint.replace("skill_manage is blocked; ", "")
+        if _skills_inline_shell() and _SKILL_VIEW_TOOL not in public_tools:
+            return f"{hint} {LIMITED_SKILL_VIEW_HINT}"
+        return hint
     except Exception:  # noqa: BLE001 - a hint only
         return LIMITED_TOOLS_HINT
 
