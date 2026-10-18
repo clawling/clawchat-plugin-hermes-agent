@@ -103,6 +103,39 @@ def set_turn(policy, name):
     })
 
 
+@pytest.fixture
+def cross_chat_direct(policy, monkeypatch):
+    from clawchat_gateway import turn_grants
+    from clawchat_gateway.tool_capabilities import TOOL_CAPABILITIES
+    from clawchat_gateway.tool_grants import resolve_turn_grants
+
+    catalog = frozenset(TOOL_CAPABILITIES["cross-chat"]["tools"])
+    monkeypatch.setattr(guard, "host_tool_catalog", lambda: (catalog, catalog))
+    snapshots = []
+
+    def bind():
+        caller = policy.session["HERMES_SESSION_USER_ID"]
+        # In an owner-spoken group turn, include a granted friend in the batch
+        # so the snapshot has only cross-chat authority, not owner-only access.
+        speakers = (caller, FRIEND) if caller == OWNER else (caller,)
+        grants = resolve_turn_grants(speakers, OWNER, [{
+            "grantee_user_id": FRIEND, "what_kind": "capability",
+            "what": "cross-chat", "mode": "direct",
+        }], now=0)
+        snapshot = turn_grants.register_turn(
+            account_id="usr_agent", chat_id=policy.session["HERMES_SESSION_CHAT_ID"],
+            speakers=speakers, grants=grants, session_key="local-path-policy",
+        )
+        snapshots.append(snapshot)
+        policy.session["HERMES_SESSION_MESSAGE_ID"] = snapshot.nonce
+        turn_grants.bind_turn(snapshot.nonce, "policy-session", "policy-turn")
+        return {"session_id": "policy-session", "turn_id": "policy-turn"}
+
+    yield bind
+    for snapshot in snapshots:
+        turn_grants.release_turn(snapshot.nonce)
+
+
 def invoke(tool, path, target=FRIEND_DM):
     if tool == "send_file":
         return tools.send_file(target, path)
@@ -320,6 +353,10 @@ def test_hook_blocks_nested_local_path_fields(policy, turn, field):
     set_turn(policy, turn)
     for value in (str(policy.home / "notes.txt"), "notes.txt"):
         args = {field: [{"nested": [value]}]}
+        result = guard.clawchat_pre_tool_call(tool_name="clawchat_send_file", args=args)
+        assert result == guard._grant_block("not-granted")
+        # Give the path check a known current-chat destination.
+        args["chat_id"] = TURNS[turn][0]
         result = guard.clawchat_pre_tool_call(tool_name="clawchat_send_file", args=args)
         assert result == {"action": "block", "message": local_paths.LOCAL_PATH_REFUSAL}
 
@@ -627,6 +664,11 @@ def test_session_reader_failure_uses_restricted_scope(policy, monkeypatch):
     assert memory_scope.resolve_memory_scope(policy.home) == memory_scope._NOTHING
     assert guard.clawchat_pre_tool_call(
         tool_name="clawchat_send_file", args={"path": "/tmp/x.txt"},
+    ) == guard._grant_block("not-granted")
+    # With no readable current chat, use a tool without cross-chat routing to
+    # keep verifying that the restricted scope refuses local paths.
+    assert guard.clawchat_pre_tool_call(
+        tool_name="clawchat_create_moment", args={"images": ["/tmp/x.txt"]},
     ) == {"action": "block", "message": local_paths.LOCAL_PATH_REFUSAL}
     monkeypatch.setattr(guard, "_guarded_call", lambda *_: True)
     assert guard.clawchat_pre_tool_call(tool_name="terminal", args={"command": "pwd"})["action"] == "block"
@@ -717,9 +759,14 @@ def test_remote_resolution_failure_drops_attachment(policy, monkeypatch, remote_
     {"message": 'MEDIA:  "/tmp/x.txt"'}, {"media_files": ["/tmp/x"]},
     {"attachments": ["/tmp/x"]},
 ))
-def test_send_message_local_references_follow_turn_policy(policy, turn, target, args):
+def test_send_message_local_references_follow_turn_policy(policy, cross_chat_direct, turn, target, args):
     set_turn(policy, turn)
-    result = guard.clawchat_pre_tool_call(tool_name="send_message", args={"target": target, **args})
+    call_args = {"target": target, **args}
+    call_ids = {}
+    if turn != "owner_direct" and target != f"clawchat:{TURNS[turn][0]}":
+        assert guard.clawchat_pre_tool_call(tool_name="send_message", args=call_args) == guard._grant_block("not-granted")
+        call_ids = cross_chat_direct()
+    result = guard.clawchat_pre_tool_call(tool_name="send_message", args=call_args, **call_ids)
     refusal = local_paths.LOCAL_PATH_REFUSAL if target.startswith("clawchat:") else local_paths.ATTACHMENT_REFUSAL
     assert result == (None if turn == "owner_direct" else {"action": "block", "message": refusal})
 
@@ -728,7 +775,10 @@ def test_send_message_local_references_follow_turn_policy(policy, turn, target, 
 def test_send_message_remote_marker_is_available(policy, turn):
     set_turn(policy, turn)
     assert guard.clawchat_pre_tool_call(tool_name="send_message", args={
-        "target": f"clawchat:{FRIEND_DM}", "message": "MEDIA:https://cdn.example/x",
+        "target": f"clawchat:{OWNER_DM}", "message": "MEDIA:https://cdn.example/x",
+    }) == guard._grant_block("not-granted")
+    assert guard.clawchat_pre_tool_call(tool_name="send_message", args={
+        "target": f"clawchat:{TURNS[turn][0]}", "message": "MEDIA:https://cdn.example/x",
     }) is None
 
 
@@ -1029,9 +1079,13 @@ def test_owner_missing_send_file_has_neutral_error(policy):
     {"message": "MEDIA:http://cdn.example/a.png"},
     {"media_files": ["https://cdn.example/a.png"]},
 ))
-def test_send_message_cross_platform_attachments_are_blocked(policy, turn, args):
+def test_send_message_cross_platform_attachments_are_blocked(policy, cross_chat_direct, turn, args):
     set_turn(policy, turn)
-    assert guard.clawchat_pre_tool_call(tool_name="send_message", args={"target": "telegram:123", **args}) == {
+    call_args = {"target": "telegram:123", **args}
+    assert guard.clawchat_pre_tool_call(tool_name="send_message", args=call_args) == guard._grant_block("not-granted")
+    call_ids = cross_chat_direct()
+    # Explicit cross-chat permission still cannot bypass attachment policy.
+    assert guard.clawchat_pre_tool_call(tool_name="send_message", args=call_args, **call_ids) == {
         "action": "block", "message": local_paths.ATTACHMENT_REFUSAL,
     }
 

@@ -19,6 +19,8 @@ from test_tool_grants_ask import approval
 def test_four_version_tiers(host, approval, monkeypatch, tier, has_turn, override, approve):
     monkeypatch.setattr(guard, "host_supports_toolset_override", lambda: override)
     monkeypatch.setattr(guard, "_host_supports_approve", lambda: approve)
+    if not has_turn:
+        monkeypatch.setattr(guard, "_host_supports_pre_llm_call", lambda: False)
     direct, ask = snapshot(key="direct"), snapshot(grants={TOOL: "ask"}, key="ask")
     owner = turns.register_turn(account_id="usr_agent", chat_id="cnv_owner", speakers=("usr_owner",),
                                 grants={}, session_key="owner", owner_verified=True, owner_side=True)
