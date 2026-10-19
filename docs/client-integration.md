@@ -405,6 +405,9 @@ should do the same:
    that one reconnect only; the ordinary exponential state is untouched, so a
    device that stops being evicted returns to the fast path immediately.
 
+The `4001` takeover floor and `4002` retry-after floor apply whether the peer's
+close surfaces as a clean return, `ConnectionClosedError`, or a handshake timeout.
+
 Constants: `TAKEOVER_BACKOFF_FLOOR_SECONDS` / `TAKEOVER_BACKOFF_MAX_SECONDS` in
 `clawchat_gateway/connection.py`.
 
