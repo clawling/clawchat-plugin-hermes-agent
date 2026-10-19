@@ -1050,7 +1050,7 @@ def fork_whitelist(monkeypatch):
     return whitelist
 
 
-@pytest.mark.parametrize('pending', ['none', 'owner', 'guest'])
+@pytest.mark.parametrize('pending', ['none', 'unknown', 'owner', 'guest', 'wrong-chat'])
 @pytest.mark.parametrize('session', ['owner', 'guest', 'group'])
 @pytest.mark.parametrize('allowed', [{'skill_manage'}, None, set(), ['skill_manage'], 'missing'])
 def test_internal_fork_owner_tools_require_owner_session_and_nonempty_whitelist(
@@ -1059,19 +1059,19 @@ def test_internal_fork_owner_tools_require_owner_session_and_nonempty_whitelist(
         fork_whitelist.allowed = allowed
     chat = 'cnv_guest' if session == 'guest' else 'cnv_owner'
     snapshot = None
-    if pending != 'none':
-        snapshot = turns.register_turn(account_id='usr_agent', chat_id=chat,
-            session_key='fork-test', speakers=('usr_owner' if pending == 'owner' else 'usr_guest',),
-            grants={}, owner_side=pending == 'owner', owner_verified=False)
+    if pending not in ('none', 'unknown'):
+        snapshot = turns.register_turn(account_id='usr_agent', chat_id='cnv_other' if pending == 'wrong-chat' else chat,
+            session_key='fork-test', speakers=('usr_owner' if pending in ('owner', 'wrong-chat') else 'usr_guest',),
+            grants={}, owner_side=pending in ('owner', 'wrong-chat'), owner_verified=False)
         turns.bind_turn(snapshot.nonce, 's', 'parent-turn')
     try:
         with host(HERMES_SESSION_PLATFORM='clawchat', HERMES_SESSION_CHAT_ID=chat,
                   HERMES_SESSION_CHAT_TYPE='group' if session == 'group' else 'dm',
                   HERMES_SESSION_USER_ID='usr_guest' if session == 'guest' else 'usr_owner',
-                  HERMES_SESSION_MESSAGE_ID=snapshot.nonce if snapshot else ''):
+                  HERMES_SESSION_MESSAGE_ID=snapshot.nonce if snapshot else 'unknown' if pending == 'unknown' else ''):
             assert turns.lookup_snapshot_for_call(snapshot.nonce if snapshot else '', chat, 's', 'fork-turn') is None
             decision = call('skill_manage', turn_id='fork-turn', args={'action': 'patch'})
-            permitted = session == 'owner' and isinstance(allowed, set) and bool(allowed) and pending != 'guest'
+            permitted = session == 'owner' and isinstance(allowed, set) and bool(allowed) and pending == 'owner'
             assert decision is None if permitted else decision and decision['action'] == 'block'
             for tool in AUTHORIZATION_TOOLS:
                 assert call(tool, turn_id='fork-turn')['action'] == 'block'
@@ -1080,6 +1080,53 @@ def test_internal_fork_owner_tools_require_owner_session_and_nonempty_whitelist(
     finally:
         if snapshot:
             turns.release_turn(snapshot.nonce)
+
+
+@pytest.mark.parametrize('release', ['turn', 'session'])
+@pytest.mark.parametrize('origin', ['owner', 'guest', 'wrong-chat', 'expired', 'evicted', 'revoked', 'mixed'])
+def test_internal_fork_released_parent_requires_matching_owner_origin(
+        host, fork_whitelist, monkeypatch, release, origin):
+    now = [100.0]
+    monkeypatch.setattr(turns, 'time', SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(turns, '_released_turns', {}, raising=False)
+    fork_whitelist.allowed = {'skill_manage', *AUTHORIZATION_TOOLS}
+    s = turns.register_turn(account_id='usr_agent', chat_id='cnv_other' if origin == 'wrong-chat' else 'cnv_owner',
+        session_key='released-fork', speakers=('usr_guest' if origin == 'guest' else 'usr_owner',),
+        grants={}, owner_side=origin != 'guest', owner_verified=False)
+    turns.bind_turn(s.nonce, 's', 'parent-turn')
+    try:
+        if origin == 'revoked':
+            turns.mark_unverified_input(s.account_id, 'released-fork')
+        if origin == 'mixed':
+            guest = turns.register_turn(account_id=s.account_id, chat_id=s.chat_id,
+                session_key='released-fork', speakers=('usr_guest',), grants={})
+            turns.release_turn(guest.nonce)
+        if release == 'turn':
+            turns.release_turn(s.nonce)
+        else:
+            turns.release_session(s.account_id, 'released-fork')
+        assert turns.get_snapshot(s.nonce) is None
+        if origin == 'expired':
+            now[0] += 3600
+        if origin == 'evicted':
+            for _ in range(512):
+                now[0] += 1
+                newer = turns.register_turn(account_id=s.account_id, chat_id=s.chat_id,
+                    session_key='eviction-fork', speakers=('usr_owner',), grants={}, owner_side=True)
+                turns.release_turn(newer.nonce)
+        with host(HERMES_SESSION_PLATFORM='clawchat', HERMES_SESSION_CHAT_ID='cnv_owner',
+                  HERMES_SESSION_CHAT_TYPE='dm', HERMES_SESSION_USER_ID='usr_owner',
+                  HERMES_SESSION_MESSAGE_ID=s.nonce):
+            decision = call('skill_manage', turn_id='fork-turn', args={'action': 'patch'})
+            if origin == 'owner':
+                assert decision is None
+            else:
+                assert decision and decision['action'] == 'block'
+            for tool in AUTHORIZATION_TOOLS:
+                assert call(tool, turn_id='fork-turn')['action'] == 'block'
+    finally:
+        turns.release_turn(s.nonce)
+        turns.clear_unverified_input(s.account_id, 'released-fork')
 
 
 @pytest.mark.parametrize("failure", ["missing", "mismatch", "unbound", "empty_ids", "read_error"])

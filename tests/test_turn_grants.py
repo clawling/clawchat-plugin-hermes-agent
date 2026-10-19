@@ -3,7 +3,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 import os
 import sys
 
@@ -99,6 +99,40 @@ def test_context_reader_never_uses_environment(monkeypatch):
     with bind(HERMES_SESSION_MESSAGE_ID="bound-nonce"):
         assert turns.session_context_value("HERMES_SESSION_MESSAGE_ID") == "bound-nonce"
     assert turns.session_context_value("HERMES_SESSION_MESSAGE_ID") == ""
+
+
+@pytest.mark.parametrize('release', ['turn', 'session'])
+def test_released_origin_retains_no_grants_and_repeated_release_does_not_extend_ttl(monkeypatch, release):
+    now = [100.0]
+    monkeypatch.setattr(turns, 'time', SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(turns, '_released_turns', {}, raising=False)
+    s = turns.register_turn(account_id='usr_agent', chat_id='cnv_owner', speakers=('usr_owner',),
+        grants={}, session_key='released-origin', owner_side=True, owner_verified=True)
+    turns.bind_turn(s.nonce, 's', 't')
+
+    def finish():
+        if release == 'turn':
+            turns.release_turn(s.nonce)
+        else:
+            turns.release_session(s.account_id, 'released-origin')
+
+    try:
+        finish()
+        assert turns.get_snapshot(s.nonce) is None
+        assert turns.bound_snapshot(s.nonce) is None
+        assert turns.active_snapshot(s.account_id, 'released-origin') is None
+        assert turns.lookup_for_tool_call(s.nonce, s.chat_id, 's', 't') == {}
+        assert turns.get_released_turn_origin(s.nonce) == (s.chat_id, True, 100.0)
+        now[0] += 1800
+        finish()
+        assert turns.get_released_turn_origin(s.nonce) == (s.chat_id, True, 100.0)
+        now[0] += 1800
+        assert turns.get_released_turn_origin(s.nonce) is None
+        assert turns.get_released_turn_origin('') is None
+        assert turns.get_released_turn_origin('unknown') is None
+        assert len(turns._released_turns) == 1
+    finally:
+        finish()
 
 
 def test_unverified_input_revokes_all_nonces_and_blocks_registration_until_cleared():

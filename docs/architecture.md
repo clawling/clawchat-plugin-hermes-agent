@@ -268,8 +268,9 @@ requester inheritance. `turn_attachments.post_tool_call` calls
 `process_origins.record_process_origin` after a successful non-owner `terminal`
 call with `background: true` and `notify: true` (older hosts:
 `notify_on_complete: true`), recording process ID, plugin turn nonce, speakers,
-account, chat and session route. Explicit `notify` takes precedence over the
-old flag. The adapter matches only host `internal=True` events whose metadata has
+account, chat and session route. Explicit non-`None` `notify` takes precedence
+over the old flag; missing or `None` `notify` falls back to the old flag. The
+adapter matches only host `internal=True` events whose metadata has
 `notification_origin=process_registry_synthetic`,
 `original_trigger_message_id` equal to that starting turn's plugin nonce, and
 a matching recorded `gateway_session_key`, in the same source chat. The first

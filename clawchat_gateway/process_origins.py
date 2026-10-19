@@ -46,7 +46,8 @@ def record_process_origin(*, tool_name="", args=None, result=None, session_id=""
     try:
         if (not _tool_grants_enabled() or tool_name != "terminal" or not isinstance(args, dict)
                 or args.get("background") is not True
-                or (args["notify"] if "notify" in args else args.get("notify_on_complete")) is not True
+                or (args.get("notify") if args.get("notify") is not None
+                    else args.get("notify_on_complete")) is not True
                 or status != "ok" or error_type or error_message
                 or turn_grants.session_context_value("HERMES_SESSION_PLATFORM") != "clawchat"):
             return

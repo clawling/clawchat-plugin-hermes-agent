@@ -50,6 +50,9 @@ _active: dict[tuple[str, str], str] = {}
 _session_nonces: dict[tuple[str, str], set[str]] = {}
 _unverified_inputs: set[tuple[str, str]] = set()
 _approvals: dict[str, GrantApproval] = {}
+_released_turns: dict[str, tuple[str, bool, float]] = {}
+_MAX_RELEASED_TURNS = 512
+_RELEASED_TURN_TTL = 60 * 60
 
 
 def register_turn(*, account_id: str, chat_id: str, speakers: tuple[str, ...],
@@ -98,6 +101,13 @@ def get_snapshot(nonce: str) -> TurnSnapshot | None:
         return _snapshots.get(nonce)
 
 
+def get_released_turn_origin(nonce: str) -> tuple[str, bool, float] | None:
+    """Read recent attribution only; never restore grants or owner verification."""
+    with _lock:
+        origin = _released_turns.get(nonce) if nonce else None
+        return origin if origin and time.monotonic() - origin[2] < _RELEASED_TURN_TTL else None
+
+
 def session_key_for_nonce(account_id: str, nonce: str) -> str:
     """Read the plugin session identity; never infer it from host/user text."""
     with _lock:
@@ -139,9 +149,22 @@ def clear_unverified_input(account_id: str, session_key: str) -> None:
         _unverified_inputs.discard((account_id, session_key))
 
 
+def _record_released_turn_locked(snapshot: TurnSnapshot | None) -> None:
+    if snapshot is None:
+        return
+    now = time.monotonic()
+    for nonce, (_, _, released_at) in list(_released_turns.items()):
+        if now - released_at >= _RELEASED_TURN_TTL:
+            del _released_turns[nonce]
+    while len(_released_turns) >= _MAX_RELEASED_TURNS:
+        oldest = min(_released_turns, key=lambda nonce: _released_turns[nonce][2])
+        del _released_turns[oldest]
+    _released_turns[snapshot.nonce] = (snapshot.chat_id, snapshot.owner_side, now)
+
+
 def release_turn(nonce: str) -> None:
     with _lock:
-        _snapshots.pop(nonce, None)
+        _record_released_turn_locked(_snapshots.pop(nonce, None))
         _bindings.pop(nonce, None)
         for key, nonces in list(_session_nonces.items()):
             nonces.discard(nonce)
@@ -159,7 +182,7 @@ def release_session(account_id: str, session_key: str) -> None:
         _active.pop(key, None)
         nonces = _session_nonces.pop(key, set())
         for nonce in nonces:
-            _snapshots.pop(nonce, None)
+            _record_released_turn_locked(_snapshots.pop(nonce, None))
             _bindings.pop(nonce, None)
     from clawchat_gateway.turn_attachments import clear_turn
     for nonce in nonces:

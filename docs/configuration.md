@@ -1493,7 +1493,8 @@ requester's grants:
   inside the plugin, resume as the requester with current grants as above.
 - Background process completions (`process-completion`) from a successful
   `terminal` call with both `background: true` and `notify: true` (older hosts:
-  `notify_on_complete: true`). Explicit `notify` takes precedence over the old flag.
+  `notify_on_complete: true`). Explicit non-`None` `notify` takes precedence over
+  the old flag; missing or `None` `notify` falls back to the old flag.
   With grants enabled, `post_tool_call` records the process ID, starting turn's
   plugin nonce, non-owner speaker set, account, chat and session route. Only a
   host `internal=True` event can match: metadata `notification_origin` must be
@@ -1529,9 +1530,14 @@ remain unchanged.
 
 Host background review forks with a nonempty thread tool whitelist also use
 ordinary owner tools in the owner's direct-chat session, subject to the host's
-whitelist, when no snapshot is bound to the fork and any pending snapshot is
-owner-side. They gain no verified-owner status and cannot use the four
-authorization tools. Forks in guest or group sessions gain no additional access.
+whitelist, when no snapshot is bound to the fork and its nonce proves that the
+parent turn was owner-side in the same chat. Its snapshot must still be live or
+have been recently released as owner-side. Released attribution keeps only
+nonce, chat, owner-side status and release time in memory, limited to 512 entries
+with a one-hour lifetime; restart, expiry or oldest-entry eviction loses this
+fallback. Empty or unknown nonces and non-owner parents never qualify. Forks
+gain no verified-owner status and cannot use the four authorization tools.
+Forks in guest or group sessions gain no additional access.
 
 ## Reconnect, heartbeat, ack
 

@@ -307,7 +307,9 @@ def test_successful_bound_background_completion_is_registered(origins):
     ({"notify_on_complete": True}, True),
     ({}, False),
     ({"notify": 1}, False),
-    ({"notify": None, "notify_on_complete": True}, False),
+    ({"notify": None, "notify_on_complete": True}, True),
+    ({"notify": None}, False),
+    ({"notify": None, "notify_on_complete": 1}, False),
     ({"notify": ["ready"], "notify_on_complete": True}, False),
 ])
 def test_process_notification_intent_uses_explicit_notify(origins, notification, registered):
