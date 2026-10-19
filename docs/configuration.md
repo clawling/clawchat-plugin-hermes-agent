@@ -1668,8 +1668,13 @@ same checks. Non-HTTP(S) schemes are rejected before joining a URL to its base.
 Each hop resolves the hostname once, rejects the request if **any** resolved
 address is not public unicast, and connects to a validated IP while retaining
 the hostname for Host and TLS verification. Localhost names are also rejected.
+Connection failures try the remaining distinct validated IPs in order without
+resolving again. TCP connection and TLS handshake each use a timeout capped by
+the remaining attachment deadline. At most four inbound DNS lookups may remain
+pending; further lookups are rejected until a slot becomes available.
 Every redirect repeats these checks, with at most five redirects; HTTPS-to-HTTP
-redirects require the HTTP opt-in too.
+redirects require the HTTP opt-in too. Backslashes in redirect destinations are
+normalized before resolving and validating their target host.
 
 Downloads **never attach Authorization**, even for URLs on the configured base
 origin: media URLs must be public or presigned GET URLs. Downloads bypass
@@ -1681,9 +1686,9 @@ rejected immediately; bodies stream in 64 KiB chunks with the same byte limit.
 The socket timeout defaults to 30 seconds and the total attachment deadline to
 300 seconds. Temporary `.part` files are removed on failure and renamed only
 after a complete download. A rejected or failed attachment is logged without
-URL queries or fragments and skipped; remaining attachments and the text message
-continue normally. Environment values take precedence over the matching extra
-keys for all five settings.
+URL userinfo, queries or fragments and skipped; remaining attachments and the
+text message continue normally. Environment values take precedence over the
+matching extra keys for all five settings.
 
 ### `media_local_roots` no longer scopes outbound delivery
 

@@ -59,14 +59,25 @@ def server():
             try:
                 if route.header_pause:
                     release.wait(route.header_pause)
+                chunked = route.headers.get("Transfer-Encoding", "").lower() == "chunked"
+                if chunked:
+                    self.protocol_version = "HTTP/1.1"
                 self.send_response(route.status)
                 for name, value in route.headers.items():
                     self.send_header(name, value)
+                if chunked:
+                    self.send_header("Connection", "close")
                 self.end_headers()
                 for _ in range(route.chunks):
                     if route.pause:
                         release.wait(route.pause)
-                    self.wfile.write(route.body)
+                    if chunked:
+                        self.wfile.write(f"{len(route.body):X}\r\n".encode() + route.body + b"\r\n")
+                    else:
+                        self.wfile.write(route.body)
+                    self.wfile.flush()
+                if chunked:
+                    self.wfile.write(b"0\r\n\r\n")
                     self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
                 pass
@@ -136,14 +147,14 @@ def test_http_requires_explicit_opt_in(tmp_path, public_server):
 
 def test_https_downgrade_is_rejected(tmp_path, public_server, monkeypatch):
     # Simulate the first TLS hop's response using the local HTTP fixture.
-    monkeypatch.setattr(media, "_PublicHTTPSConnection", media._PublicHTTPConnection)
+    monkeypatch.setattr(media, "_InboundHTTPSConnection", media._InboundHTTPConnection)
     public_server.routes["/start"] = Route(302, {"Location": public_server.url("/end")})
     assert download(tmp_path, [public_server.url("/start", scheme="https")]) == []
     assert [path for path, _ in public_server.requests] == ["/start"]
 
 
 def test_https_is_allowed_by_default(tmp_path, public_server, monkeypatch):
-    monkeypatch.setattr(media, "_PublicHTTPSConnection", media._PublicHTTPConnection)
+    monkeypatch.setattr(media, "_InboundHTTPSConnection", media._InboundHTTPConnection)
     got = download(tmp_path, [public_server.url(scheme="https")])
     assert got[0].local_path.read_bytes() == b"image"
     assert "authorization" not in {name.lower() for name in public_server.requests[0][1]}
@@ -222,6 +233,123 @@ def test_dns_rebinding_connects_only_to_checked_ip_per_hop(tmp_path, server, mon
     assert download(tmp_path, [server.url("/start")], allow_http=True) == []
     assert resolved == [("media.example.test", server.port)] * 2
     assert connections == [("8.8.8.8", server.port)]
+
+
+@pytest.mark.parametrize("scheme", ["http", "https"])
+@pytest.mark.parametrize("failure", [OSError, TimeoutError])
+def test_checked_ips_are_deduplicated_and_retried_without_dns(tmp_path, server, monkeypatch, scheme, failure):
+    resolved = []
+    connected = []
+    tls_hosts = []
+    real_connect = socket.create_connection
+
+    def resolve(host, port):
+        resolved.append((host, port))
+        return addresses("8.8.8.8", "8.8.8.8", "1.1.1.1", port=port)
+
+    def connect(address, timeout):
+        connected.append(address)
+        if address[0] == "8.8.8.8":
+            raise failure("first address unavailable")
+        return real_connect(("127.0.0.1", server.port), timeout)
+
+    def wrap(sock, server_hostname):
+        tls_hosts.append(server_hostname)
+        return sock
+
+    monkeypatch.setattr(media, "_resolve_host", resolve)
+    monkeypatch.setattr(socket, "create_connection", connect)
+    # Keep real HTTP transport while recording the TLS hostname and fallback.
+    monkeypatch.setattr(media.ssl, "create_default_context", lambda: SimpleNamespace(wrap_socket=wrap))
+    got = download(tmp_path, [server.url(scheme=scheme)], allow_http=True)
+    assert got[0].local_path.read_bytes() == b"image"
+    assert resolved == [("media.example.test", server.port)]
+    assert connected == [("8.8.8.8", server.port), ("1.1.1.1", server.port)]
+    assert tls_hosts == (["media.example.test"] if scheme == "https" else [])
+    assert server.requests[0][1]["Host"] == f"media.example.test:{server.port}"
+
+
+def test_all_checked_ips_must_fail_before_download_fails(tmp_path, monkeypatch, caplog):
+    connected = []
+    monkeypatch.setattr(media, "_resolve_host", lambda host, port: addresses("8.8.8.8", "1.1.1.1", port=port))
+
+    def connect(address, timeout):
+        connected.append(address)
+        raise OSError("address unavailable")
+
+    monkeypatch.setattr(socket, "create_connection", connect)
+    assert download(tmp_path, ["https://media.example.test/a"]) == []
+    assert connected == [("8.8.8.8", 443), ("1.1.1.1", 443)]
+    assert "download failed" in caplog.text
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("stage", ["tcp", "tls"])
+def test_connection_stages_share_deadline_and_recompute_timeout(tmp_path, monkeypatch, caplog, stage):
+    now = [0.0]
+    tcp_timeouts = []
+    tls_timeouts = []
+    tls_hosts = []
+    closed = []
+    sock = SimpleNamespace(settimeout=tls_timeouts.append, close=lambda: closed.append(True))
+
+    def connect(address, timeout):
+        tcp_timeouts.append(timeout)
+        now[0] += 1.1 if stage == "tcp" else 0.7
+        return sock
+
+    def wrap(raw_sock, server_hostname):
+        tls_hosts.append(server_hostname)
+        now[0] += 0.4
+        return raw_sock
+
+    monkeypatch.setattr(media.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(media, "_resolve_host", lambda host, port: addresses("8.8.8.8", "1.1.1.1", port=port))
+    monkeypatch.setattr(socket, "create_connection", connect)
+    monkeypatch.setattr(media.ssl, "create_default_context", lambda: SimpleNamespace(wrap_socket=wrap))
+    assert download(tmp_path, ["https://media.example.test/a"], timeout_seconds=30, deadline_seconds=1) == []
+    assert tcp_timeouts == [1]
+    if stage == "tcp":
+        assert tls_timeouts == [] and tls_hosts == []
+    else:
+        assert tls_timeouts == [pytest.approx(0.3)]
+        assert tls_hosts == ["media.example.test"]
+    assert closed
+    assert "deadline exceeded" in caplog.text
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("host", ["2130706433", "0177.0.0.1", "0x7f.0.0.1", "localhost.", "[::ffff:127.0.0.1]"])
+def test_loopback_host_spellings_are_rejected_with_real_resolver(tmp_path, monkeypatch, host):
+    monkeypatch.setattr(socket, "create_connection", forbidden)
+    with pytest.raises(media.InboundMediaRejected, match="address"):
+        media._download_inbound_media_sync(url=f"https://{host}/a", download_dir=tmp_path)
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("location", [
+    "//other.example.test/a", r"\\other.example.test\a", r"/\other.example.test/a",
+])
+def test_alternate_redirect_authorities_are_resolved_and_checked(tmp_path, server, monkeypatch, location):
+    server.routes["/start"] = Route(302, {"Location": location})
+    resolved = []
+    connected = []
+    real_connect = socket.create_connection
+
+    def resolve(host, port):
+        resolved.append((host, port))
+        return addresses("8.8.8.8" if host == "media.example.test" else "127.0.0.1", port=port)
+
+    def connect(address, timeout):
+        connected.append(address)
+        return real_connect(("127.0.0.1", server.port), timeout)
+
+    monkeypatch.setattr(media, "_resolve_host", resolve)
+    monkeypatch.setattr(socket, "create_connection", connect)
+    assert download(tmp_path, [server.url("/start")], allow_http=True) == []
+    assert resolved == [("media.example.test", server.port), ("other.example.test", 80)]
+    assert connected == [("8.8.8.8", server.port)]
+    assert len(server.requests) == 1
 
 
 def test_cross_host_redirect_to_private_address_is_rejected(tmp_path, server, monkeypatch):
@@ -375,6 +503,29 @@ def test_stream_limit_cleans_partial_file(tmp_path, public_server, monkeypatch, 
     assert all(path.suffix == ".part" for path in observed)
 
 
+def test_oversized_chunked_response_is_stopped_and_partial_removed(tmp_path, public_server, monkeypatch, caplog):
+    public_server.routes["/chunked"] = Route(
+        headers={"Transfer-Encoding": "chunked"}, body=b"x" * 65536, chunks=32,
+    )
+    received = []
+    read1 = media.http.client.HTTPResponse.read1
+
+    def read(response, size):
+        assert response.chunked
+        assert response.version == 11
+        assert response.headers.get("Content-Length") is None
+        chunk = read1(response, size)
+        received.append(len(chunk))
+        return chunk
+
+    monkeypatch.setattr(media.http.client.HTTPResponse, "read1", read)
+    assert download(tmp_path, [public_server.url("/chunked")], allow_http=True, max_bytes=100000) == []
+    assert 100000 < sum(received) <= 100000 + 65536
+    assert max(received) <= 65536
+    assert not list(tmp_path.iterdir())
+    assert "size limit" in caplog.text
+
+
 def test_success_streams_in_chunks_and_renames(tmp_path, public_server, monkeypatch):
     reads = []
     read1 = media.http.client.HTTPResponse.read1
@@ -452,6 +603,60 @@ def test_total_deadline_bounds_dns_and_never_connects_late(tmp_path, monkeypatch
         assert finished.wait(1)
 
 
+def test_pending_dns_is_bounded_and_fifth_lookup_starts_no_thread(monkeypatch):
+    slots = threading.BoundedSemaphore(4)
+    release = threading.Event()
+    workers = []
+    thread_type = threading.Thread
+
+    def thread(*args, **kwargs):
+        worker = thread_type(*args, **kwargs)
+        workers.append(worker)
+        return worker
+
+    def resolve(host, port):
+        release.wait(5)
+        return addresses("8.8.8.8", port=port)
+
+    monkeypatch.setattr(media, "_INBOUND_DNS_SLOTS", slots)
+    monkeypatch.setattr(media, "_resolve_host", resolve)
+    monkeypatch.setattr(media.threading, "Thread", thread)
+    try:
+        for _ in range(4):
+            with pytest.raises(media.InboundMediaRejected, match="deadline"):
+                media._resolve_inbound_host("media.example.test", 443, 0.01)
+        assert len(workers) == 4
+        with pytest.raises(media.InboundMediaRejected, match="dns"):
+            media._resolve_inbound_host("media.example.test", 443, 30)
+        assert len(workers) == 4
+    finally:
+        release.set()
+        for worker in workers:
+            worker.join(timeout=2)
+            assert not worker.is_alive()
+    assert all(slots.acquire(blocking=False) for _ in range(4))
+    assert not slots.acquire(blocking=False)
+    for _ in range(4):
+        slots.release()
+
+
+@pytest.mark.parametrize("failure", ["resolution", "start"])
+def test_failed_dns_releases_its_slot(monkeypatch, failure):
+    slots = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(media, "_INBOUND_DNS_SLOTS", slots)
+
+    def fail(*args, **kwargs):
+        raise OSError("lookup unavailable")
+
+    monkeypatch.setattr(media, "_resolve_host", fail)
+    if failure == "start":
+        monkeypatch.setattr(media.threading, "Thread", fail)
+    with pytest.raises(media.InboundMediaRejected, match="dns"):
+        media._resolve_inbound_host("media.example.test", 443, 1)
+    assert slots.acquire(blocking=False)
+    slots.release()
+
+
 def test_total_deadline_spans_redirects(tmp_path, public_server):
     for n in range(5):
         public_server.routes[f"/{n}"] = Route(302, {"Location": f"/{n + 1}"}, header_pause=0.06)
@@ -482,6 +687,28 @@ def test_exception_urls_and_malformed_urls_cannot_leak_or_escape(tmp_path, caplo
     assert download(tmp_path, ["https://media.example.test/a?private-query#private-fragment"], download_file=fail) == []
     assert download(tmp_path, ["https://[invalid?private-query#private-fragment"]) == []
     assert "private-query" not in caplog.text and "private-fragment" not in caplog.text
+
+
+def test_rejected_userinfo_never_appears_in_logs(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(media, "_resolve_host", forbidden)
+    monkeypatch.setattr(socket, "create_connection", forbidden)
+    assert download(tmp_path, ["https://user:pw@media.example.test/a.png?x=1"]) == []  # redact-allow:email (userinfo test data)
+    assert "rejected" in caplog.text
+    assert "https://media.example.test/a.png" in caplog.text
+    for value in ("user", "pw", "x=1"):
+        assert value not in caplog.text
+
+
+@pytest.mark.parametrize("url,expected", [
+    ("https://user:pw@media.example.test:8443/a.png?x=1#fragment", "https://media.example.test:8443/a.png"),  # redact-allow:email (userinfo test data)
+    ("https://user:pw@[::1]:8443/a.png?x=1", "https://[::1]:8443/a.png"),  # redact-allow:email (userinfo test data)
+    ("https://media.example.test:bad/a.png?x=1", "<invalid>"),
+    ("https://[invalid/a.png?x=1", "<invalid>"),
+    ("https:///a.png?x=1", "<invalid>"),
+    ("data:text/plain,private-payload", "data:<redacted>"),
+])
+def test_inbound_log_url_rebuilds_only_safe_http_components(url, expected):
+    assert media._inbound_log_url(url) == expected
 
 
 def test_injected_downloader_receives_only_new_keyword_parameters(tmp_path):

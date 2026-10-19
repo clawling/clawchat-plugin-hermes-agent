@@ -368,7 +368,17 @@ def _inbound_log_url(url: str) -> str:
     # A non-HTTP(S) value (e.g. a data: URL) may be its own payload: log only
     # its scheme. Queries and fragments may carry signatures.
     try:
-        scheme = urlparse(url).scheme
+        parsed = urlparse(url)
+        scheme = parsed.scheme
+        if scheme in {"http", "https"}:
+            host = parsed.hostname
+            port = parsed.port
+            if not host:
+                return "<invalid>"
+            authority = f"[{host}]" if ":" in host else host
+            if port is not None:
+                authority += f":{port}"
+            return urlunparse((scheme, authority, parsed.path, "", "", ""))[:512]
     except ValueError:
         return "<invalid>"
     if scheme and scheme not in {"http", "https"}:
@@ -380,9 +390,16 @@ def _resolve_host(host: str, port: int):
     return socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
 
 
+_INBOUND_DNS_SLOTS = threading.BoundedSemaphore(4)
+
+
 def _resolve_inbound_host(host: str, port: int, remaining: float):
     # The system resolver cannot be interrupted; its result must not outlive
-    # the attachment deadline or start a late connection.
+    # the attachment deadline or start a late connection. Bound pending lookups
+    # even when the resolver remains blocked after callers have timed out.
+    slots = _INBOUND_DNS_SLOTS
+    if not slots.acquire(blocking=False):
+        raise InboundMediaRejected("dns")
     done = threading.Event()
     result = []
 
@@ -392,14 +409,70 @@ def _resolve_inbound_host(host: str, port: int, remaining: float):
         except Exception:
             result.append(None)
         finally:
+            slots.release()
             done.set()
 
-    threading.Thread(target=resolve, daemon=True).start()
+    try:
+        threading.Thread(target=resolve, daemon=True).start()
+    except Exception:
+        slots.release()
+        raise InboundMediaRejected("dns") from None
     if not done.wait(remaining):
         raise InboundMediaRejected("deadline")
     if not result[0]:
         raise InboundMediaRejected("dns")
     return result[0]
+
+
+class _InboundHTTPConnection(_PublicHTTPConnection):
+    def __init__(self, host: str, port: int, *, ip: str, timeout: float, remaining):
+        super().__init__(host, port, ip=ip, timeout=timeout)
+        self._remaining = remaining
+
+    def connect(self):
+        self.sock = socket.create_connection(
+            (self._public_ip, self.port), min(self.timeout, self._remaining())
+        )
+        self._remaining()
+
+
+class _InboundHTTPSConnection(_PublicHTTPSConnection):
+    def __init__(self, host: str, port: int, *, ip: str, timeout: float, remaining):
+        super().__init__(host, port, ip=ip, timeout=timeout)
+        self._remaining = remaining
+
+    def connect(self):
+        sock = socket.create_connection(
+            (self._public_ip, self.port), min(self.timeout, self._remaining())
+        )
+        try:
+            sock.settimeout(min(self.timeout, self._remaining()))
+            self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+            self._remaining()
+        except Exception:
+            sock.close()
+            raise
+
+
+def _connect_inbound_media(host, port, ips, *, https, timeout, remaining):
+    connection_type = _InboundHTTPSConnection if https else _InboundHTTPConnection
+    last_error = None
+    for ip in dict.fromkeys(ips):
+        remaining()
+        connection = connection_type(host, port, ip=ip, timeout=timeout, remaining=remaining)
+        try:
+            connection.connect()
+            remaining()
+            return connection
+        except OSError as exc:
+            last_error = exc
+            connection.close()
+        except Exception:
+            connection.close()
+            raise
+    if last_error is not None:
+        raise last_error
+    raise InboundMediaRejected("dns")
 
 
 def _download_inbound_media_sync(
@@ -443,15 +516,14 @@ def _download_inbound_media_sync(
         addresses = _resolve_inbound_host(host, port, remaining())
         if not allow_private_network and not all(_public_address(a[4][0]) for a in addresses):
             raise InboundMediaRejected("address")
-        connection_type = _PublicHTTPSConnection if parsed.scheme == "https" else _PublicHTTPConnection
         # Bypass environment proxies so the checked address is the connected address.
-        connection = connection_type(
-            host, port, ip=addresses[0][4][0], timeout=min(timeout_seconds, remaining())
+        connection = _connect_inbound_media(
+            host, port, (a[4][0] for a in addresses), https=parsed.scheme == "https",
+            timeout=timeout_seconds, remaining=remaining,
         )
         partial_path = None
         watchdog = None
         try:
-            connection.connect()
             sock = connection.sock
 
             def expire():
@@ -477,6 +549,9 @@ def _download_inbound_media_sync(
                     location = response.headers.get("Location")
                     if hop == 5 or not location:
                         raise InboundMediaRejected("redirect")
+                    # Normalize alternate separators before interpreting the
+                    # authority so every redirect destination is checked.
+                    location = location.replace("\\", "/")
                     if urlparse(location).scheme and not _is_remote_url(location):
                         raise InboundMediaRejected("scheme")
                     url = urljoin(url, location)

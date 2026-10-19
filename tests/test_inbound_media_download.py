@@ -43,7 +43,7 @@ class _Connection:
 
 def _install_connection(monkeypatch, seen, status=200):
     monkeypatch.setattr(media_runtime, "_resolve_host", lambda *_: [(2, 1, 6, "", ("8.8.8.8", 443))])
-    monkeypatch.setattr(media_runtime, "_PublicHTTPSConnection", lambda *a, **kw: _Connection(_Resp(status), seen))
+    monkeypatch.setattr(media_runtime, "_InboundHTTPSConnection", lambda *a, **kw: _Connection(_Resp(status), seen))
 
 
 def test_download_sends_a_non_default_user_agent(tmp_path, monkeypatch):
