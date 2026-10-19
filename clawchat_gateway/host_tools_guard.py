@@ -671,7 +671,7 @@ def _install_grant_catalog_filter() -> bool:
                     bound.arguments["skip_tool_search_assembly"] = True
                 raw = original(*bound.args, **bound.kwargs)
                 try:
-                    owner_fork = snapshot is None and _owner_fork_parent(nonce, chat_id)
+                    owner_fork = snapshot is None and _review_fork_catalog_call(bound, nonce, chat_id)
                     filtered = _filter_grant_definitions(raw, snapshot, owner_fork=owner_fork)
                 except Exception:  # noqa: BLE001 - filter errors never restore the full toolset
                     return []
@@ -1216,6 +1216,17 @@ def _owner_fork_parent(nonce: str, chat_id: str) -> bool:
     origin = ((pending.chat_id, pending.owner_side) if pending is not None
               else get_released_turn_origin(nonce))
     return bool(origin and origin[0] == chat_id and origin[1])
+
+
+def _review_fork_catalog_call(bound, nonce: str, chat_id: str) -> bool:
+    """Limit the catalog exception to the host review whitelist construction."""
+    enabled = bound.arguments.get("enabled_toolsets")
+    return bool(
+        threading.current_thread().name == "bg-review"
+        and isinstance(enabled, (list, tuple)) and enabled
+        and all(toolset in ("memory", "skills") for toolset in enabled)
+        and _owner_fork_parent(nonce, chat_id)
+    )
 
 
 _PATH_FIELDS = {

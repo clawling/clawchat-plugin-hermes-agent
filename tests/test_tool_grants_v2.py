@@ -1068,7 +1068,7 @@ def mirrored_host_whitelist(host_whitelist_api):
     return host_whitelist_api
 
 
-def _fork_thread_result(callback):
+def _fork_thread_result(callback, *, name=None):
     results, errors = [], []
 
     def run():
@@ -1077,7 +1077,7 @@ def _fork_thread_result(callback):
         except BaseException as exc:
             errors.append(exc)
 
-    thread = threading.Thread(target=run)
+    thread = threading.Thread(target=run, name=name)
     thread.start()
     thread.join(timeout=10)
     assert not thread.is_alive(), 'fork/hook worker did not finish'
@@ -1108,10 +1108,12 @@ def review_fork_catalog(search_catalog):
     raw = [item for item in base(skip_tool_search_assembly=True)
            if item['function']['name'] in AUTHORIZATION_TOOLS]
     raw += [{'function': {'name': name}} for name in ('skill_manage', 'skill_view', 'skills_list')]
+    model_tools.review_raw = raw
+    model_tools.review_toolsets = ['skills']
 
     def definitions(enabled_toolsets=None, disabled_toolsets=None, quiet_mode=False,
                     skip_tool_search_assembly=False):
-        assert enabled_toolsets == ['skills']
+        assert enabled_toolsets == model_tools.review_toolsets
         assert skip_tool_search_assembly
         return raw
 
@@ -1159,7 +1161,7 @@ def test_review_fork_builds_whitelist_from_filtered_catalog(
     try:
         if parent == 'released':
             turns.release_turn(s.nonce)
-        names, result = _fork_thread_result(fork)
+        names, result = _fork_thread_result(fork, name='bg-review')
         if case == 'owner' or parent == 'live' and case in {'guest-chat', 'group'}:
             assert names == {'skill_manage', 'skill_view', 'skills_list'}
             assert names.isdisjoint(AUTHORIZATION_TOOLS)
@@ -1176,6 +1178,52 @@ def test_review_fork_builds_whitelist_from_filtered_catalog(
             assert not turns.get_snapshot(s.nonce).owner_verified
     finally:
         turns.release_turn(s.nonce)
+
+
+@pytest.mark.parametrize('thread_name,toolsets,permitted', [
+    ('ordinary-worker', ['skills'], False),
+    ('bg-review-renamed', ['skills'], False),
+    ('bg-review', ['terminal'], False),
+    ('bg-review', None, False),
+    ('bg-review', 'omitted', False),
+    ('bg-review', ['skills', 'terminal'], False),
+    ('bg-review', [], False),
+    ('bg-review', (), False),
+    ('bg-review', 'skills', False),
+    ('bg-review', {'skills'}, False),
+    ('bg-review', ['skills', None], False),
+    ('bg-review', ['memory', 'skills'], True),
+    ('bg-review', ('skills',), True),
+    ('bg-review', ('memory', 'skills'), True),
+])
+def test_released_owner_fork_catalog_requires_review_call(
+        host, review_fork_catalog, thread_name, toolsets, permitted):
+    model_tools = review_fork_catalog
+    model_tools.review_toolsets = None if toolsets == 'omitted' else toolsets
+    if not permitted:
+        model_tools.review_raw.append({'function': {'name': 'terminal'}})
+    s = turns.register_turn(account_id='usr_agent', chat_id='cnv_owner',
+        session_key='review-catalog-scope', speakers=('usr_owner',), grants={}, owner_side=True)
+    turns.bind_turn(s.nonce, 's', 'parent-turn')
+    turns.release_turn(s.nonce)
+
+    def fork():
+        with host(HERMES_SESSION_PLATFORM='clawchat', HERMES_SESSION_CHAT_ID='cnv_owner',
+                  HERMES_SESSION_CHAT_TYPE='dm', HERMES_SESSION_USER_ID='usr_owner',
+                  HERMES_SESSION_MESSAGE_ID=s.nonce):
+            assert turns.get_snapshot(s.nonce) is None
+            assert guard._owner_fork_parent(s.nonce, 'cnv_owner')
+            definitions = (model_tools.get_tool_definitions() if toolsets == 'omitted' else
+                           model_tools.get_tool_definitions(toolsets))
+            return {item['function']['name'] for item in definitions}
+
+    names = _fork_thread_result(fork, name=thread_name)
+    if permitted:
+        assert names == {'skill_manage', 'skill_view', 'skills_list'}
+        assert names.isdisjoint(AUTHORIZATION_TOOLS)
+    else:
+        assert names.isdisjoint({'skill_manage', 'terminal'})
+        assert 'clawchat_tool_request' in names
 
 
 @pytest.mark.parametrize('case', [
@@ -1279,6 +1327,51 @@ def test_internal_fork_threaded_clear_and_missing_mirror(host, host_whitelist_ap
         assert after and after['action'] == 'block'
     finally:
         turns.release_turn(s.nonce)
+
+
+@pytest.mark.parametrize('case', [
+    'owner', 'guest-chat', 'group', 'guest-parent', 'wrong-chat', 'unknown-nonce', 'not-listed',
+])
+def test_internal_fork_copied_context_retains_whitelist_after_clear(host, mirrored_host_whitelist, case):
+    plugins = mirrored_host_whitelist
+    chat = 'cnv_guest' if case == 'guest-chat' else 'cnv_owner'
+    s = turns.register_turn(
+        account_id='usr_agent', chat_id='cnv_other' if case == 'wrong-chat' else chat,
+        session_key='copied-review-context', speakers=('usr_guest' if case == 'guest-parent' else 'usr_owner',),
+        grants={}, owner_side=case != 'guest-parent', owner_verified=False)
+    turns.bind_turn(s.nonce, 's', 'parent-turn')
+    turns.release_turn(s.nonce)
+    nonce = 'unknown' if case == 'unknown-nonce' else s.nonce
+
+    def fork():
+        with host(HERMES_SESSION_PLATFORM='clawchat', HERMES_SESSION_CHAT_ID=chat,
+                  HERMES_SESSION_CHAT_TYPE='group' if case == 'group' else 'dm',
+                  HERMES_SESSION_USER_ID='usr_guest' if case == 'guest-chat' else 'usr_owner',
+                  HERMES_SESSION_MESSAGE_ID=nonce):
+            allowed = {'memory' if case == 'not-listed' else 'skill_manage', *AUTHORIZATION_TOOLS}
+            plugins.set_thread_tool_whitelist(allowed)
+            try:
+                copied = copy_context()
+            finally:
+                plugins.clear_thread_tool_whitelist()
+            assert guard._HOST_FORK_WHITELIST.get() is None
+            assert plugins._thread_tool_whitelist.allowed is None
+            assert _dispatch_fork_tool(plugins, 'skill_manage', nonce)['action'] == 'block'
+
+            def dispatch_copied():
+                assert guard._HOST_FORK_WHITELIST.get() == frozenset(allowed)
+                result = _dispatch_fork_tool(plugins, 'skill_manage', nonce)
+                for tool in AUTHORIZATION_TOOLS:
+                    assert _dispatch_fork_tool(plugins, tool, nonce)['action'] == 'block'
+                return result
+
+            return _fork_thread_result(lambda: copied.run(dispatch_copied))
+
+    result = _fork_thread_result(fork, name='bg-review')
+    if case == 'owner':
+        assert result is None
+    else:
+        assert result and result['action'] == 'block'
 
 
 @pytest.mark.parametrize('allowed,permitted', [

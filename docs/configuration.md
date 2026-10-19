@@ -1542,13 +1542,20 @@ Hermes can run `pre_tool_call` in a separate thread, where its
 `_thread_tool_whitelist` is invisible. At registration the plugin mirrors the
 host's set/clear whitelist API into a ContextVar carried by the host's copied
 hook context, and also requires the called tool to be in that nonempty
-whitelist. Clearing the host whitelist clears the mirror. If an older host or
-an unavailable mirror supplies no whitelist in the hook context, the fork
+whitelist. Clearing the host whitelist resets the mirror only in the current
+context. Contexts copied before clear, including contexts propagated to threads
+spawned inside a fork, retain its whitelist; they still require the owner's
+direct chat, a same-chat owner-side parent and membership of the called tool
+in that whitelist, and always refuse the four authorization tools. If an older
+host or an unavailable mirror supplies no whitelist in the hook context, the fork
 remains denied; same-thread hooks can still read the host's thread-local value.
-When a fork builds its host whitelist without a live snapshot, the same
-owner-direct-chat and owner-side parent checks let the plugin catalog retain
-ordinary owner tools, including `skill_manage`, while excluding all four
-authorization tools.
+When the host review fork builds its whitelist without a live snapshot, the
+catalog retains ordinary owner tools, including `skill_manage`, only on a thread
+named exactly `bg-review`, with `enabled_toolsets` supplied as a nonempty list
+or tuple containing only `memory` and/or `skills`, and with the same
+owner-direct-chat and owner-side parent checks. All four authorization tools
+remain excluded. A renamed thread or missing, empty or different toolsets keep
+the ordinary filtering without this exception.
 
 ## Reconnect, heartbeat, ack
 
