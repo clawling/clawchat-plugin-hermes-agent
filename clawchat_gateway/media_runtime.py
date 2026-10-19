@@ -370,7 +370,8 @@ def _inbound_log_url(url: str) -> str:
     try:
         parsed = urlparse(url)
         scheme = parsed.scheme
-        if scheme in {"http", "https"}:
+        # A scheme-relative value ("//user:pw@host/…") carries an authority too.
+        if scheme in {"http", "https"} or (not scheme and parsed.netloc):
             host = parsed.hostname
             port = parsed.port
             if not host:

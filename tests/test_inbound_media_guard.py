@@ -701,7 +701,8 @@ def test_rejected_userinfo_never_appears_in_logs(tmp_path, monkeypatch, caplog):
 
 @pytest.mark.parametrize("url,expected", [
     ("https://user:pw@media.example.test:8443/a.png?x=1#fragment", "https://media.example.test:8443/a.png"),  # redact-allow:email (userinfo test data)
-    ("https://user:pw@[::1]:8443/a.png?x=1", "https://[::1]:8443/a.png"),  # redact-allow:email (userinfo test data)
+    ("https://user:pw@[::1]:8443/a.png?x=1", "https://[::1]:8443/a.png"),
+    ("//user:pw@media.example.test/a.png?x=1", "//media.example.test/a.png"),  # redact-allow:email (userinfo test data)
     ("https://media.example.test:bad/a.png?x=1", "<invalid>"),
     ("https://[invalid/a.png?x=1", "<invalid>"),
     ("https:///a.png?x=1", "<invalid>"),
