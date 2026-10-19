@@ -472,8 +472,10 @@ def host_tool_catalog() -> tuple[frozenset[str], frozenset[str]]:
     return known, available
 
 
-def _filter_grant_definitions(definitions, snapshot):
+def _filter_grant_definitions(definitions, snapshot, *, owner_fork=False):
     from clawchat_gateway.tool_capabilities import AUTHORIZATION_TOOLS
+    if owner_fork:
+        return [item for item in definitions if item["function"]["name"] not in AUTHORIZATION_TOOLS]
     from clawchat_gateway.tool_grants import tool_grant_visible
     public = public_tool_names(item["function"]["name"] for item in definitions)
 
@@ -658,8 +660,10 @@ def _install_grant_catalog_filter() -> bool:
                 if (_UNNARROWED_CATALOG.get()
                         or session_context_value("HERMES_SESSION_PLATFORM") != "clawchat"):
                     return original(*args, **kwargs)
-                snapshot = get_snapshot(session_context_value("HERMES_SESSION_MESSAGE_ID"))
-                if snapshot and snapshot.chat_id != session_context_value("HERMES_SESSION_CHAT_ID"):
+                nonce = session_context_value("HERMES_SESSION_MESSAGE_ID")
+                chat_id = session_context_value("HERMES_SESSION_CHAT_ID")
+                snapshot = get_snapshot(nonce)
+                if snapshot and snapshot.chat_id != chat_id:
                     snapshot = None
                 bound = signature.bind(*args, **kwargs)
                 skip_assembly = bound.arguments.get("skip_tool_search_assembly", False)
@@ -667,7 +671,8 @@ def _install_grant_catalog_filter() -> bool:
                     bound.arguments["skip_tool_search_assembly"] = True
                 raw = original(*bound.args, **bound.kwargs)
                 try:
-                    filtered = _filter_grant_definitions(raw, snapshot)
+                    owner_fork = snapshot is None and _owner_fork_parent(nonce, chat_id)
+                    filtered = _filter_grant_definitions(raw, snapshot, owner_fork=owner_fork)
                 except Exception:  # noqa: BLE001 - filter errors never restore the full toolset
                     return []
                 # Assembly writes source summaries into the tool_search schema
@@ -1201,6 +1206,18 @@ def _session_turn() -> str:
         return "other"
 
 
+def _owner_fork_parent(nonce: str, chat_id: str) -> bool:
+    """Prove an owner-chat fork's live or recently released owner-side parent."""
+    if _session_turn() != "owner" or not nonce:
+        return False
+    from clawchat_gateway.turn_grants import get_snapshot, get_released_turn_origin
+
+    pending = get_snapshot(nonce)
+    origin = ((pending.chat_id, pending.owner_side) if pending is not None
+              else get_released_turn_origin(nonce))
+    return bool(origin and origin[0] == chat_id and origin[1])
+
+
 _PATH_FIELDS = {
     "path", "filepath", "file_path", "images", "iconpath", "icon_path",
     "media", "media_files", "attachments", "avatar", "image",
@@ -1523,8 +1540,7 @@ def _clawchat_pre_tool_decision(*, tool_name: str = "", args: Any = None, **kwar
                                  get_released_turn_origin(nonce) if nonce else None)
                 allowed = _host_thread_whitelist()
                 whitelist_is_set = isinstance(allowed, (set, frozenset))
-                if (session_turn == "owner" and nonce and parent_origin
-                        and parent_origin[0] == chat_id and parent_origin[1]
+                if (_owner_fork_parent(nonce, chat_id)
                         and whitelist_is_set and allowed and tool_name in allowed):
                     return None
                 whitelist_status = ("none" if allowed is None else "invalid" if not whitelist_is_set

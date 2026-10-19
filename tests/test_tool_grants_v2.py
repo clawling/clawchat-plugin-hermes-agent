@@ -1100,6 +1100,84 @@ def _dispatch_fork_tool(plugins, tool, nonce):
     return _fork_thread_result(lambda: ctx.run(callback))
 
 
+@pytest.fixture
+def review_fork_catalog(search_catalog):
+    model_tools = search_catalog
+    base = model_tools.get_tool_definitions
+    # Include authorization schemas to verify that owner forks remove all four.
+    raw = [item for item in base(skip_tool_search_assembly=True)
+           if item['function']['name'] in AUTHORIZATION_TOOLS]
+    raw += [{'function': {'name': name}} for name in ('skill_manage', 'skill_view', 'skills_list')]
+
+    def definitions(enabled_toolsets=None, disabled_toolsets=None, quiet_mode=False,
+                    skip_tool_search_assembly=False):
+        assert enabled_toolsets == ['skills']
+        assert skip_tool_search_assembly
+        return raw
+
+    model_tools.get_tool_definitions = definitions
+    assert guard._install_grant_catalog_filter()
+    return model_tools
+
+
+@pytest.mark.parametrize('parent', ['live', 'released'])
+@pytest.mark.parametrize('case', [
+    'owner', 'guest-chat', 'group', 'guest-parent', 'wrong-chat', 'unknown-nonce', 'empty-nonce',
+])
+def test_review_fork_builds_whitelist_from_filtered_catalog(
+        host, mirrored_host_whitelist, review_fork_catalog, parent, case):
+    plugins = mirrored_host_whitelist
+    chat = 'cnv_guest' if case == 'guest-chat' else 'cnv_owner'
+    s = turns.register_turn(
+        account_id='usr_agent', chat_id='cnv_other' if case == 'wrong-chat' else chat,
+        session_key='review-catalog-fork', speakers=('usr_guest' if case == 'guest-parent' else 'usr_owner',),
+        grants={}, owner_side=case != 'guest-parent', owner_verified=False)
+    turns.bind_turn(s.nonce, 's', 'parent-turn')
+    nonce = 'unknown' if case == 'unknown-nonce' else '' if case == 'empty-nonce' else s.nonce
+
+    def fork():
+        with host(HERMES_SESSION_PLATFORM='clawchat', HERMES_SESSION_CHAT_ID=chat,
+                  HERMES_SESSION_CHAT_TYPE='group' if case == 'group' else 'dm',
+                  HERMES_SESSION_USER_ID='usr_guest' if case == 'guest-chat' else 'usr_owner',
+                  HERMES_SESSION_MESSAGE_ID=nonce):
+            assert guard._HOST_FORK_WHITELIST.get() is None
+            # background_review constructs its whitelist before setting the host TLS.
+            definitions = review_fork_catalog.get_tool_definitions(enabled_toolsets=['skills'])
+            names = {item['function']['name'] for item in definitions}
+            # A released parent must not bypass the separate guest search/assembly guard.
+            if parent == 'released':
+                assert guard._guest_catalog_turn()
+            plugins.set_thread_tool_whitelist(names)
+            try:
+                result = _dispatch_fork_tool(plugins, 'skill_manage', nonce)
+                for tool in AUTHORIZATION_TOOLS:
+                    assert _dispatch_fork_tool(plugins, tool, nonce)['action'] == 'block'
+            finally:
+                plugins.clear_thread_tool_whitelist()
+            return names, result
+
+    try:
+        if parent == 'released':
+            turns.release_turn(s.nonce)
+        names, result = _fork_thread_result(fork)
+        if case == 'owner' or parent == 'live' and case in {'guest-chat', 'group'}:
+            assert names == {'skill_manage', 'skill_view', 'skills_list'}
+            assert names.isdisjoint(AUTHORIZATION_TOOLS)
+        else:
+            assert 'skill_manage' not in names
+            assert names.isdisjoint(set(AUTHORIZATION_TOOLS) - {'clawchat_tool_request'})
+            # Preserve the existing guest catalog's request schema visibility.
+            assert 'clawchat_tool_request' in names
+        if case == 'owner':
+            assert result is None
+        else:
+            assert result and result['action'] == 'block'
+        if parent == 'live':
+            assert not turns.get_snapshot(s.nonce).owner_verified
+    finally:
+        turns.release_turn(s.nonce)
+
+
 @pytest.mark.parametrize('case', [
     'live-owner', 'released-owner', 'frozenset', 'not-listed',
     *sorted(AUTHORIZATION_TOOLS), 'guest-chat', 'group', 'guest-parent',

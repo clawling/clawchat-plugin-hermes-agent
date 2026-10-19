@@ -1545,6 +1545,10 @@ hook context, and also requires the called tool to be in that nonempty
 whitelist. Clearing the host whitelist clears the mirror. If an older host or
 an unavailable mirror supplies no whitelist in the hook context, the fork
 remains denied; same-thread hooks can still read the host's thread-local value.
+When a fork builds its host whitelist without a live snapshot, the same
+owner-direct-chat and owner-side parent checks let the plugin catalog retain
+ordinary owner tools, including `skill_manage`, while excluding all four
+authorization tools.
 
 ## Reconnect, heartbeat, ack
 
