@@ -111,6 +111,62 @@ _GRANT_APPROVAL_GATE_LOCK = threading.Lock()
 _GRANT_CATALOG_LOCK = threading.Lock()
 _GUEST_SEARCH_ENTRY_POINTS = ("connector_entries_by_group", "remote_schemas_for", "_registry_entry")
 _UNNARROWED_CATALOG = ContextVar("clawchat_unnarrowed_catalog", default=False)
+_HOST_FORK_WHITELIST: ContextVar[Optional[frozenset[str]]] = ContextVar(
+    "clawchat_host_fork_whitelist", default=None,
+)
+
+
+def install_host_whitelist_mirror() -> None:
+    """Carry the host's caller-thread whitelist into copied hook contexts."""
+    try:
+        import hermes_cli.plugins as plugins
+    except Exception:  # noqa: BLE001 - old hosts keep the refusal
+        return
+    original_set = getattr(plugins, "set_thread_tool_whitelist", None)
+    original_clear = getattr(plugins, "clear_thread_tool_whitelist", None)
+    if not callable(original_set) or not callable(original_clear):
+        return
+
+    if not getattr(original_set, "_clawchat_whitelist_mirror", False):
+        @wraps(original_set)
+        def mirrored_set(*args, **kwargs):
+            result = original_set(*args, **kwargs)
+            try:
+                allowed = args[0] if args else kwargs.get("allowed")
+                _HOST_FORK_WHITELIST.set(
+                    frozenset(allowed) if isinstance(allowed, (set, frozenset)) else None,
+                )
+            except Exception:  # noqa: BLE001 - never change the host API's behavior
+                pass
+            return result
+
+        mirrored_set._clawchat_whitelist_mirror = True
+        plugins.set_thread_tool_whitelist = mirrored_set
+
+    if not getattr(original_clear, "_clawchat_whitelist_mirror", False):
+        @wraps(original_clear)
+        def mirrored_clear(*args, **kwargs):
+            result = original_clear(*args, **kwargs)
+            try:
+                _HOST_FORK_WHITELIST.set(None)
+            except Exception:  # noqa: BLE001 - never change the host API's behavior
+                pass
+            return result
+
+        mirrored_clear._clawchat_whitelist_mirror = True
+        plugins.clear_thread_tool_whitelist = mirrored_clear
+
+
+def _host_thread_whitelist() -> Any:
+    """Prefer the context mirror; same-thread hooks can still use host TLS."""
+    allowed = _HOST_FORK_WHITELIST.get()
+    if allowed is not None:
+        return allowed
+    try:
+        from hermes_cli.plugins import _thread_tool_whitelist
+        return _thread_tool_whitelist.allowed
+    except Exception:  # noqa: BLE001 - missing/unreadable host state grants nothing
+        return None
 
 #: Host toolsets (Hermes 0.21 ``toolsets.py`` names) removed by default from
 #: turns the owner did not start: shell + process management, file read/write/patch/search,
@@ -1460,19 +1516,27 @@ def _clawchat_pre_tool_decision(*, tool_name: str = "", args: Any = None, **kwar
                                  and pending_snapshot.chat_id == chat_id and _approve_attributed(pending_snapshot))
         if session_context_value("HERMES_SESSION_PLATFORM") == "clawchat" and (
                 snapshot or can_bind_call or pending_snapshot and pending_snapshot.chat_id == chat_id):
-            if can_bind_call and snapshot is None and session_turn == "owner" and nonce:
+            if can_bind_call and snapshot is None:
                 from clawchat_gateway.turn_grants import get_released_turn_origin
                 parent_origin = ((pending_snapshot.chat_id, pending_snapshot.owner_side)
-                                 if pending_snapshot is not None else get_released_turn_origin(nonce))
-                if parent_origin and parent_origin[0] == chat_id and parent_origin[1]:
-                    try:
-                        from hermes_cli.plugins import _thread_tool_whitelist
-                        allowed = _thread_tool_whitelist.allowed
-                    except Exception:  # noqa: BLE001 - only host-restricted forks qualify
-                        allowed = None
-                    if isinstance(allowed, set) and allowed:
-                        # The host enforces this thread's whitelist before the hook.
-                        return None
+                                 if pending_snapshot is not None else
+                                 get_released_turn_origin(nonce) if nonce else None)
+                allowed = _host_thread_whitelist()
+                whitelist_is_set = isinstance(allowed, (set, frozenset))
+                if (session_turn == "owner" and nonce and parent_origin
+                        and parent_origin[0] == chat_id and parent_origin[1]
+                        and whitelist_is_set and allowed and tool_name in allowed):
+                    return None
+                whitelist_status = ("none" if allowed is None else "invalid" if not whitelist_is_set
+                                    else "empty" if not allowed else
+                                    "contains-tool" if tool_name in allowed else "missing-tool")
+                logger.debug(
+                    "clawchat review fork not allowed: session_turn=%s nonce_present=%s "
+                    "parent_found=%s parent_same_chat=%s parent_owner_side=%s whitelist=%s",
+                    session_turn, bool(nonce), bool(parent_origin),
+                    bool(parent_origin and parent_origin[0] == chat_id),
+                    bool(parent_origin and parent_origin[1]), whitelist_status,
+                )
             session_turn = "other"
         # The plugin's own tools: any turn that is not the owner's. The host's
         # send_message: only ClawChat turns the owner did not start, so another
@@ -1717,6 +1781,7 @@ def refuses_non_owner_turns() -> bool:
 def register_host_tools_guard(ctx: Any) -> None:
     """Register the ``pre_tool_call`` hook and say so when a layer is missing."""
     global _hook_missing
+    install_host_whitelist_mirror()
     from clawchat_gateway import turn_attachments
     turn_attachments.completion_hook_registered = False
     if not host_supports_toolset_override():
@@ -1774,6 +1839,7 @@ __all__ = [
     "clawchat_pre_tool_call",
     "is_mcp_tool",
     "is_owner_turn",
+    "install_host_whitelist_mirror",
     "limited_tools_hint",
     "memory_provider_tools",
     "non_owner_host_tools",

@@ -1538,6 +1538,13 @@ with a one-hour lifetime; restart, expiry or oldest-entry eviction loses this
 fallback. Empty or unknown nonces and non-owner parents never qualify. Forks
 gain no verified-owner status and cannot use the four authorization tools.
 Forks in guest or group sessions gain no additional access.
+Hermes can run `pre_tool_call` in a separate thread, where its
+`_thread_tool_whitelist` is invisible. At registration the plugin mirrors the
+host's set/clear whitelist API into a ContextVar carried by the host's copied
+hook context, and also requires the called tool to be in that nonempty
+whitelist. Clearing the host whitelist clears the mirror. If an older host or
+an unavailable mirror supplies no whitelist in the hook context, the fork
+remains denied; same-thread hooks can still read the host's thread-local value.
 
 ## Reconnect, heartbeat, ack
 

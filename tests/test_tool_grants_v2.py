@@ -1,5 +1,6 @@
 """Selector, migration, and execution regressions for capability grants."""
 from contextlib import contextmanager
+from contextvars import copy_context
 from dataclasses import replace
 from types import ModuleType, SimpleNamespace
 import json
@@ -645,12 +646,14 @@ def test_guest_search_guard_neutralizes_only_unverified_clawchat_turns(host, sea
         turns.release_turn(snapshot.nonce)
 
 
-def test_guest_search_guard_installs_with_host_hooks(host, search_catalog, monkeypatch):
+def test_guest_search_guard_installs_with_host_hooks(host, search_catalog, monkeypatch, host_whitelist_api):
     search = search_catalog.search
     for name, original in search.originals.items():
         monkeypatch.setattr(search, name, original)
+    original_set = host_whitelist_api.set_thread_tool_whitelist
     guard.register_host_tools_guard(SimpleNamespace(register_hook=lambda *args: None))
     assert all(getattr(getattr(search, name), "_clawchat_guest", False) for name in search.originals)
+    assert host_whitelist_api.set_thread_tool_whitelist.__wrapped__ is original_set
 
 
 @pytest.mark.parametrize("bridge", ["tool_search", "tool_describe"])
@@ -1036,6 +1039,271 @@ def test_legacy_host_without_execution_ids_keeps_ordinary_approval(host, monkeyp
         # Management never falls back to ordinary approval on an old host.
         assert guard.clawchat_pre_tool_call(tool_name="clawchat_tool_grant", args={}, **ids) == {
             "action": "block", "message": grants.GRANT_BLOCK_MESSAGE}
+
+
+@pytest.fixture
+def host_whitelist_api(monkeypatch):
+    """Hermes 0.21.6 API: writes belong to the calling thread only."""
+    plugins = ModuleType('hermes_cli.plugins')
+    plugins._thread_tool_whitelist = threading.local()
+
+    def set_thread_tool_whitelist(
+            allowed, deny_msg_fmt="Tool '{tool_name}' denied: not in this thread's tool whitelist"):
+        plugins._thread_tool_whitelist.allowed = allowed
+        plugins._thread_tool_whitelist.fmt = deny_msg_fmt
+
+    def clear_thread_tool_whitelist():
+        plugins._thread_tool_whitelist.allowed = None
+
+    plugins.set_thread_tool_whitelist = set_thread_tool_whitelist
+    plugins.clear_thread_tool_whitelist = clear_thread_tool_whitelist
+    monkeypatch.setitem(sys.modules, 'hermes_cli.plugins', plugins)
+    monkeypatch.setattr(sys.modules['hermes_cli'], 'plugins', plugins, raising=False)
+    return plugins
+
+
+@pytest.fixture
+def mirrored_host_whitelist(host_whitelist_api):
+    guard.install_host_whitelist_mirror()
+    return host_whitelist_api
+
+
+def _fork_thread_result(callback):
+    results, errors = [], []
+
+    def run():
+        try:
+            results.append(callback())
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    thread.join(timeout=10)
+    assert not thread.is_alive(), 'fork/hook worker did not finish'
+    if errors:
+        raise errors[0]
+    return results[0]
+
+
+def _dispatch_fork_tool(plugins, tool, nonce):
+    """Match plugins_dispatch: copy caller context into a fresh hook thread."""
+    ctx = copy_context()
+
+    def callback():
+        assert not hasattr(plugins._thread_tool_whitelist, 'allowed')
+        assert turns.session_context_value('HERMES_SESSION_MESSAGE_ID') == nonce
+        assert turns.session_context_value('HERMES_SESSION_PLATFORM') == 'clawchat'
+        return guard.clawchat_pre_tool_call(
+            tool_name=tool, args={'action': 'patch'}, session_id='s', turn_id='fork-turn')
+
+    return _fork_thread_result(lambda: ctx.run(callback))
+
+
+@pytest.mark.parametrize('case', [
+    'live-owner', 'released-owner', 'frozenset', 'not-listed',
+    *sorted(AUTHORIZATION_TOOLS), 'guest-chat', 'group', 'guest-parent',
+    'wrong-chat', 'unknown-nonce', 'empty-nonce', 'empty-whitelist',
+    'unset-whitelist', 'invalid-whitelist',
+])
+def test_internal_fork_threaded_dispatch(host, mirrored_host_whitelist, caplog, case):
+    plugins = mirrored_host_whitelist
+    chat = 'cnv_guest' if case == 'guest-chat' else 'cnv_owner'
+    s = turns.register_turn(
+        account_id='usr_agent', chat_id='cnv_other' if case == 'wrong-chat' else chat,
+        session_key='threaded-fork', speakers=('usr_guest' if case == 'guest-parent' else 'usr_owner',),
+        grants={}, owner_side=case != 'guest-parent', owner_verified=False)
+    turns.bind_turn(s.nonce, 's', 'parent-turn')
+    nonce = 'unknown' if case == 'unknown-nonce' else '' if case == 'empty-nonce' else s.nonce
+    tool = case if case in AUTHORIZATION_TOOLS else 'terminal' if case == 'not-listed' else 'skill_manage'
+
+    def fork():
+        with host(HERMES_SESSION_PLATFORM='clawchat', HERMES_SESSION_CHAT_ID=chat,
+                  HERMES_SESSION_CHAT_TYPE='group' if case == 'group' else 'dm',
+                  HERMES_SESSION_USER_ID='usr_guest' if case == 'guest-chat' else 'usr_owner',
+                  HERMES_SESSION_MESSAGE_ID=nonce):
+            allowed = {'skill_manage', 'memory', *AUTHORIZATION_TOOLS}
+            if case == 'empty-whitelist':
+                allowed = set()
+            elif case == 'invalid-whitelist':
+                allowed = ['skill_manage']
+            elif case == 'frozenset':
+                allowed = frozenset(allowed)
+            if case != 'unset-whitelist':
+                plugins.set_thread_tool_whitelist(allowed, deny_msg_fmt='review: {tool_name}')
+            try:
+                return _dispatch_fork_tool(plugins, tool, nonce)
+            finally:
+                plugins.clear_thread_tool_whitelist()
+
+    try:
+        if case == 'released-owner':
+            turns.release_turn(s.nonce)
+        with caplog.at_level('DEBUG', logger=guard.__name__):
+            result = _fork_thread_result(fork)
+        if case in {'live-owner', 'released-owner', 'frozenset'}:
+            assert result is None
+        else:
+            assert result and result['action'] == 'block'
+            if case not in AUTHORIZATION_TOOLS:
+                diagnostics = [record.getMessage() for record in caplog.records
+                               if record.name == guard.__name__ and 'review fork not allowed' in record.getMessage()]
+                assert len(diagnostics) == 1
+                diagnostic = diagnostics[0]
+                assert s.nonce not in diagnostic
+                assert 'patch' not in diagnostic
+                expected = {
+                    'not-listed': 'whitelist=missing-tool',
+                    'empty-whitelist': 'whitelist=empty',
+                    'unset-whitelist': 'whitelist=none',
+                    'invalid-whitelist': 'whitelist=none',
+                    'guest-chat': 'session_turn=other',
+                    'group': 'session_turn=other',
+                    'guest-parent': 'parent_owner_side=False',
+                    'wrong-chat': 'parent_same_chat=False',
+                    'unknown-nonce': 'parent_found=False',
+                    'empty-nonce': 'nonce_present=False',
+                }[case]
+                assert expected in diagnostic
+        if case != 'released-owner':
+            assert not turns.get_snapshot(s.nonce).owner_verified
+    finally:
+        turns.release_turn(s.nonce)
+
+
+@pytest.mark.parametrize('install', [False, True])
+def test_internal_fork_threaded_clear_and_missing_mirror(host, host_whitelist_api, install):
+    plugins = host_whitelist_api
+    if install:
+        guard.install_host_whitelist_mirror()
+    s = turns.register_turn(account_id='usr_agent', chat_id='cnv_owner',
+        session_key='threaded-clear', speakers=('usr_owner',), grants={}, owner_side=True)
+    turns.bind_turn(s.nonce, 's', 'parent-turn')
+
+    def fork():
+        with host(HERMES_SESSION_PLATFORM='clawchat', HERMES_SESSION_CHAT_ID='cnv_owner',
+                  HERMES_SESSION_CHAT_TYPE='dm', HERMES_SESSION_USER_ID='usr_owner',
+                  HERMES_SESSION_MESSAGE_ID=s.nonce):
+            plugins.set_thread_tool_whitelist({'skill_manage'})
+            try:
+                before = _dispatch_fork_tool(plugins, 'skill_manage', s.nonce)
+            finally:
+                plugins.clear_thread_tool_whitelist()
+            after = _dispatch_fork_tool(plugins, 'skill_manage', s.nonce)
+            return before, after
+
+    try:
+        before, after = _fork_thread_result(fork)
+        if install:
+            assert before is None
+        else:
+            assert before and before['action'] == 'block'
+        assert after and after['action'] == 'block'
+    finally:
+        turns.release_turn(s.nonce)
+
+
+@pytest.mark.parametrize('allowed,permitted', [
+    (frozenset({'skill_manage'}), True), ({'memory'}, False),
+])
+def test_internal_fork_same_thread_whitelist_membership(host, host_whitelist_api, allowed, permitted):
+    plugins = host_whitelist_api
+    s = turns.register_turn(account_id='usr_agent', chat_id='cnv_owner',
+        session_key='same-thread-fork', speakers=('usr_owner',), grants={}, owner_side=True)
+    turns.bind_turn(s.nonce, 's', 'parent-turn')
+    try:
+        with host(HERMES_SESSION_PLATFORM='clawchat', HERMES_SESSION_CHAT_ID='cnv_owner',
+                  HERMES_SESSION_CHAT_TYPE='dm', HERMES_SESSION_USER_ID='usr_owner',
+                  HERMES_SESSION_MESSAGE_ID=s.nonce):
+            plugins.set_thread_tool_whitelist(allowed)
+            try:
+                result = call('skill_manage', turn_id='fork-turn', args={'action': 'patch'})
+                assert result is None if permitted else result and result['action'] == 'block'
+            finally:
+                plugins.clear_thread_tool_whitelist()
+    finally:
+        turns.release_turn(s.nonce)
+
+
+def test_host_whitelist_mirror_install_is_idempotent(host_whitelist_api):
+    plugins = host_whitelist_api
+    original_set = plugins.set_thread_tool_whitelist
+    original_clear = plugins.clear_thread_tool_whitelist
+    guard.install_host_whitelist_mirror()
+    wrapped_set = plugins.set_thread_tool_whitelist
+    wrapped_clear = plugins.clear_thread_tool_whitelist
+    guard.install_host_whitelist_mirror()
+    assert plugins.set_thread_tool_whitelist is wrapped_set
+    assert plugins.clear_thread_tool_whitelist is wrapped_clear
+    assert wrapped_set.__wrapped__ is original_set
+    assert wrapped_clear.__wrapped__ is original_clear
+
+    def fork():
+        allowed = {'skill_manage'}
+        assert plugins.set_thread_tool_whitelist(allowed, 'review: {tool_name}') is None
+        assert plugins._thread_tool_whitelist.allowed is allowed
+        assert plugins._thread_tool_whitelist.fmt == 'review: {tool_name}'
+        assert guard._host_thread_whitelist() == frozenset(allowed)
+        assert plugins.clear_thread_tool_whitelist() is None
+        assert plugins._thread_tool_whitelist.allowed is None
+        assert plugins._thread_tool_whitelist.fmt == 'review: {tool_name}'
+        assert guard._host_thread_whitelist() is None
+
+    _fork_thread_result(fork)
+
+
+def test_host_whitelist_mirror_preserves_host_calls_on_mirror_error(host_whitelist_api, monkeypatch):
+    plugins = host_whitelist_api
+    calls = []
+    set_result, clear_result = object(), object()
+
+    def original_set(*args, **kwargs):
+        calls.append(('set', args, kwargs))
+        return set_result
+
+    def original_clear(*args, **kwargs):
+        calls.append(('clear', args, kwargs))
+        return clear_result
+
+    def broken_mirror(value):
+        raise RuntimeError('mirror unavailable')
+
+    monkeypatch.setattr(plugins, 'set_thread_tool_whitelist', original_set)
+    monkeypatch.setattr(plugins, 'clear_thread_tool_whitelist', original_clear)
+    monkeypatch.setattr(guard, '_HOST_FORK_WHITELIST', SimpleNamespace(set=broken_mirror))
+    guard.install_host_whitelist_mirror()
+    allowed = {'skill_manage'}
+    assert plugins.set_thread_tool_whitelist(allowed=allowed, deny_msg_fmt='review') is set_result
+    assert plugins.clear_thread_tool_whitelist() is clear_result
+    assert calls == [('set', (), {'allowed': allowed, 'deny_msg_fmt': 'review'}), ('clear', (), {})]
+
+
+def test_host_whitelist_mirror_context_precedence_and_invalid_reset(mirrored_host_whitelist):
+    plugins = mirrored_host_whitelist
+
+    def fork():
+        allowed = {'skill_manage'}
+        plugins.set_thread_tool_whitelist(allowed=allowed)
+        assert guard._HOST_FORK_WHITELIST.get() == frozenset({'skill_manage'})
+        allowed.add('terminal')
+        # The frozen mirror takes precedence over the host's mutable TLS set.
+        assert guard._host_thread_whitelist() == frozenset({'skill_manage'})
+        plugins.set_thread_tool_whitelist(['memory'])
+        assert guard._HOST_FORK_WHITELIST.get() is None
+        plugins.clear_thread_tool_whitelist()
+        assert guard._host_thread_whitelist() is None
+
+    _fork_thread_result(fork)
+    assert guard._HOST_FORK_WHITELIST.get() is None
+
+
+def test_host_whitelist_mirror_missing_host_api(host_whitelist_api, monkeypatch):
+    original_set = host_whitelist_api.set_thread_tool_whitelist
+    monkeypatch.delattr(host_whitelist_api, 'clear_thread_tool_whitelist')
+    guard.install_host_whitelist_mirror()
+    assert host_whitelist_api.set_thread_tool_whitelist is original_set
+    monkeypatch.setitem(sys.modules, 'hermes_cli.plugins', None)
+    guard.install_host_whitelist_mirror()
 
 
 @pytest.fixture
