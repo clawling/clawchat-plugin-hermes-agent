@@ -21,12 +21,73 @@ from clawchat_gateway.tool_grants import GRANT_WRITE_FAILED_MESSAGE, NON_OWNER_G
 from clawchat_gateway.tool_requests import (
     REQUEST_CARD_TTL_MS, REQUEST_COOLDOWN_MS, REQUEST_WAKE_STALE_MS, REQUEST_DAILY_WINDOW_POLICY,
     REQUEST_COPY, build_request_card, build_request_notice, sanitize_request_text, resolve_request_daily_window,
+    request_grant_block,
 )
 from test_tool_grants_admission import harness, message, coalesced, CHAT, OWNER_CHAT, wait_for_events
 from test_tool_grants_hook import host, context
 from test_tool_grants_ask import approval
 
 NOW = 1_800_000_000_000
+
+
+@pytest.mark.parametrize('available', [
+    TOOL_CAPABILITIES['cross-chat']['tools'],
+    *[(tool,) for tool in TOOL_CAPABILITIES['cross-chat']['tools']],
+])
+@pytest.mark.parametrize('unmatched', ['none', 'ask'])
+def test_cross_chat_request_public_defaults_do_not_count_as_grants(available, unmatched):
+    from clawchat_gateway.tool_grants import resolve_turn_grants
+    grants = resolve_turn_grants(['usr_guest'], 'usr_owner', [], NOW,
+        public_tools=TOOL_CAPABILITIES['cross-chat']['tools'], unmatched=unmatched)
+    assert request_grant_block(grants, 'cross-chat', available=available, now=NOW) is None
+
+
+@pytest.mark.parametrize('kind,mode,expected', [
+    ('capability', 'direct', 'already-granted'), ('capability', 'ask', 'already-granted'),
+    ('all', 'direct', 'already-granted'), ('tool', 'direct', 'already-granted'),
+    ('capability', 'deny', 'denied'),
+])
+def test_cross_chat_request_uses_explicit_rules(kind, mode, expected):
+    from clawchat_gateway.tool_grants import resolve_turn_grants
+    tools = TOOL_CAPABILITIES['cross-chat']['tools']
+    selectors = tools if kind == 'tool' else ['all' if kind == 'all' else 'cross-chat']
+    rows = [dict(grantee_user_id='usr_guest', what_kind=kind, what=what, mode=mode)
+            for what in selectors]
+    grants = resolve_turn_grants(['usr_guest'], 'usr_owner', rows, NOW, public_tools=tools)
+    assert request_grant_block(grants, 'cross-chat', available=tools, now=NOW) == expected
+
+
+@pytest.mark.parametrize('mode', ['direct', 'deny'])
+def test_cross_chat_request_batch_requires_every_speaker_grant(mode):
+    from clawchat_gateway.tool_grants import resolve_turn_grants
+    tools = TOOL_CAPABILITIES['cross-chat']['tools']
+    rows = [dict(grantee_user_id='usr_guest', what_kind='capability', what='cross-chat', mode=mode)]
+    grants = resolve_turn_grants(['usr_guest', 'usr_other'], 'usr_owner', rows, NOW, public_tools=tools)
+    assert request_grant_block(grants, 'cross-chat', 2, available=tools, now=NOW) == 'batch-intersection'
+
+
+@pytest.mark.parametrize('mode', ['direct', 'ask', 'deny'])
+def test_cross_chat_request_expired_rules_do_not_count_as_grants(mode):
+    from clawchat_gateway.tool_grants import resolve_turn_grants
+    tools = TOOL_CAPABILITIES['cross-chat']['tools']
+    rows = [dict(grantee_user_id='usr_guest', what_kind='capability', what='cross-chat',
+                 mode=mode, expires_at=NOW + 1)]
+    grants = resolve_turn_grants(['usr_guest'], 'usr_owner', rows, NOW, public_tools=tools)
+    assert request_grant_block(grants, 'cross-chat', available=tools, now=NOW + 2) is None
+    assert request_grant_block(grants, 'cross-chat', 2, available=[], now=NOW + 2) == 'not-available'
+
+
+@pytest.mark.parametrize('public,mode,expected', [
+    (True, None, 'already-granted'), (False, None, None),
+    (False, 'direct', 'already-granted'), (False, 'ask', 'already-granted'),
+    (True, 'deny', 'denied'),
+])
+def test_terminal_request_preserves_default_and_explicit_modes(public, mode, expected):
+    from clawchat_gateway.tool_grants import resolve_turn_grants
+    tools = TOOL_CAPABILITIES['terminal']['tools']
+    rows = [dict(grantee_user_id='usr_guest', what_kind='capability', what='terminal', mode=mode)] if mode else []
+    grants = resolve_turn_grants(['usr_guest'], 'usr_owner', rows, NOW, public_tools=tools if public else ())
+    assert request_grant_block(grants, 'terminal', available=tools, now=NOW) == expected
 
 
 @pytest.fixture

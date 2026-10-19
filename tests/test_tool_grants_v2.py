@@ -5,6 +5,7 @@ from types import ModuleType, SimpleNamespace
 import json
 import sqlite3
 import sys
+import threading
 import time
 
 import pytest
@@ -1035,6 +1036,50 @@ def test_legacy_host_without_execution_ids_keeps_ordinary_approval(host, monkeyp
         # Management never falls back to ordinary approval on an old host.
         assert guard.clawchat_pre_tool_call(tool_name="clawchat_tool_grant", args={}, **ids) == {
             "action": "block", "message": grants.GRANT_BLOCK_MESSAGE}
+
+
+@pytest.fixture
+def fork_whitelist(monkeypatch):
+    plugins = sys.modules.get('hermes_cli.plugins')
+    if plugins is None:
+        plugins = ModuleType('hermes_cli.plugins')
+        monkeypatch.setitem(sys.modules, 'hermes_cli.plugins', plugins)
+        monkeypatch.setattr(sys.modules['hermes_cli'], 'plugins', plugins, raising=False)
+    whitelist = threading.local()
+    monkeypatch.setattr(plugins, '_thread_tool_whitelist', whitelist, raising=False)
+    return whitelist
+
+
+@pytest.mark.parametrize('pending', ['none', 'owner', 'guest'])
+@pytest.mark.parametrize('session', ['owner', 'guest', 'group'])
+@pytest.mark.parametrize('allowed', [{'skill_manage'}, None, set(), ['skill_manage'], 'missing'])
+def test_internal_fork_owner_tools_require_owner_session_and_nonempty_whitelist(
+        host, fork_whitelist, pending, session, allowed):
+    if allowed != 'missing':
+        fork_whitelist.allowed = allowed
+    chat = 'cnv_guest' if session == 'guest' else 'cnv_owner'
+    snapshot = None
+    if pending != 'none':
+        snapshot = turns.register_turn(account_id='usr_agent', chat_id=chat,
+            session_key='fork-test', speakers=('usr_owner' if pending == 'owner' else 'usr_guest',),
+            grants={}, owner_side=pending == 'owner', owner_verified=False)
+        turns.bind_turn(snapshot.nonce, 's', 'parent-turn')
+    try:
+        with host(HERMES_SESSION_PLATFORM='clawchat', HERMES_SESSION_CHAT_ID=chat,
+                  HERMES_SESSION_CHAT_TYPE='group' if session == 'group' else 'dm',
+                  HERMES_SESSION_USER_ID='usr_guest' if session == 'guest' else 'usr_owner',
+                  HERMES_SESSION_MESSAGE_ID=snapshot.nonce if snapshot else ''):
+            assert turns.lookup_snapshot_for_call(snapshot.nonce if snapshot else '', chat, 's', 'fork-turn') is None
+            decision = call('skill_manage', turn_id='fork-turn', args={'action': 'patch'})
+            permitted = session == 'owner' and isinstance(allowed, set) and bool(allowed) and pending != 'guest'
+            assert decision is None if permitted else decision and decision['action'] == 'block'
+            for tool in AUTHORIZATION_TOOLS:
+                assert call(tool, turn_id='fork-turn')['action'] == 'block'
+            if snapshot:
+                assert not turns.get_snapshot(snapshot.nonce).owner_verified
+    finally:
+        if snapshot:
+            turns.release_turn(snapshot.nonce)
 
 
 @pytest.mark.parametrize("failure", ["missing", "mismatch", "unbound", "empty_ids", "read_error"])

@@ -1460,6 +1460,16 @@ def _clawchat_pre_tool_decision(*, tool_name: str = "", args: Any = None, **kwar
                                  and pending_snapshot.chat_id == chat_id and _approve_attributed(pending_snapshot))
         if session_context_value("HERMES_SESSION_PLATFORM") == "clawchat" and (
                 snapshot or can_bind_call or pending_snapshot and pending_snapshot.chat_id == chat_id):
+            if (can_bind_call and snapshot is None and session_turn == "owner"
+                    and (pending_snapshot is None or pending_snapshot.owner_side)):
+                try:
+                    from hermes_cli.plugins import _thread_tool_whitelist
+                    allowed = _thread_tool_whitelist.allowed
+                except Exception:  # noqa: BLE001 - only host-restricted forks qualify
+                    allowed = None
+                if isinstance(allowed, set) and allowed:
+                    # The host enforces this thread's whitelist before the hook.
+                    return None
             session_turn = "other"
         # The plugin's own tools: any turn that is not the owner's. The host's
         # send_message: only ClawChat turns the owner did not start, so another

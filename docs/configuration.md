@@ -1427,6 +1427,9 @@ one trusted non-owner, that non-owner is the requester regardless of message
 order. Two or more non-owners create no request context. Deny, mixed-turn blocks, unavailable capabilities
 and existing access send no card. Unclassified tools require an owner-created
 exact-tool grant. Model arguments never determine requester identity or routing.
+For `cross-chat` requests, only unexpired explicit tool, capability or `all`
+rules with mode `direct` or `ask` count as existing access; public current-chat
+defaults do not.
 
 One transaction checks the person × capability six-hour cooldown and the
 Agent-wide rolling 24-hour limit of 20 request cards, reserves a code in
@@ -1489,7 +1492,8 @@ requester's grants:
 - Authorization-card wakeups (`grant-receipt`), with trusted origin attached
   inside the plugin, resume as the requester with current grants as above.
 - Background process completions (`process-completion`) from a successful
-  `terminal` call with both `background: true` and `notify_on_complete: true`.
+  `terminal` call with both `background: true` and `notify: true` (older hosts:
+  `notify_on_complete: true`). Explicit `notify` takes precedence over the old flag.
   With grants enabled, `post_tool_call` records the process ID, starting turn's
   plugin nonce, non-owner speaker set, account, chat and session route. Only a
   host `internal=True` event can match: metadata `notification_origin` must be
@@ -1522,6 +1526,12 @@ start a turn in the owner's chat. If the host adds a tool that can start turns
 in another session before the plugin's audited route inventory is updated,
 that premise breaks. The plugin's own synthetic-turn rules described above
 remain unchanged.
+
+Host background review forks with a nonempty thread tool whitelist also use
+ordinary owner tools in the owner's direct-chat session, subject to the host's
+whitelist, when no snapshot is bound to the fork and any pending snapshot is
+owner-side. They gain no verified-owner status and cannot use the four
+authorization tools. Forks in guest or group sessions gain no additional access.
 
 ## Reconnect, heartbeat, ack
 

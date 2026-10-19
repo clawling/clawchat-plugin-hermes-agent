@@ -301,6 +301,35 @@ def test_successful_bound_background_completion_is_registered(origins):
         kind="trusted-origin", source="process-completion", requester_user_id="usr_guest")
 
 
+@pytest.mark.parametrize("notification,registered", [
+    ({"notify": True}, True),
+    ({"notify": False, "notify_on_complete": True}, False),
+    ({"notify_on_complete": True}, True),
+    ({}, False),
+    ({"notify": 1}, False),
+    ({"notify": None, "notify_on_complete": True}, False),
+    ({"notify": ["ready"], "notify_on_complete": True}, False),
+])
+def test_process_notification_intent_uses_explicit_notify(origins, notification, registered):
+    nonce = origins(args={"background": True, **notification})
+    origin = resolve_origin_grant_context(completion(nonce))
+    assert origin == (dict(kind="trusted-origin", source="process-completion",
+                           requester_user_id="usr_guest") if registered else "unknown")
+
+
+@pytest.mark.asyncio
+async def test_notify_true_completion_inherits_current_terminal_grant(origins, dispatch, harness, host):
+    nonce = origins(args={"background": True, "notify": True})
+    harness.rows[:] = [rule()]
+    event = completion(nonce)
+    await dispatch(event)
+    snapshot = turns.get_snapshot(event.source.message_id)
+    assert snapshot and snapshot.non_owner_speakers == {"usr_guest"} and not snapshot.owner_side
+    with host(**context(snapshot)):
+        guard.clawchat_pre_llm_call(session_id="s", turn_id="t")
+        assert call("terminal", turn_id="t") is None
+
+
 @pytest.mark.parametrize("changes", [
     {"owner": True, "speakers": ("usr_owner",)}, {"legacy": True, "speakers": ()},
     {"speakers": ()}, {"speakers": ("",)}, {"speakers": (" ",)},

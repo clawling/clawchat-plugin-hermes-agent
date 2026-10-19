@@ -42,7 +42,9 @@ def request_grant_block(grants, capability, non_owner_count=1, *, available=None
     tools = TOOL_CAPABILITIES[capability]['tools']
     if available is not None:
         tools = [tool for tool in tools if tool in available]
-    modes = [evaluate_tool_grant(grants, tool, now=now) for tool in tools]
+    # No destination: evaluate cross-chat requests without current-chat defaults.
+    context = {"chat_id": ""} if capability == "cross-chat" else None
+    modes = [evaluate_tool_grant(grants, tool, context=context, now=now) for tool in tools]
     if not modes:
         return 'not-available'
     if all(mode in ('direct', 'ask') for mode in modes):
