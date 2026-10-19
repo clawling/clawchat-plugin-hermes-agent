@@ -275,6 +275,7 @@ def test_no_proxy_direct_route_retains_private_checks(tmp_path, server, proxy_se
     "localhost", "a.localhost", "LOCALHOST.",
     # IDNA maps U+3002 to "." before CONNECT; trailing-dot numeric literal.
     "127\u30020\u30020\u30021", "localhost\u3002", "127.0.0.1.",
+    "%31%32%37.0.0.1",
 ])
 def test_proxy_never_receives_private_literals_or_localhost(tmp_path, proxy_server, monkeypatch, caplog, host):
     monkeypatch.setenv("HTTPS_PROXY", proxy_server.url)
@@ -1102,3 +1103,7 @@ def test_adapter_passes_limits_and_no_token(monkeypatch, make_config):
         allow_http=True, allow_private_network=True, proxy_mode="on", max_bytes=100,
         timeout_seconds=0.2, deadline_seconds=0.4,
     ))]
+
+
+def test_ipv6_zone_name_keeps_its_case():
+    assert media._normalize_inbound_host("FE80::1%En0") == "fe80::1%En0"

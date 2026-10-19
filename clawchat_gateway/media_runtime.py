@@ -542,8 +542,11 @@ def _connect_inbound_media(host, port, ips, *, https, timeout, remaining, tunnel
 
 
 def _normalize_inbound_host(host: str) -> str:
-    if ":" in host:  # IPv6 literal
-        return host.lower()
+    if ":" in host:  # IPv6 literal; a zone name after "%" is case-sensitive
+        address, sep, zone = host.partition("%")
+        return address.lower() + sep + zone
+    if "%" in host:  # a proxy might decode it after the local checks
+        raise InboundMediaRejected("address")
     try:
         return host.encode("idna").decode("ascii").lower()
     except UnicodeError:
