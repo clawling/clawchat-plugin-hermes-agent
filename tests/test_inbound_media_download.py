@@ -5,10 +5,21 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import os
 from email.message import Message
 from types import SimpleNamespace
 
+import pytest
+
 from clawchat_gateway import media_runtime
+
+
+@pytest.fixture(autouse=True)
+def isolate_environment_proxies(monkeypatch):
+    # The default proxy mode follows *_proxy variables; keep the host's out.
+    for name in list(os.environ):
+        if name.lower().endswith("_proxy"):
+            monkeypatch.delenv(name)
 
 
 class _Resp(io.BytesIO):

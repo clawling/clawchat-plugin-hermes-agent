@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import http.client
+import ipaddress
 import json
 import logging
 import mimetypes
@@ -11,6 +13,7 @@ import ssl
 import sys
 import threading
 import time
+import urllib.request
 import uuid
 from pathlib import Path
 from collections.abc import Sequence
@@ -18,6 +21,7 @@ from dataclasses import dataclass
 from urllib.parse import unquote, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
+from clawchat_gateway.config import DEFAULT_MEDIA_PROXY_MODE
 from clawchat_gateway.local_paths import (
     _public_address, is_denied_hermes_path, local_attachment_allowed,
     legacy_attachment_allowed, remote_media_allowed,
@@ -356,7 +360,35 @@ _INBOUND_REASONS = {
     "redirect": "redirect missing location or limit reached",
     "size": "attachment exceeds size limit",
     "deadline": "attachment deadline exceeded",
+    "proxy": "proxy is required but unavailable or unsupported",
 }
+
+_INBOUND_PROXY_WARNING_LOCK = threading.Lock()
+_INBOUND_PROXY_WARNED = False
+
+
+def _inbound_proxy(scheme: str, host: str, proxy_mode: str):
+    if proxy_mode == "off" or urllib.request.proxy_bypass(host):
+        return None
+    value = urllib.request.getproxies().get(scheme)
+    if not value:
+        if proxy_mode == "on":
+            raise InboundMediaRejected("proxy")
+        return None
+    try:
+        proxy = urlparse(value)
+        if proxy.scheme == "http" and proxy.hostname and (proxy.port is None or proxy.port > 0):
+            return proxy
+    except ValueError:
+        pass
+    if proxy_mode == "on":
+        raise InboundMediaRejected("proxy")
+    global _INBOUND_PROXY_WARNED
+    with _INBOUND_PROXY_WARNING_LOCK:
+        if not _INBOUND_PROXY_WARNED:
+            _INBOUND_PROXY_WARNED = True
+            logger.warning("clawchat inbound media: unsupported environment proxy; using direct connection")
+    return None
 
 
 class _InboundMediaHTTPError(OSError):
@@ -455,12 +487,45 @@ class _InboundHTTPSConnection(_PublicHTTPSConnection):
             raise
 
 
-def _connect_inbound_media(host, port, ips, *, https, timeout, remaining):
+class _InboundProxyHTTPSConnection(_InboundHTTPConnection):
+    def __init__(self, *args, tunnel, proxy_headers, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._context = ssl.create_default_context()
+        self.set_tunnel(*tunnel, headers=proxy_headers)
+
+    def connect(self):
+        super().connect()
+        sock = self.sock
+
+        def expire():
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+        # CONNECT headers can trickle indefinitely despite a socket timeout.
+        watchdog = threading.Timer(self._remaining(), expire)
+        watchdog.daemon = True
+        try:
+            watchdog.start()
+            sock.settimeout(min(self.timeout, self._remaining()))
+            self._tunnel()
+        finally:
+            watchdog.cancel()
+        sock.settimeout(min(self.timeout, self._remaining()))
+        self.sock = self._context.wrap_socket(sock, server_hostname=self._tunnel_host)
+        self._remaining()
+
+
+def _connect_inbound_media(host, port, ips, *, https, timeout, remaining, tunnel=None, proxy_headers=None):
     connection_type = _InboundHTTPSConnection if https else _InboundHTTPConnection
+    if tunnel is not None:
+        connection_type = _InboundProxyHTTPSConnection
     last_error = None
     for ip in dict.fromkeys(ips):
         remaining()
-        connection = connection_type(host, port, ip=ip, timeout=timeout, remaining=remaining)
+        kwargs = dict(tunnel=tunnel, proxy_headers=proxy_headers) if tunnel is not None else {}
+        connection = connection_type(host, port, ip=ip, timeout=timeout, remaining=remaining, **kwargs)
         try:
             connection.connect()
             remaining()
@@ -482,6 +547,7 @@ def _download_inbound_media_sync(
     download_dir: Path,
     allow_http: bool = False,
     allow_private_network: bool = False,
+    proxy_mode: str = DEFAULT_MEDIA_PROXY_MODE,
     max_bytes: int = 104857600,
     timeout_seconds: float = 30,
     deadline_seconds: float = 300,
@@ -514,13 +580,30 @@ def _download_inbound_media_sync(
             or host.lower().rstrip(".").endswith(".localhost")
         ):
             raise InboundMediaRejected("address")
-        addresses = _resolve_inbound_host(host, port, remaining())
-        if not allow_private_network and not all(_public_address(a[4][0]) for a in addresses):
+        try:
+            literal = ipaddress.ip_address(host)
+        except ValueError:
+            try:
+                # Recognize legacy numeric IPv4 spellings without doing DNS.
+                literal = ipaddress.ip_address(socket.inet_aton(host))
+            except OSError:
+                literal = None
+        if literal is not None and not allow_private_network and not _public_address(str(literal)):
             raise InboundMediaRejected("address")
-        # Bypass environment proxies so the checked address is the connected address.
+        proxy = _inbound_proxy(parsed.scheme, host, proxy_mode)
+        connect_host, connect_port = (proxy.hostname, proxy.port or 80) if proxy else (host, port)
+        addresses = _resolve_inbound_host(connect_host, connect_port, remaining())
+        if not proxy and not allow_private_network and not all(_public_address(a[4][0]) for a in addresses):
+            raise InboundMediaRejected("address")
+        proxy_headers = {}
+        if proxy and proxy.username is not None:
+            credentials = f"{unquote(proxy.username)}:{unquote(proxy.password or '')}"
+            proxy_headers["Proxy-Authorization"] = "Basic " + base64.b64encode(credentials.encode()).decode("ascii")
         connection = _connect_inbound_media(
-            host, port, (a[4][0] for a in addresses), https=parsed.scheme == "https",
+            connect_host, connect_port, (a[4][0] for a in addresses), https=parsed.scheme == "https",
             timeout=timeout_seconds, remaining=remaining,
+            tunnel=(host, port) if proxy and parsed.scheme == "https" else None,
+            proxy_headers=proxy_headers,
         )
         partial_path = None
         watchdog = None
@@ -543,7 +626,11 @@ def _download_inbound_media_sync(
             if port != default_port:
                 host_header += f":{port}"
             target = urlunparse(("", "", parsed.path or "/", parsed.params, parsed.query, ""))
-            connection.request("GET", target, headers={"Host": host_header, "User-Agent": _USER_AGENT})
+            headers = {"Host": host_header, "User-Agent": _USER_AGENT}
+            if proxy and parsed.scheme == "http":
+                target = urlunparse((parsed.scheme, host_header, parsed.path or "/", parsed.params, parsed.query, ""))
+                headers.update(proxy_headers)
+            connection.request("GET", target, headers=headers)
             with connection.getresponse() as response:
                 remaining()
                 if response.status in {301, 302, 303, 307, 308}:
@@ -751,6 +838,7 @@ async def download_inbound_media(
     media_base_url: str = "",
     allow_http: bool = False,
     allow_private_network: bool = False,
+    proxy_mode: str = DEFAULT_MEDIA_PROXY_MODE,
     max_bytes: int = 104857600,
     timeout_seconds: float = 30,
     deadline_seconds: float = 300,
@@ -774,6 +862,7 @@ async def download_inbound_media(
                 download_dir=Path(download_dir),
                 allow_http=allow_http,
                 allow_private_network=allow_private_network,
+                proxy_mode=proxy_mode,
                 max_bytes=max_bytes,
                 timeout_seconds=timeout_seconds,
                 deadline_seconds=deadline_seconds,

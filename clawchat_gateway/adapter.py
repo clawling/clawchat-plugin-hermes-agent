@@ -6272,6 +6272,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             media_base_url=self._clawchat_config.media_base_url,
             allow_http=self._clawchat_config.media_allow_http,
             allow_private_network=self._clawchat_config.media_allow_private_network,
+            proxy_mode=self._clawchat_config.media_proxy_mode,
             max_bytes=self._clawchat_config.media_max_bytes,
             timeout_seconds=self._clawchat_config.media_download_timeout_seconds,
             deadline_seconds=self._clawchat_config.media_download_deadline_seconds,

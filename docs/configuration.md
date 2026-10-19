@@ -1656,6 +1656,7 @@ actual backstop against a leaked keepalive that never sends a
 | —                                      | `media_download_dir`  | `/tmp/clawchat-media`    | Where inbound media gets staged. |
 | `CLAWCHAT_MEDIA_ALLOW_HTTP` | `media_allow_http` | `false` | Also allow HTTP for inbound downloads, including redirects. HTTPS is always allowed. |
 | `CLAWCHAT_MEDIA_ALLOW_PRIVATE_NETWORK` | `media_allow_private_network` | `false` | Skip inbound public-address checks, including the localhost hostname restriction. For local development / testing only; scheme checks still apply. |
+| `CLAWCHAT_MEDIA_PROXY_MODE` | `media_proxy_mode` | `"auto"` | Environment proxy routing: `auto`, `on`, or `off` (case-insensitive). Invalid values fall back to `auto` with a warning at config load. Only `http://` proxies are supported. |
 | `CLAWCHAT_MEDIA_MAX_BYTES` | `media_max_bytes` | `104857600` (100 MiB) | Maximum bytes per inbound attachment. Invalid or non-positive values fall back to the default. |
 | `CLAWCHAT_MEDIA_DOWNLOAD_TIMEOUT_SECONDS` | `media_download_timeout_seconds` | `30` | Socket connection / individual read timeout in seconds. Accepts fractional seconds; invalid or non-positive values fall back to the default. |
 | `CLAWCHAT_MEDIA_DOWNLOAD_DEADLINE_SECONDS` | `media_download_deadline_seconds` | `300` | Total time limit in seconds for one inbound attachment, across resolution and redirects. Accepts fractional seconds; invalid or non-positive values fall back to the default. |
@@ -1665,21 +1666,51 @@ actual backstop against a leaked keepalive that never sends a
 Inbound downloads allow HTTPS only; `media_allow_http` explicitly enables HTTP.
 Relative URLs use the media base derived from the settings above and undergo the
 same checks. Non-HTTP(S) schemes are rejected before joining a URL to its base.
-Each hop resolves the hostname once, rejects the request if **any** resolved
-address is not public unicast, and connects to a validated IP while retaining
+For a direct connection, each hop resolves the hostname once, rejects the
+request if **any** resolved address is not public unicast, and connects to a validated IP while retaining
 the hostname for Host and TLS verification. Localhost names are also rejected.
 Connection failures try the remaining distinct validated IPs in order without
 resolving again. TCP connection and TLS handshake each use a timeout capped by
 the remaining attachment deadline. At most four inbound DNS lookups may remain
 pending; further lookups are rejected until a slot becomes available.
-Every redirect repeats these checks, with at most five redirects; HTTPS-to-HTTP
-redirects require the HTTP opt-in too. Backslashes in redirect destinations are
+Every redirect chooses its route again and repeats the applicable checks, with
+at most five redirects; HTTPS-to-HTTP redirects require the HTTP opt-in too.
+Backslashes in redirect destinations are
 normalized before resolving and validating their target host.
 
-Downloads **never attach Authorization**, even for URLs on the configured base
-origin: media URLs must be public or presigned GET URLs. Downloads bypass
-environment proxies so address validation applies to the actual connection.
-Environments that require an HTTP proxy must provide direct media connectivity.
+`media_proxy_mode` controls environment proxies on every hop:
+
+- `auto` (default): use the target scheme's proxy from Python's
+  `urllib.request.getproxies()` (including `HTTP_PROXY` / `HTTPS_PROXY`). Without
+  a proxy for that scheme, connect directly with full address validation.
+  Unsupported proxy URLs, including `socks5://`, fall back to direct connections
+  with a warning once per process; the warning omits the proxy URL.
+- `on`: require a supported proxy for that scheme. A missing or unsupported
+  proxy rejects the download.
+- `off`: always connect directly with full DNS / public-address checks and IP
+  pinning, ignoring environment proxies.
+
+In `auto` and `on`, a hostname matched by `urllib.request.proxy_bypass(host)`
+(`no_proxy` / `NO_PROXY`) takes the direct path with full address validation.
+This also applies after redirects. Only `http://` proxy URLs are supported:
+HTTPS targets use CONNECT followed by TLS with target hostname verification;
+HTTP targets use an absolute-URI GET and still require `media_allow_http`.
+The proxy itself may have a private address.
+
+**Residual risk:** when `auto` (default) or `on` uses a proxy, target hostname
+DNS resolution and private-network checks are delegated to that proxy. The
+plugin rejects private, loopback and link-local IP literals before contacting
+the proxy, and rejects localhost names, unless `media_allow_private_network`
+is enabled. It does not resolve other target hostnames locally. If the proxy
+can access private networks, the plugin cannot prevent a request whose
+hostname resolves to an internal address. Set `media_proxy_mode: "off"` for
+strict local destination validation (and leave `media_allow_private_network`
+disabled).
+
+Downloads **never attach Authorization** to the target, even for URLs on the
+configured base origin: media URLs must be public or presigned GET URLs.
+Proxy URL userinfo is sent only as Basic `Proxy-Authorization` to the proxy
+(on CONNECT for HTTPS), and never logged or sent through the tunnel.
 
 The default limit is 100 MiB per attachment. An oversized Content-Length is
 rejected immediately; bodies stream in 64 KiB chunks with the same byte limit.
@@ -1688,7 +1719,7 @@ The socket timeout defaults to 30 seconds and the total attachment deadline to
 after a complete download. A rejected or failed attachment is logged without
 URL userinfo, queries or fragments and skipped; remaining attachments and the
 text message continue normally. Environment values take precedence over the
-matching extra keys for all five settings.
+matching extra keys for all six inbound download settings.
 
 ### `media_local_roots` no longer scopes outbound delivery
 

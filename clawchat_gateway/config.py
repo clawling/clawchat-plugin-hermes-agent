@@ -12,6 +12,19 @@ from clawchat_gateway.hermes_home import hermes_home
 from clawchat_gateway.tool_grants import TOOL_GRANTS_CONFIG_KEY
 
 logger = logging.getLogger("clawchat_gateway.config")
+DEFAULT_MEDIA_PROXY_MODE = "auto"
+
+
+def _read_media_proxy_mode(value: Any) -> str:
+    # YAML 1.1 may parse unquoted on/off as booleans.
+    if isinstance(value, bool):
+        normalized = "on" if value else "off"
+    else:
+        normalized = str(value).strip().lower()
+    if normalized in {"auto", "on", "off"}:
+        return normalized
+    logger.warning("clawchat: invalid media_proxy_mode; using auto")
+    return DEFAULT_MEDIA_PROXY_MODE
 
 
 def _read_env_file_entry(name: str, *, strict: bool = False) -> tuple[bool, str]:
@@ -576,6 +589,7 @@ class ClawChatConfig:
     media_download_dir: str = "/tmp/clawchat-media"
     media_allow_http: bool = False
     media_allow_private_network: bool = False
+    media_proxy_mode: str = DEFAULT_MEDIA_PROXY_MODE
     media_max_bytes: int = 104857600
     media_download_timeout_seconds: float = 30.0
     media_download_deadline_seconds: float = 300.0
@@ -710,6 +724,10 @@ class ClawChatConfig:
                 _get_env("CLAWCHAT_MEDIA_ALLOW_PRIVATE_NETWORK")
                 or _get_config_value(extra, "media_allow_private_network", False)
             ) is True,
+            media_proxy_mode=_read_media_proxy_mode(
+                _get_env("CLAWCHAT_MEDIA_PROXY_MODE")
+                or _get_config_value(extra, "media_proxy_mode", DEFAULT_MEDIA_PROXY_MODE)
+            ),
             media_max_bytes=_read_media_limit(
                 _get_env("CLAWCHAT_MEDIA_MAX_BYTES")
                 or _get_config_value(extra, "media_max_bytes", 104857600), 104857600,

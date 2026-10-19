@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import http.client
 import logging
 import os
+import select
 import socket
 import threading
 import time
@@ -16,6 +19,14 @@ from urllib.parse import urlsplit
 import pytest
 
 from clawchat_gateway import adapter, config, media_runtime as media
+
+
+@pytest.fixture(autouse=True)
+def isolate_environment_proxies(monkeypatch):
+    for name in list(os.environ):
+        if name.lower().endswith("_proxy"):
+            monkeypatch.delenv(name)
+    monkeypatch.setattr(media, "_INBOUND_PROXY_WARNED", False)
 
 
 def addresses(*ips, port=80):
@@ -105,6 +116,252 @@ def public_server(server, monkeypatch):
     monkeypatch.setattr(media, "_resolve_host", lambda host, port: addresses("127.0.0.1", port=port))
     monkeypatch.setattr(media, "_public_address", lambda ip: ip == "127.0.0.1")
     return server
+
+
+@pytest.fixture
+def proxy_server(server, monkeypatch):
+    requests = []
+    resolutions = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append((self.requestline, dict(self.headers)))
+            parsed = urlsplit(self.path)
+            assert parsed.hostname == "media.example.test" and parsed.port == server.port
+            upstream = http.client.HTTPConnection("127.0.0.1", server.port, timeout=2)
+            try:
+                target = parsed.path or "/"
+                if parsed.query:
+                    target += "?" + parsed.query
+                headers = {name: value for name, value in self.headers.items()
+                           if name.lower() != "proxy-authorization"}
+                upstream.request("GET", target, headers=headers)
+                response = upstream.getresponse()
+                self.send_response(response.status)
+                for name, value in response.getheaders():
+                    self.send_header(name, value)
+                self.end_headers()
+                self.wfile.write(response.read())
+            finally:
+                upstream.close()
+
+        def do_CONNECT(self):
+            requests.append((self.requestline, dict(self.headers)))
+            assert self.path == f"media.example.test:{server.port}"
+            with socket.create_connection(("127.0.0.1", server.port), timeout=2) as upstream:
+                self.send_response(200, "Connection established")
+                self.end_headers()
+                self.wfile.flush()
+                peers = [self.connection, upstream]
+                while True:
+                    ready, _, _ = select.select(peers, [], [], 2)
+                    if not ready:
+                        break
+                    for source in ready:
+                        data = source.recv(65536)
+                        if not data:
+                            return
+                        destination = upstream if source is self.connection else self.connection
+                        destination.sendall(data)
+
+        def log_message(self, *args):
+            pass
+
+    def resolve(host, port):
+        resolutions.append((host, port))
+        assert host == "127.0.0.1", "proxy route must not resolve the target hostname"
+        return addresses(host, port=port)
+
+    monkeypatch.setattr(media, "_resolve_host", resolve)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    worker = threading.Thread(target=lambda: httpd.serve_forever(poll_interval=0.01), daemon=True)
+    worker.start()
+    try:
+        yield SimpleNamespace(
+            requests=requests, resolutions=resolutions, port=httpd.server_port,
+            url=f"http://127.0.0.1:{httpd.server_port}",
+        )
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        worker.join(timeout=2)
+
+
+@pytest.mark.parametrize("scheme", ["http", "https"])
+@pytest.mark.parametrize("mode", [None, "on"])
+def test_environment_proxy_get_and_connect(tmp_path, server, proxy_server, monkeypatch, scheme, mode):
+    monkeypatch.setenv(f"{scheme.upper()}_PROXY", proxy_server.url)
+    tls_hosts = []
+
+    def wrap(sock, server_hostname):
+        tls_hosts.append(server_hostname)
+        return sock
+
+    monkeypatch.setattr(media.ssl, "create_default_context", lambda: SimpleNamespace(wrap_socket=wrap))
+    kwargs = {} if mode is None else {"proxy_mode": mode}
+    url = server.url("/a.png?signature=test#fragment", scheme=scheme)
+    got = download(tmp_path, [url], allow_http=scheme == "http", **kwargs)
+    assert got[0].local_path.read_bytes() == b"image"
+    assert proxy_server.resolutions == [("127.0.0.1", proxy_server.port)]
+    requestline, headers = proxy_server.requests[0]
+    expected = f"CONNECT media.example.test:{server.port} " if scheme == "https" else f"GET {url.split('#')[0]} "
+    assert requestline.startswith(expected)
+    assert tls_hosts == (["media.example.test"] if scheme == "https" else [])
+    for received in [headers, server.requests[0][1]]:
+        assert "authorization" not in {key.lower() for key in received}
+    assert "proxy-authorization" not in {key.lower() for key in server.requests[0][1]}
+
+
+def test_auto_without_proxy_still_checks_private_dns(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(media, "_resolve_host", lambda host, port: addresses("127.0.0.1", port=port))
+    monkeypatch.setattr(socket, "create_connection", forbidden)
+    assert download(tmp_path, ["https://media.example.test/a"]) == []
+    assert "destination address is not allowed" in caplog.text
+
+
+def test_off_ignores_environment_proxy(tmp_path, public_server, proxy_server, monkeypatch):
+    # proxy_server installs a resolver too; restore the direct fixture's mapping.
+    monkeypatch.setattr(media, "_resolve_host", lambda host, port: addresses("127.0.0.1", port=port))
+    monkeypatch.setenv("HTTP_PROXY", proxy_server.url)
+    monkeypatch.setattr(media.urllib.request, "getproxies", forbidden)
+    monkeypatch.setattr(media.urllib.request, "proxy_bypass", forbidden)
+    assert len(download(tmp_path, [public_server.url()], allow_http=True, proxy_mode="off")) == 1
+    assert proxy_server.requests == []
+
+
+@pytest.mark.parametrize("value", [None, "socks5://127.0.0.1:9999", "http://[invalid"])
+def test_on_requires_supported_proxy(tmp_path, monkeypatch, caplog, value):
+    if value is not None:
+        monkeypatch.setenv("HTTPS_PROXY", value)
+    monkeypatch.setattr(media, "_resolve_host", forbidden)
+    monkeypatch.setattr(socket, "create_connection", forbidden)
+    assert download(tmp_path, ["https://media.example.test/a"], proxy_mode="on") == []
+    assert "proxy is required but unavailable or unsupported" in caplog.text
+    assert not list(tmp_path.iterdir())
+
+
+def test_auto_unsupported_proxy_warns_once_without_url_and_validates_direct(tmp_path, monkeypatch, caplog):
+    proxy_url = "socks5://user:pw@127.0.0.1:9999"  # redact-allow:email
+    monkeypatch.setenv("HTTPS_PROXY", proxy_url)
+    monkeypatch.setattr(media, "_resolve_host", lambda host, port: addresses("127.0.0.1", port=port))
+    monkeypatch.setattr(socket, "create_connection", forbidden)
+    for _ in range(2):
+        assert download(tmp_path, ["https://media.example.test/a"]) == []
+    assert caplog.text.count("unsupported environment proxy") == 1
+    assert caplog.text.count("destination address is not allowed") == 2
+    for secret in (proxy_url, "user", "pw", "socks5", "9999"):
+        assert secret not in caplog.text
+
+
+@pytest.mark.parametrize("mode", ["auto", "on"])
+@pytest.mark.parametrize("has_proxy", [True, False])
+def test_no_proxy_direct_route_retains_private_checks(tmp_path, server, proxy_server, monkeypatch, caplog, mode, has_proxy):
+    if has_proxy:
+        monkeypatch.setenv("HTTP_PROXY", proxy_server.url)
+    monkeypatch.setenv("no_proxy", "media.example.test")
+    monkeypatch.setattr(media, "_resolve_host", lambda host, port: addresses("127.0.0.1", port=port))
+    assert download(tmp_path, [server.url()], allow_http=True, proxy_mode=mode) == []
+    assert "destination address is not allowed" in caplog.text
+    assert proxy_server.requests == [] and server.requests == []
+    monkeypatch.setattr(media, "_public_address", lambda ip: ip == "127.0.0.1")
+    assert len(download(tmp_path, [server.url()], allow_http=True, proxy_mode=mode)) == 1
+    assert proxy_server.requests == []
+
+
+@pytest.mark.parametrize("host", [
+    "127.0.0.1", "192.168.1.1", "172.16.0.1",  # redact-allow:private-ip
+    "169.254.169.254", "[::1]", "[fe80::1]", "[::ffff:127.0.0.1]",
+    "2130706433", "0177.0.0.1", "0x7f.0.0.1",
+    "localhost", "a.localhost", "LOCALHOST.",
+])
+def test_proxy_never_receives_private_literals_or_localhost(tmp_path, proxy_server, monkeypatch, caplog, host):
+    monkeypatch.setenv("HTTPS_PROXY", proxy_server.url)
+    monkeypatch.setattr(media, "_resolve_host", forbidden)
+    monkeypatch.setattr(socket, "create_connection", forbidden)
+    assert download(tmp_path, [f"https://{host}/a"]) == []
+    assert "destination address is not allowed" in caplog.text
+    assert proxy_server.requests == []
+
+
+@pytest.mark.parametrize("location", ["file:///nonexistent/a", "http://media.example.test/a"])
+def test_proxy_redirect_scheme_is_rechecked(tmp_path, server, proxy_server, monkeypatch, caplog, location):
+    monkeypatch.setenv("HTTPS_PROXY", proxy_server.url)
+    monkeypatch.setattr(media.ssl, "create_default_context", lambda: SimpleNamespace(wrap_socket=lambda sock, **kw: sock))
+    server.routes["/start"] = Route(302, {"Location": location})
+    assert download(tmp_path, [server.url("/start", scheme="https")]) == []
+    assert "URL scheme is not allowed" in caplog.text
+    assert len(proxy_server.requests) == 1
+    assert [path for path, _ in server.requests] == ["/start"]
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("mode", ["auto", "on"])
+@pytest.mark.parametrize("public", [True, False])
+def test_proxy_redirect_to_no_proxy_checks_dns(tmp_path, server, proxy_server, monkeypatch, caplog, mode, public):
+    proxy_url = f"http://user:pw@127.0.0.1:{proxy_server.port}"  # redact-allow:email
+    monkeypatch.setenv("HTTP_PROXY", proxy_url)
+    monkeypatch.setenv("NO_PROXY", "direct.example.test")
+    server.routes["/start"] = Route(302, {"Location": server.url("/end", host="direct.example.test")})
+    resolved = []
+
+    def resolve(host, port):
+        resolved.append((host, port))
+        assert host in {"127.0.0.1", "direct.example.test"}
+        return addresses("127.0.0.1", port=port)
+
+    monkeypatch.setattr(media, "_resolve_host", resolve)
+    if public:
+        monkeypatch.setattr(media, "_public_address", lambda ip: ip == "127.0.0.1")
+    got = download(tmp_path, [server.url("/start")], allow_http=True, proxy_mode=mode)
+    assert len(got) == int(public)
+    assert resolved == [("127.0.0.1", proxy_server.port), ("direct.example.test", server.port)]
+    assert len(proxy_server.requests) == 1
+    assert "Proxy-Authorization" in proxy_server.requests[0][1]
+    assert [path for path, _ in server.requests] == (["/start", "/end"] if public else ["/start"])
+    assert all(not any("authorization" in key.lower() for key in headers) for _, headers in server.requests)
+    if not public:
+        assert "destination address is not allowed" in caplog.text
+
+
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_proxy_userinfo_only_authenticates_proxy(tmp_path, server, proxy_server, monkeypatch, caplog, scheme):
+    proxy_url = f"http://user:pw@127.0.0.1:{proxy_server.port}"  # redact-allow:email
+    monkeypatch.setenv(f"{scheme.upper()}_PROXY", proxy_url)
+    monkeypatch.setattr(media.ssl, "create_default_context", lambda: SimpleNamespace(wrap_socket=lambda sock, **kw: sock))
+    server.routes["/bad"] = Route(403)
+    assert download(tmp_path, [server.url("/bad", scheme=scheme)], allow_http=scheme == "http") == []
+    requestline, headers = proxy_server.requests[0]
+    expected = "Basic " + base64.b64encode(b"user:pw").decode()
+    assert headers["Proxy-Authorization"] == expected
+    assert "user" not in requestline and "pw" not in requestline
+    assert "authorization" not in {key.lower() for key in headers}
+    assert not any("authorization" in key.lower() for key in server.requests[0][1])
+    assert "HTTP status 403" in caplog.text
+    for secret in (proxy_url, "user", "pw", expected):
+        assert secret not in caplog.text
+
+
+@pytest.mark.parametrize("mode", ["auto", "on"])
+def test_proxy_selection_requires_target_scheme(tmp_path, monkeypatch, caplog, mode):
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9999")
+    monkeypatch.setattr(media, "_resolve_host", lambda host, port: addresses("127.0.0.1", port=port))
+    monkeypatch.setattr(socket, "create_connection", forbidden)
+    assert download(tmp_path, ["https://media.example.test/a"], proxy_mode=mode) == []
+    expected = "destination address is not allowed" if mode == "auto" else "proxy is required"
+    assert expected in caplog.text
+
+
+@pytest.mark.parametrize("scheme", ["http", "https"])
+@pytest.mark.parametrize("declared", [True, False])
+def test_proxy_size_limit_cleans_partial_files(tmp_path, server, proxy_server, monkeypatch, caplog, scheme, declared):
+    monkeypatch.setenv(f"{scheme.upper()}_PROXY", proxy_server.url)
+    monkeypatch.setattr(media.ssl, "create_default_context", lambda: SimpleNamespace(wrap_socket=lambda sock, **kw: sock))
+    headers = {"Content-Length": "9"} if declared else {}
+    server.routes["/large"] = Route(headers=headers, body=b"oversized")
+    assert download(tmp_path, [server.url("/large", scheme=scheme)],
+                    allow_http=scheme == "http", max_bytes=4) == []
+    assert "attachment exceeds size limit" in caplog.text
+    assert not list(tmp_path.iterdir())
 
 
 @pytest.mark.parametrize("value", ["ftp://files.example.test/a", "data:text/plain,hello", "javascript:void(0)", "C:/clawchat-test.txt"])
@@ -439,7 +696,7 @@ def test_same_base_origin_has_no_authorization(tmp_path, public_server):
     assert "authorization" not in {name.lower() for name in public_server.requests[0][1]}
 
 
-def test_environment_proxies_and_urlopen_are_bypassed(tmp_path, public_server, monkeypatch):
+def test_off_bypasses_environment_proxies_and_urlopen(tmp_path, public_server, monkeypatch):
     monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:1")
     monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:1")
@@ -453,7 +710,7 @@ def test_environment_proxies_and_urlopen_are_bypassed(tmp_path, public_server, m
         return real_connect(address, timeout)
 
     monkeypatch.setattr(socket, "create_connection", connect)
-    assert len(download(tmp_path, [public_server.url()], allow_http=True)) == 1
+    assert len(download(tmp_path, [public_server.url()], allow_http=True, proxy_mode="off")) == 1
     assert connected == [("127.0.0.1", public_server.port)]
 
 
@@ -720,9 +977,10 @@ def test_injected_downloader_receives_only_new_keyword_parameters(tmp_path):
         return media.DownloadedMedia(tmp_path / "a.png", "image/png", 5, kwargs["url"])
 
     assert len(download(tmp_path, ["/a.png"], download_file=injected, allow_http=True,
-                        allow_private_network=True, max_bytes=19, timeout_seconds=0.2, deadline_seconds=0.4)) == 1
+                        allow_private_network=True, proxy_mode="on", max_bytes=19,
+                        timeout_seconds=0.2, deadline_seconds=0.4)) == 1
     assert seen == [dict(url="https://media.example.test/a.png", download_dir=tmp_path,
-                         allow_http=True, allow_private_network=True, max_bytes=19,
+                         allow_http=True, allow_private_network=True, proxy_mode="on", max_bytes=19,
                          timeout_seconds=0.2, deadline_seconds=0.4)]
 
 
@@ -730,6 +988,7 @@ MEDIA_DEFAULTS = {
     "media_allow_http": False, "media_allow_private_network": False,
     "media_max_bytes": 104857600, "media_download_timeout_seconds": 30,
     "media_download_deadline_seconds": 300,
+    "media_proxy_mode": "auto",
 }
 
 
@@ -773,10 +1032,41 @@ def test_config_env_overrides_extra(make_config, monkeypatch):
     assert make_config().media_allow_private_network is True
 
 
+@pytest.mark.parametrize("value,expected", [
+    ("AUTO", "auto"), ("On", "on"), (" OFF ", "off"),
+    (True, "on"), (False, "off"),
+])
+def test_config_proxy_mode_extra_is_case_insensitive(make_config, value, expected):
+    assert make_config({"media_proxy_mode": value}).media_proxy_mode == expected
+
+
+@pytest.mark.parametrize("value,expected", [("AuTo", "auto"), (" ON ", "on"), ("OFF", "off")])
+def test_config_proxy_mode_env_overrides_extra(make_config, monkeypatch, value, expected):
+    monkeypatch.setenv("CLAWCHAT_MEDIA_PROXY_MODE", value)
+    assert make_config({"media_proxy_mode": "invalid"}).media_proxy_mode == expected
+
+
+@pytest.mark.parametrize("source", ["extra", "env"])
+@pytest.mark.parametrize("value", [None, "", "invalid", "socks5", 1, [], {}])
+def test_config_invalid_proxy_mode_falls_back_and_warns_once(make_config, monkeypatch, caplog, source, value):
+    extra = {"media_proxy_mode": value}
+    if source == "env":
+        monkeypatch.setenv("CLAWCHAT_MEDIA_PROXY_MODE", str(value))
+        extra = {"media_proxy_mode": "off"} if value != "" else {}
+    assert make_config(extra).media_proxy_mode == "auto"
+    expected = 0 if source == "env" and value == "" else 1
+    assert caplog.text.count("invalid media_proxy_mode") == expected
+
+
+def test_config_empty_proxy_mode_env_uses_extra(make_config, monkeypatch):
+    monkeypatch.setenv("CLAWCHAT_MEDIA_PROXY_MODE", "")
+    assert make_config({"media_proxy_mode": "off"}).media_proxy_mode == "off"
+
+
 @pytest.mark.parametrize("value", [None, "", "nonsense", "0", "-1", 0, -1, True, False, "nan", "inf", "-inf", float("inf")])
 @pytest.mark.parametrize("source", ["extra", "env"])
 def test_config_invalid_numeric_limits_fall_back(make_config, monkeypatch, value, source):
-    keys = list(MEDIA_DEFAULTS)[2:]
+    keys = [key for key, default in MEDIA_DEFAULTS.items() if type(default) in {int, float}]
     extra = {key: value for key in keys}
     if source == "env":
         for key in keys:
@@ -792,7 +1082,8 @@ def test_config_invalid_numeric_limits_fall_back(make_config, monkeypatch, value
 
 def test_adapter_passes_limits_and_no_token(monkeypatch, make_config):
     settings = make_config(dict(media_allow_http=True, media_allow_private_network=True, media_max_bytes=100,
-                                media_download_timeout_seconds=0.2, media_download_deadline_seconds=0.4))
+                                media_download_timeout_seconds=0.2, media_download_deadline_seconds=0.4,
+                                media_proxy_mode="on"))
     seen = []
 
     async def capture(urls, **kwargs):
@@ -806,6 +1097,6 @@ def test_adapter_passes_limits_and_no_token(monkeypatch, make_config):
     assert seen == [(inbound.media_urls, dict(
         base_url=settings.base_url, websocket_url=settings.websocket_url,
         download_dir=settings.media_download_dir, media_base_url=settings.media_base_url,
-        allow_http=True, allow_private_network=True, max_bytes=100,
+        allow_http=True, allow_private_network=True, proxy_mode="on", max_bytes=100,
         timeout_seconds=0.2, deadline_seconds=0.4,
     ))]
