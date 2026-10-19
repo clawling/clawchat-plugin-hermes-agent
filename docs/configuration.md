@@ -1654,6 +1654,36 @@ actual backstop against a leaked keepalive that never sends a
 | `CLAWCHAT_MEDIA_BASE_URL`              | `media_base_url`      | `""`                     | Overrides the host used for `/media/upload` and media downloads. When empty, the base is derived from `websocket_url` / `base_url` (`media_runtime.derive_base_url`). Trailing slashes are stripped. Set it when media is served from a different origin than the REST API. |
 | `CLAWCHAT_MEDIA_LOCAL_ROOTS`           | `media_local_roots`   | `()`                     | OS-pathsep-separated list (env) or array (extra). **Legacy / no longer restricting.** See below. |
 | —                                      | `media_download_dir`  | `/tmp/clawchat-media`    | Where inbound media gets staged. |
+| `CLAWCHAT_MEDIA_ALLOW_HTTP` | `media_allow_http` | `false` | Also allow HTTP for inbound downloads, including redirects. HTTPS is always allowed. |
+| `CLAWCHAT_MEDIA_ALLOW_PRIVATE_NETWORK` | `media_allow_private_network` | `false` | Skip inbound public-address checks, including the localhost hostname restriction. For local development / testing only; scheme checks still apply. |
+| `CLAWCHAT_MEDIA_MAX_BYTES` | `media_max_bytes` | `104857600` (100 MiB) | Maximum bytes per inbound attachment. Invalid or non-positive values fall back to the default. |
+| `CLAWCHAT_MEDIA_DOWNLOAD_TIMEOUT_SECONDS` | `media_download_timeout_seconds` | `30` | Socket connection / individual read timeout in seconds. Accepts fractional seconds; invalid or non-positive values fall back to the default. |
+| `CLAWCHAT_MEDIA_DOWNLOAD_DEADLINE_SECONDS` | `media_download_deadline_seconds` | `300` | Total time limit in seconds for one inbound attachment, across resolution and redirects. Accepts fractional seconds; invalid or non-positive values fall back to the default. |
+
+### Inbound media downloads
+
+Inbound downloads allow HTTPS only; `media_allow_http` explicitly enables HTTP.
+Relative URLs use the media base derived from the settings above and undergo the
+same checks. Non-HTTP(S) schemes are rejected before joining a URL to its base.
+Each hop resolves the hostname once, rejects the request if **any** resolved
+address is not public unicast, and connects to a validated IP while retaining
+the hostname for Host and TLS verification. Localhost names are also rejected.
+Every redirect repeats these checks, with at most five redirects; HTTPS-to-HTTP
+redirects require the HTTP opt-in too.
+
+Downloads **never attach Authorization**, even for URLs on the configured base
+origin: media URLs must be public or presigned GET URLs. Downloads bypass
+environment proxies so address validation applies to the actual connection.
+Environments that require an HTTP proxy must provide direct media connectivity.
+
+The default limit is 100 MiB per attachment. An oversized Content-Length is
+rejected immediately; bodies stream in 64 KiB chunks with the same byte limit.
+The socket timeout defaults to 30 seconds and the total attachment deadline to
+300 seconds. Temporary `.part` files are removed on failure and renamed only
+after a complete download. A rejected or failed attachment is logged without
+URL queries or fragments and skipped; remaining attachments and the text message
+continue normally. Environment values take precedence over the matching extra
+keys for all five settings.
 
 ### `media_local_roots` no longer scopes outbound delivery
 

@@ -1,6 +1,7 @@
 import base64
 import json
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -469,6 +470,16 @@ def _read_positive_float(value: Any, default: float) -> float:
     return parsed
 
 
+def _read_media_limit(value: Any, default: int | float) -> int | float:
+    if isinstance(value, bool):
+        return default
+    try:
+        parsed = int(value) if isinstance(default, int) else float(value)
+        return parsed if parsed > 0 and math.isfinite(parsed) else default
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
 # Session / note keys, named and valued as in the other ClawChat agent channels
 # (hyphenated, read from platforms.clawchat.extra). The factory value and the
 # safe range live only here: an out-of-range value is clamped to the nearest
@@ -563,6 +574,11 @@ class ClawChatConfig:
     ack_auto_resend_on_timeout: bool = False
     media_local_roots: tuple[str, ...] = field(default_factory=tuple)
     media_download_dir: str = "/tmp/clawchat-media"
+    media_allow_http: bool = False
+    media_allow_private_network: bool = False
+    media_max_bytes: int = 104857600
+    media_download_timeout_seconds: float = 30.0
+    media_download_deadline_seconds: float = 300.0
     enable_rich_interactions: bool = False
     # Experimental: relay host reply streaming as Protocol-v2 §8 frames.
     stream_replies: bool = False
@@ -685,6 +701,26 @@ class ClawChatConfig:
             media_local_roots=tuple(media_local_roots),
             media_download_dir=_get_config_value(
                 extra, "media_download_dir", "/tmp/clawchat-media"
+            ),
+            media_allow_http=_read_optional_bool(
+                _get_env("CLAWCHAT_MEDIA_ALLOW_HTTP")
+                or _get_config_value(extra, "media_allow_http", False)
+            ) is True,
+            media_allow_private_network=_read_optional_bool(
+                _get_env("CLAWCHAT_MEDIA_ALLOW_PRIVATE_NETWORK")
+                or _get_config_value(extra, "media_allow_private_network", False)
+            ) is True,
+            media_max_bytes=_read_media_limit(
+                _get_env("CLAWCHAT_MEDIA_MAX_BYTES")
+                or _get_config_value(extra, "media_max_bytes", 104857600), 104857600,
+            ),
+            media_download_timeout_seconds=_read_media_limit(
+                _get_env("CLAWCHAT_MEDIA_DOWNLOAD_TIMEOUT_SECONDS")
+                or _get_config_value(extra, "media_download_timeout_seconds", 30.0), 30.0,
+            ),
+            media_download_deadline_seconds=_read_media_limit(
+                _get_env("CLAWCHAT_MEDIA_DOWNLOAD_DEADLINE_SECONDS")
+                or _get_config_value(extra, "media_download_deadline_seconds", 300.0), 300.0,
             ),
             enable_rich_interactions=bool(
                 _get_config_value(

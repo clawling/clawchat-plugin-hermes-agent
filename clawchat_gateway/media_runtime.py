@@ -9,6 +9,8 @@ import os
 import socket
 import ssl
 import sys
+import threading
+import time
 import uuid
 from pathlib import Path
 from collections.abc import Sequence
@@ -220,7 +222,9 @@ def _resolve_inbound_media_url(
     websocket_url: str,
     media_base_url: str = "",
 ) -> str:
-    if _is_remote_url(url):
+    if urlparse(url).scheme:
+        if not _is_remote_url(url):
+            raise InboundMediaRejected("scheme")
         return url
     resolved_base_url = derive_base_url(
         websocket_url=websocket_url, base_url=base_url, media_base_url=media_base_url
@@ -341,29 +345,177 @@ def _safe_download_filename(url: str, mime: str) -> str:
     return f"media-{uuid.uuid4().hex}{extension}"
 
 
+class InboundMediaRejected(ValueError):
+    """An inbound attachment violated the download policy."""
+
+
+_INBOUND_REASONS = {
+    "scheme": "URL scheme is not allowed",
+    "address": "destination address is not allowed",
+    "dns": "destination resolution failed",
+    "redirect": "redirect missing location or limit reached",
+    "size": "attachment exceeds size limit",
+    "deadline": "attachment deadline exceeded",
+}
+
+
+class _InboundMediaHTTPError(OSError):
+    def __init__(self, status: int):
+        self.status = status
+
+
+def _inbound_log_url(url: str) -> str:
+    # A non-HTTP(S) value (e.g. a data: URL) may be its own payload: log only
+    # its scheme. Queries and fragments may carry signatures.
+    try:
+        scheme = urlparse(url).scheme
+    except ValueError:
+        return "<invalid>"
+    if scheme and scheme not in {"http", "https"}:
+        return f"{scheme[:16]}:<redacted>"
+    return url.split("?", 1)[0].split("#", 1)[0][:512]
+
+
+def _resolve_host(host: str, port: int):
+    return socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+
+
+def _resolve_inbound_host(host: str, port: int, remaining: float):
+    # The system resolver cannot be interrupted; its result must not outlive
+    # the attachment deadline or start a late connection.
+    done = threading.Event()
+    result = []
+
+    def resolve():
+        try:
+            result.append(_resolve_host(host, port))
+        except Exception:
+            result.append(None)
+        finally:
+            done.set()
+
+    threading.Thread(target=resolve, daemon=True).start()
+    if not done.wait(remaining):
+        raise InboundMediaRejected("deadline")
+    if not result[0]:
+        raise InboundMediaRejected("dns")
+    return result[0]
+
+
 def _download_inbound_media_sync(
     *,
     url: str,
-    token: str,
     download_dir: Path,
+    allow_http: bool = False,
+    allow_private_network: bool = False,
+    max_bytes: int = 104857600,
+    timeout_seconds: float = 30,
+    deadline_seconds: float = 300,
 ) -> DownloadedMedia:
-    headers = {"User-Agent": _USER_AGENT}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    request = Request(url, headers=headers)
-    with urlopen(request) as response:
-        buffer = response.read()
-        mime = response.headers.get_content_type() or _guess_mime(url)
-    download_dir.mkdir(parents=True, exist_ok=True)
-    filename = _safe_download_filename(url, mime)
-    local_path = download_dir / f"{uuid.uuid4().hex}-{filename}"
-    local_path.write_bytes(buffer)
-    return DownloadedMedia(
-        local_path=local_path,
-        mime=mime,
-        size=len(buffer),
-        source_url=url,
-    )
+    source_url = url
+    deadline = time.monotonic() + deadline_seconds
+
+    def remaining():
+        seconds = deadline - time.monotonic()
+        if seconds <= 0:
+            raise InboundMediaRejected("deadline")
+        return seconds
+
+    for hop in range(6):
+        try:
+            parsed = urlparse(url)
+            if parsed.scheme != "https" and not (allow_http and parsed.scheme == "http"):
+                raise InboundMediaRejected("scheme")
+            host = parsed.hostname or ""
+            if not host or parsed.username is not None or parsed.password is not None:
+                raise InboundMediaRejected("address")
+            default_port = 443 if parsed.scheme == "https" else 80
+            port = parsed.port or default_port
+        except ValueError as exc:
+            if isinstance(exc, InboundMediaRejected):
+                raise
+            raise InboundMediaRejected("address") from None
+        if not allow_private_network and (
+            host.lower().rstrip(".") == "localhost"
+            or host.lower().rstrip(".").endswith(".localhost")
+        ):
+            raise InboundMediaRejected("address")
+        addresses = _resolve_inbound_host(host, port, remaining())
+        if not allow_private_network and not all(_public_address(a[4][0]) for a in addresses):
+            raise InboundMediaRejected("address")
+        connection_type = _PublicHTTPSConnection if parsed.scheme == "https" else _PublicHTTPConnection
+        # Bypass environment proxies so the checked address is the connected address.
+        connection = connection_type(
+            host, port, ip=addresses[0][4][0], timeout=min(timeout_seconds, remaining())
+        )
+        partial_path = None
+        watchdog = None
+        try:
+            connection.connect()
+            sock = connection.sock
+
+            def expire():
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+            # A socket timeout alone cannot bound a peer that trickles headers
+            # or body bytes. Interrupt the socket at the attachment deadline.
+            watchdog = threading.Timer(remaining(), expire)
+            watchdog.daemon = True
+            watchdog.start()
+            sock.settimeout(min(timeout_seconds, remaining()))
+            host_header = f"[{host}]" if ":" in host else host
+            if port != default_port:
+                host_header += f":{port}"
+            target = urlunparse(("", "", parsed.path or "/", parsed.params, parsed.query, ""))
+            connection.request("GET", target, headers={"Host": host_header, "User-Agent": _USER_AGENT})
+            with connection.getresponse() as response:
+                remaining()
+                if response.status in {301, 302, 303, 307, 308}:
+                    location = response.headers.get("Location")
+                    if hop == 5 or not location:
+                        raise InboundMediaRejected("redirect")
+                    if urlparse(location).scheme and not _is_remote_url(location):
+                        raise InboundMediaRejected("scheme")
+                    url = urljoin(url, location)
+                    continue
+                if not 200 <= response.status < 300:
+                    raise _InboundMediaHTTPError(response.status)
+                length = response.headers.get("Content-Length")
+                if length is not None and int(length) > max_bytes:
+                    raise InboundMediaRejected("size")
+                mime = response.headers.get_content_type() or _guess_mime(url)
+                download_dir.mkdir(parents=True, exist_ok=True)
+                filename = _safe_download_filename(url, mime)
+                local_path = download_dir / f"{uuid.uuid4().hex}-{filename}"
+                partial_path = local_path.with_name(local_path.name + ".part")
+                size = 0
+                with partial_path.open("xb") as output:
+                    while not response.isclosed():
+                        sock.settimeout(min(timeout_seconds, remaining()))
+                        chunk = response.read1(64 * 1024)
+                        remaining()
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        if size > max_bytes:
+                            raise InboundMediaRejected("size")
+                        output.write(chunk)
+                if length is not None and size != int(length):
+                    raise OSError("incomplete attachment")
+                remaining()
+                partial_path.replace(local_path)
+                return DownloadedMedia(local_path, mime, size, source_url)
+        finally:
+            if watchdog is not None:
+                watchdog.cancel()
+            try:
+                connection.close()
+            finally:
+                if partial_path is not None:
+                    partial_path.unlink(missing_ok=True)
 
 
 def _encode_multipart(*, buffer: bytes, filename: str, mime: str) -> tuple[bytes, str]:
@@ -518,15 +670,18 @@ async def download_inbound_media(
     *,
     base_url: str,
     websocket_url: str,
-    token: str,
     download_dir: str | Path,
     download_file=None,
     media_base_url: str = "",
+    allow_http: bool = False,
+    allow_private_network: bool = False,
+    max_bytes: int = 104857600,
+    timeout_seconds: float = 30,
+    deadline_seconds: float = 300,
 ) -> list[DownloadedMedia]:
     if not urls:
         return []
 
-    target_dir = Path(download_dir)
     downloader = download_file or _download_inbound_media_sync
     downloaded: list[DownloadedMedia] = []
     for url in urls:
@@ -540,17 +695,29 @@ async def download_inbound_media(
             item = await asyncio.to_thread(
                 downloader,
                 url=resolved_url,
-                token=token,
-                download_dir=target_dir,
+                download_dir=Path(download_dir),
+                allow_http=allow_http,
+                allow_private_network=allow_private_network,
+                max_bytes=max_bytes,
+                timeout_seconds=timeout_seconds,
+                deadline_seconds=deadline_seconds,
             )
             downloaded.append(item)
         except Exception as exc:  # noqa: BLE001
-            # Keep going with the other attachments, but say why this one is
-            # missing. The query string is dropped: it may carry a signature.
+            # Exception messages may also contain signed URLs; log only known
+            # policy reasons, HTTP status codes or the failure's type.
+            rejected = isinstance(exc, InboundMediaRejected)
+            if rejected:
+                reason = _INBOUND_REASONS.get(str(exc), "download policy violation")
+            elif isinstance(exc, _InboundMediaHTTPError):
+                reason = f"HTTP status {exc.status}"
+            else:
+                reason = type(exc).__name__
             logger.warning(
-                "clawchat inbound media download failed url=%s error=%s",
-                urlunparse(urlparse(str(url))._replace(query="", fragment="")),
-                exc,
+                "clawchat inbound media %s url=%s reason=%s",
+                "rejected" if rejected else "download failed",
+                _inbound_log_url(str(url)),
+                reason,
             )
             continue
     return downloaded

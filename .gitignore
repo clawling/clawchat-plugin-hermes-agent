@@ -137,6 +137,9 @@ tmp
 #   * inbound_media_download — inbound attachment downloads send a
 #     non-default User-Agent (the CDN 403s urllib's), and a failed download
 #     is logged without the URL's query string.
+#   * inbound_media_guard — downloads validate schemes and every resolved
+#     address at each hop, pin the connection, omit credentials, and enforce
+#     size and time limits while removing partial files on failure.
 #   * send_file_tool — clawchat_send_file sends a local file into any chat by
 #     id (as_document, caption), is not swallowed after a same-turn mention,
 #     refuses credential paths, and falls back to the standalone sender.
@@ -225,6 +228,7 @@ tests/*
 !tests/test_inbound_rate_warning.py
 !tests/test_tool_media_host.py
 !tests/test_inbound_media_download.py
+!tests/test_inbound_media_guard.py
 !tests/test_send_file_tool.py
 !tests/test_current_agent_prompt.py
 !tests/test_agent_profile_scope.py

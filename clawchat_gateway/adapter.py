@@ -6268,9 +6268,13 @@ class ClawChatAdapter(BasePlatformAdapter):
             inbound.media_urls,
             base_url=self._clawchat_config.base_url,
             websocket_url=self._clawchat_config.websocket_url,
-            token=self._clawchat_config.token,
             download_dir=self._clawchat_config.media_download_dir,
             media_base_url=self._clawchat_config.media_base_url,
+            allow_http=self._clawchat_config.media_allow_http,
+            allow_private_network=self._clawchat_config.media_allow_private_network,
+            max_bytes=self._clawchat_config.media_max_bytes,
+            timeout_seconds=self._clawchat_config.media_download_timeout_seconds,
+            deadline_seconds=self._clawchat_config.media_download_deadline_seconds,
         )
         logger.info(
             "clawchat inbound media downloaded chat_id=%s requested=%d downloaded=%d types=%s",
