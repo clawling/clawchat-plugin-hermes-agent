@@ -64,7 +64,7 @@ async def _peer(monkeypatch, close_codes):
             "type": "res", "requestId": request["trace_id"],
             "payload": {"type": "hello-ok"},
         }))
-        await conn._ready_event.wait()
+        await asyncio.wait_for(conn._ready_event.wait(), timeout=5)
         if code is None:
             ws.transport.abort()  # no close frame: the client records 1006
         else:
@@ -73,7 +73,10 @@ async def _peer(monkeypatch, close_codes):
     # Avoid opening sqlite even during construction, and keep device resolution
     # independent of the machine running the tests.
     monkeypatch.setattr(connection, "get_clawchat_store", lambda: None)
-    monkeypatch.setattr(connection, "HANDSHAKE_TIMEOUT_SECONDS", 0.2)
+    if 4002 in close_codes:
+        # Only the refusal case is meant to time out; keep the real deadline
+        # for handshakes that must succeed.
+        monkeypatch.setattr(connection, "HANDSHAKE_TIMEOUT_SECONDS", 0.2)
     async with serve(handler, "127.0.0.1", 0) as server:
         port = server.sockets[0].getsockname()[1]
         cfg = ClawChatConfig(

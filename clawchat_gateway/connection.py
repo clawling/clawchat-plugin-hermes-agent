@@ -1307,11 +1307,25 @@ class ClawChatConnection:
                 refusal_floor = 0.0
                 try:
                     await self._run_one_connection()
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
                     # websockets raises ConnectionClosedError for non-1000/1001
                     # closes; a pre-hello 4002 instead times out the handshake.
                     if self._last_close_code not in {CLOSE_CODE_REPLACED, CLOSE_CODE_DUPLICATE_THROTTLED}:
                         raise
+                    logger.warning(
+                        format_ws_log(
+                            event="connection_lost",
+                            account_id=self._account_id,
+                            attempt=self._attempt,
+                            reconnect_count=self._reconnect_count,
+                            state=self._state.value,
+                            action="reconnect",
+                            fields=[
+                                ("code", self._last_close_code),
+                                ("reason", self._safe_error_text(exc)),
+                            ],
+                        )
+                    )
                 if self._last_close_code == CLOSE_CODE_REPLACED:
                     # Evicted by a newer session for this device. The
                     # stable-ready reset is deliberately NOT taken here: the
