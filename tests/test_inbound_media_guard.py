@@ -161,9 +161,9 @@ def test_https_is_allowed_by_default(tmp_path, public_server, monkeypatch):
 
 
 @pytest.mark.parametrize("ips", [
-    ("127.0.0.1",), ("10.0.0.1",), ("192.168.1.1",), ("169.254.169.254",),  # redact-allow:private-ip (test data)
+    ("127.0.0.1",), ("172.16.0.1",), ("192.168.1.1",), ("169.254.169.254",),  # redact-allow:private-ip (test data)
     ("::1",), ("fe80::1",), ("100.64.0.1",), ("::ffff:127.0.0.1",),
-    ("224.0.0.1",), ("8.8.8.8", "10.0.0.1"), ("10.0.0.1", "8.8.8.8"),  # redact-allow:private-ip
+    ("224.0.0.1",), ("8.8.8.8", "172.16.0.1"), ("172.16.0.1", "8.8.8.8"),  # redact-allow:private-ip
 ])
 def test_every_resolved_address_must_be_public(tmp_path, monkeypatch, caplog, ips):
     seen = []
@@ -360,7 +360,7 @@ def test_cross_host_redirect_to_private_address_is_rejected(tmp_path, server, mo
 
     def resolve(host, port):
         resolved.append(host)
-        return addresses("8.8.8.8" if host == "media.example.test" else "10.0.0.1", port=port)  # redact-allow:private-ip
+        return addresses("8.8.8.8" if host == "media.example.test" else "172.16.0.1", port=port)  # redact-allow:private-ip
 
     def connect(address, timeout):
         connected.append(address)
