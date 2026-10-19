@@ -380,7 +380,7 @@ def host(monkeypatch):
 @pytest.mark.parametrize(
     "tool,args",
     [
-        ("terminal", {"command": "cat ~/.hermes/.env"}),
+        ("terminal", {"command": "run-cleanup --everything"}),
         ("read_file", {"path": "owner.md"}),
         ("memory", {"action": "add", "target": "memory", "content": NEW_FACT}),
         ("mcp__filesystem__read_file", {"path": "config.yaml"}),
