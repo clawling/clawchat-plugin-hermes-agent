@@ -273,6 +273,8 @@ def test_no_proxy_direct_route_retains_private_checks(tmp_path, server, proxy_se
     "169.254.169.254", "[::1]", "[fe80::1]", "[::ffff:127.0.0.1]",
     "2130706433", "0177.0.0.1", "0x7f.0.0.1",
     "localhost", "a.localhost", "LOCALHOST.",
+    # IDNA maps U+3002 to "." before CONNECT; trailing-dot numeric literal.
+    "127\u30020\u30020\u30021", "localhost\u3002", "127.0.0.1.",
 ])
 def test_proxy_never_receives_private_literals_or_localhost(tmp_path, proxy_server, monkeypatch, caplog, host):
     monkeypatch.setenv("HTTPS_PROXY", proxy_server.url)

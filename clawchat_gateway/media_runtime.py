@@ -541,6 +541,15 @@ def _connect_inbound_media(host, port, ips, *, https, timeout, remaining, tunnel
     raise InboundMediaRejected("dns")
 
 
+def _normalize_inbound_host(host: str) -> str:
+    if ":" in host:  # IPv6 literal
+        return host.lower()
+    try:
+        return host.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        raise InboundMediaRejected("address") from None
+
+
 def _download_inbound_media_sync(
     *,
     url: str,
@@ -575,17 +584,20 @@ def _download_inbound_media_sync(
             if isinstance(exc, InboundMediaRejected):
                 raise
             raise InboundMediaRejected("address") from None
+        # Check the same ASCII form the connection (and a proxy's CONNECT)
+        # will use: IDNA maps e.g. U+3002 to "." after any raw-text check.
+        host = _normalize_inbound_host(host)
+        check_host = host.rstrip(".")
         if not allow_private_network and (
-            host.lower().rstrip(".") == "localhost"
-            or host.lower().rstrip(".").endswith(".localhost")
+            check_host == "localhost" or check_host.endswith(".localhost")
         ):
             raise InboundMediaRejected("address")
         try:
-            literal = ipaddress.ip_address(host)
+            literal = ipaddress.ip_address(check_host)
         except ValueError:
             try:
                 # Recognize legacy numeric IPv4 spellings without doing DNS.
-                literal = ipaddress.ip_address(socket.inet_aton(host))
+                literal = ipaddress.ip_address(socket.inet_aton(check_host))
             except OSError:
                 literal = None
         if literal is not None and not allow_private_network and not _public_address(str(literal)):
