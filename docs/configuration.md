@@ -1557,6 +1557,13 @@ owner-direct-chat and owner-side parent checks. All four authorization tools
 remain excluded. A renamed thread or missing, empty or different toolsets keep
 the ordinary filtering without this exception.
 
+Known limitation: this fork rule relies on Hermes internals that are not a
+public plugin API — `hermes_cli.plugins.set_thread_tool_whitelist` /
+`clear_thread_tool_whitelist`, the thread-local `_thread_tool_whitelist`, and
+the review thread name `bg-review` (all as of Hermes 0.21.6). If a host release
+renames or removes any of them, owner review forks lose `skill_manage` and
+similar owner tools again (they are refused); no session gains access.
+
 ## Reconnect, heartbeat, ack
 
 | `extra.*` key                          | Default        |
