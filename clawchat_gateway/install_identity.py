@@ -24,8 +24,8 @@ _cache: dict[Path, str | None] = {}
 _guard = threading.RLock()
 # Only failed event creation is cached; notice failures must not revive reclaim.
 _failed_writes: dict[Path, dict[str, Any]] = {}
-# Reclaim generation seen when a creation was cached; a change means another
-# process reclaimed since, so the cached creation must not be persisted.
+# Reclaim generation sampled before recording an event. Failed creations stay
+# only in memory until reclaim; they are never persisted later.
 _failed_generations: dict[Path, str | None] = {}
 _warned_lock_paths: set[Path] = set()
 _WINDOWS_LOCK_OFFSET = 1024 * 1024
@@ -266,9 +266,8 @@ def _bump_reclaim_generation_unlocked(home: Path) -> None:
         Path(temporary).unlink(missing_ok=True)
 
 
-def _remember_failed_creation(home: Path, state: dict[str, Any]) -> None:
-    if home not in _failed_writes:
-        _failed_generations[home] = _read_reclaim_generation(home)
+def _remember_failed_creation(home: Path, state: dict[str, Any], snapshot: str | None) -> None:
+    _failed_generations[home] = snapshot
     _failed_writes[home] = dict(state)
     logger.error("cannot persist superseded installation; remaining in standby")
 
@@ -276,13 +275,16 @@ def _remember_failed_creation(home: Path, state: dict[str, Any]) -> None:
 def record_superseded(profile_home: Path, state: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     """Claim a durable event once; a failed creation blocks locally without notice."""
     home = profile_home.expanduser().resolve()
+    # Snapshot before attempting the lock: another process may reclaim between
+    # the fallback disk read and caching this event after lock acquisition fails.
+    snapshot = _read_reclaim_generation(home)
     try:
         with _state_guard(home):
             existing = _read_superseded_unlocked(home, state.get("user_id"))
             if existing is not None:
                 return existing, False
             if not _write_superseded_unlocked(home, state):
-                _remember_failed_creation(home, state)
+                _remember_failed_creation(home, state, snapshot)
                 return state, False
             return state, True
     except OSError:
@@ -293,7 +295,7 @@ def record_superseded(profile_home: Path, state: dict[str, Any]) -> tuple[dict[s
                 # event: a later reclaim deletes it and must not be undone.
                 logger.error("cannot lock superseded installation state; remaining in standby")
                 return existing, False
-            _remember_failed_creation(home, state)
+            _remember_failed_creation(home, state, snapshot)
             return state, False
 
 
@@ -303,14 +305,9 @@ def update_owner_notice(profile_home: Path, superseded_at: str, result: dict[str
     try:
         with _state_guard(home):
             current = _read_disk_superseded_unlocked(home)
-            if current is None:
-                current = _failed_writes.get(home)
             if current is None or current.get("superseded_at") != superseded_at:
                 return False
             if _write_superseded_unlocked(home, {**current, "owner_notice": result}):
-                pending = _failed_writes.get(home)
-                if pending and pending.get("superseded_at") == superseded_at:
-                    _failed_writes.pop(home, None)
                 return True
     except OSError:
         logger.warning("cannot update superseded owner notice", exc_info=True)
@@ -319,59 +316,35 @@ def update_owner_notice(profile_home: Path, superseded_at: str, result: dict[str
     return False
 
 
-def retry_superseded_write(profile_home: Path) -> bool:
-    """Retry creation unless this identity already has a durable event."""
+def release_reclaimed_cache(profile_home: Path) -> bool:
+    """Release memory-only state after an observable reclaim; never write it back."""
     home = profile_home.expanduser().resolve()
     with _guard:
         if home not in _failed_writes:
             return False
-        try:
-            with _state_guard(home):
-                pending = _failed_writes.get(home)
-                if pending is None:
-                    return False
-                seen = _failed_generations.get(home)
-                if seen is not None and _read_reclaim_generation(home) not in (seen, None):
-                    # Reclaimed by another process since this creation was cached.
-                    _failed_writes.pop(home, None)
-                    _failed_generations.pop(home, None)
-                    return False
-                disk = _read_disk_superseded_unlocked(home)
-                if disk is not None and (
-                    disk.get("unreadable") or disk.get("user_id") == pending.get("user_id")
-                ):
-                    if not disk.get("unreadable"):
-                        # This identity's event is already durable (this one or a
-                        # newer one); never overwrite it with the cached creation.
-                        _failed_writes.pop(home, None)
-                    return False
-                # No state on disk, or only a previous identity's: persist ours.
-                if _write_superseded_unlocked(home, pending):
-                    _failed_writes.pop(home, None)
-                    return True
-        except OSError:
-            logger.warning("cannot retry superseded installation state", exc_info=True)
-            return False
-        logger.error("cannot persist superseded installation; remaining in standby")
+        snapshot = _failed_generations.get(home)
+        current = _read_reclaim_generation(home)
+        if snapshot is not None and current is not None and snapshot != current:
+            _failed_writes.pop(home, None)
+            _failed_generations.pop(home, None)
+            return True
         return False
 
 
 def clear_superseded(profile_home: Path) -> bool:
     home = profile_home.expanduser().resolve()
     with _state_guard(home):
-        existed = _read_superseded_unlocked(home) is not None
-        if not existed:
-            return False
-        path = superseded_path(home)
+        # Every reclaim signals other processes' memory-only state, even with no
+        # local state. Cached state is never written back, so a failed signal
+        # cannot revive anything; it only leaves those processes waiting.
         try:
-            path.stat()
-        except FileNotFoundError:
-            pass
-        else:
-            # Bump first: if this fails the reclaim fails with the state intact,
-            # and a creation cached in another process cannot outlive it.
             _bump_reclaim_generation_unlocked(home)
-            path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("cannot signal reclaim to other processes; "
+                           "restart any gateway still logging 'cannot persist superseded installation'")
+        existed = _read_superseded_unlocked(home) is not None
+        path = superseded_path(home)
+        path.unlink(missing_ok=True)
         _failed_writes.pop(home, None)
         _failed_generations.pop(home, None)
     return existed
@@ -407,11 +380,11 @@ def install_status(profile_home: Path, user_id: str | None = None) -> dict[str, 
 def reclaim_message(cleared: bool) -> str:
     if not cleared:
         return (
-            "This installation is not superseded. / 本安装未处于被取代状态。\n"
-            "If gateway logs show 'cannot persist superseded installation', send "
-            "/clawchat-reclaim in that Hermes or restart the gateway.\n"
-            "若 gateway 日志显示 cannot persist superseded installation，"
-            "请在该 Hermes 里发 /clawchat-reclaim 或重启 gateway。"
+            "This installation is not superseded (no disk record). If a running gateway "
+            "logs 'cannot persist superseded installation', it will observe this reclaim "
+            "and reconnect within 30 seconds.\n"
+            "本安装未处于被取代状态（磁盘无记录）；若某个正在运行的 gateway 日志显示 "
+            "cannot persist superseded installation，它会在 30 秒内看到这次 reclaim 并重连。"
         )
     return (
         "Superseded state cleared. A running gateway will reconnect within 30 seconds "

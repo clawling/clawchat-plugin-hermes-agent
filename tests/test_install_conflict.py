@@ -37,10 +37,12 @@ def isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(identity.socket, "gethostname", lambda: "test-host")
     identity._cache.clear()
     identity._failed_writes.clear()
+    identity._failed_generations.clear()
     identity._warned_lock_paths.clear()
     yield
     identity._cache.clear()
     identity._failed_writes.clear()
+    identity._failed_generations.clear()
 
 
 def config(url="ws://127.0.0.1:1"):
@@ -59,6 +61,14 @@ def blocked(home, user_id="usr_test_agent"):
              "owner_notice": {"status": "pending"}}
     assert identity.write_superseded(home, state)
     return state
+
+
+def _external_reclaim(home):
+    """Simulate reclaim in another process without touching this process's cache."""
+    home = home.resolve()
+    with identity._state_guard(home):
+        identity._bump_reclaim_generation_unlocked(home)
+        identity.superseded_path(home).unlink(missing_ok=True)
 
 
 async def until(predicate, timeout=3):
@@ -544,6 +554,7 @@ async def test_reclaim_is_profile_scoped(monkeypatch, tmp_path):
 
 def test_failed_write_over_old_identity_still_blocks(monkeypatch, tmp_path):
     blocked(tmp_path, "usr_previous_agent")
+    original = identity.superseded_path(tmp_path).read_bytes()
     state = {"user_id": "usr_test_agent", "owner_notice": {"status": "pending"}}
     real_replace, broken = identity.os.replace, [True]
 
@@ -556,14 +567,20 @@ def test_failed_write_over_old_identity_still_blocks(monkeypatch, tmp_path):
     recorded, created = identity.record_superseded(tmp_path, state)
     assert recorded == state and not created
     assert identity.read_superseded(tmp_path, "usr_test_agent") == state
-    # The standby retry must keep the cached state while the write keeps failing ...
-    assert identity.retry_superseded_write(tmp_path) is False
+    # Memory blocks this identity without changing the previous identity's file.
+    assert identity.release_reclaimed_cache(tmp_path) is False
     assert identity.read_superseded(tmp_path, "usr_test_agent") == state
-    # ... and replace the previous identity's state once the disk recovers.
+    # Disk recovery never causes an old cached creation to be written back.
     broken[0] = False
-    assert identity.retry_superseded_write(tmp_path) is True
+    assert identity.release_reclaimed_cache(tmp_path) is False
+    assert identity.read_superseded(tmp_path, "usr_test_agent") == state
+    assert identity.superseded_path(tmp_path).read_bytes() == original
+    _external_reclaim(tmp_path)
+    assert identity.release_reclaimed_cache(tmp_path) is True
     assert not identity._failed_writes
-    assert identity.read_superseded(tmp_path, "usr_test_agent")["user_id"] == "usr_test_agent"
+    assert not identity._failed_generations
+    assert identity.read_superseded(tmp_path, "usr_test_agent") is None
+    assert not identity.superseded_path(tmp_path).exists()
 
 
 @pytest.mark.asyncio
@@ -902,7 +919,7 @@ def test_state_lock_unavailable_refuses_all_mutations(monkeypatch, tmp_path, cap
     # A durable event already blocks; it is returned, never re-cached in memory.
     assert identity.record_superseded(tmp_path, state) == (state, False)
     assert tmp_path.resolve() not in identity._failed_writes
-    assert not identity.retry_superseded_write(tmp_path)
+    assert not identity.release_reclaimed_cache(tmp_path)
     assert identity.read_superseded(tmp_path) == state
     assert identity.install_status(tmp_path)["is_superseded"] is True
     assert identity.superseded_path(tmp_path).read_bytes() == original
@@ -929,19 +946,33 @@ def test_cached_creation_cannot_undo_other_process_reclaim(monkeypatch, tmp_path
     with identity._state_guard(home):
         identity._bump_reclaim_generation_unlocked(home)
         identity.superseded_path(home).unlink()
-    # A's standby retry must honour that reclaim instead of re-creating its event.
-    assert identity.retry_superseded_write(tmp_path) is False
+    # Only the generation change releases A's cache; it never re-creates an event.
+    assert identity.release_reclaimed_cache(tmp_path) is True
     assert identity.read_superseded(tmp_path) is None
+    assert home not in identity._failed_generations
     assert not identity.superseded_path(tmp_path).exists()
 
 
-def test_reclaim_fails_closed_when_generation_cannot_be_bumped(monkeypatch, tmp_path):
-    state = blocked(tmp_path)
+@pytest.mark.parametrize("location", ["disk", "memory", "none"])
+def test_reclaim_still_clears_locally_when_generation_cannot_be_bumped(monkeypatch, tmp_path, caplog, location):
+    state = _event_state()
+    if location == "disk":
+        state = blocked(tmp_path)
+    elif location == "memory":
+        with monkeypatch.context() as failure:
+            failure.setattr(identity, "_write_superseded_unlocked", Mock(return_value=False))
+            assert identity.record_superseded(tmp_path, state) == (state, False)
+    generation = identity._read_reclaim_generation(tmp_path)
     monkeypatch.setattr(identity, "_bump_reclaim_generation_unlocked",
                         Mock(side_effect=OSError("read only")))
-    with pytest.raises(OSError):
-        identity.clear_superseded(tmp_path)
-    assert identity.read_superseded(tmp_path) == state
+    # The signal to other processes is best-effort: nothing is ever written back,
+    # so a failed signal cannot revive state; the local reclaim still succeeds.
+    assert identity.clear_superseded(tmp_path) is (location != "none")
+    assert identity.read_superseded(tmp_path) is None
+    assert not identity._failed_writes and not identity._failed_generations
+    assert identity._read_reclaim_generation(tmp_path) == generation
+    assert not identity.superseded_path(tmp_path).exists()
+    assert "cannot signal reclaim to other processes" in caplog.text
 
 
 def test_lock_failure_over_durable_event_cannot_undo_reclaim(monkeypatch, tmp_path):
@@ -960,10 +991,147 @@ def test_lock_failure_over_durable_event_cannot_undo_reclaim(monkeypatch, tmp_pa
     # The lock recovers and process B reclaims.
     unavailable[0] = False
     assert identity.clear_superseded(tmp_path) is True
-    # A's standby retry must not recreate the reclaimed event.
-    assert not identity.retry_superseded_write(tmp_path)
+    # There was no cached creation to release or write back.
+    assert not identity.release_reclaimed_cache(tmp_path)
     assert identity.read_superseded(tmp_path) is None
     assert not identity.superseded_path(tmp_path).exists()
+
+
+@pytest.mark.parametrize("unreadable", ["snapshot", "current"])
+def test_unknown_generation_keeps_cache_without_writing(monkeypatch, tmp_path, unreadable):
+    state, home = _event_state(), tmp_path.resolve()
+    real_read = identity._read_reclaim_generation
+    with monkeypatch.context() as failure:
+        failure.setattr(identity, "_write_superseded_unlocked", Mock(return_value=False))
+        if unreadable == "snapshot":
+            failure.setattr(identity, "_read_reclaim_generation", Mock(return_value=None))
+        assert identity.record_superseded(home, state) == (state, False)
+    snapshot = identity._failed_generations[home]
+    assert snapshot == (None if unreadable == "snapshot" else "")
+    _external_reclaim(home)
+    if unreadable == "current":
+        monkeypatch.setattr(identity, "_read_reclaim_generation", Mock(return_value=None))
+    write = Mock(side_effect=AssertionError("a cached creation must never be written back"))
+    lock = Mock(side_effect=AssertionError("cache release needs no state file lock"))
+    monkeypatch.setattr(identity, "_write_superseded_unlocked", write)
+    monkeypatch.setattr(identity, "_state_guard", lock)
+    assert not identity.release_reclaimed_cache(home)
+    assert identity._failed_writes[home] == state
+    assert identity._failed_generations[home] == snapshot
+    assert not identity.superseded_path(home).exists()
+    if unreadable == "current":
+        # A readable changed generation on a later check can release the cache.
+        monkeypatch.setattr(identity, "_read_reclaim_generation", real_read)
+        assert identity.release_reclaimed_cache(home)
+        assert home not in identity._failed_writes and home not in identity._failed_generations
+    write.assert_not_called()
+    lock.assert_not_called()
+
+
+@pytest.mark.parametrize("unknown_snapshot", [False, True])
+def test_reclaim_between_fallback_disk_read_and_caching_never_revives_state(
+    monkeypatch, tmp_path, unknown_snapshot,
+):
+    home, state = tmp_path.resolve(), _event_state("original-event")
+    real_guard = identity._state_guard
+    real_read = identity._read_superseded_unlocked
+    real_generation = identity._read_reclaim_generation
+    order = []
+
+    def read_generation(home):
+        order.append("generation")
+        if unknown_snapshot and len(order) == 1:
+            return None
+        return real_generation(home)
+
+    def unavailable(_home):
+        order.append("lock")
+        raise identity.StateLockUnavailable("locking unavailable")
+
+    def read_before_other_processes(home, user_id=None):
+        value = real_read(home, user_id)
+        assert value is None
+        order.append("disk")
+        # After A reads no event, B persists another event and C reclaims it.
+        # Use the real guard to simulate those processes without changing A's cache.
+        with real_guard(home):
+            assert identity._write_superseded_unlocked(home, _event_state("other-event"))
+        with real_guard(home):
+            identity._bump_reclaim_generation_unlocked(home)
+            identity.superseded_path(home).unlink()
+        return value
+
+    monkeypatch.setattr(identity, "_read_reclaim_generation", read_generation)
+    monkeypatch.setattr(identity, "_state_guard", unavailable)
+    monkeypatch.setattr(identity, "_read_superseded_unlocked", read_before_other_processes)
+    assert identity.record_superseded(home, state) == (state, False)
+    assert order == ["generation", "lock", "disk"]
+    assert identity._failed_generations[home] == (None if unknown_snapshot else "")
+    assert not identity.superseded_path(home).exists()
+    write = Mock(side_effect=AssertionError("reclaim must never be undone by an old cache"))
+    monkeypatch.setattr(identity, "_write_superseded_unlocked", write)
+    assert identity.release_reclaimed_cache(home) is (not unknown_snapshot)
+    assert identity.release_reclaimed_cache(home) is False
+    assert (home in identity._failed_writes) is unknown_snapshot
+    assert (home in identity._failed_generations) is unknown_snapshot
+    assert not identity.superseded_path(home).exists()
+    write.assert_not_called()
+
+
+def test_empty_reclaim_always_advances_generation(tmp_path):
+    home = tmp_path.resolve()
+    assert identity._read_reclaim_generation(home) == ""
+    assert identity.clear_superseded(home) is False
+    first = identity._read_reclaim_generation(home)
+    assert first and re.fullmatch(r"[0-9a-f]{32}", first)
+    assert identity.clear_superseded(home) is False
+    assert identity._read_reclaim_generation(home) not in (None, first)
+    assert not identity.superseded_path(home).exists()
+    assert not identity._failed_writes and not identity._failed_generations
+
+
+def test_repeated_record_preserves_cached_event_and_original_snapshot(monkeypatch, tmp_path):
+    home, state = tmp_path.resolve(), _event_state("original-event")
+    with monkeypatch.context() as failure:
+        failure.setattr(identity, "_write_superseded_unlocked", Mock(return_value=False))
+        assert identity.record_superseded(home, state) == (state, False)
+    snapshot = identity._failed_generations[home]
+    _external_reclaim(home)
+    assert identity.record_superseded(home, _event_state("later-event")) == (state, False)
+    assert identity._failed_generations[home] == snapshot
+    assert identity.release_reclaimed_cache(home)
+    assert identity.read_superseded(home) is None
+    assert not identity.superseded_path(home).exists()
+
+
+def test_other_process_empty_reclaim_releases_memory_only_event(monkeypatch, tmp_path):
+    state = _event_state()
+    with monkeypatch.context() as failure:
+        failure.setattr(identity, "_write_superseded_unlocked", Mock(return_value=False))
+        assert identity.record_superseded(tmp_path, state) == (state, False)
+    # The other process has neither this cache nor a disk record, but still signals reclaim.
+    result = subprocess.run(_state_command(tmp_path, "clear", {}), capture_output=True,
+                            text=True, timeout=10, check=True)
+    assert json.loads(result.stdout) is False
+    assert identity._failed_writes[tmp_path.resolve()] == state
+    assert identity.release_reclaimed_cache(tmp_path)
+    assert identity.read_superseded(tmp_path) is None
+    assert not identity.superseded_path(tmp_path).exists()
+
+
+def test_notice_result_cannot_persist_memory_only_event(monkeypatch, tmp_path):
+    home, state = tmp_path.resolve(), _event_state()
+    with monkeypatch.context() as failure:
+        failure.setattr(identity, "_write_superseded_unlocked", Mock(return_value=False))
+        assert identity.record_superseded(home, state) == (state, False)
+    snapshot = identity._failed_generations[home]
+    write = Mock(side_effect=AssertionError("notice must only update a disk event"))
+    monkeypatch.setattr(identity, "_write_superseded_unlocked", write)
+    assert not identity.update_owner_notice(home, state["superseded_at"], {"status": "sent"})
+    assert not identity.superseded_path(home).exists()
+    assert identity._failed_writes[home] == state
+    assert identity._failed_generations[home] == snapshot
+    write.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1158,44 +1326,55 @@ def test_notice_update_rejects_a_different_event(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_failed_write_recovers_then_external_reclaim_reconnects(monkeypatch, tmp_path):
-    original_replace = identity.os.replace
-    attempts = []
-    def fail_replace(*_a):
-        attempts.append(True)
-        raise OSError("test write failure")
-    monkeypatch.setattr(identity.os, "replace", fail_replace)
+async def test_memory_only_state_never_persists_and_external_generation_reconnects(monkeypatch, tmp_path):
+    real_write, real_release = identity._write_superseded_unlocked, identity.release_reclaimed_cache
+    write = Mock(return_value=False)
+    releases = []
+    def observe_release(home):
+        result = real_release(home)
+        releases.append(result)
+        return result
+    monkeypatch.setattr(identity, "_write_superseded_unlocked", write)
+    monkeypatch.setattr(identity, "release_reclaimed_cache", observe_release)
     async with peer(supersede=False) as (url, requests):
         conn = make_conn(url)
         await conn._handle_install_superseded()
         assert conn._owner_notice_task is None
         await conn.start()
         try:
-            await until(lambda: len(attempts) >= 3)
+            await until(lambda: len(releases) >= 3)
             assert conn.is_superseded
             assert tmp_path.resolve() in identity._failed_writes
             assert not requests
-            monkeypatch.setattr(identity.os, "replace", original_replace)
-            await until(lambda: identity.superseded_path(tmp_path).exists()
-                        and tmp_path.resolve() not in identity._failed_writes)
+            assert not identity.superseded_path(tmp_path).exists()
+            # Restore disk writes and observe further standby cycles: no retry occurs.
+            write.side_effect = real_write
+            await until(lambda: len(releases) >= 6)
+            assert write.call_count == 1
+            assert not identity.superseded_path(tmp_path).exists()
             assert conn.is_superseded
-            result = subprocess.run(_state_command(tmp_path, "clear", {}), capture_output=True,
-                                    text=True, timeout=10, check=True)
-            assert json.loads(result.stdout) is True
+            # Another process only bumps the generation; A's cache is untouched.
+            _external_reclaim(tmp_path)
+            assert tmp_path.resolve() in identity._failed_writes
             await until(lambda: conn.is_ready)
+            assert True in releases
             assert len(requests) == 1
+            assert write.call_count == 1
             assert identity.read_superseded(tmp_path) is None
+            assert tmp_path.resolve() not in identity._failed_generations
+            assert not identity.superseded_path(tmp_path).exists()
         finally:
             await conn.stop()
 
 
-def test_empty_reclaim_explains_memory_only_recovery(capsys):
+def test_empty_reclaim_explains_memory_only_recovery(tmp_path, capsys):
     from clawchat_cli import main
     assert main(["reclaim"]) == 0
     text = capsys.readouterr().out
     assert "cannot persist superseded installation" in text
-    assert "/clawchat-reclaim" in text
-    assert "重启 gateway" in text
+    assert "磁盘无记录" in text
+    assert "30 秒内看到这次 reclaim 并重连" in text
+    assert identity._read_reclaim_generation(tmp_path)
 
 
 def _event_state(stamp="test-event"):
@@ -1307,7 +1486,7 @@ async def test_failed_notice_write_then_external_reclaim_does_not_revive(monkeyp
             result = subprocess.run(_state_command(tmp_path, "clear", {}), capture_output=True,
                                     text=True, timeout=10, check=True)
             assert json.loads(result.stdout) is True
-            assert not identity.retry_superseded_write(tmp_path)
+            assert not identity.release_reclaimed_cache(tmp_path)
             await until(lambda: conn.is_ready)
             assert len(requests) == 1
             assert not identity.superseded_path(tmp_path).exists()
@@ -1315,24 +1494,34 @@ async def test_failed_notice_write_then_external_reclaim_does_not_revive(monkeyp
             await conn.stop()
 
 
-def test_retry_discards_cached_creation_when_another_disk_event_exists(monkeypatch, tmp_path):
+def test_another_disk_event_does_not_replace_memory_without_reclaim(monkeypatch, tmp_path):
     old, newer = _event_state("old-event"), _event_state("new-event")
     with monkeypatch.context() as failure:
         failure.setattr(identity.os, "replace", Mock(side_effect=OSError("creation failed")))
         assert identity.record_superseded(tmp_path, old) == (old, False)
     assert identity.write_superseded(tmp_path, newer)
-    assert not identity.retry_superseded_write(tmp_path)
-    assert tmp_path.resolve() not in identity._failed_writes
-    assert identity.read_superseded(tmp_path) == newer
+    assert not identity.release_reclaimed_cache(tmp_path)
+    assert identity._failed_writes[tmp_path.resolve()] == old
+    assert identity.read_superseded(tmp_path) == old
+    assert json.loads(identity.superseded_path(tmp_path).read_text()) == newer
+    _external_reclaim(tmp_path)
+    assert identity.release_reclaimed_cache(tmp_path)
+    assert identity.read_superseded(tmp_path) is None
 
 
-def test_reclaimed_creation_is_not_retried(monkeypatch, tmp_path):
+@pytest.mark.parametrize("unknown_snapshot", [False, True])
+def test_in_process_reclaim_clears_memory_and_snapshot(monkeypatch, tmp_path, unknown_snapshot):
     state = _event_state()
     with monkeypatch.context() as failure:
         failure.setattr(identity.os, "replace", Mock(side_effect=OSError("creation failed")))
+        if unknown_snapshot:
+            failure.setattr(identity, "_read_reclaim_generation", Mock(return_value=None))
         assert identity.record_superseded(tmp_path, state) == (state, False)
     assert identity.clear_superseded(tmp_path)
-    assert not identity.retry_superseded_write(tmp_path)
+    assert not identity.release_reclaimed_cache(tmp_path)
+    assert tmp_path.resolve() not in identity._failed_writes
+    assert tmp_path.resolve() not in identity._failed_generations
+    assert identity._read_reclaim_generation(tmp_path)
     assert not identity.superseded_path(tmp_path).exists()
 
 

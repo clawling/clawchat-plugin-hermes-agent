@@ -1673,17 +1673,24 @@ Contention retries for up to 120 seconds and then fails without performing an
 unlocked update. A failed event creation blocks locally without sending a notice;
 a failed reclaim reports an error and the CLI returns a nonzero exit code.
 
-Only failed event creation is cached in memory and retried during standby. A
-failed owner-notice result update logs a WARNING and is never cached for retry,
-so it cannot recreate state removed by external reclaim. Before retrying creation,
-the plugin checks the event's identity: an already durable event for the same
-identity replaces the cached creation. A stale disk event belonging to another
-identity is overwritten by this identity's cached event. Unreadable disk state
-keeps the cached creation blocked. Each reclaim that removes a disk state first
-rewrites `<profile_home>/clawchat/install_reclaim_generation`; a cached creation
-made before a reclaim by another process is discarded instead of persisted, and
-if that file cannot be written the reclaim fails with the state intact. Once
-creation succeeds, external CLI reclaim works normally.
+Failed event creation is cached only in this process's memory to block connection
+and refresh. Cached events are never written back to disk, even after storage
+recovers or another identity's stale state remains on disk. Owner-notice results
+only update the matching disk event; they cannot persist a memory-only event.
+A failed result update logs a WARNING and is never retried.
+
+Before attempting the state lock, event creation reads a snapshot from
+`<profile_home>/clawchat/install_reclaim_generation`. Every successful reclaim
+atomically replaces this generation file with mode `0600` under the state lock,
+even when no superseded state exists on disk or in the reclaiming process.
+If updating the generation fails, reclaim still clears the disk state and the
+reclaiming process's memory and logs a WARNING: memory-only state is never
+written back, so the failure cannot revive anything, but other processes holding
+memory-only state keep waiting until restarted. A waiting process checks every 30 seconds: only a readable
+generation different from its readable initial snapshot releases its cached
+event. This check never writes state or requires the state file lock. An absent
+generation file represents the initial generation; an unreadable file is unknown
+and cannot establish that reclaim occurred.
 On restart, a matching (or unreadable) state file blocks connection before startup
 refresh, holding only the profile lock; a different agent identity ignores it.
 If configuration has no user ID yet, a read-only SQLite identity lookup supplies
@@ -1724,10 +1731,14 @@ or invalid seed produces no install ID and creates no seed, state or lock file,
 and the plugin database is opened read-only without initialization or
 migration (SQLite may still maintain its own `-wal` / `-shm` side files for
 an existing WAL database).
-If no disk state exists but logs
-show `cannot persist superseded installation`, use `/clawchat-reclaim` in that
-Hermes process or restart the gateway; a restart without a disk state connects
-normally.
+If logs show `cannot persist superseded installation`, run
+`hermes clawchat reclaim` at any time on this installation. Even a response saying
+there is no disk record advances the generation; a waiting gateway with a readable
+initial and current generation releases its memory-only state and reconnects
+within 30 seconds. If the initial generation was unreadable, or the current
+generation remains unreadable, use `/clawchat-reclaim` in that Hermes process or
+restart the gateway. Process-local reclaim clears its cache directly, and a
+restart loses memory-only state; without a disk state, startup connects normally.
 
 ## Typing
 

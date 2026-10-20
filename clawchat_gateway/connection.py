@@ -1509,7 +1509,7 @@ class ClawChatConnection:
         last_reminder = time.monotonic() if waiting else 0.0
         while not self._stopping:
             self._reclaim_event.clear()
-            install_identity.retry_superseded_write(self._profile_home)
+            install_identity.release_reclaimed_cache(self._profile_home)
             state = install_identity.read_superseded(self._profile_home, self._superseded_user_id())
             if state is None:
                 if waiting:
