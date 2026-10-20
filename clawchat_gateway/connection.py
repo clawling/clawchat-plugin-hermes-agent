@@ -377,6 +377,9 @@ class ClawChatConnection:
         self._owner_locale = owner_locale
         self._allow_superseded_notice = _allow_superseded_notice
         self._superseded = False
+        # Reclaim generation read when this connection first saw 4010; a reclaim
+        # after that point must win over the event it is about to record.
+        self._superseded_snapshot: str | None = None
         self._reclaim_event = asyncio.Event()
         self._owner_notice_task: asyncio.Task[None] | None = None
         self._owner_notice_tasks: set[asyncio.Task[None]] = set()
@@ -1515,6 +1518,7 @@ class ClawChatConnection:
                 if waiting:
                     self._cancel_owner_notices()
                     self._superseded = False
+                    self._superseded_snapshot = None
                     self._log_install_state("install_reclaimed", logging.INFO)
                     await self._set_state(ConnectionState.DISCONNECTED)
                 return True
@@ -1531,8 +1535,13 @@ class ClawChatConnection:
                 pass
         return False
 
+    def _latch_superseded(self) -> None:
+        if not self._superseded:
+            self._superseded_snapshot = install_identity.read_reclaim_generation(self._profile_home)
+            self._superseded = True
+
     async def _handle_install_superseded(self) -> None:
-        self._superseded = True
+        self._latch_superseded()
         self._refresh_pending_reconnect = False
         self._takeover_streak = 0
         try:
@@ -1540,7 +1549,7 @@ class ClawChatConnection:
         except (ValueError, TypeError):
             reason = {}
         version = reason.get("by_client_version") if isinstance(reason, dict) else None
-        state, created = install_identity.record_superseded(self._profile_home, {
+        state, created = install_identity.record_superseded(self._profile_home, snapshot=self._superseded_snapshot, state={
             "user_id": self._cfg.user_id, "device_id": self.session_device_id(),
             "install_id": install_identity.get_install_id(self._profile_home),
             "superseded_at": datetime.now(timezone.utc).isoformat(),
@@ -2408,7 +2417,7 @@ class ClawChatConnection:
             self._last_close_reason = getattr(ws, "close_reason", None)
             if self._last_close_code == CLOSE_CODE_SUPERSEDED_BY_OTHER_INSTALL:
                 # Latch before any task can attempt refresh after teardown.
-                self._superseded = True
+                self._latch_superseded()
             self._ws = None
             self._read_task = None
             self._connection_credential_generation = None
@@ -2493,7 +2502,7 @@ class ClawChatConnection:
             await self._read_frames(ws)
         finally:
             if getattr(ws, "close_code", None) == CLOSE_CODE_SUPERSEDED_BY_OTHER_INSTALL:
-                self._superseded = True
+                self._latch_superseded()
                 if self._hello_wait is not None and not self._hello_wait.done():
                     self._hello_wait.set_result(False)
 

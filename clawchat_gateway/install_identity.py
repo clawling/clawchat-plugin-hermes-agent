@@ -272,19 +272,33 @@ def _remember_failed_creation(home: Path, state: dict[str, Any], snapshot: str |
     logger.error("cannot persist superseded installation; remaining in standby")
 
 
-def record_superseded(profile_home: Path, state: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-    """Claim a durable event once; a failed creation blocks locally without notice."""
+_NO_SNAPSHOT: Any = object()
+
+
+def read_reclaim_generation(profile_home: Path) -> str | None:
+    return _read_reclaim_generation(profile_home.expanduser().resolve())
+
+
+def record_superseded(
+    profile_home: Path, state: dict[str, Any], *, snapshot: Any = _NO_SNAPSHOT,
+) -> tuple[dict[str, Any], bool]:
+    """Claim a durable event once; a failed creation blocks locally without notice.
+
+    ``snapshot`` is the reclaim generation read when the conflict was first
+    observed; a reclaim completed after it wins and the event is not recorded.
+    """
     home = profile_home.expanduser().resolve()
-    # Snapshot before attempting the lock: another process may reclaim between
-    # the fallback disk read and caching this event after lock acquisition fails.
-    snapshot = _read_reclaim_generation(home)
+    if snapshot is _NO_SNAPSHOT:
+        snapshot = _read_reclaim_generation(home)
     try:
         with _state_guard(home):
             existing = _read_superseded_unlocked(home, state.get("user_id"))
             if existing is not None:
                 return existing, False
             current = _read_reclaim_generation(home)
-            if snapshot is not None and current is not None and current != snapshot:
+            # A vanished file ("") proves nothing; only a present, different
+            # generation shows that a reclaim completed.
+            if snapshot is not None and current and current != snapshot:
                 # A reclaim completed after this event began: honour it rather
                 # than record an event the operator has already overridden.
                 logger.warning("superseded event overtaken by a reclaim; not recording it")
@@ -341,14 +355,11 @@ def release_reclaimed_cache(profile_home: Path) -> bool:
 def clear_superseded(profile_home: Path) -> bool:
     home = profile_home.expanduser().resolve()
     with _state_guard(home):
-        # Every reclaim signals other processes' memory-only state, even with no
-        # local state. Cached state is never written back, so a failed signal
-        # cannot revive anything; it only leaves those processes waiting.
-        try:
-            _bump_reclaim_generation_unlocked(home)
-        except OSError:
-            logger.warning("cannot signal reclaim to other processes; "
-                           "restart any gateway still logging 'cannot persist superseded installation'")
+        # Every reclaim advances the generation first, even with no local state:
+        # it releases other processes' memory-only state and stops an event
+        # still being recorded elsewhere. If that fails the reclaim fails with
+        # disk and memory unchanged (restarting the gateway drops memory-only state).
+        _bump_reclaim_generation_unlocked(home)
         existed = _read_superseded_unlocked(home) is not None
         path = superseded_path(home)
         path.unlink(missing_ok=True)

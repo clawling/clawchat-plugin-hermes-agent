@@ -1679,20 +1679,20 @@ recovers or another identity's stale state remains on disk. Owner-notice results
 only update the matching disk event; they cannot persist a memory-only event.
 A failed result update logs a WARNING and is never retried.
 
-Before attempting the state lock, event creation reads a snapshot from
-`<profile_home>/clawchat/install_reclaim_generation`. Every successful reclaim
-atomically replaces this generation file with mode `0600` under the state lock,
-even when no superseded state exists on disk or in the reclaiming process.
-If updating the generation fails, reclaim still clears the disk state and the
-reclaiming process's memory and logs a WARNING: memory-only state is never
-written back, so the failure cannot revive anything, but other processes holding
-memory-only state keep waiting until restarted. Event creation compares the generation again under the state lock: if a reclaim
-completed after the snapshot, the event is not recorded and the connection
-proceeds as reclaimed. A waiting process checks every 30 seconds: only a readable,
-present generation different from its readable initial snapshot releases its
-cached event (a generation file that disappears proves nothing). This check never writes state or requires the state file lock. An absent
-generation file represents the initial generation; an unreadable file is unknown
-and cannot establish that reclaim occurred.
+When a connection first observes `4010` it reads a snapshot of
+`<profile_home>/clawchat/install_reclaim_generation`. Every reclaim first
+atomically replaces this generation file (mode `0600`) under the state lock, even
+when no superseded state exists on disk or in the reclaiming process; if that
+fails, the reclaim fails with disk and memory state unchanged (restarting the
+gateway drops memory-only state). Event creation compares the generation again
+under the state lock: if a reclaim completed after the snapshot, the event is not
+recorded, no notice is sent, and the connection proceeds as reclaimed. A waiting
+process checks every 30 seconds: only a readable, present generation different
+from its readable snapshot releases its cached event; this check never writes
+state or requires the state file lock. An absent generation file represents the
+initial generation, a file that disappears later proves nothing, and an
+unreadable file is unknown and cannot establish that a reclaim occurred (the
+event is then recorded and the installation stays stopped: fail-closed).
 On restart, a matching (or unreadable) state file blocks connection before startup
 refresh, holding only the profile lock; a different agent identity ignores it.
 If configuration has no user ID yet, a read-only SQLite identity lookup supplies
@@ -1738,8 +1738,9 @@ If logs show `cannot persist superseded installation`, run
 there is no disk record advances the generation; a waiting gateway with a readable
 initial and current generation releases its memory-only state and reconnects
 within 30 seconds. If the initial generation was unreadable, or the current
-generation remains unreadable, use `/clawchat-reclaim` in that Hermes process or
-restart the gateway. Process-local reclaim clears its cache directly, and a
+generation remains unreadable, restart the gateway (memory-only state does not
+survive a restart); `/clawchat-reclaim` in that Hermes process also works once
+the generation file is writable again. Process-local reclaim clears its cache directly, and a
 restart loses memory-only state; without a disk state, startup connects normally.
 
 ## Typing

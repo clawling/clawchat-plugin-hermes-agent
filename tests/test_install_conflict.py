@@ -384,8 +384,11 @@ async def test_refresh_skipped_and_no_logout_or_credential_clear(monkeypatch, tm
 @pytest.mark.asyncio
 async def test_write_failure_still_blocks_and_reclaim_wakes(monkeypatch, tmp_path):
     conn = make_conn()
-    def fail_replace(*_a):
-        raise OSError("test write failure")
+    real_replace = identity.os.replace
+    def fail_replace(src, dst, *a):
+        if Path(dst).name == "install_superseded.json":
+            raise OSError("test write failure")
+        return real_replace(src, dst, *a)
     monkeypatch.setattr(identity.os, "replace", fail_replace)
     conn._last_close_reason = "not-json"
     await conn._handle_install_superseded()
@@ -618,6 +621,8 @@ async def test_stop_cancels_notices_from_consecutive_conflicts(monkeypatch, tmp_
     await until(lambda: len(calls) == 1)
     old_notice = conn._owner_notice_task
     identity.clear_superseded(tmp_path)
+    # The standby loop resets the latch on reclaim before any later conflict.
+    conn._superseded, conn._superseded_snapshot = False, None
     await conn._handle_install_superseded()
     await until(lambda: len(calls) == 2)
     latest_notice = conn._owner_notice_task
@@ -778,8 +783,8 @@ async def test_simultaneous_connections_record_and_notify_once(monkeypatch, tmp_
     monkeypatch.setattr(sender, "standalone_send", send)
     record = identity.record_superseded
     created = []
-    def observe(home, state):
-        result = record(home, state)
+    def observe(home, state, **kwargs):
+        result = record(home, state, **kwargs)
         created.append(result[1])
         return result
     monkeypatch.setattr(identity, "record_superseded", observe)
@@ -954,7 +959,7 @@ def test_cached_creation_cannot_undo_other_process_reclaim(monkeypatch, tmp_path
 
 
 @pytest.mark.parametrize("location", ["disk", "memory", "none"])
-def test_reclaim_still_clears_locally_when_generation_cannot_be_bumped(monkeypatch, tmp_path, caplog, location):
+def test_reclaim_fails_closed_when_generation_cannot_be_bumped(monkeypatch, tmp_path, location):
     state = _event_state()
     if location == "disk":
         state = blocked(tmp_path)
@@ -962,17 +967,31 @@ def test_reclaim_still_clears_locally_when_generation_cannot_be_bumped(monkeypat
         with monkeypatch.context() as failure:
             failure.setattr(identity, "_write_superseded_unlocked", Mock(return_value=False))
             assert identity.record_superseded(tmp_path, state) == (state, False)
+    cached = dict(identity._failed_writes)
     generation = identity._read_reclaim_generation(tmp_path)
     monkeypatch.setattr(identity, "_bump_reclaim_generation_unlocked",
                         Mock(side_effect=OSError("read only")))
-    # The signal to other processes is best-effort: nothing is ever written back,
-    # so a failed signal cannot revive state; the local reclaim still succeeds.
-    assert identity.clear_superseded(tmp_path) is (location != "none")
-    assert identity.read_superseded(tmp_path) is None
-    assert not identity._failed_writes and not identity._failed_generations
+    # Without advancing the generation a reclaim could be overtaken by an event
+    # still being recorded elsewhere, so it fails and changes nothing.
+    with pytest.raises(OSError):
+        identity.clear_superseded(tmp_path)
+    assert identity.read_superseded(tmp_path) == (None if location == "none" else state)
+    assert identity._failed_writes == cached
     assert identity._read_reclaim_generation(tmp_path) == generation
-    assert not identity.superseded_path(tmp_path).exists()
-    assert "cannot signal reclaim to other processes" in caplog.text
+    assert identity.superseded_path(tmp_path).exists() == (location == "disk")
+
+
+def test_reclaim_after_conflict_seen_wins_over_late_record(tmp_path):
+    # The connection latched the conflict (snapshot), then a reclaim completed
+    # while teardown was still running, before the event was recorded.
+    snapshot = identity.read_reclaim_generation(tmp_path)
+    home = tmp_path.resolve()
+    home.joinpath("clawchat").mkdir(parents=True, exist_ok=True)
+    assert identity.clear_superseded(tmp_path) is False
+    state = _event_state()
+    assert identity.record_superseded(tmp_path, state, snapshot=snapshot) == (state, False)
+    assert identity.read_superseded(tmp_path) is None
+    assert not identity._failed_writes
 
 
 def test_lock_failure_over_durable_event_cannot_undo_reclaim(monkeypatch, tmp_path):
@@ -1729,3 +1748,20 @@ def test_vanished_generation_does_not_release_cache(monkeypatch, tmp_path):
     identity._reclaim_generation_path(home).unlink()
     assert identity.release_reclaimed_cache(tmp_path) is False
     assert identity.read_superseded(tmp_path) == state
+
+
+@pytest.mark.asyncio
+async def test_reclaim_during_teardown_wins_and_reconnects(tmp_path):
+    conn = make_conn()
+    try:
+        # 4010 observed (latched with its snapshot); teardown is still running
+        # when another process reclaims.
+        conn._latch_superseded()
+        assert identity.clear_superseded(tmp_path) is False
+        await conn._handle_install_superseded()
+        assert identity.read_superseded(tmp_path) is None
+        assert conn._owner_notice_task is None
+        assert await asyncio.wait_for(conn._wait_if_superseded(), 1) is True
+        assert not conn._superseded and conn._superseded_snapshot is None
+    finally:
+        await conn.stop()
