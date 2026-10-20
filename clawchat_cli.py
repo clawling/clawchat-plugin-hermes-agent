@@ -14,7 +14,7 @@ from clawchat_gateway.cli import setup_clawchat_cli
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="clawchat_cli.py",
-        description="Compatibility CLI for Hermes v0.12 ClawChat activation.",
+        description="Compatibility CLI for Hermes v0.12 ClawChat activation and installation management.",
     )
     setup_clawchat_cli(parser)
     return parser

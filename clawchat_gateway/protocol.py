@@ -123,11 +123,14 @@ def build_connect_request(
     device_id: str | None = None,
     capabilities: dict[str, Any] | None = None,
     client_version: str | None = None,
+    install_id: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "token": token,
         "nonce": nonce,
     }
+    if install_id:
+        payload["install_id"] = install_id
     if device_id is not None:
         payload["device_id"] = device_id
     # Telemetry only (§3.3): the hub logs it on `handshake accepted`, gates nothing.

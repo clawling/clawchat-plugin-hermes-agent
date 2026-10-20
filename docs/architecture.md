@@ -26,8 +26,9 @@ These names refer to different layers and are not interchangeable:
 | `ctx.register_platform(name="clawchat", ...)`                | `__init__._register_platform` | Registers the gateway platform. Requires Hermes v0.12.0+; raises otherwise.            |
 | `ctx.register_tool(name, "clawchat", schema, handler, ...)`  | `clawchat_gateway.plugin_tools.register_tools` | Registers all 51 `clawchat_*` tools. List is also in `plugin.yaml`. |
 | `ctx.register_skill("clawchat-core", path, description=...)` | `__init__._register_skill` | Registers the bundled Plugin Bundle skill `clawchat:clawchat-core` (path `skills/clawchat-core/SKILL.md`), then any extra skills present in the managed manifest (`$HERMES_HOME/clawchat-skills/manifest.json`) that were delivered by a dynamic skill update, so they survive restarts. Also captures the registrar (`skill_update.set_skill_registrar`) so a brand-new skill applied after owner consent is hot-registered immediately (`skill_update.hot_register_new_skills`) without a restart. Skipped silently if the host does not implement `register_skill`. Load also runs `skill_update.ensure_external_skills_dir()`, which idempotently adds `clawchat-skills` to the host config's `skills.external_dirs` so all managed skills additionally appear in the `<available_skills>` index / `skills_list` under their bare names. |
-| `ctx.register_cli_command("clawchat", ...)`                  | `__init__._register_cli_commands` | Adds `hermes clawchat activate <CODE>` on Hermes builds that expose `register_cli_command`. |
+| `ctx.register_cli_command("clawchat", ...)`                  | `__init__._register_cli_commands` | Adds `hermes clawchat activate <CODE>`, `reclaim`, and `status` on Hermes builds that expose `register_cli_command`. |
 | `ctx.register_command("clawchat-activate", ...)`             | `__init__._register_commands` | Adds the `/clawchat-activate <CODE>` slash command for in-session activation.        |
+| `ctx.register_command("clawchat-reclaim", ...)` | `__init__._register_commands` | Clears superseded state and immediately wakes local waiting connections. |
 | `ctx.register_command("clawchat-output", ...)`               | `__init__._register_commands` | Adds the `/clawchat-output minimal\|normal\|full` slash command ([`./output-visibility.md`](./output-visibility.md)). |
 | `ctx.register_hook("pre_api_request", ...)`                  | `__init__._register_llm_context_debug_hooks` | Installs the LLM-context debug observer (inert unless `CLAWCHAT_LLM_CONTEXT_DEBUG` is set). |
 | `ctx.register_hook("post_api_request", ...)`                 | `__init__._register_session_usage_hook` | Records the prompt size of each ClawChat conversation's latest model request (`clawchat_gateway.sediment`), which times the sediment turn before compression. |
@@ -424,7 +425,21 @@ not the cron field keeps the sender.
 ClawChat has no REST send endpoint, so the standalone path opens an
 **ephemeral** `ClawChatConnection` (reusing credential loading, the challenge
 handshake, token refresh, and ack tracking), sends one `message.send` frame
-with `wait_for_ack=True`, and closes. Two invariants:
+with `wait_for_ack=True`, and closes. Main connections advertise a stable
+installation hash and the terminal-conflict capability. A `4010` (including a
+pre-hello refusal) persists `install_superseded.json`, stops reconnect/refresh,
+and keeps the supervisor and instance locks alive in `SUPERSEDED`. The adapter
+returns success for this settled state so Hermes does not rebuild it repeatedly.
+`install_identity.py` owns identity generation and durable state; explicit local
+CLI/slash reclaim or successful activation resumes connection. See
+[configuration](./configuration.md#installation-conflicts-and-recovery).
+
+Ordinary standalone delivery is blocked while superseded. The one owner notice
+per live event uses an internal exception, a sibling connection with a separate
+supervisor slot, no install metadata, and no refresh. Its bounded background task
+is cancelled on stop; persisted pending/failed results are never retried on restart.
+
+Two invariants:
 
 - **Sibling device id.** msghub enforces single-session per
   `(user_id, device_id)` with takeover semantics — connecting with the

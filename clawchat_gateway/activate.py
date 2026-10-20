@@ -30,6 +30,7 @@ from clawchat_gateway.api_client import (
     ClawChatApiError,
     agents_connect_with_retry,
 )
+from clawchat_gateway.hermes_home import hermes_home
 from clawchat_gateway.config import _get_env
 from clawchat_gateway.device_id import get_device_id, resolve_paired_device_id
 from clawchat_gateway.onboarding import RECONNECT_GUIDE_URL, onboarding_context
@@ -1004,6 +1005,11 @@ async def activate(
         )
     except Exception:  # noqa: BLE001
         logger.warning("clawchat activation database persistence failed")
+    from clawchat_gateway.install_identity import clear_superseded
+    from clawchat_gateway.connection import ClawChatConnection
+
+    clear_superseded(hermes_home())
+    ClawChatConnection.wake_reclaimed(hermes_home())
     return payload
 
 

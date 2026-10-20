@@ -804,6 +804,7 @@ def _register_commands(ctx) -> None:
     from clawchat_gateway.commands import (
         handle_clawchat_activate_command,
         handle_clawchat_output_command,
+        handle_clawchat_reclaim_command,
     )
 
     register_command(
@@ -811,6 +812,12 @@ def _register_commands(ctx) -> None:
         handle_clawchat_activate_command,
         description="Activate ClawChat with an activation code.",
         args_hint="CODE [--restart] [--no-restart]",
+    )
+    register_command(
+        "clawchat-reclaim",
+        handle_clawchat_reclaim_command,
+        description="Reclaim this ClawChat installation and reconnect.",
+        args_hint="",
     )
     register_command(
         "clawchat-output",

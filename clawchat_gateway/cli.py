@@ -42,6 +42,9 @@ def setup_clawchat_cli(parser: argparse.ArgumentParser) -> None:
         help="Re-pair the agent this profile already holds (keeps its identity).",
     )
     activate_parser.set_defaults(func=handle_clawchat_cli, _parser=parser)
+    for command in ("reclaim", "status"):
+        sub = subparsers.add_parser(command, help=f"ClawChat installation {command}")
+        sub.set_defaults(func=handle_clawchat_cli, _parser=parser)
     parser.set_defaults(_parser=parser)
 
 
@@ -65,6 +68,25 @@ def format_activation_failure(exc: ClawChatApiError) -> list[str]:
 
 
 def handle_clawchat_cli(args: argparse.Namespace) -> int:
+    command = getattr(args, "command", None)
+    if command in ("reclaim", "status"):
+        import json
+        from clawchat_gateway.hermes_home import hermes_home
+        from clawchat_gateway.install_identity import clear_superseded, install_status, reclaim_message
+
+        home = hermes_home()
+        if command == "status":
+            print(json.dumps(install_status(home), indent=2, ensure_ascii=False))
+            return 0
+        try:
+            cleared = clear_superseded(home)
+        except OSError as exc:
+            print(f"clawchat: reclaim failed ({type(exc).__name__})", file=sys.stderr)
+            return 1
+        from clawchat_gateway.connection import ClawChatConnection
+        ClawChatConnection.wake_reclaimed(home)
+        print(reclaim_message(cleared))
+        return 0
     if getattr(args, "command", None) != "activate":
         parser = getattr(args, "_parser", None)
         if parser is not None:

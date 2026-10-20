@@ -18,6 +18,18 @@ For end users, the bundled installer wraps everything above:
 npx -y @clawling/clawchat-plugin-install-cli@latest install --target hermes
 ```
 
+## Commands
+
+- `hermes clawchat activate CODE`: activate or explicitly re-pair this profile.
+- `hermes clawchat status`: inspect installation conflict state and lock diagnostics.
+- `hermes clawchat reclaim`: resume this installation after another installation replaced it.
+- `/clawchat-activate CODE`, `/clawchat-reclaim`, `/clawchat-output minimal|normal|full`:
+  in-session commands. Use reclaim in the local Hermes you want to resume.
+
+A terminal `4010` preserves credentials and keeps the process alive without
+reconnecting or refreshing, also after restart. One owner DM explains recovery.
+See [installation conflicts](docs/configuration.md#installation-conflicts-and-recovery).
+
 ## Documentation
 
 | Topic                          | Doc                                                                 |

@@ -17,9 +17,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from typing import Any
 
 from clawchat_gateway.config import ClawChatConfig
+from clawchat_gateway.hermes_home import hermes_home
+from clawchat_gateway.install_identity import read_superseded
 from clawchat_gateway.connection import (
     HANDSHAKE_TIMEOUT_SECONDS,
     ClawChatConnection,
@@ -65,6 +68,7 @@ async def standalone_send(
     thread_id: str | None = None,
     media_files: list[str] | None = None,
     force_document: bool = False,
+    _allow_superseded_notice: bool = False,
 ) -> dict[str, Any]:
     """Send one message over an ephemeral ClawChat connection.
 
@@ -81,11 +85,20 @@ async def standalone_send(
     if not target:
         return {"error": "ClawChat standalone send requires a chat_id."}
 
-    config = ClawChatConfig.from_platform_config(platform_config)
+    config = (platform_config if isinstance(platform_config, ClawChatConfig)
+              else ClawChatConfig.from_platform_config(platform_config))
+    if not _allow_superseded_notice and read_superseded(hermes_home(), config.user_id) is not None:
+        return {"error": "This installation was superseded. Run hermes clawchat reclaim locally or /clawchat-reclaim."}
+    if _allow_superseded_notice:
+        # One best-effort connection attempt; a failure must not become a retry loop.
+        config = replace(config, reconnect_max_retries=0)
     if not config.websocket_url:
         return {"error": "ClawChat is not configured (missing websocket_url)."}
 
-    connection = ClawChatConnection(config, on_message=_drop_inbound)
+    connection = ClawChatConnection(
+        config, on_message=_drop_inbound,
+        _allow_superseded_notice=_allow_superseded_notice,
+    )
     sibling_id = connection.use_sibling_connect_device_id(STANDALONE_DEVICE_SUFFIX)
     logger.info(
         "clawchat standalone send start chat_id=%s device_id=%s", target, sibling_id

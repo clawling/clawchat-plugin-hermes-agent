@@ -1,10 +1,9 @@
 # CLI reference
 
-The plugin contributes four command surfaces to a Hermes install. Three are
-activation surfaces wrapping the same
-`clawchat_gateway.activate.activate_and_maybe_restart` coroutine — pick
-whichever matches the host. The fourth, `/clawchat-output`, has nothing to do
-with activation and sets the output visibility preset. The plugin additionally
+The plugin exposes activation, installation recovery/status, and output visibility
+commands. The activation surfaces wrap the same
+`clawchat_gateway.activate.activate_and_maybe_restart` coroutine; pick whichever
+matches the host. `/clawchat-output` sets the output visibility preset. The plugin additionally
 backs the host's own `hermes gateway setup` flow (Interactive setup, below) via
 `setup_fn`; that command belongs to Hermes, not to this plugin.
 
@@ -45,6 +44,18 @@ python "${HERMES_HOME:-$HOME/.hermes}/plugins/clawchat/clawchat_cli.py" activate
   `setup_clawchat_cli` parser as `hermes clawchat …` above, so it accepts the
   same flags.
 - Use this when `hermes clawchat …` is not exposed.
+
+## Installation recovery and status
+
+`hermes clawchat status` prints JSON with a short install ID, superseded state
+(time, winner version, owner notice outcome), and the last lock holder record. Lock state is available for in-process gateways;
+a separate CLI process reports `unknown` because the record can outlive its holder.
+`hermes clawchat reclaim` clears superseded state; a running gateway reconnects
+within 30 seconds, otherwise it connects on next startup. `/clawchat-reclaim` takes
+no arguments and also immediately wakes this process's waiting connections.
+Run recovery on the installation you intend to use: it can displace the other one.
+A missing state is a successful no-op. The compatibility script also accepts
+`status` and `reclaim`. Successful activation clears superseded state as well.
 
 ## Output-visibility slash command
 

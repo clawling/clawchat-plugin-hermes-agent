@@ -1635,8 +1635,48 @@ JSON remains readable. Unsupported locking (for example a network filesystem
 without lock support, or an unwritable path) logs one WARNING per path and
 proceeds without that lock. This safeguard is host-local: different OS users
 with separate `HERMES_HOME` roots do not share the identity lock, and separate
-hosts still rely on protocol takeover backoff. Standalone senders use a sibling
-connect device ID and are exempt from both locks.
+hosts use installation-conflict handling when supported, with protocol takeover
+backoff as the legacy fallback. Standalone senders use a sibling connect device ID and are exempt from both locks.
+
+### Installation conflicts and recovery
+
+Canonical connections report an `install_id` and `capabilities.install_conflict: true`.
+The ID is the first 24 hex characters of SHA-256 over a random seed, the existing
+host device fingerprint, hostname, and resolved absolute profile home. Only the
+hash is sent. `<profile_home>/clawchat/install_seed` is created once with exclusive
+creation and mode `0600`; it survives restarts and may travel with a copied profile.
+Changing the machine, hostname, or profile directory produces a different ID.
+If the seed cannot be read or written, or is malformed, a WARNING is logged once
+and both fields are omitted, preserving legacy `4001` handling. Standalone sibling
+connections omit both fields.
+
+When two different installations use the same agent/device, a supporting hub sends
+terminal close **`4010`** to the displaced installation, before or after `hello-ok`.
+The plugin enters `ConnectionState.SUPERSEDED`: the process stays alive, retains
+its instance locks, and stops reconnecting and refreshing tokens. The token remains
+valid and credentials are preserved. State is atomically written with mode `0600`
+to `<profile_home>/clawchat/install_superseded.json`, including agent/device/installation
+IDs, UTC time, optional winner version, and owner-notice outcome. Write failure
+still blocks the current process. On restart, a matching (or unreadable) state file
+blocks connection before startup refresh; a different agent identity ignores it.
+An ERROR log includes reclaim instructions; reminders are at most every ten minutes.
+
+For each live `4010` event the plugin attempts one owner DM through a standalone
+sibling device, with a total timeout and no token refresh. The durable `owner_notice`
+records `pending`, `sent` (message ID), `failed` (error type), or `skipped` (no owner
+conversation). Failure and restart never retry the notice. Other standalone sends
+return an error while superseded.
+
+Run `hermes clawchat status` to inspect the short install ID, superseded time,
+winner version, notice result, and instance-lock status when available in this
+process. A separate CLI process reports lock state as `unknown` and includes the
+last holder record; that persisted record alone does not prove a running holder. Run `hermes clawchat reclaim` **on
+the installation you want to use** to clear the state. A running gateway checks
+within 30 seconds; an offline gateway connects on its next start. This can displace
+the other installation. `/clawchat-reclaim` in local Hermes also wakes this process's
+waiting connections immediately. Successful activation, including `--repair` and
+`--new-account`, clears the state too. The compatibility `clawchat_cli.py` accepts
+both `status` and `reclaim`.
 
 ## Typing
 

@@ -422,7 +422,7 @@ GROUP_BATCH_MENTION_REPLY_GUIDANCE = (
 DIRECT_MESSAGE_REPLY_GUIDANCE = (
     "Direct messages are normally addressed to you. Reply unless current agent behavior says this message should not be answered."
 )
-CLAWCHAT_PLUGIN_SLASH_COMMANDS = {"clawchat-activate", "clawchat-output"}
+CLAWCHAT_PLUGIN_SLASH_COMMANDS = {"clawchat-activate", "clawchat-output", "clawchat-reclaim"}
 HERMES_BUILTIN_SLASH_COMMANDS = {
     "new",
     "reset",
@@ -1062,6 +1062,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             on_notify_signal=self._on_notify_signal,
             on_message_error=self._on_message_error,
             is_chat_rejected=self._is_chat_server_rejected,
+            owner_locale=self._owner_locale,
         )
         self._active_runs_by_id: dict[str, _ActiveRun] = {}
         self._active_chat_runs: dict[str, str] = {}
@@ -1234,6 +1235,9 @@ class ClawChatAdapter(BasePlatformAdapter):
         ready = await self._connection.wait_until_ready(
             timeout=HANDSHAKE_TIMEOUT_SECONDS + 1.0,
         )
+        if not ready and self._connection.is_superseded:
+            logger.info("clawchat connect superseded; waiting for explicit reclaim")
+            return True
         if not ready and self._connection.is_standby:
             # Another process on this host holds the instance lock; this one
             # takes over when it exits. Started, not failed: a False here would

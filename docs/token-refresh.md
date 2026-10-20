@@ -305,9 +305,15 @@ hot-swapped onto a live WS. Always **close then reconnect** with the new token, 
 | Refresh in-flight | supervisor must **not** open a socket with the dead token — gate reconnect on the in-flight refresh. On success reconnect immediately (reset backoff); on transient-fail keep backoff with the current token. |
 | Permanent refresh failure → WS stops | OpenClaw: auth-failed latch stops reconnects, runtime flips not-configured. Hermes: persist revoked marker → clear creds → `AUTH_FAILED` → close WS → wait for activation, for SQLite and env bootstraps alike. Adoption must pass both the access-token latch and refresh-fingerprint guard (§C.2). |
 
-**Never** refresh/reconnect on non-auth closes (duplicate-session takeover, missed pongs,
-backpressure, handshake-timeout) — backoff-reconnect with the same token + device id. Two of
-those closes carry timing the client must honour: **`4001`** (takeover) → raise the reconnect
+Non-auth closes (duplicate-session takeover, missed pongs, backpressure,
+handshake-timeout) never trigger token refresh. Ordinary non-auth closes reconnect
+with backoff using the same token and device ID. Terminal **`4010`** is the exception
+to reconnect: it persists superseded state and stops **all** refresh paths (startup,
+proactive, handshake rejection, and REST 401), including sibling senders. Refresh
+returns `skipped`, never permanent failure or auto-logout. The single owner notice
+uses the existing token without refresh; if it fails it is not retried. Restart
+keeps waiting until local reclaim or successful activation clears the state.
+Two retryable closes carry timing the client must honour: **`4001`** (takeover) → raise the reconnect
 floor to ≥ 5 s (msghub §3.6); **`4002`** (`duplicate_session_throttled`, opt-in) → wait the JSON
 close reason's `retry_after_ms` (60 s, doubling to 300 s) — longer than openclaw's `maxDelay`
 of 15 s. Both clients read the close code today: openclaw in `ws-client.ts`'s

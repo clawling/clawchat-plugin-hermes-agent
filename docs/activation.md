@@ -434,7 +434,10 @@ When the server rejects the token and there is no refresh token, the existing
 `action=stop_reconnect` and stop that supervisor. Transient errors
 (`remote auth service unavailable`, 5xx, timeouts) still retry or
 backoff-reconnect per §A / §B and never revoke credentials. `4001` / `4002`
-keep their takeover / duplicate-session meaning.
+keep their takeover / duplicate-session meaning. Terminal `4010` instead preserves
+credentials and waits for explicit local `hermes clawchat reclaim` or
+`/clawchat-reclaim`, without reconnect or refresh, including after restart.
+Successful activation (also `--repair` / `--new-account`) clears this state.
 
 After the owner re-activates, the poll adopts the new row (its access token
 differs from the latched one and passes the refresh fingerprint check), logs

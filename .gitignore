@@ -189,6 +189,7 @@ tmp
 tests/*
 !tests/conftest.py
 !tests/test_instance_lock.py
+!tests/test_install_conflict.py
 !tests/test_takeover_close_backoff.py
 !tests/test_credential_revocation.py
 !tests/test_multiplex_isolation.py

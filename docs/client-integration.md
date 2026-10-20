@@ -196,6 +196,8 @@ literal string `"challenge"` — it is not correlated with the client's
 | `token` | yes | Bearer token (see §2) |
 | `nonce` | yes | Echoed from `connect.challenge` |
 | `device_id` | optional | Stable identifier for this device. If omitted, the server uses the authenticated `user_id`. **Strongly recommended** for multi-device users — it is the key for replay state. Run exactly one process per `(user_id, device_id)`; see the operator warning in §3.6. |
+| `install_id` | optional | Stable installation hash, 8–64 ASCII `[0-9A-Za-z_-]`, unchanged across restarts and different per installation. Invalid/non-string values are treated as absent. Hermes uses 24 hex characters and omits this on sibling connections. |
+| `capabilities.install_conflict` | optional | Literal JSON `true` promises terminal `4010` handling; every other value means false. Hermes advertises it only with an available canonical install ID. Older servers ignore both fields. |
 | `client_version` | optional | Your app's own version string (mobile sends its package version, e.g. `"3.8.2"`). Diagnostic only — see below. An empty string is acceptable. |
 | `protocol_version` | optional | The wire protocol revision you speak — send `2` for the v2 baseline. Diagnostic only; omission is recorded as `0`. Redundant with the mandatory envelope `version: "2"` (§4) that the hub enforces on every uplink. |
 | `capabilities` | optional | A map of feature flags. **A client SHOULD advertise every feature it supports and MAY omit any flag for a feature it does not** — omission disables that feature for this device, it never errors. Per-flag meaning in the table below. |
@@ -214,6 +216,7 @@ milestone MAY add minimum-version rejection.
 
 | Capability | Default if omitted | Meaning |
 |------------|--------------------|---------|
+| `install_conflict` | off | Literal `true` promises terminal `4010` support: stop automatic reconnect and token refresh when displaced by a distinct installation (§3.6). Requires both sessions to report valid, different `install_id` values. |
 | `multi_device` | off | **Functional.** Advertising it makes the user's *other* devices receive echoes of messages this device sends, and the server stamps `origin_device_id` on downlinks so each device can filter its own self-echo. Not advertising it preserves the legacy no-self-fanout behavior. |
 | `device_replay` | (ignored) | **Legacy / forward-compat only.** The server runs device replay (§11) unconditionally regardless of this flag, and stamps `delivery_mode: "device_replay"` on `hello-ok`. Send it for clarity; do not depend on it gating anything. |
 | `chat_meta_events` | off | Opts the client in to server-pushed `chat.metadata.invalidated` (§9.3). A client that does not advertise it never sees the event. |
@@ -331,6 +334,25 @@ received is the authoritative signal, never the close code. For
 
 ### 3.6 Duplicate-session policy
 
+**Different installations.** When both sessions have distinct valid `install_id`
+values and the displaced session advertised `capabilities.install_conflict: true`,
+the hub closes the displaced session with **`4010`** instead of `4001`. This is
+terminal even before `hello-ok`, with compact JSON reason
+`{"reason":"superseded_by_other_install","by_client_version":"winner version"}`.
+The version may be absent; missing or malformed diagnostics do not change the
+terminal meaning. Stop automatic reconnect and token refresh; preserve credentials.
+Hermes persists this decision, retains its instance locks in `SUPERSEDED`, and
+attempts one owner DM via a sibling device with the existing token. Failure and
+restart never retry that notice. Local `hermes clawchat reclaim` (30-second disk
+poll), `/clawchat-reclaim` (immediate local wake), or successful activation resumes
+connection. `hermes clawchat status` shows state and notice outcome. Ordinary
+standalone sends return an error until reclaim. See
+[configuration](configuration.md#installation-conflicts-and-recovery).
+
+**Legacy fallback.** If either install ID is missing, they are equal, or the
+displaced client did not opt in, the existing `4001` behavior below is unchanged.
+Older servers also retain `4001` behavior.
+
 If the same `(user_id, device_id)` pair is already connected to the same
 server instance, the server uses **takeover** semantics: the **older**
 socket is closed (no business envelope), and the **newer** socket proceeds
@@ -344,7 +366,7 @@ Client implication: a `hello-ok` you receive may be racing an older
 session you previously held. If the older session is still running
 locally, it will see its connection close (close code `4001` when the
 frame arrives). Treat a `4001` — or any unexplained close on a
-previously-good session — as a likely takeover by another instance of
+previously-good session (except terminal `4010`) — as a likely takeover by another instance of
 yourself, and reconnect with backoff; do **not** assume the token has
 been revoked. A well-behaved client SHOULD treat `4001` as a signal to
 back off rather than reconnect instantly, since an instant reconnect that
@@ -2611,6 +2633,7 @@ The server may close the connection in several scenarios:
 | `hello-fail` — auth service unavailable (upstream `5xx` / timeout) | `hello-fail` with a reason **containing** `auth service unavailable` (canonical `"remote auth service unavailable"`) + close | **Backoff-reconnect with the same token** — the token may be valid; the auth backend (member-backend) is down. Do **NOT** trigger token refresh/re-login here (a 5xx storm would otherwise become a mass-refresh storm). |
 | Duplicate session for `(user_id, device_id)` — you are the **older** session | No envelope and no `hello-fail`; a CLOSE control frame with application code **`4001`** (best-effort — an already-dead socket may just drop) | A newer instance of you took over; reconnect on a **raised** backoff floor (§3.6). The token is still valid. |
 | Duplicate session for `(user_id, device_id)` — you are the **newer** session and the incumbent is healthy | No envelope and no `hello-fail`; a CLOSE with application code **`4002`** and a JSON reason carrying `retry_after_ms` (only where `takeover_refuse_enabled` is on) | **Wait `retry_after_ms`, then reconnect.** You were refused, not evicted. The token is still valid. |
+| Different installation displaced this session or refused its late handshake | CLOSE **`4010`**, optionally naming the winner version in JSON; `hello-ok` may never arrive | Stop automatic reconnect and token refresh; preserve credentials and wait for explicit local reclaim. |
 | Missed pongs | Close when no `Pong` control frame arrives within `ping_interval * max_miss_pong + pong_timeout` (~70 s with defaults) | Reconnect with backoff |
 | Server backpressure | Close (the server kicks slow clients to protect itself) | Reconnect with backoff; messages will replay via §11 |
 | Any handshake rejection (`hello-fail`) | The `hello-fail` frame, then an abrupt close with **no CLOSE frame** (observed as 1006) | Act on `payload.reason` per §3.5; do not treat 1006 as a distinct failure class here |
@@ -2621,13 +2644,14 @@ The server may close the connection in several scenarios:
 |---|---|---|
 | `4001` | your `(user_id, device_id)` was taken over by a newer session | Back off before reconnecting (raise the floor — an instant reconnect causes a mutual-eviction storm). The token is still valid. |
 | `4002` | you tried to take over a `(user_id, device_id)` in a sustained eviction loop while the session holding it was provably alive | Wait the `retry_after_ms` in the JSON close reason before reconnecting; it doubles per consecutive refusal (60s → 300s cap). The token is still valid. |
+| `4010` | a different installation displaced this session (both install IDs present and distinct, displaced client opted in) | Terminal: persist superseded state, stop reconnect and refresh, notify the owner once; wait for explicit local reclaim. Token remains valid. |
 | `1009` | an inbound frame exceeded the server's frame cap (8 MiB post-auth, 64 KiB for the pre-auth `connect` frame) | Split the payload, or use media upload (§15). Never resend the frame. |
 | `1005` / close with no status | server-initiated kick: backpressure, ack-silence, unacked-ledger depth, `device.cursor.reset` | Reconnect with backoff; replay recovers the messages. |
 | `4002` | your `connect` was **turned away** instead of being allowed to evict a provably-healthy incumbent session for the same `(user_id, device_id)` — see §3.6 | Wait at least `retry_after_ms` (below) before retrying. The token is still valid, and no `hello-ok` was sent. |
 | `1006` (abnormal, no CLOSE frame) | handshake rejection, or a transport drop | **Read the last frame you received**: a `hello-fail` arrives immediately before the close and carries the real reason (§3.5). |
 
-`4001` and `4002` are the only application (4000–4999) close codes msghub emits
-(`4002` only where `takeover_refuse_enabled` is on). There is no close code for
+`4001`, `4002`, and `4010` are the only application (4000–4999) close codes the server emits.
+`4002` comes from takeover refusal (`takeover_refuse_enabled`) or handshake rate limiting. There is no close code for
 auth failure and none for protocol violation.
 
 The `4002` close **reason** is a JSON object, not free text:
@@ -2650,7 +2674,7 @@ The `4002` close **reason** is a JSON object, not free text:
 > `auth service unavailable` for transient (see §3.5). Both strings are pinned by
 > server-side tests and are stable wire contract.
 
-**Reconnection strategy.** Implement exponential backoff with jitter,
+**Reconnection strategy.** Except for terminal `4010`, implement exponential backoff with jitter,
 capped at e.g. 30 s. On reconnect, supply the same `device_id` as before
 to resume the replay cursor — you do **not** need to track which messages
 you missed; the server does.

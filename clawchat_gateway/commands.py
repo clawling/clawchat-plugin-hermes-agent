@@ -136,3 +136,19 @@ async def handle_clawchat_output_command(raw_args: str) -> str:
         f"- detail level: `{detail_level}`\n\n"
         "Applies to new ClawChat messages."
     )
+
+
+async def handle_clawchat_reclaim_command(raw_args: str) -> str:
+    if (raw_args or "").strip():
+        return "usage: /clawchat-reclaim"
+    from clawchat_gateway.hermes_home import hermes_home
+    from clawchat_gateway.install_identity import clear_superseded, reclaim_message
+    from clawchat_gateway.connection import ClawChatConnection
+
+    home = hermes_home()
+    try:
+        cleared = clear_superseded(home)
+    except OSError as exc:
+        return f"clawchat: reclaim failed ({type(exc).__name__})"
+    ClawChatConnection.wake_reclaimed(home)
+    return reclaim_message(cleared)

@@ -9,10 +9,13 @@ import json
 import logging
 import os
 import random
+import socket
 import time
 from collections import deque
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from functools import wraps
+from pathlib import Path
 from typing import Any, Awaitable, Callable, ClassVar, Literal
 
 try:
@@ -23,7 +26,7 @@ except ImportError:  # pragma: no cover
 from clawchat_gateway import __version__
 from clawchat_gateway.config import ClawChatConfig
 from clawchat_gateway.hermes_home import hermes_home
-from clawchat_gateway import instance_lock
+from clawchat_gateway import instance_lock, install_identity
 from clawchat_gateway.profile_collision import hermes_root
 from clawchat_gateway.token_refresh import (
     RefreshManager,
@@ -55,6 +58,7 @@ from clawchat_gateway.ws_state import ReconnectTracker
 logger = logging.getLogger("clawchat_gateway.connection")
 
 HANDSHAKE_TIMEOUT_SECONDS = 10.0
+SUPERSEDED_CHECK_SECONDS = 30.0
 INSTANCE_LOCK_RETRY_SECONDS = 30.0
 INSTANCE_LOCK_REMINDER_SECONDS = 600.0
 CREDENTIAL_READ_FAILURE_LIMIT = 3
@@ -74,6 +78,8 @@ CLOSE_CODE_REPLACED = 4001
 # carrying retry_after_ms; unlike 4001 the server owns the escalation
 # (60s -> 300s per consecutive refusal), so the client just honours the value.
 CLOSE_CODE_DUPLICATE_THROTTLED = 4002
+# Different installations require explicit operator recovery; tokens remain valid.
+CLOSE_CODE_SUPERSEDED_BY_OTHER_INSTALL = 4010
 # Reconnect floor after being evicted by a takeover, and its ceiling once the
 # eviction keeps repeating.
 #
@@ -164,7 +170,7 @@ _TRANSIENT_AUTH_FAILURE_MARKERS = (
 )
 
 
-def build_connect_capabilities() -> dict[str, bool]:
+def build_connect_capabilities(*, install_conflict: bool = False) -> dict[str, bool]:
     """Return the capability flags advertised in the connect handshake.
 
     Extracted so tests can assert on the capability set without wiring up a
@@ -172,6 +178,7 @@ def build_connect_capabilities() -> dict[str, bool]:
     (``clawchat-plugin-openclaw``).
     """
     return {
+        **({"install_conflict": True} if install_conflict else {}),
         # Agent runtime is single-device: multi_device stays off so the
         # server never self-fans-out this connection's own messages.
         "multi_device": False,
@@ -295,6 +302,7 @@ class ConnectionState(str, enum.Enum):
     AUTH_FAILED = "auth_failed"
     SUSPENDED = "suspended"
     STANDBY = "standby"
+    SUPERSEDED = "superseded"
     CLOSED = "closed"
 
 
@@ -356,6 +364,8 @@ class ClawChatConnection:
         is_chat_rejected: IsChatRejected | None = None,
         account_id: str = "default",
         connect_device_id: str | None = None,
+        owner_locale: Callable[[], str | None] | None = None,
+        _allow_superseded_notice: bool = False,
     ) -> None:
         # ``connect_device_id`` overrides the device id presented in the WS
         # connect payload ONLY. REST refresh keeps the canonical resolved id
@@ -364,6 +374,12 @@ class ClawChatConnection:
         # via takeover, so a standalone sender must present a sibling device
         # id or it kicks a gateway running in another process off the socket.
         self._connect_device_id = connect_device_id
+        self._owner_locale = owner_locale
+        self._allow_superseded_notice = _allow_superseded_notice
+        self._superseded = False
+        self._reclaim_event = asyncio.Event()
+        self._owner_notice_task: asyncio.Task[None] | None = None
+        self._owner_notice_tasks: set[asyncio.Task[None]] = set()
         self._cfg = config
         self._on_message = on_message
         self._on_state_change = on_state_change
@@ -452,6 +468,10 @@ class ClawChatConnection:
             return
         # Supersede any orphaned supervisor for the same account before starting
         # ours, so only one WS session per account is ever live in this process.
+        if self._connect_device_id:
+            self._supervisor_key = (
+                str(self._profile_home), self._account_id + ":" + self._connect_device_id,
+            )
         prior = ClawChatConnection._live_supervisors.get(self._supervisor_key)
         if prior is not None and prior is not self:
             # Take a process-local reference BEFORE stop can drop the OS lock.
@@ -531,7 +551,8 @@ class ClawChatConnection:
 
     async def _refresh_should_continue(self, refresh_config: ClawChatConfig | None) -> bool:
         if (
-            not self._instance_locks_ready() or self._auth_failed
+            self._allow_superseded_notice or self._install_is_blocked()
+            or not self._instance_locks_ready() or self._auth_failed
             or self._activation_source_suspended or refresh_config is None
         ):
             return False
@@ -540,7 +561,7 @@ class ClawChatConnection:
         status = await self._recheck_activation_source(adopt_changes=False)
         return (
             status in ("ok", "unreadable") and not self._activation_source_suspended
-            and self._instance_locks_ready()
+            and self._instance_locks_ready() and not self._install_is_blocked()
         )
 
     def _instance_locks_ready(self) -> bool:
@@ -1011,7 +1032,7 @@ class ClawChatConnection:
     ) -> bool:
         from clawchat_gateway.activate import persist_rotated_tokens
 
-        if self._auth_failed or self._activation_source_suspended or not self._cfg.refresh_token:
+        if self._install_is_blocked() or self._auth_failed or self._activation_source_suspended or not self._cfg.refresh_token:
             return False
         if expected_credentials is not None and (
             self._cfg.token != expected_credentials.token
@@ -1025,6 +1046,9 @@ class ClawChatConnection:
             expected_access_token=request_credentials.token,
             expected_refresh_token=request_credentials.refresh_token,
         ) != "ok":
+            return False
+
+        if self._install_is_blocked():
             return False
 
         # §C.2: thread the in-memory identity down so an env-only deployment (no
@@ -1108,6 +1132,8 @@ class ClawChatConnection:
         self, expected: ClawChatConfig | None, *, completing_pending: bool = False,
         reason: str = AUTO_LOGOUT_LAST_ERROR,
     ) -> bool:
+        if self._install_is_blocked():
+            return False
         if self._auth_failed or (self._activation_source_suspended and not completing_pending):
             self._log_discarded_refresh("credentials_unavailable")
             return False
@@ -1130,7 +1156,8 @@ class ClawChatConnection:
             expected_refresh_token=expected.refresh_token, permanent_failure_reason=reason,
         )
         if (
-            self._auth_failed
+            self._install_is_blocked()
+            or self._auth_failed
             or (self._activation_source_suspended and not completing_pending)
             or self._cfg.token != expected.token
             or self._cfg.refresh_token != expected.refresh_token
@@ -1256,6 +1283,14 @@ class ClawChatConnection:
         self._stopping = True
         try:
             self._cancel_stable_ready_reset()
+            # Reclaim can start a later conflict while an older notice is still
+            # within its deadline. Stop every outstanding notice, not just the latest.
+            for task in self._owner_notice_tasks:
+                task.cancel()
+            if self._owner_notice_tasks:
+                await asyncio.gather(*self._owner_notice_tasks, return_exceptions=True)
+            self._owner_notice_tasks.clear()
+            self._owner_notice_task = None
             await self._set_state(ConnectionState.CLOSED)
             self._reject_pending_acks(RuntimeError("connection stopped"))
             self._reject_queued_ack_waiters(RuntimeError("connection stopped"), clear_queue=True)
@@ -1395,12 +1430,140 @@ class ClawChatConnection:
         """Waiting behind another process's instance lock — started, not failed."""
         return self._state == ConnectionState.STANDBY
 
+    @property
+    def is_superseded(self) -> bool:
+        return self._state == ConnectionState.SUPERSEDED
+
+    def _install_is_blocked(self) -> bool:
+        # The reader latches before teardown/persistence. Share that short window
+        # with sibling senders so none can refresh while the terminal close settles.
+        return self._superseded or any(
+            conn._superseded and conn._profile_home == self._profile_home
+            and conn._cfg.user_id == self._cfg.user_id
+            for conn in self._live_supervisors.values()
+        ) or install_identity.read_superseded(self._profile_home, self._cfg.user_id) is not None
+
+    @classmethod
+    def wake_reclaimed(cls, profile_home: Path) -> None:
+        home = profile_home.expanduser().resolve()
+        for conn in list(cls._live_supervisors.values()):
+            if conn._profile_home == home:
+                # Commands can run on a different thread/loop in Hermes.
+                task = conn._supervisor_task
+                if task is not None and not task.done() and not task.get_loop().is_closed():
+                    task.get_loop().call_soon_threadsafe(conn._reclaim_event.set)
+
+    def _log_install_state(
+        self, event: str, level: int, state: dict[str, Any] | None = None,
+    ) -> None:
+        state = state or {}
+        logger.log(level, format_ws_log(
+            event=event, account_id=self._account_id, attempt=self._attempt,
+            reconnect_count=self._reconnect_count, state=self._state.value,
+            action="wait" if event == "install_superseded" else "connect",
+            fields=[("code", CLOSE_CODE_SUPERSEDED_BY_OTHER_INSTALL),
+                    ("install_id", str(state.get("install_id") or "")[:8]),
+                    ("by_client_version", state.get("by_client_version")),
+                    ("unreadable", state.get("unreadable", False)),
+                    ("recovery", "hermes clawchat reclaim or /clawchat-reclaim")],
+        ))
+
+    async def _wait_if_superseded(self) -> bool:
+        if self._allow_superseded_notice:
+            return not self._stopping
+        waiting = self._superseded
+        last_reminder = time.monotonic() if waiting else 0.0
+        while not self._stopping:
+            self._reclaim_event.clear()
+            state = install_identity.read_superseded(self._profile_home, self._cfg.user_id)
+            if state is None:
+                if waiting:
+                    self._superseded = False
+                    self._log_install_state("install_reclaimed", logging.INFO)
+                    await self._set_state(ConnectionState.DISCONNECTED)
+                return True
+            self._superseded = True
+            await self._set_state(ConnectionState.SUPERSEDED)
+            now = time.monotonic()
+            if not waiting or now - last_reminder >= INSTANCE_LOCK_REMINDER_SECONDS:
+                self._log_install_state("install_superseded", logging.WARNING if waiting else logging.ERROR, state)
+                last_reminder = now
+            waiting = True
+            try:
+                await asyncio.wait_for(self._reclaim_event.wait(), timeout=SUPERSEDED_CHECK_SECONDS)
+            except asyncio.TimeoutError:
+                pass
+        return False
+
+    async def _handle_install_superseded(self) -> None:
+        self._superseded = True
+        self._refresh_pending_reconnect = False
+        self._takeover_streak = 0
+        existing = install_identity.read_superseded(self._profile_home, self._cfg.user_id)
+        if existing is None:
+            try:
+                reason = json.loads(self._last_close_reason or "{}")
+            except (ValueError, TypeError):
+                reason = {}
+            version = reason.get("by_client_version") if isinstance(reason, dict) else None
+            state = {
+                "user_id": self._cfg.user_id, "device_id": self.session_device_id(),
+                "install_id": install_identity.get_install_id(self._profile_home),
+                "superseded_at": datetime.now(timezone.utc).isoformat(),
+                "by_client_version": version if isinstance(version, str) else None,
+                "owner_notice": {"status": "pending"},
+            }
+            install_identity.write_superseded(self._profile_home, state)
+            if not self._stopping:
+                self._owner_notice_task = asyncio.create_task(
+                    self._send_superseded_notice(state), name="clawchat-install-owner-notice",
+                )
+                self._owner_notice_tasks.add(self._owner_notice_task)
+                self._owner_notice_task.add_done_callback(self._owner_notice_tasks.discard)
+        else:
+            state = existing
+        await self._set_state(ConnectionState.SUPERSEDED)
+        self._log_install_state("install_superseded", logging.ERROR, state)
+
+    async def _send_superseded_notice(self, state: dict[str, Any]) -> None:
+        from clawchat_gateway.owner_language import resolve_owner_language_if_known
+        from clawchat_gateway.standalone_send import standalone_send
+
+        try:
+            chat_id = self._store.get_activation_conversation(
+                platform="hermes", account_id="default",
+            ) if self._store is not None else None
+            if not chat_id:
+                result = {"status": "skipped", "reason": "missing_owner_chat_id"}
+            else:
+                locale = self._owner_locale() if self._owner_locale is not None else None
+                language = resolve_owner_language_if_known(locale)
+                host = socket.gethostname()
+                en = (f"This agent is now online at another installation. This installation on {host} "
+                      "has stopped connecting to avoid mutual takeovers. To switch back here, run "
+                      "`hermes clawchat reclaim` locally, or send /clawchat-reclaim in this machine's Hermes.")
+                zh = (f"这个 agent 已在另一处安装上线，本机（{host}）上的这份安装已停止连接以避免互相顶号。"
+                      "如需切回本机，在本机运行 `hermes clawchat reclaim`，"
+                      "或在本机的 Hermes 里发送 /clawchat-reclaim。")
+                text = zh if language in ("zh", "zh_Hant") else en if language else en + "\n" + zh
+                sent = await asyncio.wait_for(standalone_send(
+                    self._cfg, str(chat_id), text, _allow_superseded_notice=True,
+                ), timeout=HANDSHAKE_TIMEOUT_SECONDS + 10.0)
+                result = ({"status": "sent", "message_id": sent.get("message_id")}
+                          if sent.get("success") else {"status": "failed", "error_type": "SendError"})
+        except Exception as exc:  # noqa: BLE001 — deliberately no retry
+            result = {"status": "failed", "error_type": type(exc).__name__}
+        # A reclaim or a later event must never be overwritten by this background task.
+        current = install_identity.read_superseded(self._profile_home, self._cfg.user_id)
+        if current and current.get("superseded_at") == state["superseded_at"]:
+            install_identity.write_superseded(self._profile_home, {**state, "owner_notice": result})
+
     async def wait_until_ready(self, *, timeout: float) -> bool:
         if self.is_ready:
             return True
         try:
-            # Also wakes on STANDBY, which will not turn READY within a
-            # handshake timeout; callers tell the two apart via ``is_standby``.
+            # STANDBY and SUPERSEDED are settled waits, not startup failures.
+            # Callers inspect their corresponding properties after this wakes.
             await asyncio.wait_for(self._settled_event.wait(), timeout=timeout)
         except asyncio.TimeoutError:
             return False
@@ -1410,7 +1573,7 @@ class ClawChatConnection:
         if self._state == state:
             return
         self._state = state
-        if state in {ConnectionState.READY, ConnectionState.STANDBY}:
+        if state in {ConnectionState.READY, ConnectionState.STANDBY, ConnectionState.SUPERSEDED}:
             self._settled_event.set()
         else:
             self._settled_event.clear()
@@ -1454,6 +1617,10 @@ class ClawChatConnection:
                         fields=[("source", "sqlite_startup")],
                     )
                 )
+            if not await self._wait_for_instance_locks():
+                break
+            if not await self._wait_if_superseded():
+                break
             if not self._refresh_credentials_usable(self._cfg.refresh_token):
                 await self._enter_auth_failed()
             if not self._has_connect_credentials():
@@ -1515,22 +1682,29 @@ class ClawChatConnection:
                 except Exception as exc:  # noqa: BLE001
                     # websockets raises ConnectionClosedError for non-1000/1001
                     # closes; a pre-hello 4002 instead times out the handshake.
-                    if self._last_close_code not in {CLOSE_CODE_REPLACED, CLOSE_CODE_DUPLICATE_THROTTLED}:
+                    if self._last_close_code not in {
+                        CLOSE_CODE_REPLACED, CLOSE_CODE_DUPLICATE_THROTTLED,
+                        CLOSE_CODE_SUPERSEDED_BY_OTHER_INSTALL,
+                    }:
                         raise
-                    logger.warning(
-                        format_ws_log(
-                            event="connection_lost",
-                            account_id=self._account_id,
-                            attempt=self._attempt,
-                            reconnect_count=self._reconnect_count,
-                            state=self._state.value,
-                            action="reconnect",
-                            fields=[
-                                ("code", self._last_close_code),
-                                ("reason", self._safe_error_text(exc)),
-                            ],
+                    if self._last_close_code != CLOSE_CODE_SUPERSEDED_BY_OTHER_INSTALL:
+                        logger.warning(
+                            format_ws_log(
+                                event="connection_lost",
+                                account_id=self._account_id,
+                                attempt=self._attempt,
+                                reconnect_count=self._reconnect_count,
+                                state=self._state.value,
+                                action="reconnect",
+                                fields=[
+                                    ("code", self._last_close_code),
+                                    ("reason", self._safe_error_text(exc)),
+                                ],
+                            )
                         )
-                    )
+                if self._last_close_code == CLOSE_CODE_SUPERSEDED_BY_OTHER_INSTALL:
+                    await self._handle_install_superseded()
+                    continue
                 if self._last_close_code == CLOSE_CODE_REPLACED:
                     # Evicted by a newer session for this device. The
                     # stable-ready reset is deliberately NOT taken here: the
@@ -1902,6 +2076,8 @@ class ClawChatConnection:
         message; here we drop the in-memory creds and latch the rejected token so
         the supervisor stops opening sockets with the dead token.
         """
+        if self._allow_superseded_notice or self._install_is_blocked():
+            return RefreshOutcome(status="skipped", error="installation superseded; run hermes clawchat reclaim")
         if not self._instance_locks_ready():
             return RefreshOutcome(status="skipped", error="instance locks not held")
         if self._activation_source_suspended:
@@ -1911,6 +2087,8 @@ class ClawChatConnection:
             return RefreshOutcome(status="skipped", error="instance locks not held")
         if source_status in ("changed", "revoked") or self._activation_source_suspended:
             return RefreshOutcome(status="skipped", error="activation credential source changed")
+        if self._allow_superseded_notice or self._install_is_blocked():
+            return RefreshOutcome(status="skipped", error="installation superseded")
         manager = self._refresh_manager
         if not self._refresh_credentials_usable(self._cfg.refresh_token):
             await self._enter_auth_failed()
@@ -1922,6 +2100,8 @@ class ClawChatConnection:
         token = self._cfg.token
         refresh_token = self._cfg.refresh_token or None
         outcome = await manager.refresh(access_token=token, refresh_token=refresh_token)
+        if self._install_is_blocked():
+            return RefreshOutcome(status="skipped", error="installation superseded")
         if self._activation_source_suspended:
             return RefreshOutcome(status="skipped", error="activation credential source suspended")
         if (
@@ -2051,6 +2231,8 @@ class ClawChatConnection:
             logger.warning("clawchat stale socket close failed")
 
     async def _run_one_connection(self) -> bool:
+        if self._install_is_blocked() and not self._allow_superseded_notice:
+            return False
         if not self._instance_locks_ready():
             return False
         # A source check can invalidate this attempt while connect/hello awaits.
@@ -2172,6 +2354,9 @@ class ClawChatConnection:
             # takeover eviction apart from an ordinary drop.
             self._last_close_code = getattr(ws, "close_code", None)
             self._last_close_reason = getattr(ws, "close_reason", None)
+            if self._last_close_code == CLOSE_CODE_SUPERSEDED_BY_OTHER_INSTALL:
+                # Latch before any task can attempt refresh after teardown.
+                self._superseded = True
             self._ws = None
             self._read_task = None
             self._connection_credential_generation = None
@@ -2252,6 +2437,15 @@ class ClawChatConnection:
             self._flushing_send_queue = False
 
     async def _read_loop(self, ws: Any) -> None:
+        try:
+            await self._read_frames(ws)
+        finally:
+            if getattr(ws, "close_code", None) == CLOSE_CODE_SUPERSEDED_BY_OTHER_INSTALL:
+                self._superseded = True
+                if self._hello_wait is not None and not self._hello_wait.done():
+                    self._hello_wait.set_result(False)
+
+    async def _read_frames(self, ws: Any) -> None:
         async for raw in ws:
             try:
                 frame = decode_frame(raw)
@@ -2652,12 +2846,15 @@ class ClawChatConnection:
                 )
             except Exception:  # noqa: BLE001 — best-effort, must not block connect
                 logger.debug("clawchat device id backfill failed")
+        install_id = (install_identity.get_install_id(self._profile_home)
+                      if not self._connect_device_id else None)
         connect_req = build_connect_request(
             frame_id=req_id,
             token=self._connection_token if self._connection_token is not None else self._cfg.token,
             nonce=nonce,
             device_id=device_id,
-            capabilities=build_connect_capabilities(),
+            install_id=install_id,
+            capabilities=build_connect_capabilities(install_conflict=bool(install_id)),
             client_version=__version__,
         )
         await self._ws.send(encode_frame(connect_req))

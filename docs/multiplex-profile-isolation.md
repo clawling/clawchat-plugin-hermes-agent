@@ -6,7 +6,8 @@ without changing the process-wide environment.
 
 Each profile keeps its existing `.env` and SQLite database. Store instances are
 cached by absolute database path; supervisor slots use `(profile_home, account_id)`.
-The database account key remains `default`, so existing activation rows need no
+Sibling sender supervisor slots additionally include the connect device ID, so an
+owner notice cannot stop the canonical supervisor. The database account key remains `default`, so existing activation rows need no
 migration. Starting a replacement connection still stops an older connection for
 the same profile, but never another profile's connection.
 
@@ -155,3 +156,15 @@ suite before merging anything that touches these modules.
 After deploying and restarting the gateway, verify each profile has its own
 `ready` connection and test actual messages with both accounts. A systemd
 `active` state or a startup notification alone is not end-to-end chat validation.
+
+Installation identity and superseded state are also profile scoped:
+`clawchat/install_seed` and `clawchat/install_superseded.json` live under the resolved
+profile home. A copied seed derives a different `install_id` at another absolute
+path, hostname, or host fingerprint, without changing the paired device ID or
+credentials. If a copy displaces the original, terminal `4010` leaves the original
+alive but waiting for explicit local reclaim, including after restart. Refresh is
+blocked for every connection in that profile, including sibling senders; only the
+single owner notice may open a sibling socket with the existing token. Reclaim in
+one multiplexed profile wakes only that profile. Keeping identical host identifiers
+and the same absolute path in cloned containers also keeps the derived install ID;
+use distinct container hostnames or profile paths to distinguish those installs.
