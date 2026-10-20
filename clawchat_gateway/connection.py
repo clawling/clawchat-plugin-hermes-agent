@@ -860,7 +860,10 @@ class ClawChatConnection:
                     if lease is None:
                         raise ClawChatApiError(kind="instance_lock", message="instance locks released", connect_failed=True)
                     leases.append(lease)
-                if not self._instance_locks_ready() or self._cfg is not request_config:
+                if (
+                    not self._instance_locks_ready()
+                    or self._cfg.refresh_token != request_config.refresh_token
+                ):
                     raise ClawChatApiError(kind="instance_lock", message="instance ownership changed", connect_failed=True)
                 return refresh_sync(*args)
             finally:
@@ -1249,29 +1252,37 @@ class ClawChatConnection:
             self._credential_watch_task.cancel()
         if self._hello_wait is not None and not self._hello_wait.done():
             self._hello_wait.cancel()
-        if self._ws is not None:
-            try:
-                await asyncio.wait_for(
-                    self._ws.close(), timeout=_WS_CLOSE_TIMEOUT_SECONDS
-                )
-            except (asyncio.TimeoutError, Exception):  # noqa: BLE001
-                # A half-dead socket may never complete the close handshake; don't
-                # let it stall supersession or the host's disconnect budget.
-                pass
-        if self._supervisor_task is not None:
-            self._supervisor_task.cancel()
-            try:
-                await self._supervisor_task
-            except (asyncio.CancelledError, Exception):
-                pass
-            self._supervisor_task = None
-        # A refresh request already in flight on a worker thread keeps its own
-        # lease (``_build_refresh_client``), so releasing here never lets another
-        # process refresh concurrently with it.
-        for held in self._instance_locks.values():
-            held.release()
-        self._instance_locks.clear()
-        self._instance_lock_waiting = None
+        try:
+            if self._ws is not None:
+                try:
+                    await asyncio.wait_for(
+                        self._ws.close(), timeout=_WS_CLOSE_TIMEOUT_SECONDS
+                    )
+                except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+                    # A half-dead socket may never complete the close handshake; don't
+                    # let it stall supersession or the host's disconnect budget.
+                    pass
+            if self._supervisor_task is not None:
+                self._supervisor_task.cancel()
+                try:
+                    await self._supervisor_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                self._supervisor_task = None
+        finally:
+            # Also on cancellation (a host disconnect budget or an abandoned
+            # supersede): never strand the OS locks. ``_stopping`` already gates
+            # every connect / refresh path, and the supervisor is cancelled here
+            # if the body above did not get that far.
+            if self._supervisor_task is not None and not self._supervisor_task.done():
+                self._supervisor_task.cancel()
+            # A refresh request already in flight on a worker thread keeps its own
+            # lease (``_build_refresh_client``), so releasing here never lets another
+            # process refresh concurrently with it.
+            for held in self._instance_locks.values():
+                held.release()
+            self._instance_locks.clear()
+            self._instance_lock_waiting = None
         # Release our slot only if a newer ``start`` hasn't already claimed it.
         if ClawChatConnection._live_supervisors.get(self._supervisor_key) is self:
             del ClawChatConnection._live_supervisors[self._supervisor_key]

@@ -134,11 +134,16 @@ def acquire(path: Path, *, kind: str, profile_home: Path) -> LockResult:
                 "started_at": datetime.now(timezone.utc).isoformat(),
                 "kind": kind, "profile_home": str(profile_home), "version": __version__,
             }
-            os.ftruncate(fd, 0)
-            os.lseek(fd, 0, os.SEEK_SET)
-            with os.fdopen(os.dup(fd), "w", encoding="utf-8") as stream:
-                json.dump(holder, stream)
-                stream.flush()
+            try:
+                os.ftruncate(fd, 0)
+                os.lseek(fd, 0, os.SEEK_SET)
+                with os.fdopen(os.dup(fd), "w", encoding="utf-8") as stream:
+                    json.dump(holder, stream)
+                    stream.flush()
+            except OSError as exc:
+                # The kernel lock is what grants ownership; the record is only
+                # diagnostics. Keep the lock (a full disk must not unlock us).
+                logger.warning("instance lock holder record write failed path=%s error=%s", path, exc)
             entry = _Entry(fd, backend, holder)
             _registry[path] = entry
             fd = None  # Registry owns the descriptor now.

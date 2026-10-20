@@ -554,3 +554,48 @@ async def test_cancelled_supersede_does_not_strand_references(homes, monkeypatch
         await original_stop()
         await fresh.stop()
     assert _probe(homes / "clawchat" / "gateway.lock")["outcome"] == "acquired"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX flock")
+def test_holder_record_write_failure_keeps_the_lock(tmp_path, monkeypatch, caplog):
+    def full_disk(*args):
+        raise OSError(errno.ENOSPC, "no space left")
+
+    monkeypatch.setattr(instance_lock.os, "ftruncate", full_disk)
+    path = tmp_path / "gateway.lock"
+    with caplog.at_level(logging.WARNING):
+        result = instance_lock.acquire(path, kind="profile", profile_home=tmp_path)
+    try:
+        assert result.outcome == "acquired"
+        assert "holder record write failed" in caplog.text
+        assert _probe(path)["outcome"] == "held"
+    finally:
+        result.release()
+    assert _probe(path)["outcome"] == "acquired"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_stop_still_releases_locks(homes, monkeypatch):
+    conn, _ = _connection(monkeypatch, homes)
+    ready = _park_connection(monkeypatch, conn)
+    closing = asyncio.Event()
+
+    class _StuckSocket:
+        async def close(self):
+            closing.set()
+            await asyncio.Event().wait()
+
+    await conn.start()
+    try:
+        await asyncio.wait_for(ready.wait(), 1)
+        conn._ws = _StuckSocket()
+        stopper = asyncio.create_task(conn.stop())
+        await asyncio.wait_for(closing.wait(), 1)
+        stopper.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stopper
+        assert not conn._instance_locks
+        assert _probe(homes / "clawchat" / "gateway.lock")["outcome"] == "acquired"
+    finally:
+        conn._ws = None
+        await conn.stop()
