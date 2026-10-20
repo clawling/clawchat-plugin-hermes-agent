@@ -283,6 +283,12 @@ def record_superseded(profile_home: Path, state: dict[str, Any]) -> tuple[dict[s
             existing = _read_superseded_unlocked(home, state.get("user_id"))
             if existing is not None:
                 return existing, False
+            current = _read_reclaim_generation(home)
+            if snapshot is not None and current is not None and current != snapshot:
+                # A reclaim completed after this event began: honour it rather
+                # than record an event the operator has already overridden.
+                logger.warning("superseded event overtaken by a reclaim; not recording it")
+                return state, False
             if not _write_superseded_unlocked(home, state):
                 _remember_failed_creation(home, state, snapshot)
                 return state, False
@@ -324,7 +330,8 @@ def release_reclaimed_cache(profile_home: Path) -> bool:
             return False
         snapshot = _failed_generations.get(home)
         current = _read_reclaim_generation(home)
-        if snapshot is not None and current is not None and snapshot != current:
+        # Reclaims only ever write the file; a vanished one proves nothing.
+        if snapshot is not None and current and snapshot != current:
             _failed_writes.pop(home, None)
             _failed_generations.pop(home, None)
             return True

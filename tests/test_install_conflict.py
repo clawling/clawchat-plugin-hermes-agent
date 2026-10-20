@@ -11,7 +11,7 @@ import subprocess
 import sys
 from pathlib import Path
 from dataclasses import replace
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -1696,3 +1696,36 @@ async def test_pre_http_skip_is_not_retried_persisted_or_logged_out():
     logout.assert_not_called()
     rejected.assert_not_called()
     assert not manager.logged_out
+
+
+def test_reclaim_between_snapshot_and_lock_is_honoured(monkeypatch, tmp_path):
+    state = _event_state()
+    real_guard = identity._state_guard
+    home = tmp_path.resolve()
+
+    @contextmanager
+    def guard_after_reclaim(path):
+        # Another process completes a reclaim after the snapshot, before the lock.
+        with real_guard(path):
+            identity._bump_reclaim_generation_unlocked(home)
+        with real_guard(path):
+            yield
+
+    monkeypatch.setattr(identity, "_state_guard", guard_after_reclaim)
+    assert identity.record_superseded(tmp_path, state) == (state, False)
+    assert identity.read_superseded(tmp_path) is None
+    assert not identity.superseded_path(tmp_path).exists()
+    assert not identity._failed_writes
+
+
+def test_vanished_generation_does_not_release_cache(monkeypatch, tmp_path):
+    home = tmp_path.resolve()
+    with identity._state_guard(home):
+        identity._bump_reclaim_generation_unlocked(home)
+    state = _event_state()
+    with monkeypatch.context() as failure:
+        failure.setattr(identity, "_write_superseded_unlocked", Mock(return_value=False))
+        assert identity.record_superseded(tmp_path, state) == (state, False)
+    identity._reclaim_generation_path(home).unlink()
+    assert identity.release_reclaimed_cache(tmp_path) is False
+    assert identity.read_superseded(tmp_path) == state

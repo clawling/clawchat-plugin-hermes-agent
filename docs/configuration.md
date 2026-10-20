@@ -1686,9 +1686,11 @@ even when no superseded state exists on disk or in the reclaiming process.
 If updating the generation fails, reclaim still clears the disk state and the
 reclaiming process's memory and logs a WARNING: memory-only state is never
 written back, so the failure cannot revive anything, but other processes holding
-memory-only state keep waiting until restarted. A waiting process checks every 30 seconds: only a readable
-generation different from its readable initial snapshot releases its cached
-event. This check never writes state or requires the state file lock. An absent
+memory-only state keep waiting until restarted. Event creation compares the generation again under the state lock: if a reclaim
+completed after the snapshot, the event is not recorded and the connection
+proceeds as reclaimed. A waiting process checks every 30 seconds: only a readable,
+present generation different from its readable initial snapshot releases its
+cached event (a generation file that disappears proves nothing). This check never writes state or requires the state file lock. An absent
 generation file represents the initial generation; an unreadable file is unknown
 and cannot establish that reclaim occurred.
 On restart, a matching (or unreadable) state file blocks connection before startup
