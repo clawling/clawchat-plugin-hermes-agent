@@ -269,3 +269,5 @@ CLAUDE.md
 !tests/test_tool_requests.py
 
 !tests/test_turn_attachments.py
+
+!tests/test_message_timestamps.py
