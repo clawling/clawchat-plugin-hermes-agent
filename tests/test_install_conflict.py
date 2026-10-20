@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import os
 import re
@@ -12,7 +13,7 @@ from pathlib import Path
 from dataclasses import replace
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from websockets.asyncio.server import serve
@@ -366,7 +367,6 @@ async def test_refresh_skipped_and_no_logout_or_credential_clear(monkeypatch, tm
         conn._refresh_manager.refresh.assert_not_called()
         assert await conn._persist_auth_logout("test failure") is False
         assert await conn._persist_refresh_rejection("test-refresh") is False
-        assert await conn._persist_rotated_tokens("rotated", "rotated-refresh") is False
         logout.assert_not_called()
         assert conn.config.token == "test-access"
 
@@ -379,7 +379,7 @@ async def test_write_failure_still_blocks_and_reclaim_wakes(monkeypatch, tmp_pat
     monkeypatch.setattr(identity.os, "replace", fail_replace)
     conn._last_close_reason = "not-json"
     await conn._handle_install_superseded()
-    await conn._owner_notice_task
+    assert conn._owner_notice_task is None
     assert conn.is_superseded
     assert not identity.superseded_path(tmp_path).exists()
     sibling = make_conn(connect_device_id="test-standalone")
@@ -535,7 +535,8 @@ def test_failed_write_over_old_identity_still_blocks(monkeypatch, tmp_path):
     blocked(tmp_path, "usr_previous_agent")
     state = {"user_id": "usr_test_agent", "owner_notice": {"status": "pending"}}
     monkeypatch.setattr(identity.os, "replace", lambda *_a: (_ for _ in ()).throw(OSError("read only")))
-    assert not identity.write_superseded(tmp_path, state)
+    recorded, created = identity.record_superseded(tmp_path, state)
+    assert recorded == state and not created
     assert identity.read_superseded(tmp_path, "usr_test_agent") == state
 
 
@@ -769,13 +770,13 @@ if action == "record":
     state, created = identity.record_superseded(home, payload)
     result = {"state": state, "created": created}
 elif action == "update":
-    original_read = identity._read_superseded_unlocked
+    original_read = identity._read_disk_superseded_unlocked
     def pause_after_read(*args):
         value = original_read(*args)
         print("read", flush=True)
         sys.stdin.readline()
         return value
-    identity._read_superseded_unlocked = pause_after_read
+    identity._read_disk_superseded_unlocked = pause_after_read
     result = identity.update_owner_notice(home, payload["superseded_at"], {"status": "sent"})
 else:
     if action == "clear-observed":
@@ -888,7 +889,7 @@ async def test_failed_write_recovers_then_external_reclaim_reconnects(monkeypatc
     async with peer(supersede=False) as (url, requests):
         conn = make_conn(url)
         await conn._handle_install_superseded()
-        await conn._owner_notice_task
+        assert conn._owner_notice_task is None
         await conn.start()
         try:
             await until(lambda: len(attempts) >= 3)
@@ -916,3 +917,314 @@ def test_empty_reclaim_explains_memory_only_recovery(capsys):
     assert "cannot persist superseded installation" in text
     assert "/clawchat-reclaim" in text
     assert "重启 gateway" in text
+
+
+def _event_state(stamp="test-event"):
+    return {"user_id": "usr_test_agent", "superseded_at": stamp,
+            "owner_notice": {"status": "pending"}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["queued", "response-pending", "cancelled-watcher"])
+async def test_refresh_worker_boundary_and_completed_rotation(monkeypatch, tmp_path, phase):
+    from clawchat_gateway import activate, api_client
+    import clawchat_gateway.standalone_send as sender
+    from clawchat_gateway.storage import ClawChatStore
+
+    monkeypatch.setattr(sender, "standalone_send", AsyncMock(return_value={"success": True, "message_id": "msg_test"}))
+    store = ClawChatStore(tmp_path / "refresh.sqlite")
+    cfg = replace(config(), base_url="http://127.0.0.1:1")
+    store.upsert_activation(platform="hermes", account_id="default", user_id=cfg.user_id,
+                            owner_user_id=cfg.owner_user_id, conversation_id="cnv_test",
+                            access_token=cfg.token, refresh_token=cfg.refresh_token,
+                            device_id="test-device")
+    conn = ClawChatConnection(cfg, on_message=AsyncMock())
+    conn._store = store
+    assert conn._load_startup_activation_credentials()
+    conn._refresh_manager = conn._build_refresh_manager()
+    conn._refresh_manager._max_transient_retries = 0
+    socket = conn._ws = SimpleNamespace(close=AsyncMock())
+    dial = AsyncMock()
+    monkeypatch.setattr(connection, "_ws_connect", dial)
+    monkeypatch.setattr(activate, "get_clawchat_store", lambda: store)
+    env_writes = []
+    monkeypatch.setattr(activate, "_write_env_values", lambda values: env_writes.append(dict(values)))
+    reached, release = asyncio.Event(), asyncio.Event()
+    http = Mock(return_value=api_client.RefreshResult("rotated-access", "rotated-refresh"))
+    monkeypatch.setattr(api_client.ClawChatApiClient, "_auth_refresh_sync", http)
+
+    async def delayed_worker(func, /, *args, **kwargs):
+        # Model either a queued worker or an HTTP response awaiting delivery.
+        # Execute the production guarded worker, without starting a real thread.
+        if phase == "queued":
+            reached.set()
+            await release.wait()
+            return func(*args, **kwargs)
+        result = func(*args, **kwargs)
+        reached.set()
+        await release.wait()
+        return result
+
+    monkeypatch.setattr(api_client.asyncio, "to_thread", delayed_worker)
+    task = asyncio.create_task(conn._attempt_refresh(close_ws_on_success=True))
+    try:
+        await asyncio.wait_for(reached.wait(), 2)
+        conn._last_close_code = 4010
+        await conn._handle_install_superseded()
+        await conn._owner_notice_task
+        if phase == "cancelled-watcher":
+            task.cancel()
+            await asyncio.sleep(0)
+        release.set()
+        if phase == "cancelled-watcher":
+            # The cancellation is honoured, but only after the rotation is persisted.
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 2)
+        else:
+            result = await asyncio.wait_for(task, 2)
+            assert result.status == "skipped"
+        current = store.get_activation_credentials(platform="hermes", account_id="default")
+        if phase == "queued":
+            http.assert_not_called()
+            assert not env_writes
+            assert current.access_token == cfg.token and current.refresh_token == cfg.refresh_token
+        else:
+            assert http.call_count == 1
+            assert current.access_token == "rotated-access"
+            assert current.refresh_token == "rotated-refresh"
+            if phase == "response-pending":
+                assert conn.config.token == "rotated-access"
+                assert conn.config.refresh_token == "rotated-refresh"
+            assert env_writes == [{"CLAWCHAT_TOKEN": "rotated-access", "CLAWCHAT_REFRESH_TOKEN": "rotated-refresh"}]
+        assert (await conn.reactive_refresh()).status == "skipped"
+        assert http.call_count == (0 if phase == "queued" else 1)
+        assert not conn._refresh_pending_reconnect
+        assert conn.is_superseded and not conn._auth_failed
+        assert not conn._refresh_manager.logged_out
+        socket.close.assert_not_called()
+        dial.assert_not_called()
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await conn.stop()
+
+
+@pytest.mark.asyncio
+async def test_failed_notice_write_then_external_reclaim_does_not_revive(monkeypatch, tmp_path):
+    blocked(tmp_path)
+    async with peer(supersede=False) as (url, requests):
+        conn = make_conn(url)
+        await conn.start()
+        try:
+            await until(lambda: conn.is_superseded)
+            state = identity.read_superseded(tmp_path)
+            with monkeypatch.context() as failure:
+                failure.setattr(identity.os, "replace", Mock(side_effect=OSError("notice write failed")))
+                assert not identity.update_owner_notice(tmp_path, state["superseded_at"], {"status": "sent"})
+            assert tmp_path.resolve() not in identity._failed_writes
+            # Independent interpreter clears disk; it cannot touch this process's cache.
+            result = subprocess.run(_state_command(tmp_path, "clear", {}), capture_output=True,
+                                    text=True, timeout=10, check=True)
+            assert json.loads(result.stdout) is True
+            assert not identity.retry_superseded_write(tmp_path)
+            await until(lambda: conn.is_ready)
+            assert len(requests) == 1
+            assert not identity.superseded_path(tmp_path).exists()
+        finally:
+            await conn.stop()
+
+
+def test_retry_discards_cached_creation_when_another_disk_event_exists(monkeypatch, tmp_path):
+    old, newer = _event_state("old-event"), _event_state("new-event")
+    with monkeypatch.context() as failure:
+        failure.setattr(identity.os, "replace", Mock(side_effect=OSError("creation failed")))
+        assert identity.record_superseded(tmp_path, old) == (old, False)
+    assert identity.write_superseded(tmp_path, newer)
+    assert not identity.retry_superseded_write(tmp_path)
+    assert tmp_path.resolve() not in identity._failed_writes
+    assert identity.read_superseded(tmp_path) == newer
+
+
+def test_reclaimed_creation_is_not_retried(monkeypatch, tmp_path):
+    state = _event_state()
+    with monkeypatch.context() as failure:
+        failure.setattr(identity.os, "replace", Mock(side_effect=OSError("creation failed")))
+        assert identity.record_superseded(tmp_path, state) == (state, False)
+    assert identity.clear_superseded(tmp_path)
+    assert not identity.retry_superseded_write(tmp_path)
+    assert not identity.superseded_path(tmp_path).exists()
+
+
+def _mock_windows_lock(monkeypatch, *, failures, error_number):
+    clock = [0.0]
+    calls = []
+    windows = SimpleNamespace(LK_LOCK=1, LK_NBLCK=2, LK_UNLCK=3)
+    attempts = [0]
+    def locking(_fd, mode, count):
+        calls.append(mode)
+        assert count == 1
+        if mode != windows.LK_UNLCK:
+            attempts[0] += 1
+            if failures is None or attempts[0] <= failures:
+                raise OSError(error_number, "lock held")
+    windows.locking = locking
+    def sleep(seconds):
+        clock[0] += seconds
+    monkeypatch.setitem(sys.modules, "msvcrt", windows)
+    monkeypatch.setattr(identity, "_state_lock_backend", lambda: "windows")
+    monkeypatch.setattr(identity, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=sleep))
+    return windows, calls, clock
+
+
+@pytest.mark.parametrize("error_number", [errno.EACCES, getattr(errno, "EDEADLOCK", errno.EDEADLK)])
+def test_windows_contention_retries_until_lock_is_owned(monkeypatch, tmp_path, caplog, error_number):
+    windows, calls, clock = _mock_windows_lock(monkeypatch, failures=2, error_number=error_number)
+    state = _event_state()
+    assert identity.record_superseded(tmp_path, state) == (state, True)
+    assert calls == [windows.LK_LOCK, windows.LK_LOCK, windows.LK_LOCK, windows.LK_UNLCK]
+    assert clock[0] > 0
+    assert identity.read_superseded(tmp_path) == state
+    assert "file lock unavailable" not in caplog.text
+
+
+@pytest.mark.parametrize("operation", ["record", "notice", "clear", "cli"])
+def test_windows_contention_timeout_never_mutates_without_lock(monkeypatch, tmp_path, caplog, operation, capsys):
+    state = _event_state()
+    if operation != "record":
+        assert identity.write_superseded(tmp_path, state)
+    _mock_windows_lock(monkeypatch, failures=None, error_number=errno.EACCES)
+    monkeypatch.setattr(identity, "STATE_LOCK_TIMEOUT_SECONDS", 0.12)
+    write = Mock(side_effect=AssertionError("contended lock must never allow a write"))
+    monkeypatch.setattr(identity, "_write_superseded_unlocked", write)
+    if operation == "record":
+        assert identity.record_superseded(tmp_path, state) == (state, False)
+        assert identity._failed_writes[tmp_path.resolve()] == state
+        assert not identity.superseded_path(tmp_path).exists()
+    elif operation == "notice":
+        assert not identity.update_owner_notice(tmp_path, state["superseded_at"], {"status": "sent"})
+        assert tmp_path.resolve() not in identity._failed_writes
+        assert "cannot update superseded owner notice" in caplog.text
+    elif operation == "clear":
+        with pytest.raises(identity.StateLockTimeoutError):
+            identity.clear_superseded(tmp_path)
+    else:
+        from clawchat_cli import main
+        assert main(["reclaim"]) == 1
+        assert "reclaim failed" in capsys.readouterr().err
+    if operation != "record":
+        assert identity.read_superseded(tmp_path) == state
+    write.assert_not_called()
+    assert "file lock unavailable" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_windows_contention_timeout_suppresses_notice_and_reports_slash_failure(monkeypatch, tmp_path):
+    from clawchat_gateway.commands import handle_clawchat_reclaim_command
+    import clawchat_gateway.standalone_send as sender
+    _mock_windows_lock(monkeypatch, failures=None, error_number=getattr(errno, "EDEADLOCK", errno.EDEADLK))
+    monkeypatch.setattr(identity, "STATE_LOCK_TIMEOUT_SECONDS", 0.1)
+    send = AsyncMock()
+    monkeypatch.setattr(sender, "standalone_send", send)
+    conn = make_conn()
+    try:
+        await conn._handle_install_superseded()
+        assert conn.is_superseded and conn._owner_notice_task is None
+        assert tmp_path.resolve() in identity._failed_writes
+        assert "reclaim failed" in await handle_clawchat_reclaim_command("")
+        assert tmp_path.resolve() in identity._failed_writes
+        send.assert_not_called()
+    finally:
+        await conn.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stored_user", ["usr_test_agent", "usr_other_agent"])
+async def test_empty_config_identity_filters_state_using_sqlite(monkeypatch, tmp_path, stored_user):
+    from clawchat_gateway.storage import ClawChatStore
+    state = blocked(tmp_path)
+    store = ClawChatStore(tmp_path / "identity.sqlite")
+    cfg = config()
+    store.upsert_activation(platform="hermes", account_id="default", user_id=stored_user,
+                            owner_user_id=cfg.owner_user_id, conversation_id="cnv_test",
+                            access_token=cfg.token, refresh_token=cfg.refresh_token,
+                            device_id="test-device")
+    async with peer(supersede=False) as (url, requests):
+        conn = make_conn(url)
+        conn._cfg = replace(conn._cfg, user_id="", token="", refresh_token="", owner_user_id="")
+        conn._store = store
+        getter = store.get_activation_user_id
+        config_ids_at_lookup = []
+        def observe(**kwargs):
+            config_ids_at_lookup.append(conn.config.user_id)
+            return getter(**kwargs)
+        monkeypatch.setattr(store, "get_activation_user_id", observe)
+        await conn.start()
+        try:
+            if stored_user == state["user_id"]:
+                await until(lambda: conn.is_superseded)
+                assert not requests
+                assert conn.config.user_id == "" and conn.config.token == ""
+                assert set(conn._instance_locks) == {"profile"}
+            else:
+                await until(lambda: conn.is_ready)
+                assert len(requests) == 1
+                assert conn.config.user_id == stored_user
+            assert config_ids_at_lookup and config_ids_at_lookup[0] == ""
+        finally:
+            await conn.stop()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_identity_lookup_failure_remains_fail_closed(monkeypatch, tmp_path):
+    blocked(tmp_path)
+    conn = make_conn()
+    conn._cfg = replace(conn._cfg, user_id="")
+    conn._store = SimpleNamespace(get_activation_user_id=Mock(side_effect=OSError("read failed")))
+    loader = Mock(side_effect=AssertionError("blocked startup must not load credentials"))
+    monkeypatch.setattr(conn, "_load_startup_activation_credentials", loader)
+    await conn.start()
+    try:
+        await until(lambda: conn.is_superseded)
+        loader.assert_not_called()
+        assert conn.config.user_id == ""
+    finally:
+        await conn.stop()
+
+
+def test_sqlite_identity_getter_does_not_initialize_or_load_credentials(tmp_path, monkeypatch):
+    import sqlite3
+    from clawchat_gateway.storage import ClawChatStore
+    path = tmp_path / "existing.sqlite"
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE activations (platform TEXT, account_id TEXT, user_id TEXT)")
+        db.execute("INSERT INTO activations VALUES (?, ?, ?)", ("hermes", "default", "usr_other_agent"))
+    store = ClawChatStore(path)
+    monkeypatch.setattr(store, "initialize", Mock(side_effect=AssertionError("identity read must not initialize")))
+    monkeypatch.setattr(store, "get_activation_credentials", Mock(side_effect=AssertionError("identity read must not load tokens")))
+    assert store.get_activation_user_id(platform="hermes", account_id="default") == "usr_other_agent"
+    assert not store._initialized
+    missing = ClawChatStore(tmp_path / "absent.sqlite")
+    with pytest.raises(sqlite3.OperationalError):
+        missing.get_activation_user_id(platform="hermes", account_id="default")
+    assert not missing.db_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_pre_http_skip_is_not_retried_persisted_or_logged_out():
+    from clawchat_gateway.api_client import RefreshSkipped
+    request = AsyncMock(side_effect=RefreshSkipped(kind="installation_superseded", message="superseded",
+                                                  connect_failed=True))
+    persist, logout, rejected, sleep = AsyncMock(), AsyncMock(), AsyncMock(), AsyncMock()
+    manager = RefreshManager(build_client=lambda: SimpleNamespace(auth_refresh=request),
+                             persist_tokens=persist, persist_logout=logout, persist_rejection=rejected,
+                             device_id_provider=lambda: "test-device", sleep=sleep,
+                             max_transient_retries=2, should_continue=lambda: True)
+    outcome = await manager.refresh(access_token="test-access", refresh_token="test-refresh")
+    assert outcome.status == "skipped" and request.await_count == 1
+    sleep.assert_not_called()
+    persist.assert_not_called()
+    logout.assert_not_called()
+    rejected.assert_not_called()
+    assert not manager.logged_out

@@ -24,6 +24,7 @@ from clawchat_gateway.api_client import (
     ClawChatApiClient,
     ClawChatApiError,
     RefreshResult,
+    RefreshSkipped,
     auth_refresh_with_retry,
     is_permanent_refresh_error,
 )
@@ -253,6 +254,8 @@ class RefreshManager:
                 sleep=self._sleep,
                 should_continue=self._should_continue,
             )
+        except RefreshSkipped as exc:
+            return RefreshOutcome(status="skipped", error=str(exc))
         except ClawChatApiError as exc:
             if is_permanent_refresh_error(exc):
                 # §B / §C: adopted permanent → latch + auto-logout (keep identity).

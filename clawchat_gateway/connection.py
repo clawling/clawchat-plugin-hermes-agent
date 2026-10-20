@@ -870,7 +870,7 @@ class ClawChatConnection:
         return not self._stopping
 
     def _build_refresh_client(self) -> Any:
-        from clawchat_gateway.api_client import ClawChatApiClient, ClawChatApiError
+        from clawchat_gateway.api_client import ClawChatApiClient, ClawChatApiError, RefreshSkipped
 
         base_url = self._cfg.base_url or self._cfg.websocket_url
         client = ClawChatApiClient(
@@ -898,6 +898,13 @@ class ClawChatConnection:
                     or self._cfg.refresh_token != request_config.refresh_token
                 ):
                     raise ClawChatApiError(kind="instance_lock", message="instance ownership changed", connect_failed=True)
+                # The worker may have been queued before a terminal close arrived.
+                # Recheck at the HTTP boundary, after retaining its ownership leases.
+                if self._allow_superseded_notice or self._install_is_blocked():
+                    raise RefreshSkipped(
+                        kind="installation_superseded", message="installation superseded",
+                        connect_failed=True,
+                    )
                 return refresh_sync(*args)
             finally:
                 for lease in leases:
@@ -1032,7 +1039,9 @@ class ClawChatConnection:
     ) -> bool:
         from clawchat_gateway.activate import persist_rotated_tokens
 
-        if self._install_is_blocked() or self._auth_failed or self._activation_source_suspended or not self._cfg.refresh_token:
+        # Supersession stops new requests, but an already completed rotation must
+        # be saved. Keep the existing ownership/revocation checks for this pair.
+        if self._auth_failed or self._activation_source_suspended or not self._cfg.refresh_token:
             return False
         if expected_credentials is not None and (
             self._cfg.token != expected_credentials.token
@@ -1046,9 +1055,6 @@ class ClawChatConnection:
             expected_access_token=request_credentials.token,
             expected_refresh_token=request_credentials.refresh_token,
         ) != "ok":
-            return False
-
-        if self._install_is_blocked():
             return False
 
         # §C.2: thread the in-memory identity down so an env-only deployment (no
@@ -1132,6 +1138,7 @@ class ClawChatConnection:
         self, expected: ClawChatConfig | None, *, completing_pending: bool = False,
         reason: str = AUTO_LOGOUT_LAST_ERROR,
     ) -> bool:
+        # A late rejection during supersession must not clear otherwise valid credentials.
         if self._install_is_blocked():
             return False
         if self._auth_failed or (self._activation_source_suspended and not completing_pending):
@@ -1434,6 +1441,19 @@ class ClawChatConnection:
     def is_superseded(self) -> bool:
         return self._state == ConnectionState.SUPERSEDED
 
+    def _superseded_user_id(self) -> str | None:
+        if self._cfg.user_id:
+            return self._cfg.user_id
+        if self._store is not None:
+            try:
+                user_id = self._store.get_activation_user_id(
+                    platform="hermes", account_id=self._account_id,
+                )
+                return str(user_id or "").strip() or None
+            except Exception:  # noqa: BLE001 — unknown identity must fail closed
+                logger.warning("clawchat superseded identity lookup failed; retaining fail-closed filtering")
+        return None
+
     def _install_is_blocked(self) -> bool:
         # The reader latches before teardown/persistence. Share that short window
         # with sibling senders so none can refresh while the terminal close settles.
@@ -1441,7 +1461,7 @@ class ClawChatConnection:
             conn._superseded and conn._profile_home == self._profile_home
             and conn._cfg.user_id == self._cfg.user_id
             for conn in self._live_supervisors.values()
-        ) or install_identity.read_superseded(self._profile_home, self._cfg.user_id) is not None
+        ) or install_identity.read_superseded(self._profile_home, self._superseded_user_id()) is not None
 
     @classmethod
     def wake_reclaimed(cls, profile_home: Path) -> None:
@@ -1476,7 +1496,7 @@ class ClawChatConnection:
         while not self._stopping:
             self._reclaim_event.clear()
             install_identity.retry_superseded_write(self._profile_home)
-            state = install_identity.read_superseded(self._profile_home, self._cfg.user_id)
+            state = install_identity.read_superseded(self._profile_home, self._superseded_user_id())
             if state is None:
                 if waiting:
                     self._superseded = False
@@ -2091,8 +2111,22 @@ class ClawChatConnection:
             return RefreshOutcome(status="skipped", error="no refresh credentials")
         token = self._cfg.token
         refresh_token = self._cfg.refresh_token or None
-        outcome = await manager.refresh(access_token=token, refresh_token=refresh_token)
-        if self._install_is_blocked():
+        refresh_task = asyncio.create_task(manager.refresh(access_token=token, refresh_token=refresh_token))
+        try:
+            outcome = await asyncio.shield(refresh_task)
+        except asyncio.CancelledError:
+            if not self._install_is_blocked():
+                refresh_task.cancel()
+                await asyncio.gather(refresh_task, return_exceptions=True)
+                raise
+            # Terminal WS teardown cancels its credential watcher. Let an HTTP
+            # rotation already in progress finish persisting (the manager writes
+            # both stores), then honour the cancellation; reclaim re-reads them.
+            await asyncio.gather(refresh_task, return_exceptions=True)
+            raise
+        superseded = self._install_is_blocked()
+        if superseded and outcome.status != "success":
+            self._refresh_pending_reconnect = False
             return RefreshOutcome(status="skipped", error="installation superseded")
         if self._activation_source_suspended:
             return RefreshOutcome(status="skipped", error="activation credential source suspended")
@@ -2104,6 +2138,9 @@ class ClawChatConnection:
             and self._cfg.refresh_token == outcome.refresh_token
         ):
             # Another single-flight waiter already adopted this result.
+            if superseded:
+                self._refresh_pending_reconnect = False
+                return RefreshOutcome(status="skipped", error="rotation saved while installation superseded")
             self._refresh_pending_reconnect = True
             if close_ws_on_success and self._ws is not None:
                 try:
@@ -2131,7 +2168,7 @@ class ClawChatConnection:
             self._using_activation_db_credentials = True
             if outcome.access_token != self._rejected_activation_token:
                 self._rejected_activation_token = None
-            self._refresh_pending_reconnect = True
+            self._refresh_pending_reconnect = not superseded
             self._activated_at_ms = int(time.time() * 1000)
             logger.info(
                 format_ws_log(
@@ -2140,10 +2177,12 @@ class ClawChatConnection:
                     attempt=self._attempt,
                     reconnect_count=self._reconnect_count,
                     state=self._state.value,
-                    action="reconnect",
-                    fields=[("close_ws", close_ws_on_success)],
+                    action="wait" if superseded else "reconnect",
+                    fields=[("close_ws", close_ws_on_success and not superseded)],
                 )
             )
+            if superseded:
+                return RefreshOutcome(status="skipped", error="rotation saved while installation superseded")
             if close_ws_on_success and self._ws is not None:
                 try:
                     await self._ws.close()

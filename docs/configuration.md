@@ -1656,20 +1656,33 @@ connections omit both fields.
 When two different installations use the same agent/device, a supporting hub sends
 terminal close **`4010`** to the displaced installation, before or after `hello-ok`.
 The plugin enters `ConnectionState.SUPERSEDED`: the process stays alive, retains
-its instance locks, and stops reconnecting and refreshing tokens. The token remains
-valid and credentials are preserved. State is atomically written with mode `0600`
+its instance locks, and stops reconnecting and starting new token refreshes. The
+HTTP worker rechecks supersession before sending. A successful rotation already
+in flight is still saved to both credential stores (if WS teardown cancels the
+credential watcher meanwhile, the save completes before the cancellation is
+honoured and a later reclaim re-reads the stored pair); it never schedules a
+reconnect while superseded. The token remains valid and credentials are preserved. State is atomically written with mode `0600`
 to `<profile_home>/clawchat/install_superseded.json`, including agent/device/installation
 IDs, UTC time, optional winner version, and owner-notice outcome. Creation, owner
 notice updates, and reclaim are serialized under a process-local lock plus the
 persistent `<profile_home>/clawchat/install_superseded.lock` (mode `0600`). POSIX
-uses `flock`; Windows uses a byte-range lock. The lock file is never removed. If
-it cannot be opened or locked, one WARNING per path reports fallback to
-process-local locking.
+uses `flock`; Windows uses a byte-range lock. The lock file is never removed.
+Unsupported locking or an inaccessible lock file reports one WARNING per path and
+falls back to process-local locking. Contention instead retries for up to 120
+seconds and then fails without performing an unlocked update. A failed event
+creation blocks locally without sending a notice; a failed reclaim reports an
+error and the CLI returns a nonzero exit code.
 
-Write failure still blocks the current process. Each standby poll retries an
-in-memory-only state write; once it succeeds, external CLI reclaim works normally.
+Only failed event creation is cached in memory and retried during standby. A
+failed owner-notice result update logs a WARNING and is never cached for retry,
+so it cannot recreate state removed by external reclaim. Before retrying creation,
+the plugin verifies that disk still has no event; a newer disk event discards the
+cached creation. Once creation succeeds, external CLI reclaim works normally.
 On restart, a matching (or unreadable) state file blocks connection before startup
 refresh, holding only the profile lock; a different agent identity ignores it.
+If configuration has no user ID yet, a read-only SQLite identity lookup supplies
+that filter without loading credentials or changing startup order. A failed
+lookup keeps the fail-closed behavior.
 A live `4010` retains any identity lock already held. Without superseded state,
 an unpaired gateway keeps its existing startup path and takes no identity lock
 until connection credentials are available.

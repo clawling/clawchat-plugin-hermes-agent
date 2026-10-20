@@ -1227,6 +1227,23 @@ class ClawChatStore:
         finally:
             conn.close()
 
+    def get_activation_user_id(self, *, platform: str, account_id: str) -> str | None:
+        """Read identity without initializing storage, migrating, or loading tokens."""
+        if self._disabled:
+            return None
+        uri = self.db_path.expanduser().resolve().as_uri() + "?mode=ro"
+        conn = sqlite3.connect(uri, uri=True)
+        try:
+            row = conn.execute(
+                "SELECT user_id FROM activations WHERE platform = ? AND account_id = ?",
+                (platform, account_id),
+            ).fetchone()
+            if row is None:
+                return None
+            return str(row[0] or "").strip() or None
+        finally:
+            conn.close()
+
     def get_activation_conversation(
         self,
         *,

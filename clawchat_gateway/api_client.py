@@ -143,6 +143,10 @@ class ClawChatApiError(Exception):
         return value
 
 
+class RefreshSkipped(ClawChatApiError):
+    """A local guard stopped a refresh before HTTP; never retry this attempt."""
+
+
 def format_connect_guidance(exc: ClawChatApiError) -> list[str]:
     """Extra ``clawchat: ...`` lines describing a connect failure's guidance.
 
@@ -1379,6 +1383,8 @@ async def auth_refresh_with_retry(
                 refresh_token=refresh_token,
                 device_id=device_id,
             )
+        except RefreshSkipped:
+            raise
         except ClawChatApiError as exc:
             if is_permanent_refresh_error(exc):
                 raise

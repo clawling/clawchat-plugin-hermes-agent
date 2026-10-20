@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import logging
@@ -10,6 +11,7 @@ import re
 import socket
 import tempfile
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -20,10 +22,27 @@ from clawchat_gateway.device_id import _host_device_id
 logger = logging.getLogger(__name__)
 _cache: dict[Path, str | None] = {}
 _guard = threading.RLock()
-# A failed write must still block every connection in this process.
+# Only failed event creation is cached; notice failures must not revive reclaim.
 _failed_writes: dict[Path, dict[str, Any]] = {}
 _warned_lock_paths: set[Path] = set()
 _WINDOWS_LOCK_OFFSET = 1024 * 1024
+STATE_LOCK_TIMEOUT_SECONDS = 120.0
+_STATE_LOCK_RETRY_SECONDS = 0.05
+
+
+class StateLockTimeoutError(TimeoutError):
+    """Lock contention exceeded its deadline; never continue without ownership."""
+
+
+def _state_lock_backend() -> str:
+    return "windows" if os.name == "nt" else "posix"
+
+
+def _lock_is_contended(exc: OSError) -> bool:
+    return exc.errno in {
+        errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK,
+        errno.EDEADLK, getattr(errno, "EDEADLOCK", errno.EDEADLK),
+    }
 
 
 def _derive_install_id(home: Path) -> str:
@@ -85,15 +104,40 @@ def superseded_path(profile_home: Path) -> Path:
 
 
 def _lock_state_file(fd: int, *, release: bool = False) -> None:
-    if os.name == "nt":
+    windows = _state_lock_backend() == "windows"
+    if windows:
         import msvcrt
-
-        os.lseek(fd, _WINDOWS_LOCK_OFFSET, os.SEEK_SET)
-        msvcrt.locking(fd, msvcrt.LK_UNLCK if release else msvcrt.LK_LOCK, 1)
     else:
         import fcntl
-
-        fcntl.flock(fd, fcntl.LOCK_UN if release else fcntl.LOCK_EX)
+    if release:
+        if windows:
+            os.lseek(fd, _WINDOWS_LOCK_OFFSET, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        return
+    deadline = time.monotonic() + STATE_LOCK_TIMEOUT_SECONDS
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise StateLockTimeoutError("superseded state lock contention timed out")
+        try:
+            if windows:
+                os.lseek(fd, _WINDOWS_LOCK_OFFSET, os.SEEK_SET)
+                # LK_LOCK can spend about ten seconds retrying internally. Use
+                # nonblocking attempts near the deadline to respect the total cap.
+                mode = msvcrt.LK_LOCK if remaining >= 10.0 else msvcrt.LK_NBLCK
+                msvcrt.locking(fd, mode, 1)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except OSError as exc:
+            if not _lock_is_contended(exc):
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise StateLockTimeoutError("superseded state lock contention timed out") from exc
+            time.sleep(min(_STATE_LOCK_RETRY_SECONDS, remaining))
 
 
 @contextmanager
@@ -111,7 +155,9 @@ def _state_guard(home: Path) -> Iterator[None]:
                     os.fchmod(fd, 0o600)
                 _lock_state_file(fd)
                 locked = True
-            except (OSError, ImportError):
+            except StateLockTimeoutError:
+                raise
+            except (OSError, ImportError, NotImplementedError):
                 if path not in _warned_lock_paths:
                     _warned_lock_paths.add(path)
                     logger.warning("superseded state file lock unavailable; using process-local locking")
@@ -126,17 +172,22 @@ def _state_guard(home: Path) -> Iterator[None]:
             # Never unlink the lock: other processes may be waiting on its inode.
 
 
+def _read_disk_superseded_unlocked(home: Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads(superseded_path(home).read_text(encoding="utf-8"))
+        if not isinstance(value, dict) or not isinstance(value.get("user_id"), str):
+            raise ValueError("invalid superseded state")
+        return value
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, UnicodeError):
+        return {"unreadable": True}
+
+
 def _read_superseded_unlocked(home: Path, user_id: str | None = None) -> dict[str, Any] | None:
     value = _failed_writes.get(home)
     if value is None:
-        try:
-            value = json.loads(superseded_path(home).read_text(encoding="utf-8"))
-            if not isinstance(value, dict) or not isinstance(value.get("user_id"), str):
-                raise ValueError("invalid superseded state")
-        except FileNotFoundError:
-            value = None
-        except (OSError, ValueError, UnicodeError):
-            value = {"unreadable": True}
+        value = _read_disk_superseded_unlocked(home)
     if value and user_id and value.get("user_id") and value["user_id"] != user_id:
         return None
     return value
@@ -160,11 +211,8 @@ def _write_superseded_unlocked(home: Path, value: dict[str, Any]) -> bool:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
-        _failed_writes.pop(home, None)
         return True
     except OSError:
-        _failed_writes[home] = dict(value)
-        logger.error("cannot persist superseded installation; remaining in standby", exc_info=True)
         return False
     finally:
         if temporary:
@@ -177,38 +225,87 @@ def _write_superseded_unlocked(home: Path, value: dict[str, Any]) -> bool:
 def write_superseded(profile_home: Path, value: dict[str, Any]) -> bool:
     home = profile_home.expanduser().resolve()
     with _state_guard(home):
-        return _write_superseded_unlocked(home, value)
+        saved = _write_superseded_unlocked(home, value)
+        if not saved:
+            logger.warning("cannot write superseded installation state")
+        return saved
+
+
+def _remember_failed_creation(home: Path, state: dict[str, Any]) -> None:
+    _failed_writes[home] = dict(state)
+    logger.error("cannot persist superseded installation; remaining in standby")
 
 
 def record_superseded(profile_home: Path, state: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-    """Claim a new event once, preserving an existing event for the same agent."""
+    """Claim a durable event once; a failed creation blocks locally without notice."""
     home = profile_home.expanduser().resolve()
-    with _state_guard(home):
-        existing = _read_superseded_unlocked(home, state.get("user_id"))
-        if existing is not None:
-            return existing, False
-        _write_superseded_unlocked(home, state)
-        return state, True
+    try:
+        with _state_guard(home):
+            existing = _read_superseded_unlocked(home, state.get("user_id"))
+            if existing is not None:
+                return existing, False
+            if not _write_superseded_unlocked(home, state):
+                _remember_failed_creation(home, state)
+                return state, False
+            return state, True
+    except OSError:
+        with _guard:
+            existing = _read_superseded_unlocked(home, state.get("user_id"))
+            if existing is not None:
+                logger.error("cannot persist superseded installation; remaining in standby", exc_info=True)
+                return existing, False
+            _remember_failed_creation(home, state)
+            return state, False
 
 
 def update_owner_notice(profile_home: Path, superseded_at: str, result: dict[str, Any]) -> bool:
-    """Update only the original event, never recreating state removed by reclaim."""
+    """Update only the original event; a failed notice update must never be retried."""
     home = profile_home.expanduser().resolve()
-    with _state_guard(home):
-        current = _read_superseded_unlocked(home)
-        if current is None or current.get("superseded_at") != superseded_at:
-            return False
-        return _write_superseded_unlocked(home, {**current, "owner_notice": result})
+    try:
+        with _state_guard(home):
+            current = _read_disk_superseded_unlocked(home)
+            if current is None:
+                current = _failed_writes.get(home)
+            if current is None or current.get("superseded_at") != superseded_at:
+                return False
+            if _write_superseded_unlocked(home, {**current, "owner_notice": result}):
+                pending = _failed_writes.get(home)
+                if pending and pending.get("superseded_at") == superseded_at:
+                    _failed_writes.pop(home, None)
+                return True
+    except OSError:
+        logger.warning("cannot update superseded owner notice", exc_info=True)
+        return False
+    logger.warning("cannot update superseded owner notice")
+    return False
 
 
 def retry_superseded_write(profile_home: Path) -> bool:
-    """Make an in-memory event reclaimable by another process once writes recover."""
+    """Retry only a failed creation while disk still has no event."""
     home = profile_home.expanduser().resolve()
     with _guard:
         if home not in _failed_writes:
             return False
-        with _state_guard(home):
-            return _write_superseded_unlocked(home, _failed_writes[home])
+        try:
+            with _state_guard(home):
+                pending = _failed_writes.get(home)
+                if pending is None:
+                    return False
+                disk = _read_disk_superseded_unlocked(home)
+                if disk is not None:
+                    if not disk.get("unreadable"):
+                        # Same event is already durable, or a different event won.
+                        # Neither case permits this cached creation to overwrite it.
+                        _failed_writes.pop(home, None)
+                    return False
+                if _write_superseded_unlocked(home, pending):
+                    _failed_writes.pop(home, None)
+                    return True
+        except OSError:
+            logger.warning("cannot retry superseded installation state", exc_info=True)
+            return False
+        logger.error("cannot persist superseded installation; remaining in standby")
+        return False
 
 
 def clear_superseded(profile_home: Path) -> bool:
