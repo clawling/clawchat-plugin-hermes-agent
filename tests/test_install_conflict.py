@@ -912,6 +912,38 @@ def test_state_lock_unavailable_refuses_all_mutations(monkeypatch, tmp_path, cap
     assert sum("file lock unavailable" in record.message for record in caplog.records) == 1
 
 
+def test_cached_creation_cannot_undo_other_process_reclaim(monkeypatch, tmp_path):
+    state = {"user_id": "usr_test_agent", "superseded_at": "2026-01-01T00:00:00+00:00",
+             "owner_notice": {"status": "pending"}}
+    real_write, broken = identity._write_superseded_unlocked, [True]
+    monkeypatch.setattr(identity, "_write_superseded_unlocked",
+                        lambda home, value: False if broken[0] else real_write(home, value))
+    # Process A cannot persist its creation and keeps it in memory.
+    assert identity.record_superseded(tmp_path, state) == (state, False)
+    assert identity.read_superseded(tmp_path) == state
+    broken[0] = False
+    # Process B persists the same identity's event; process C reclaims it
+    # (simulated without touching A's in-memory cache).
+    home = tmp_path.resolve()
+    assert real_write(home, {**state, "superseded_at": "2026-01-01T00:00:01+00:00"})
+    with identity._state_guard(home):
+        identity._bump_reclaim_generation_unlocked(home)
+        identity.superseded_path(home).unlink()
+    # A's standby retry must honour that reclaim instead of re-creating its event.
+    assert identity.retry_superseded_write(tmp_path) is False
+    assert identity.read_superseded(tmp_path) is None
+    assert not identity.superseded_path(tmp_path).exists()
+
+
+def test_reclaim_fails_closed_when_generation_cannot_be_bumped(monkeypatch, tmp_path):
+    state = blocked(tmp_path)
+    monkeypatch.setattr(identity, "_bump_reclaim_generation_unlocked",
+                        Mock(side_effect=OSError("read only")))
+    with pytest.raises(OSError):
+        identity.clear_superseded(tmp_path)
+    assert identity.read_superseded(tmp_path) == state
+
+
 def test_lock_failure_over_durable_event_cannot_undo_reclaim(monkeypatch, tmp_path):
     state = blocked(tmp_path)
     unavailable = [True]

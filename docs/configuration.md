@@ -1679,8 +1679,11 @@ so it cannot recreate state removed by external reclaim. Before retrying creatio
 the plugin checks the event's identity: an already durable event for the same
 identity replaces the cached creation. A stale disk event belonging to another
 identity is overwritten by this identity's cached event. Unreadable disk state
-keeps the cached creation blocked. Once creation succeeds, external CLI reclaim
-works normally.
+keeps the cached creation blocked. Each reclaim that removes a disk state first
+rewrites `<profile_home>/clawchat/install_reclaim_generation`; a cached creation
+made before a reclaim by another process is discarded instead of persisted, and
+if that file cannot be written the reclaim fails with the state intact. Once
+creation succeeds, external CLI reclaim works normally.
 On restart, a matching (or unreadable) state file blocks connection before startup
 refresh, holding only the profile lock; a different agent identity ignores it.
 If configuration has no user ID yet, a read-only SQLite identity lookup supplies

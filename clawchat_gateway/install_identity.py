@@ -24,6 +24,9 @@ _cache: dict[Path, str | None] = {}
 _guard = threading.RLock()
 # Only failed event creation is cached; notice failures must not revive reclaim.
 _failed_writes: dict[Path, dict[str, Any]] = {}
+# Reclaim generation seen when a creation was cached; a change means another
+# process reclaimed since, so the cached creation must not be persisted.
+_failed_generations: dict[Path, str | None] = {}
 _warned_lock_paths: set[Path] = set()
 _WINDOWS_LOCK_OFFSET = 1024 * 1024
 STATE_LOCK_TIMEOUT_SECONDS = 120.0
@@ -236,7 +239,36 @@ def write_superseded(profile_home: Path, value: dict[str, Any]) -> bool:
         return saved
 
 
+def _reclaim_generation_path(home: Path) -> Path:
+    return home / "clawchat" / "install_reclaim_generation"
+
+
+def _read_reclaim_generation(home: Path) -> str | None:
+    """"" before any reclaim; None when it cannot be read."""
+    try:
+        return _reclaim_generation_path(home).read_text(encoding="ascii").strip()
+    except FileNotFoundError:
+        return ""
+    except (OSError, UnicodeError):
+        return None
+
+
+def _bump_reclaim_generation_unlocked(home: Path) -> None:
+    path = _reclaim_generation_path(home)
+    fd, temporary = tempfile.mkstemp(prefix=".install_reclaim-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="ascii") as stream:
+            stream.write(uuid.uuid4().hex + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
 def _remember_failed_creation(home: Path, state: dict[str, Any]) -> None:
+    if home not in _failed_writes:
+        _failed_generations[home] = _read_reclaim_generation(home)
     _failed_writes[home] = dict(state)
     logger.error("cannot persist superseded installation; remaining in standby")
 
@@ -298,6 +330,12 @@ def retry_superseded_write(profile_home: Path) -> bool:
                 pending = _failed_writes.get(home)
                 if pending is None:
                     return False
+                seen = _failed_generations.get(home)
+                if seen is not None and _read_reclaim_generation(home) not in (seen, None):
+                    # Reclaimed by another process since this creation was cached.
+                    _failed_writes.pop(home, None)
+                    _failed_generations.pop(home, None)
+                    return False
                 disk = _read_disk_superseded_unlocked(home)
                 if disk is not None and (
                     disk.get("unreadable") or disk.get("user_id") == pending.get("user_id")
@@ -330,8 +368,12 @@ def clear_superseded(profile_home: Path) -> bool:
         except FileNotFoundError:
             pass
         else:
+            # Bump first: if this fails the reclaim fails with the state intact,
+            # and a creation cached in another process cannot outlive it.
+            _bump_reclaim_generation_unlocked(home)
             path.unlink(missing_ok=True)
         _failed_writes.pop(home, None)
+        _failed_generations.pop(home, None)
     return existed
 
 
