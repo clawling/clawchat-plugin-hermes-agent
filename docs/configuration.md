@@ -1643,8 +1643,11 @@ backoff as the legacy fallback. Standalone senders use a sibling connect device 
 Canonical connections report an `install_id` and `capabilities.install_conflict: true`.
 The ID is the first 24 hex characters of SHA-256 over a random seed, the existing
 host device fingerprint, hostname, and resolved absolute profile home. Only the
-hash is sent. `<profile_home>/clawchat/install_seed` is created once with exclusive
-creation and mode `0600`; it survives restarts and may travel with a copied profile.
+hash is sent. `<profile_home>/clawchat/install_seed` is published once using an
+atomic hard link from a fully written, fsynced temporary file with mode `0600`;
+concurrent creation never replaces an existing seed. It survives restarts and may
+travel with a copied profile. If hard links are unavailable, installation identity
+is omitted rather than publishing a partial seed.
 Changing the machine, hostname, or profile directory produces a different ID.
 If the seed cannot be read or written, or is malformed, a WARNING is logged once
 and both fields are omitted, preserving legacy `4001` handling. Standalone sibling
@@ -1656,9 +1659,20 @@ The plugin enters `ConnectionState.SUPERSEDED`: the process stays alive, retains
 its instance locks, and stops reconnecting and refreshing tokens. The token remains
 valid and credentials are preserved. State is atomically written with mode `0600`
 to `<profile_home>/clawchat/install_superseded.json`, including agent/device/installation
-IDs, UTC time, optional winner version, and owner-notice outcome. Write failure
-still blocks the current process. On restart, a matching (or unreadable) state file
-blocks connection before startup refresh; a different agent identity ignores it.
+IDs, UTC time, optional winner version, and owner-notice outcome. Creation, owner
+notice updates, and reclaim are serialized under a process-local lock plus the
+persistent `<profile_home>/clawchat/install_superseded.lock` (mode `0600`). POSIX
+uses `flock`; Windows uses a byte-range lock. The lock file is never removed. If
+it cannot be opened or locked, one WARNING per path reports fallback to
+process-local locking.
+
+Write failure still blocks the current process. Each standby poll retries an
+in-memory-only state write; once it succeeds, external CLI reclaim works normally.
+On restart, a matching (or unreadable) state file blocks connection before startup
+refresh, holding only the profile lock; a different agent identity ignores it.
+A live `4010` retains any identity lock already held. Without superseded state,
+an unpaired gateway keeps its existing startup path and takes no identity lock
+until connection credentials are available.
 An ERROR log includes reclaim instructions; reminders are at most every ten minutes.
 
 For each live `4010` event the plugin attempts one owner DM through a standalone
@@ -1676,7 +1690,11 @@ within 30 seconds; an offline gateway connects on its next start. This can displ
 the other installation. `/clawchat-reclaim` in local Hermes also wakes this process's
 waiting connections immediately. Successful activation, including `--repair` and
 `--new-account`, clears the state too. The compatibility `clawchat_cli.py` accepts
-both `status` and `reclaim`.
+both `status` and `reclaim`. Status is read-only: an absent or invalid seed produces
+no install ID and creates no files or directories. If no disk state exists but logs
+show `cannot persist superseded installation`, use `/clawchat-reclaim` in that
+Hermes process or restart the gateway; a restart without a disk state connects
+normally.
 
 ## Typing
 

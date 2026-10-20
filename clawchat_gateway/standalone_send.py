@@ -20,6 +20,7 @@ import logging
 from dataclasses import replace
 from typing import Any
 
+from clawchat_gateway import config as config_module
 from clawchat_gateway.config import ClawChatConfig
 from clawchat_gateway.hermes_home import hermes_home
 from clawchat_gateway.install_identity import read_superseded
@@ -85,9 +86,10 @@ async def standalone_send(
     if not target:
         return {"error": "ClawChat standalone send requires a chat_id."}
 
-    config = (platform_config if isinstance(platform_config, ClawChatConfig)
+    # The owner notice hands over the connection's already-resolved config.
+    config = (platform_config if isinstance(platform_config, config_module.ClawChatConfig)
               else ClawChatConfig.from_platform_config(platform_config))
-    if not _allow_superseded_notice and read_superseded(hermes_home(), config.user_id) is not None:
+    if not _allow_superseded_notice and read_superseded(hermes_home(), getattr(config, "user_id", None)) is not None:
         return {"error": "This installation was superseded. Run hermes clawchat reclaim locally or /clawchat-reclaim."}
     if _allow_superseded_notice:
         # One best-effort connection attempt; a failure must not become a retry loop.
@@ -95,9 +97,10 @@ async def standalone_send(
     if not config.websocket_url:
         return {"error": "ClawChat is not configured (missing websocket_url)."}
 
-    connection = ClawChatConnection(
-        config, on_message=_drop_inbound,
-        _allow_superseded_notice=_allow_superseded_notice,
+    connection = (
+        ClawChatConnection(config, on_message=_drop_inbound, _allow_superseded_notice=True)
+        if _allow_superseded_notice
+        else ClawChatConnection(config, on_message=_drop_inbound)
     )
     sibling_id = connection.use_sibling_connect_device_id(STANDALONE_DEVICE_SUFFIX)
     logger.info(

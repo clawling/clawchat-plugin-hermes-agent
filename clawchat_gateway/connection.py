@@ -1475,6 +1475,7 @@ class ClawChatConnection:
         last_reminder = time.monotonic() if waiting else 0.0
         while not self._stopping:
             self._reclaim_event.clear()
+            install_identity.retry_superseded_write(self._profile_home)
             state = install_identity.read_superseded(self._profile_home, self._cfg.user_id)
             if state is None:
                 if waiting:
@@ -1499,29 +1500,24 @@ class ClawChatConnection:
         self._superseded = True
         self._refresh_pending_reconnect = False
         self._takeover_streak = 0
-        existing = install_identity.read_superseded(self._profile_home, self._cfg.user_id)
-        if existing is None:
-            try:
-                reason = json.loads(self._last_close_reason or "{}")
-            except (ValueError, TypeError):
-                reason = {}
-            version = reason.get("by_client_version") if isinstance(reason, dict) else None
-            state = {
-                "user_id": self._cfg.user_id, "device_id": self.session_device_id(),
-                "install_id": install_identity.get_install_id(self._profile_home),
-                "superseded_at": datetime.now(timezone.utc).isoformat(),
-                "by_client_version": version if isinstance(version, str) else None,
-                "owner_notice": {"status": "pending"},
-            }
-            install_identity.write_superseded(self._profile_home, state)
-            if not self._stopping:
-                self._owner_notice_task = asyncio.create_task(
-                    self._send_superseded_notice(state), name="clawchat-install-owner-notice",
-                )
-                self._owner_notice_tasks.add(self._owner_notice_task)
-                self._owner_notice_task.add_done_callback(self._owner_notice_tasks.discard)
-        else:
-            state = existing
+        try:
+            reason = json.loads(self._last_close_reason or "{}")
+        except (ValueError, TypeError):
+            reason = {}
+        version = reason.get("by_client_version") if isinstance(reason, dict) else None
+        state, created = install_identity.record_superseded(self._profile_home, {
+            "user_id": self._cfg.user_id, "device_id": self.session_device_id(),
+            "install_id": install_identity.get_install_id(self._profile_home),
+            "superseded_at": datetime.now(timezone.utc).isoformat(),
+            "by_client_version": version if isinstance(version, str) else None,
+            "owner_notice": {"status": "pending"},
+        })
+        if created and not self._stopping:
+            self._owner_notice_task = asyncio.create_task(
+                self._send_superseded_notice(state), name="clawchat-install-owner-notice",
+            )
+            self._owner_notice_tasks.add(self._owner_notice_task)
+            self._owner_notice_task.add_done_callback(self._owner_notice_tasks.discard)
         await self._set_state(ConnectionState.SUPERSEDED)
         self._log_install_state("install_superseded", logging.ERROR, state)
 
@@ -1554,9 +1550,7 @@ class ClawChatConnection:
         except Exception as exc:  # noqa: BLE001 — deliberately no retry
             result = {"status": "failed", "error_type": type(exc).__name__}
         # A reclaim or a later event must never be overwritten by this background task.
-        current = install_identity.read_superseded(self._profile_home, self._cfg.user_id)
-        if current and current.get("superseded_at") == state["superseded_at"]:
-            install_identity.write_superseded(self._profile_home, {**state, "owner_notice": result})
+        install_identity.update_owner_notice(self._profile_home, state["superseded_at"], result)
 
     async def wait_until_ready(self, *, timeout: float) -> bool:
         if self.is_ready:
@@ -1598,6 +1592,8 @@ class ClawChatConnection:
         while not self._stopping:
             if not await self._wait_for_instance_locks(profile_only=True):
                 break
+            if not await self._wait_if_superseded():
+                break
             if self._activation_source_suspended:
                 if not await self._wait_for_activation_source():
                     break
@@ -1617,10 +1613,6 @@ class ClawChatConnection:
                         fields=[("source", "sqlite_startup")],
                     )
                 )
-            if not await self._wait_for_instance_locks():
-                break
-            if not await self._wait_if_superseded():
-                break
             if not self._refresh_credentials_usable(self._cfg.refresh_token):
                 await self._enter_auth_failed()
             if not self._has_connect_credentials():

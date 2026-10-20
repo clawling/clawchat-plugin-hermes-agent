@@ -3,8 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shutil
+import subprocess
+import sys
+from pathlib import Path
+from dataclasses import replace
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -31,6 +36,7 @@ def isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(identity.socket, "gethostname", lambda: "test-host")
     identity._cache.clear()
     identity._failed_writes.clear()
+    identity._warned_lock_paths.clear()
     yield
     identity._cache.clear()
     identity._failed_writes.clear()
@@ -223,6 +229,7 @@ async def test_restart_blocks_before_connect_or_startup_refresh(monkeypatch, tmp
             dial.assert_not_called()
             refresh.assert_not_called()
             assert conn._owner_notice_task is None
+            assert set(conn._instance_locks) == {"profile"}
     finally:
         await conn.stop()
 
@@ -263,7 +270,7 @@ def test_cli_reclaim_no_state_and_status(tmp_path, capsys):
     blocked(tmp_path)
     assert main(["status"]) == 0
     status = json.loads(capsys.readouterr().out)
-    assert len(status["install_id"]) == 8
+    assert status["install_id"] is None
     assert status["superseded"]["by_client_version"] == "test-version"
     assert status["superseded"]["owner_notice"]["status"] == "pending"
     assert status["is_superseded"] is True
@@ -573,3 +580,339 @@ async def test_stop_cancels_notices_from_consecutive_conflicts(monkeypatch, tmp_
     await conn.stop()
     assert old_notice.cancelled() and latest_notice.cancelled()
     assert all(task.cancelled() for task in calls)
+
+
+def test_status_on_empty_profile_creates_nothing(monkeypatch, tmp_path, capsys):
+    from clawchat_cli import main
+    home = tmp_path / "empty-profile"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    cache = dict(identity._cache)
+    assert main(["status"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["install_id"] is None
+    assert result["is_superseded"] is False
+    assert not home.exists()
+    assert identity._cache == cache
+
+
+@pytest.mark.parametrize("seed", ["", "invalid", "a" * 32 + "\n"])
+def test_peek_reads_seed_without_using_or_changing_cache(tmp_path, seed):
+    path = tmp_path / "clawchat" / "install_seed"
+    path.parent.mkdir()
+    path.write_text(seed)
+    identity._cache[tmp_path.resolve()] = "cached-value"
+    cache = dict(identity._cache)
+    result = identity.peek_install_id(tmp_path)
+    if seed.startswith("a"):
+        assert re.fullmatch(r"[0-9a-f]{24}", result)
+        assert result != "cached-value"
+        assert identity.install_status(tmp_path)["install_id"] == result[:8]
+    else:
+        assert result is None
+    assert path.read_text() == seed
+    assert identity._cache == cache
+    assert list(path.parent.iterdir()) == [path]
+
+
+def test_existing_seed_never_overwritten(monkeypatch, tmp_path):
+    path = tmp_path / "clawchat" / "install_seed"
+    path.parent.mkdir()
+    path.write_text("a" * 32 + "\n")
+    before = path.read_bytes()
+    monkeypatch.setattr(identity.os, "link", lambda *_a: pytest.fail("existing seed must be read directly"))
+    assert identity.get_install_id(tmp_path) is not None
+    assert path.read_bytes() == before
+    assert list(path.parent.iterdir()) == [path]
+
+
+def test_seed_published_only_after_complete_write_and_fsync(monkeypatch, tmp_path):
+    path = tmp_path / "clawchat" / "install_seed"
+    link = identity.os.link
+    fsync = identity.os.fsync
+    synced = []
+    def sync(fd):
+        fsync(fd)
+        synced.append(fd)
+    def publish(source, target):
+        assert synced
+        assert re.fullmatch(r"[0-9a-f]{32}\n", Path(source).read_text())
+        if os.name != "nt":
+            assert Path(source).stat().st_mode & 0o777 == 0o600
+        assert not path.exists()
+        link(source, target)
+    monkeypatch.setattr(identity.os, "fsync", sync)
+    monkeypatch.setattr(identity.os, "link", publish)
+    assert identity.get_install_id(tmp_path) is not None
+    assert list(path.parent.iterdir()) == [path]
+
+
+def test_concurrent_seed_publisher_uses_existing_winner(monkeypatch, tmp_path):
+    path = tmp_path / "clawchat" / "install_seed"
+    def winner_publishes_first(*_a):
+        path.write_text("b" * 32 + "\n")
+        raise FileExistsError()
+    monkeypatch.setattr(identity.os, "link", winner_publishes_first)
+    assert identity.get_install_id(tmp_path) == identity.peek_install_id(tmp_path)
+    assert path.read_text() == "b" * 32 + "\n"
+    assert list(path.parent.iterdir()) == [path]
+
+
+@pytest.mark.parametrize("failure", ["error", "unavailable", "not-implemented"])
+def test_seed_link_failure_disables_identity(monkeypatch, tmp_path, failure):
+    if failure == "unavailable":
+        monkeypatch.delattr(identity.os, "link")
+    else:
+        def fail(*_a):
+            if failure == "not-implemented":
+                raise NotImplementedError()
+            raise OSError("hard links unavailable")
+        monkeypatch.setattr(identity.os, "link", fail)
+    assert identity.get_install_id(tmp_path) is None
+    assert not (tmp_path / "clawchat" / "install_seed").exists()
+    assert list((tmp_path / "clawchat").iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_unpaired_startup_does_not_acquire_identity_lock(monkeypatch, tmp_path):
+    conn = make_conn()
+    conn._cfg = replace(conn._cfg, token="", refresh_token="")
+    acquire = connection.instance_lock.acquire
+    kinds = []
+    def observe(*args, **kwargs):
+        kinds.append(kwargs["kind"])
+        return acquire(*args, **kwargs)
+    monkeypatch.setattr(connection.instance_lock, "acquire", observe)
+    dial = AsyncMock()
+    monkeypatch.setattr(connection, "_ws_connect", dial)
+    await conn.start()
+    try:
+        await until(lambda: conn._activation_wait_logged)
+        await asyncio.sleep(0.05)
+        assert set(conn._instance_locks) == {"profile"}
+        assert kinds and set(kinds) == {"profile"}
+        assert not conn.is_superseded
+        dial.assert_not_called()
+    finally:
+        await conn.stop()
+
+
+@pytest.mark.asyncio
+async def test_restart_checks_superseded_before_loading_credentials(monkeypatch, tmp_path):
+    blocked(tmp_path)
+    conn = make_conn()
+    monkeypatch.setattr(conn, "_load_startup_activation_credentials",
+                        lambda: pytest.fail("blocked startup must not load credentials"))
+    await conn.start()
+    try:
+        await until(lambda: conn.is_superseded)
+        assert set(conn._instance_locks) == {"profile"}
+    finally:
+        await conn.stop()
+
+
+@pytest.mark.asyncio
+async def test_notice_result_does_not_revive_state_cleared_during_send(monkeypatch, tmp_path):
+    import clawchat_gateway.standalone_send as sender
+    async def clear_during_send(*_a, **_kw):
+        assert identity.clear_superseded(tmp_path)
+        return {"success": True, "message_id": "msg_test"}
+    monkeypatch.setattr(sender, "standalone_send", clear_during_send)
+    conn = make_conn()
+    conn._store = SimpleNamespace(get_activation_conversation=lambda **_kw: "cnv_test")
+    await conn._handle_install_superseded()
+    await conn._owner_notice_task
+    assert identity.read_superseded(tmp_path) is None
+    assert not identity.superseded_path(tmp_path).exists()
+    assert (tmp_path / "clawchat" / "install_superseded.lock").exists()
+    await conn.stop()
+
+
+@pytest.mark.asyncio
+async def test_simultaneous_connections_record_and_notify_once(monkeypatch, tmp_path):
+    import clawchat_gateway.standalone_send as sender
+    send = AsyncMock(return_value={"success": True, "message_id": "msg_test"})
+    monkeypatch.setattr(sender, "standalone_send", send)
+    record = identity.record_superseded
+    created = []
+    def observe(home, state):
+        result = record(home, state)
+        created.append(result[1])
+        return result
+    monkeypatch.setattr(identity, "record_superseded", observe)
+    first, second = make_conn(), make_conn()
+    for conn in (first, second):
+        conn._store = SimpleNamespace(get_activation_conversation=lambda **_kw: "cnv_test")
+    try:
+        await asyncio.gather(first._handle_install_superseded(), second._handle_install_superseded())
+        await until(lambda: identity.read_superseded(tmp_path)["owner_notice"]["status"] == "sent")
+        assert sorted(created) == [False, True]
+        assert send.await_count == 1
+        assert first.is_superseded and second.is_superseded
+    finally:
+        await first.stop()
+        await second.stop()
+
+
+_STATE_CHILD = """
+import json, sys, time
+from pathlib import Path
+from clawchat_gateway import install_identity as identity
+home, action, payload = Path(sys.argv[1]), sys.argv[2], json.loads(sys.argv[3])
+if action == "record":
+    original_write = identity._write_superseded_unlocked
+    def slow_write(*args):
+        time.sleep(0.1)
+        return original_write(*args)
+    identity._write_superseded_unlocked = slow_write
+    print("ready", flush=True)
+    sys.stdin.readline()
+    state, created = identity.record_superseded(home, payload)
+    result = {"state": state, "created": created}
+elif action == "update":
+    original_read = identity._read_superseded_unlocked
+    def pause_after_read(*args):
+        value = original_read(*args)
+        print("read", flush=True)
+        sys.stdin.readline()
+        return value
+    identity._read_superseded_unlocked = pause_after_read
+    result = identity.update_owner_notice(home, payload["superseded_at"], {"status": "sent"})
+else:
+    if action == "clear-observed":
+        print("clearing", flush=True)
+    result = identity.clear_superseded(home)
+print(json.dumps(result), flush=True)
+"""
+
+
+def _state_command(home, action, payload):
+    return [sys.executable, "-c", _STATE_CHILD, str(home), action, json.dumps(payload)]
+
+
+def test_separate_processes_record_one_event(tmp_path):
+    state = {"user_id": "usr_test_agent", "owner_notice": {"status": "pending"}}
+    children = []
+    try:
+        for stamp in ("first-event", "second-event"):
+            child = subprocess.Popen(_state_command(tmp_path, "record", {**state, "superseded_at": stamp}),
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            children.append(child)
+            assert child.stdout.readline().strip() == "ready"
+        for child in children:
+            child.stdin.write("go\n")
+            child.stdin.flush()
+        results = []
+        for child in children:
+            output, errors = child.communicate(timeout=10)
+            assert child.returncode == 0, errors
+            results.append(json.loads(output))
+        assert sorted(result["created"] for result in results) == [False, True]
+        assert results[0]["state"] == results[1]["state"] == identity.read_superseded(tmp_path)
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=10)
+
+
+def test_clear_waits_for_entire_owner_notice_update(tmp_path):
+    state = blocked(tmp_path)
+    update = subprocess.Popen(_state_command(tmp_path, "update", state), stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    clear = None
+    try:
+        assert update.stdout.readline().strip() == "read"
+        clear = subprocess.Popen(_state_command(tmp_path, "clear-observed", {}), stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True)
+        assert clear.stdout.readline().strip() == "clearing"
+        # The updater has read the old state but not yet written its result.
+        # Reclaim must wait for the whole transaction, then remove that result.
+        with pytest.raises(subprocess.TimeoutExpired):
+            clear.communicate(timeout=0.2)
+        update.stdin.write("go\n")
+        update.stdin.flush()
+        output, errors = update.communicate(timeout=10)
+        assert update.returncode == 0, errors
+        assert json.loads(output) is True
+        output, errors = clear.communicate(timeout=10)
+        assert clear.returncode == 0, errors
+        assert json.loads(output) is True
+        assert identity.read_superseded(tmp_path) is None
+        lock = tmp_path / "clawchat" / "install_superseded.lock"
+        assert lock.exists()
+        if os.name != "nt":
+            assert lock.stat().st_mode & 0o777 == 0o600
+    finally:
+        for child in (update, clear):
+            if child is not None:
+                if child.poll() is None:
+                    child.kill()
+                child.wait(timeout=10)
+
+
+@pytest.mark.parametrize("failure", ["open", "lock"])
+def test_state_lock_failure_warns_once_and_falls_back(monkeypatch, tmp_path, caplog, failure):
+    state = blocked(tmp_path)
+    if failure == "open":
+        original_open = identity.os.open
+        def fail_lock_open(path, *args, **kwargs):
+            if Path(path).name == "install_superseded.lock":
+                raise PermissionError()
+            return original_open(path, *args, **kwargs)
+        monkeypatch.setattr(identity.os, "open", fail_lock_open)
+    else:
+        def fail_lock(*_a, **_kw):
+            raise OSError("locking unavailable")
+        monkeypatch.setattr(identity, "_lock_state_file", fail_lock)
+    assert identity.update_owner_notice(tmp_path, state["superseded_at"], {"status": "sent"})
+    assert identity.read_superseded(tmp_path)["owner_notice"]["status"] == "sent"
+    assert identity.clear_superseded(tmp_path)
+    assert identity.record_superseded(tmp_path, state)[1] is True
+    assert sum("file lock unavailable" in record.message for record in caplog.records) == 1
+
+
+def test_notice_update_rejects_a_different_event(tmp_path):
+    state = blocked(tmp_path)
+    assert not identity.update_owner_notice(tmp_path, "old-event", {"status": "sent"})
+    assert identity.read_superseded(tmp_path) == state
+
+
+@pytest.mark.asyncio
+async def test_failed_write_recovers_then_external_reclaim_reconnects(monkeypatch, tmp_path):
+    original_replace = identity.os.replace
+    attempts = []
+    def fail_replace(*_a):
+        attempts.append(True)
+        raise OSError("test write failure")
+    monkeypatch.setattr(identity.os, "replace", fail_replace)
+    async with peer(supersede=False) as (url, requests):
+        conn = make_conn(url)
+        await conn._handle_install_superseded()
+        await conn._owner_notice_task
+        await conn.start()
+        try:
+            await until(lambda: len(attempts) >= 3)
+            assert conn.is_superseded
+            assert tmp_path.resolve() in identity._failed_writes
+            assert not requests
+            monkeypatch.setattr(identity.os, "replace", original_replace)
+            await until(lambda: identity.superseded_path(tmp_path).exists()
+                        and tmp_path.resolve() not in identity._failed_writes)
+            assert conn.is_superseded
+            result = subprocess.run(_state_command(tmp_path, "clear", {}), capture_output=True,
+                                    text=True, timeout=10, check=True)
+            assert json.loads(result.stdout) is True
+            await until(lambda: conn.is_ready)
+            assert len(requests) == 1
+            assert identity.read_superseded(tmp_path) is None
+        finally:
+            await conn.stop()
+
+
+def test_empty_reclaim_explains_memory_only_recovery(capsys):
+    from clawchat_cli import main
+    assert main(["reclaim"]) == 0
+    text = capsys.readouterr().out
+    assert "cannot persist superseded installation" in text
+    assert "/clawchat-reclaim" in text
+    assert "重启 gateway" in text
