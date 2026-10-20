@@ -1765,3 +1765,59 @@ async def test_reclaim_during_teardown_wins_and_reconnects(tmp_path):
         assert not conn._superseded and conn._superseded_snapshot is None
     finally:
         await conn.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reclaim_at", ["before-connect", "during-handshake"])
+async def test_external_reclaim_within_production_poll_window_suppresses_notice(monkeypatch, tmp_path, reclaim_at):
+    import clawchat_gateway.standalone_send as sender
+    # Production timing: an out-of-process reclaim is only noticed by the 30 s
+    # standby poll, while the notice may take up to its 20 s total timeout.
+    monkeypatch.setattr(connection, "SUPERSEDED_CHECK_SECONDS", 30.0)
+    assert connection.HANDSHAKE_TIMEOUT_SECONDS + 10.0 < 30.0
+    frames, started = [], []
+
+    class Sibling:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        def use_sibling_connect_device_id(self, suffix):
+            return "test-device" + suffix
+
+        async def start(self):
+            started.append(reclaim_at)
+
+        async def wait_until_ready(self, **_kw):
+            # `hermes clawchat reclaim` from another process: no in-process wake.
+            assert identity.clear_superseded(tmp_path) is True
+            return True
+
+        async def send_frame(self, frame, **_kw):
+            frames.append(frame)
+            return True
+
+        async def stop(self):
+            pass
+
+    monkeypatch.setattr(sender, "ClawChatConnection", Sibling)
+    conn = make_conn()
+    conn._store = SimpleNamespace(get_activation_conversation=lambda **_kw: "cnv_test")
+    original = identity.record_superseded
+
+    def record_then_reclaim(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if reclaim_at == "before-connect":
+            assert identity.clear_superseded(tmp_path) is True
+        return result
+
+    monkeypatch.setattr(identity, "record_superseded", record_then_reclaim)
+    try:
+        await conn._handle_install_superseded()
+        await asyncio.wait_for(conn._owner_notice_task, 2)
+        assert frames == []
+        # A notice reclaimed before it starts never even opens a connection.
+        assert started == ([] if reclaim_at == "before-connect" else [reclaim_at])
+        assert identity.read_superseded(tmp_path) is None
+        assert not identity.superseded_path(tmp_path).exists()
+    finally:
+        await conn.stop()

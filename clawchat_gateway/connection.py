@@ -1571,11 +1571,16 @@ class ClawChatConnection:
         from clawchat_gateway.owner_language import resolve_owner_language_if_known
         from clawchat_gateway.standalone_send import standalone_send
 
+        def still_current() -> bool:
+            return install_identity.event_is_current(self._profile_home, state["superseded_at"])
+
         try:
             chat_id = self._store.get_activation_conversation(
                 platform="hermes", account_id="default",
             ) if self._store is not None else None
-            if not chat_id:
+            if not still_current():
+                result = {"status": "skipped", "reason": "reclaimed"}
+            elif not chat_id:
                 result = {"status": "skipped", "reason": "missing_owner_chat_id"}
             else:
                 locale = self._owner_locale() if self._owner_locale is not None else None
@@ -1594,11 +1599,15 @@ class ClawChatConnection:
                         en += f" The other installation runs plugin version {version}."
                         zh += f"另一处安装的插件版本为 {version}。"
                 text = zh if language in ("zh", "zh_Hant") else en if language else en + "\n" + zh
+                # An out-of-process reclaim is only noticed by the 30 s standby
+                # poll, so the sender re-checks the event right before sending.
                 sent = await asyncio.wait_for(standalone_send(
                     self._cfg, str(chat_id), text, _allow_superseded_notice=True,
+                    _still_current=still_current,
                 ), timeout=HANDSHAKE_TIMEOUT_SECONDS + 10.0)
-                result = ({"status": "sent", "message_id": sent.get("message_id")}
-                          if sent.get("success") else {"status": "failed", "error_type": "SendError"})
+                result = ({"status": "sent", "message_id": sent.get("message_id")} if sent.get("success")
+                          else {"status": "skipped", "reason": "reclaimed"} if sent.get("stale")
+                          else {"status": "failed", "error_type": "SendError"})
         except Exception as exc:  # noqa: BLE001 — deliberately no retry
             result = {"status": "failed", "error_type": type(exc).__name__}
         # A reclaim or a later event must never be overwritten by this background task.

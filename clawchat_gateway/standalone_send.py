@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import replace
-from typing import Any
+from typing import Any, Callable
 
 from clawchat_gateway import config as config_module
 from clawchat_gateway.config import ClawChatConfig
@@ -70,6 +70,7 @@ async def standalone_send(
     media_files: list[str] | None = None,
     force_document: bool = False,
     _allow_superseded_notice: bool = False,
+    _still_current: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Send one message over an ephemeral ClawChat connection.
 
@@ -153,6 +154,9 @@ async def standalone_send(
                     )
                 }
             fragments.extend(media_fragments)
+        if _still_current is not None and not _still_current():
+            # The handshake can outlast a reclaim; never deliver a stale notice.
+            return {"error": "ClawChat notice no longer current; not sent.", "stale": True}
         message_id = new_message_id()
         frame = build_message_send_event(
             chat_id=target,

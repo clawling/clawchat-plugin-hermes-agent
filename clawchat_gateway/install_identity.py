@@ -201,6 +201,14 @@ def _read_superseded_unlocked(home: Path, user_id: str | None = None) -> dict[st
     return value
 
 
+def event_is_current(profile_home: Path, superseded_at: str) -> bool:
+    """True while this exact event is still on disk (a reclaim removes it)."""
+    home = profile_home.expanduser().resolve()
+    with _guard:
+        disk = _read_disk_superseded_unlocked(home)
+    return bool(disk and not disk.get("unreadable") and disk.get("superseded_at") == superseded_at)
+
+
 def read_superseded(profile_home: Path, user_id: str | None = None) -> dict[str, Any] | None:
     """Unreadable or malformed state blocks reconnect; a new identity is exempt."""
     home = profile_home.expanduser().resolve()

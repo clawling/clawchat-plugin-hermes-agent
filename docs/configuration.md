@@ -1709,7 +1709,11 @@ records `pending`, `sent` (message ID), `failed` (error type), or `skipped` (no 
 conversation). When available, the notice includes the other installation's plugin
 version, limited to 64 printable characters. Failure and restart never retry the
 notice. Reclaim cancels pending notices on the connection's event loop; external
-reclaim cancels them when the standby loop detects the cleared state. Cancelled
+reclaim cancels them when the standby loop detects the cleared state.
+Because the standby poll runs every 30 seconds while a notice may take up to its
+total timeout, the notice also re-checks right before connecting and again right
+before sending that its event is still on disk; after any reclaim it is not
+sent. Cancelled
 notices do not write a result. Other standalone sends return an error while
 superseded.
 
