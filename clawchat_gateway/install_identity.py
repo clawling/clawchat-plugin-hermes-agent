@@ -292,12 +292,15 @@ def retry_superseded_write(profile_home: Path) -> bool:
                 if pending is None:
                     return False
                 disk = _read_disk_superseded_unlocked(home)
-                if disk is not None:
+                if disk is not None and (
+                    disk.get("unreadable") or disk.get("user_id") == pending.get("user_id")
+                ):
                     if not disk.get("unreadable"):
-                        # Same event is already durable, or a different event won.
-                        # Neither case permits this cached creation to overwrite it.
+                        # This identity's event is already durable (this one or a
+                        # newer one); never overwrite it with the cached creation.
                         _failed_writes.pop(home, None)
                     return False
+                # No state on disk, or only a previous identity's: persist ours.
                 if _write_superseded_unlocked(home, pending):
                     _failed_writes.pop(home, None)
                     return True

@@ -534,10 +534,25 @@ async def test_reclaim_is_profile_scoped(monkeypatch, tmp_path):
 def test_failed_write_over_old_identity_still_blocks(monkeypatch, tmp_path):
     blocked(tmp_path, "usr_previous_agent")
     state = {"user_id": "usr_test_agent", "owner_notice": {"status": "pending"}}
-    monkeypatch.setattr(identity.os, "replace", lambda *_a: (_ for _ in ()).throw(OSError("read only")))
+    real_replace, broken = identity.os.replace, [True]
+
+    def replace_file(*args):
+        if broken[0]:
+            raise OSError("read only")
+        return real_replace(*args)
+
+    monkeypatch.setattr(identity.os, "replace", replace_file)
     recorded, created = identity.record_superseded(tmp_path, state)
     assert recorded == state and not created
     assert identity.read_superseded(tmp_path, "usr_test_agent") == state
+    # The standby retry must keep the cached state while the write keeps failing ...
+    assert identity.retry_superseded_write(tmp_path) is False
+    assert identity.read_superseded(tmp_path, "usr_test_agent") == state
+    # ... and replace the previous identity's state once the disk recovers.
+    broken[0] = False
+    assert identity.retry_superseded_write(tmp_path) is True
+    assert not identity._failed_writes
+    assert identity.read_superseded(tmp_path, "usr_test_agent")["user_id"] == "usr_test_agent"
 
 
 @pytest.mark.asyncio
