@@ -1537,8 +1537,10 @@ class ClawChatConnection:
 
     def _latch_superseded(self) -> None:
         if not self._superseded:
-            self._superseded_snapshot = install_identity.read_reclaim_generation(self._profile_home)
+            # Block refresh first: the generation read below is file I/O, and a
+            # queued refresh worker thread must not slip through meanwhile.
             self._superseded = True
+            self._superseded_snapshot = install_identity.read_reclaim_generation(self._profile_home)
 
     async def _handle_install_superseded(self) -> None:
         self._latch_superseded()
