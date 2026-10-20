@@ -1008,8 +1008,12 @@ async def activate(
     from clawchat_gateway.install_identity import clear_superseded
     from clawchat_gateway.connection import ClawChatConnection
 
-    clear_superseded(hermes_home())
-    ClawChatConnection.wake_reclaimed(hermes_home())
+    try:
+        clear_superseded(hermes_home())
+    except OSError:
+        logger.warning("activation succeeded but reclaim failed; retry with hermes clawchat reclaim")
+    else:
+        ClawChatConnection.wake_reclaimed(hermes_home())
     return payload
 
 

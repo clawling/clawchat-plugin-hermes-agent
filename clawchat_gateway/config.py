@@ -615,7 +615,8 @@ class ClawChatConfig:
 
     @classmethod
     def from_platform_config(
-        cls, platform_config: Any, operator_extra: Optional[dict[str, Any]] = None
+        cls, platform_config: Any, operator_extra: Optional[dict[str, Any]] = None,
+        *, read_only: bool = False,
     ) -> "ClawChatConfig":
         """Build from the host's platform config.
 
@@ -624,6 +625,7 @@ class ClawChatConfig:
         ``group_sessions_per_user`` is read only from it, never from the runtime
         extra, where the host always fills it in; without it, groups share one
         session (per-group overrides under ``groups`` still apply).
+        ``read_only`` inspects existing storage without creating or migrating it.
         """
         extra = getattr(platform_config, "extra", None) or {}
         media_roots_env = _get_env("CLAWCHAT_MEDIA_LOCAL_ROOTS")
@@ -644,6 +646,7 @@ class ClawChatConfig:
         try:
             rejected = get_clawchat_store().get_revoked_refresh_fingerprint(
                 platform="hermes", account_id="default",
+                **({"read_only": True} if read_only else {}),
             )
         except Exception:  # noqa: BLE001
             logger.warning("clawchat revoked-refresh guard read failed; using existing credentials")

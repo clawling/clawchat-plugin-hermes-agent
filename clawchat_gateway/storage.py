@@ -1123,11 +1123,15 @@ class ClawChatStore:
 
         return self._write("mark_revoked_refresh_token", write)
 
-    def get_revoked_refresh_fingerprint(self, *, platform: str, account_id: str) -> str | None:
-        self.initialize()
+    def get_revoked_refresh_fingerprint(
+        self, *, platform: str, account_id: str, read_only: bool = False,
+    ) -> str | None:
+        if not read_only:
+            self.initialize()
         if self._disabled:
             raise RuntimeError("ClawChat revoked-refresh guard unavailable")
-        conn = sqlite3.connect(self.db_path)
+        conn = (sqlite3.connect(self.db_path.expanduser().resolve().as_uri() + "?mode=ro", uri=True)
+                if read_only else sqlite3.connect(self.db_path))
         try:
             row = conn.execute(
                 "SELECT fingerprint FROM revoked_refresh_tokens WHERE platform = ? AND account_id = ?",

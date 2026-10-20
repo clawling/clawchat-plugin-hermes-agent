@@ -1668,16 +1668,19 @@ notice updates, and reclaim are serialized under a process-local lock plus the
 persistent `<profile_home>/clawchat/install_superseded.lock` (mode `0600`). POSIX
 uses `flock`; Windows uses a byte-range lock. The lock file is never removed.
 Unsupported locking or an inaccessible lock file reports one WARNING per path and
-falls back to process-local locking. Contention instead retries for up to 120
-seconds and then fails without performing an unlocked update. A failed event
-creation blocks locally without sending a notice; a failed reclaim reports an
-error and the CLI returns a nonzero exit code.
+refuses state changes; no mutation proceeds without the cross-process lock.
+Contention retries for up to 120 seconds and then fails without performing an
+unlocked update. A failed event creation blocks locally without sending a notice;
+a failed reclaim reports an error and the CLI returns a nonzero exit code.
 
 Only failed event creation is cached in memory and retried during standby. A
 failed owner-notice result update logs a WARNING and is never cached for retry,
 so it cannot recreate state removed by external reclaim. Before retrying creation,
-the plugin verifies that disk still has no event; a newer disk event discards the
-cached creation. Once creation succeeds, external CLI reclaim works normally.
+the plugin checks the event's identity: an already durable event for the same
+identity replaces the cached creation. A stale disk event belonging to another
+identity is overwritten by this identity's cached event. Unreadable disk state
+keeps the cached creation blocked. Once creation succeeds, external CLI reclaim
+works normally.
 On restart, a matching (or unreadable) state file blocks connection before startup
 refresh, holding only the profile lock; a different agent identity ignores it.
 If configuration has no user ID yet, a read-only SQLite identity lookup supplies
@@ -1691,20 +1694,31 @@ An ERROR log includes reclaim instructions; reminders are at most every ten minu
 For each live `4010` event the plugin attempts one owner DM through a standalone
 sibling device, with a total timeout and no token refresh. The durable `owner_notice`
 records `pending`, `sent` (message ID), `failed` (error type), or `skipped` (no owner
-conversation). Failure and restart never retry the notice. Other standalone sends
-return an error while superseded.
+conversation). When available, the notice includes the other installation's plugin
+version, limited to 64 printable characters. Failure and restart never retry the
+notice. Reclaim cancels pending notices on the connection's event loop; external
+reclaim cancels them when the standby loop detects the cleared state. Cancelled
+notices do not write a result. Other standalone sends return an error while
+superseded.
 
 Run `hermes clawchat status` to inspect the short install ID, superseded time,
 winner version, notice result, and instance-lock status when available in this
-process. A separate CLI process reports lock state as `unknown` and includes the
-last holder record; that persisted record alone does not prove a running holder. Run `hermes clawchat reclaim` **on
-the installation you want to use** to clear the state. A running gateway checks
+process. Status filters superseded state using the configured user ID, falling
+back to a read-only SQLite activation identity lookup. It reports `identity` as
+the first eight characters or `unknown`; an unknown identity keeps the fail-closed
+view. A different identity's residual state reports `is_superseded: false` and
+`stale_state_for_other_identity: true`. A separate CLI process reports lock state
+as `unknown` and includes the last holder record; that persisted record alone
+does not prove a running holder. Run `hermes clawchat reclaim` **on the installation
+you want to use** to clear the state. A running gateway checks
 within 30 seconds; an offline gateway connects on its next start. This can displace
 the other installation. `/clawchat-reclaim` in local Hermes also wakes this process's
 waiting connections immediately. Successful activation, including `--repair` and
-`--new-account`, clears the state too. The compatibility `clawchat_cli.py` accepts
-both `status` and `reclaim`. Status is read-only: an absent or invalid seed produces
-no install ID and creates no files or directories. If no disk state exists but logs
+`--new-account`, clears the state too. If that cleanup fails, activation still
+succeeds and logs a warning to retry `hermes clawchat reclaim`. The compatibility
+`clawchat_cli.py` accepts both `status` and `reclaim`. Status is read-only: an absent
+or invalid seed produces no install ID and creates no files or directories.
+If no disk state exists but logs
 show `cannot persist superseded installation`, use `/clawchat-reclaim` in that
 Hermes process or restart the gateway; a restart without a disk state connects
 normally.

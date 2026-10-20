@@ -1470,8 +1470,22 @@ class ClawChatConnection:
             if conn._profile_home == home:
                 # Commands can run on a different thread/loop in Hermes.
                 task = conn._supervisor_task
-                if task is not None and not task.done() and not task.get_loop().is_closed():
-                    task.get_loop().call_soon_threadsafe(conn._reclaim_event.set)
+                if task is None or task.done():
+                    task = next((notice for notice in list(conn._owner_notice_tasks) if not notice.done()), None)
+                if task is not None and not task.get_loop().is_closed():
+                    task.get_loop().call_soon_threadsafe(conn._on_install_reclaimed)
+
+    def _cancel_owner_notices(self) -> None:
+        """Cancel on the connection's event loop, including earlier pending notices."""
+        for task in list(self._owner_notice_tasks):
+            # The wake callback and the standby loop can observe the same reclaim.
+            # Do not interrupt cleanup already handling the first cancellation.
+            if not task.done() and not task.cancelling():
+                task.cancel()
+
+    def _on_install_reclaimed(self) -> None:
+        self._cancel_owner_notices()
+        self._reclaim_event.set()
 
     def _log_install_state(
         self, event: str, level: int, state: dict[str, Any] | None = None,
@@ -1499,6 +1513,7 @@ class ClawChatConnection:
             state = install_identity.read_superseded(self._profile_home, self._superseded_user_id())
             if state is None:
                 if waiting:
+                    self._cancel_owner_notices()
                     self._superseded = False
                     self._log_install_state("install_reclaimed", logging.INFO)
                     await self._set_state(ConnectionState.DISCONNECTED)
@@ -1561,6 +1576,12 @@ class ClawChatConnection:
                 zh = (f"这个 agent 已在另一处安装上线，本机（{host}）上的这份安装已停止连接以避免互相顶号。"
                       "如需切回本机，在本机运行 `hermes clawchat reclaim`，"
                       "或在本机的 Hermes 里发送 /clawchat-reclaim。")
+                version = state.get("by_client_version")
+                if isinstance(version, str):
+                    version = "".join(char for char in version if char.isprintable())[:64]
+                    if version:
+                        en += f" The other installation runs plugin version {version}."
+                        zh += f"另一处安装的插件版本为 {version}。"
                 text = zh if language in ("zh", "zh_Hant") else en if language else en + "\n" + zh
                 sent = await asyncio.wait_for(standalone_send(
                     self._cfg, str(chat_id), text, _allow_superseded_notice=True,

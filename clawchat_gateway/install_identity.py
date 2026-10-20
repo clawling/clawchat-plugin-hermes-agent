@@ -34,6 +34,10 @@ class StateLockTimeoutError(TimeoutError):
     """Lock contention exceeded its deadline; never continue without ownership."""
 
 
+class StateLockUnavailable(OSError):
+    """Cross-process ownership cannot be established; refuse state mutations."""
+
+
 def _state_lock_backend() -> str:
     return "windows" if os.name == "nt" else "posix"
 
@@ -157,10 +161,11 @@ def _state_guard(home: Path) -> Iterator[None]:
                 locked = True
             except StateLockTimeoutError:
                 raise
-            except (OSError, ImportError, NotImplementedError):
+            except (OSError, ImportError, NotImplementedError) as exc:
                 if path not in _warned_lock_paths:
                     _warned_lock_paths.add(path)
-                    logger.warning("superseded state file lock unavailable; using process-local locking")
+                    logger.warning("superseded state file lock unavailable; refusing state changes")
+                raise StateLockUnavailable("superseded state file lock unavailable") from exc
             yield
         finally:
             if fd is not None:
@@ -251,11 +256,9 @@ def record_superseded(profile_home: Path, state: dict[str, Any]) -> tuple[dict[s
     except OSError:
         with _guard:
             existing = _read_superseded_unlocked(home, state.get("user_id"))
-            if existing is not None:
-                logger.error("cannot persist superseded installation; remaining in standby", exc_info=True)
-                return existing, False
-            _remember_failed_creation(home, state)
-            return state, False
+            pending = existing if existing is not None else state
+            _remember_failed_creation(home, pending)
+            return pending, False
 
 
 def update_owner_notice(profile_home: Path, superseded_at: str, result: dict[str, Any]) -> bool:
@@ -281,7 +284,7 @@ def update_owner_notice(profile_home: Path, superseded_at: str, result: dict[str
 
 
 def retry_superseded_write(profile_home: Path) -> bool:
-    """Retry only a failed creation while disk still has no event."""
+    """Retry creation unless this identity already has a durable event."""
     home = profile_home.expanduser().resolve()
     with _guard:
         if home not in _failed_writes:
@@ -339,10 +342,15 @@ def install_status(profile_home: Path, user_id: str | None = None) -> dict[str, 
     home = profile_home.expanduser().resolve()
     live = next((conn for conn in ClawChatConnection._live_supervisors.values()
                  if conn._profile_home == home and not conn._connect_device_id), None)
-    state = read_superseded(home, user_id)
+    state = read_superseded(home)
+    stale = bool(state and user_id and state.get("user_id") and state["user_id"] != user_id)
+    if stale:
+        state = None
     return {
         "install_id": (peek_install_id(home) or "")[:8] or None,
+        "identity": user_id[:8] if user_id else "unknown",
         "is_superseded": state is not None,
+        "stale_state_for_other_identity": stale,
         "superseded": state,
         "instance_lock": live.instance_lock_status() if live else {"state": "unknown"},
         # The record persists after exit: it is diagnostic, not proof of ownership.

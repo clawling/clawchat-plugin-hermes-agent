@@ -416,8 +416,8 @@ async def test_stop_cancels_notice_and_reclaim_does_not_resurrect_state(monkeypa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["fresh", "repair", "new-account"])
-async def test_successful_activation_clears_state(monkeypatch, tmp_path, mode):
+@pytest.mark.parametrize("mode", ["fresh", "repair", "new-account", "clear-failed"])
+async def test_successful_activation_clears_state(monkeypatch, tmp_path, caplog, mode):
     from clawchat_gateway import activate as activation
     blocked(tmp_path)
     monkeypatch.setattr(activation, "_load_config", lambda: (str(tmp_path / "config.yaml"), {}))
@@ -429,9 +429,20 @@ async def test_successful_activation_clears_state(monkeypatch, tmp_path, mode):
     monkeypatch.setattr(activation, "agents_connect_with_retry", AsyncMock(return_value=result))
     monkeypatch.setattr(activation, "persist_activation", lambda **_kw: {"user_id": "usr_test_agent"})
     monkeypatch.setattr(activation, "get_clawchat_store", lambda: SimpleNamespace(upsert_activation=lambda **_kw: True))
-    await activation.activate("TESTCODE", base_url="https://example.invalid", repair=mode == "repair",
-                              new_account=mode == "new-account")
-    assert identity.read_superseded(tmp_path) is None
+    if mode == "clear-failed":
+        monkeypatch.setattr(identity, "clear_superseded", Mock(side_effect=identity.StateLockUnavailable()))
+        wake = Mock()
+        monkeypatch.setattr(ClawChatConnection, "wake_reclaimed", wake)
+    payload = await activation.activate("TESTCODE", base_url="https://example.invalid", repair=mode == "repair",
+                                        new_account=mode == "new-account")
+    assert payload["user_id"] == "usr_test_agent"
+    if mode == "clear-failed":
+        assert identity.read_superseded(tmp_path) is not None
+        assert "activation succeeded but reclaim failed" in caplog.text
+        assert "retry with hermes clawchat reclaim" in caplog.text
+        wake.assert_not_called()
+    else:
+        assert identity.read_superseded(tmp_path) is None
 
 
 @pytest.mark.asyncio
@@ -866,9 +877,10 @@ def test_clear_waits_for_entire_owner_notice_update(tmp_path):
                 child.wait(timeout=10)
 
 
-@pytest.mark.parametrize("failure", ["open", "lock"])
-def test_state_lock_failure_warns_once_and_falls_back(monkeypatch, tmp_path, caplog, failure):
+@pytest.mark.parametrize("failure", ["open", "lock", "import", "unsupported"])
+def test_state_lock_unavailable_refuses_all_mutations(monkeypatch, tmp_path, caplog, failure):
     state = blocked(tmp_path)
+    original = identity.superseded_path(tmp_path).read_bytes()
     if failure == "open":
         original_open = identity.os.open
         def fail_lock_open(path, *args, **kwargs):
@@ -878,13 +890,211 @@ def test_state_lock_failure_warns_once_and_falls_back(monkeypatch, tmp_path, cap
         monkeypatch.setattr(identity.os, "open", fail_lock_open)
     else:
         def fail_lock(*_a, **_kw):
-            raise OSError("locking unavailable")
+            errors = {"lock": OSError, "import": ImportError, "unsupported": NotImplementedError}
+            raise errors[failure]("locking unavailable")
         monkeypatch.setattr(identity, "_lock_state_file", fail_lock)
-    assert identity.update_owner_notice(tmp_path, state["superseded_at"], {"status": "sent"})
-    assert identity.read_superseded(tmp_path)["owner_notice"]["status"] == "sent"
-    assert identity.clear_superseded(tmp_path)
-    assert identity.record_superseded(tmp_path, state)[1] is True
+    write = Mock(side_effect=AssertionError("unavailable lock must never allow a write"))
+    monkeypatch.setattr(identity, "_write_superseded_unlocked", write)
+    assert not identity.update_owner_notice(tmp_path, state["superseded_at"], {"status": "sent"})
+    assert tmp_path.resolve() not in identity._failed_writes
+    with pytest.raises(identity.StateLockUnavailable):
+        identity.clear_superseded(tmp_path)
+    assert identity.record_superseded(tmp_path, state) == (state, False)
+    assert identity._failed_writes[tmp_path.resolve()] == state
+    assert not identity.retry_superseded_write(tmp_path)
+    assert identity._failed_writes[tmp_path.resolve()] == state
+    assert identity.read_superseded(tmp_path) == state
+    assert identity.install_status(tmp_path)["is_superseded"] is True
+    assert identity.superseded_path(tmp_path).read_bytes() == original
+    write.assert_not_called()
+    assert "cannot persist superseded installation" in caplog.text
+    assert "cannot update superseded owner notice" in caplog.text
     assert sum("file lock unavailable" in record.message for record in caplog.records) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["cli", "slash"])
+async def test_lock_unavailable_reclaim_fails_and_preserves_state(monkeypatch, tmp_path, capsys, command):
+    from clawchat_cli import main
+    from clawchat_gateway.commands import handle_clawchat_reclaim_command
+
+    state = blocked(tmp_path)
+    original = identity.superseded_path(tmp_path).read_bytes()
+    monkeypatch.setattr(identity, "_lock_state_file", Mock(side_effect=OSError("locking unavailable")))
+    wake = Mock()
+    monkeypatch.setattr(ClawChatConnection, "wake_reclaimed", wake)
+    if command == "cli":
+        assert main(["reclaim"]) == 1
+        assert "reclaim failed (StateLockUnavailable)" in capsys.readouterr().err
+    else:
+        assert "reclaim failed (StateLockUnavailable)" in await handle_clawchat_reclaim_command("")
+    assert identity.superseded_path(tmp_path).read_bytes() == original
+    assert identity.read_superseded(tmp_path) == state
+    wake.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_lock_unavailable_record_stays_alive_without_notice(monkeypatch, tmp_path):
+    import clawchat_gateway.standalone_send as sender
+
+    monkeypatch.setattr(identity, "_lock_state_file", Mock(side_effect=OSError("locking unavailable")))
+    send, dial, refresh = AsyncMock(), AsyncMock(), AsyncMock()
+    monkeypatch.setattr(sender, "standalone_send", send)
+    monkeypatch.setattr(connection, "_ws_connect", dial)
+    conn = make_conn()
+    conn._store = SimpleNamespace(get_activation_conversation=lambda **_kw: "cnv_test")
+    monkeypatch.setattr(conn, "_attempt_refresh", refresh)
+    await conn._handle_install_superseded()
+    await conn.start()
+    try:
+        await asyncio.sleep(connection.SUPERSEDED_CHECK_SECONDS * 3)
+        assert conn.is_superseded and not conn._supervisor_task.done()
+        assert conn._owner_notice_task is None
+        assert tmp_path.resolve() in identity._failed_writes
+        assert not identity.superseded_path(tmp_path).exists()
+        send.assert_not_called()
+        dial.assert_not_called()
+        refresh.assert_not_called()
+    finally:
+        await conn.stop()
+
+
+@pytest.mark.parametrize("source", ["env", "config", "sqlite", "unknown", "unreadable"])
+@pytest.mark.parametrize("same_identity", [False, True])
+def test_status_filters_current_identity_without_storage_writes(
+    monkeypatch, tmp_path, capsys, source, same_identity,
+):
+    from clawchat_cli import main
+    from clawchat_gateway import config as config_module, storage
+
+    state = blocked(tmp_path)
+    user_id = state["user_id"] if same_identity else "usr_other_agent"
+    store = storage.ClawChatStore(tmp_path / "status.sqlite")
+    if source == "sqlite":
+        store.upsert_activation(platform="hermes", account_id="default", user_id=user_id,
+                                conversation_id="cnv_test", owner_user_id="usr_test_owner",
+                                access_token="test-access", refresh_token="test-refresh")
+    monkeypatch.setattr(storage, "ClawChatStore", lambda: store)
+    monkeypatch.setattr(storage, "get_clawchat_store", lambda: store)
+    monkeypatch.setattr(store, "initialize", Mock(side_effect=AssertionError("status must not initialize storage")))
+    if source == "unreadable":
+        monkeypatch.setattr(store, "get_activation_user_id", Mock(side_effect=OSError("read failed")))
+    monkeypatch.setattr(config_module, "operator_clawchat_extra",
+                        lambda: {"user_id": user_id} if source == "config" else {})
+    monkeypatch.setattr(config_module, "_get_env",
+                        lambda *names: user_id if source == "env" and "CLAWCHAT_USER_ID" in names else "")
+    original = identity.superseded_path(tmp_path).read_bytes()
+    assert main(["status"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    known = source in ("env", "config", "sqlite")
+    stale = known and not same_identity
+    assert result["identity"] == (user_id[:8] if known else "unknown")
+    assert result["is_superseded"] is (not stale)
+    assert result["stale_state_for_other_identity"] is stale
+    assert result["superseded"] == (None if stale else state)
+    assert identity.superseded_path(tmp_path).read_bytes() == original
+    assert not (tmp_path / "clawchat" / "install_seed").exists()
+    if source != "sqlite":
+        assert not store.db_path.exists()
+    store.initialize.assert_not_called()
+
+
+def test_status_config_identity_precedes_sqlite(monkeypatch):
+    from clawchat_gateway import cli, config as config_module, storage
+
+    monkeypatch.setattr(config_module.ClawChatConfig, "from_platform_config",
+                        Mock(return_value=replace(config(), user_id="usr_config_agent")))
+    store = Mock(side_effect=AssertionError("configured identity needs no SQLite activation lookup"))
+    monkeypatch.setattr(storage, "ClawChatStore", store)
+    assert cli._status_user_id() == "usr_config_agent"
+    store.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("locale", [None, "zh-CN", "en-US"])
+@pytest.mark.parametrize("version", [None, "", "\n\t", "winner-1.2", "winner\n\t\x00" + "v" * 80])
+async def test_notice_includes_only_printable_bounded_winner_version(monkeypatch, tmp_path, locale, version):
+    import clawchat_gateway.standalone_send as sender
+
+    send = AsyncMock(return_value={"success": True, "message_id": "msg_test"})
+    monkeypatch.setattr(sender, "standalone_send", send)
+    conn = make_conn(owner_locale=lambda: locale)
+    conn._store = SimpleNamespace(get_activation_conversation=lambda **_kw: "cnv_test")
+    conn._last_close_reason = json.dumps({"by_client_version": version})
+    try:
+        await conn._handle_install_superseded()
+        await conn._owner_notice_task
+        text = send.call_args.args[2]
+        clean = "".join(char for char in (version or "") if char.isprintable())[:64]
+        assert ("The other installation runs plugin version" in text) == bool(clean and locale != "zh-CN")
+        assert ("另一处安装的插件版本为" in text) == bool(clean and locale != "en-US")
+        if clean:
+            if locale != "zh-CN":
+                assert f"plugin version {clean}." in text
+            if locale != "en-US":
+                assert f"插件版本为 {clean}。" in text
+        assert "\t" not in text and "\x00" not in text
+        assert "v" * 65 not in text
+    finally:
+        await conn.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["cli", "thread-cli", "slash", "activation-wakeup", "external"])
+async def test_reclaim_cancels_all_pending_notices_before_reconnect(monkeypatch, tmp_path, method):
+    from clawchat_cli import main
+    from clawchat_gateway.commands import handle_clawchat_reclaim_command
+    import clawchat_gateway.standalone_send as sender
+
+    sends, delivered = [], []
+    release = asyncio.Event()
+    async def pending_send(*_a, **_kw):
+        sends.append(asyncio.current_task())
+        await release.wait()
+        delivered.append(True)
+        return {"success": True, "message_id": "msg_test"}
+    monkeypatch.setattr(sender, "standalone_send", pending_send)
+    if method != "external":
+        monkeypatch.setattr(connection, "SUPERSEDED_CHECK_SECONDS", 60)
+    update = Mock(wraps=identity.update_owner_notice)
+    monkeypatch.setattr(identity, "update_owner_notice", update)
+    async with peer() as (url, requests):
+        conn = make_conn(url)
+        conn._store = SimpleNamespace(
+            get_activation_credentials=lambda **_kw: None,
+            get_revoked_refresh_fingerprint=lambda **_kw: None,
+            get_activation_conversation=lambda **_kw: "cnv_test",
+        )
+        await conn.start()
+        try:
+            await until(lambda: conn.is_superseded and len(sends) == 1)
+            first = conn._owner_notice_task
+            # An earlier conflict's task can still be pending when another is created.
+            second = asyncio.create_task(conn._send_superseded_notice(identity.read_superseded(tmp_path)))
+            conn._owner_notice_tasks.add(second)
+            second.add_done_callback(conn._owner_notice_tasks.discard)
+            await until(lambda: len(sends) == 2)
+            assert len(requests) == 1
+            if method == "slash":
+                assert "已清除" in await handle_clawchat_reclaim_command("")
+            elif method == "cli":
+                assert main(["reclaim"]) == 0
+            elif method == "thread-cli":
+                assert await asyncio.to_thread(main, ["reclaim"]) == 0
+            else:
+                assert identity.clear_superseded(tmp_path)
+                if method == "activation-wakeup":
+                    ClawChatConnection.wake_reclaimed(tmp_path)
+            await until(lambda: conn.is_ready and first.cancelled() and second.cancelled(), timeout=0.8)
+            assert len(requests) == 2
+            assert all(task.cancelled() for task in sends)
+            release.set()
+            await asyncio.sleep(0)
+            assert not delivered
+            assert identity.read_superseded(tmp_path) is None
+            update.assert_not_called()
+        finally:
+            await conn.stop()
 
 
 def test_notice_update_rejects_a_different_event(tmp_path):

@@ -11,6 +11,27 @@ from clawchat_gateway.restart import format_restart_lines
 activate_and_maybe_restart = None
 
 
+def _status_user_id() -> str | None:
+    """Resolve the current profile identity without initializing its database."""
+    from types import SimpleNamespace
+    from clawchat_gateway.config import ClawChatConfig, operator_clawchat_extra
+    from clawchat_gateway.storage import ClawChatStore
+
+    try:
+        extra = operator_clawchat_extra() or {}
+        cfg = ClawChatConfig.from_platform_config(
+            SimpleNamespace(extra=extra), operator_extra=extra, read_only=True,
+        )
+        if cfg.user_id:
+            return cfg.user_id
+    except Exception:  # noqa: BLE001 — status remains available with unreadable config
+        pass
+    try:
+        return ClawChatStore().get_activation_user_id(platform="hermes", account_id="default")
+    except Exception:  # noqa: BLE001 — unknown identity keeps the fail-closed view
+        return None
+
+
 def setup_clawchat_cli(parser: argparse.ArgumentParser) -> None:
     subparsers = parser.add_subparsers(dest="command")
     activate_parser = subparsers.add_parser(
@@ -76,7 +97,7 @@ def handle_clawchat_cli(args: argparse.Namespace) -> int:
 
         home = hermes_home()
         if command == "status":
-            print(json.dumps(install_status(home), indent=2, ensure_ascii=False))
+            print(json.dumps(install_status(home, _status_user_id()), indent=2, ensure_ascii=False))
             return 0
         try:
             cleared = clear_superseded(home)
