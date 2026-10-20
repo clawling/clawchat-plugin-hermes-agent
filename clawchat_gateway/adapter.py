@@ -1231,12 +1231,14 @@ class ClawChatAdapter(BasePlatformAdapter):
         ):
             logger.info("clawchat connect waiting for activation credentials")
             return True
-        started = await self._connection.wait_until_started(
+        ready = await self._connection.wait_until_ready(
             timeout=HANDSHAKE_TIMEOUT_SECONDS + 1.0,
         )
-        ready = self._connection.is_ready
-        if started and not ready:
-            logger.info("clawchat connect started in background state")
+        if not ready and self._connection.is_standby:
+            # Another process on this host holds the instance lock; this one
+            # takes over when it exits. Started, not failed: a False here would
+            # make Hermes rebuild the adapter in a loop.
+            logger.info("clawchat connect standing by for the instance lock")
             return True
         if not ready:
             logger.warning("clawchat connect returned before websocket ready")

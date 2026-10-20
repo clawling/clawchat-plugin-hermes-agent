@@ -246,7 +246,7 @@ async def test_profile_standby_kill_takeover_real_websocket(homes, monkeypatch, 
                 assert len([r for r in caplog.records if "event=instance_lock_standby" in r.message]) == 1
                 proc.kill()
                 proc.wait(timeout=10)
-                assert await conn.wait_until_ready(timeout=2)
+                await _wait_for(lambda: conn.is_ready)
                 assert len(attempts) == 1
                 manager.refresh.assert_awaited_once()
                 assert conn.instance_lock_status()["state"] == "acquired"
@@ -264,7 +264,8 @@ async def test_profile_standby_gates_and_prompt_stop(homes, monkeypatch):
         try:
             await conn.start()
             await _wait_for(lambda: conn._state == ConnectionState.STANDBY)
-            assert await conn.wait_until_started(timeout=0.2)
+            assert not await conn.wait_until_ready(timeout=0.2)
+            assert conn.is_standby
             assert not connected.is_set()
             assert (await conn._attempt_refresh(close_ws_on_success=False)).status == "skipped"
             await conn._maybe_proactive_refresh()
@@ -444,6 +445,7 @@ async def test_unsupported_locks_allow_start_and_refresh(homes, monkeypatch):
 async def test_direct_socket_and_refresh_calls_require_ownership(homes, monkeypatch):
     conn, manager = _connection(monkeypatch, homes)
     conn._refresh_manager = manager
+    conn._instance_lock_enforced = True  # As after start(), before the supervisor locks.
     socket = AsyncMock()
     monkeypatch.setattr(connection, "_ws_connect", socket)
     assert await conn._run_one_connection() is False
@@ -513,6 +515,7 @@ async def test_refresh_worker_retains_lock_until_request_finishes(homes, monkeyp
 async def test_refresh_rechecks_identity_after_credential_watch(homes, monkeypatch):
     conn, manager = _connection(monkeypatch, homes)
     conn._refresh_manager = manager
+    conn._instance_lock_enforced = True
     assert await conn._wait_for_instance_locks()
 
     async def changed():
@@ -599,3 +602,12 @@ async def test_cancelled_stop_still_releases_locks(homes, monkeypatch):
     finally:
         conn._ws = None
         await conn.stop()
+
+
+@pytest.mark.asyncio
+async def test_unstarted_connection_is_not_gated(homes, monkeypatch):
+    # Only start() runs the supervisor that takes the locks; a never-started
+    # connection keeps the old direct-call behaviour.
+    conn, manager = _connection(monkeypatch, homes)
+    assert conn._instance_locks_ready()
+    assert conn.instance_lock_status()["state"] == "unlocked"

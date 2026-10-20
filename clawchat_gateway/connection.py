@@ -379,6 +379,12 @@ class ClawChatConnection:
         self._instance_root = hermes_root().expanduser().resolve()
         self._instance_locks: dict[str, instance_lock.LockResult] = {}
         self._instance_lock_waiting: instance_lock.LockResult | None = None
+        # Set by ``start``: only a started canonical connection runs the
+        # supervisor that acquires the locks, so only it is gated by them.
+        self._instance_lock_enforced = False
+        # True after a STANDBY wait, until the caller re-reads the credential
+        # source (the holder may have rotated tokens meanwhile).
+        self._instance_lock_waited = False
         self._state = ConnectionState.DISCONNECTED
         self._ws: Any = None
         self._stopping = False
@@ -406,7 +412,7 @@ class ClawChatConnection:
         self._credential_watch_task: asyncio.Task[None] | None = None
         self._hello_wait: asyncio.Future[bool] | None = None
         self._ready_event = asyncio.Event()
-        self._started_event = asyncio.Event()
+        self._settled_event = asyncio.Event()
         self._pending_connect_id: str | None = None
         self._hello_resolved_device_id: str | None = None
         self._hello_delivery_mode: str | None = None
@@ -477,6 +483,7 @@ class ClawChatConnection:
                 raise
         self._stopping = False
         self._auth_failed = False
+        self._instance_lock_enforced = not self._connect_device_id
         self._warn_if_device_id_volatile()
         if self._refresh_manager is None:
             self._refresh_manager = self._build_refresh_manager()
@@ -540,7 +547,7 @@ class ClawChatConnection:
         if self._stopping:
             return False
         # Standalone senders use a sibling WS device and must never wait on the gateway.
-        if self._connect_device_id:
+        if self._connect_device_id or not self._instance_lock_enforced:
             return True
         profile = self._instance_locks.get("profile")
         identity = self._instance_locks.get("identity")
@@ -554,6 +561,10 @@ class ClawChatConnection:
                 )
             ))
         )
+
+    def _take_instance_lock_waited(self) -> bool:
+        waited, self._instance_lock_waited = self._instance_lock_waited, False
+        return waited
 
     def instance_lock_status(self) -> dict[str, Any]:
         waiting = self._instance_lock_waiting
@@ -607,6 +618,7 @@ class ClawChatConnection:
                     await self._set_state(ConnectionState.DISCONNECTED)
                 return True
             self._instance_lock_waiting = blocked
+            self._instance_lock_waited = True
             now = time.monotonic()
             first = waited_from is None
             if first:
@@ -1242,17 +1254,17 @@ class ClawChatConnection:
         self._clear_pending_permanent()
         self._credential_generation += 1
         self._stopping = True
-        self._cancel_stable_ready_reset()
-        await self._set_state(ConnectionState.CLOSED)
-        self._reject_pending_acks(RuntimeError("connection stopped"))
-        self._reject_queued_ack_waiters(RuntimeError("connection stopped"), clear_queue=True)
-        if self._read_task is not None:
-            self._read_task.cancel()
-        if self._credential_watch_task is not None:
-            self._credential_watch_task.cancel()
-        if self._hello_wait is not None and not self._hello_wait.done():
-            self._hello_wait.cancel()
         try:
+            self._cancel_stable_ready_reset()
+            await self._set_state(ConnectionState.CLOSED)
+            self._reject_pending_acks(RuntimeError("connection stopped"))
+            self._reject_queued_ack_waiters(RuntimeError("connection stopped"), clear_queue=True)
+            if self._read_task is not None:
+                self._read_task.cancel()
+            if self._credential_watch_task is not None:
+                self._credential_watch_task.cancel()
+            if self._hello_wait is not None and not self._hello_wait.done():
+                self._hello_wait.cancel()
             if self._ws is not None:
                 try:
                     await asyncio.wait_for(
@@ -1378,31 +1390,30 @@ class ClawChatConnection:
     def is_ready(self) -> bool:
         return self._state == ConnectionState.READY
 
+    @property
+    def is_standby(self) -> bool:
+        """Waiting behind another process's instance lock — started, not failed."""
+        return self._state == ConnectionState.STANDBY
+
     async def wait_until_ready(self, *, timeout: float) -> bool:
         if self.is_ready:
             return True
         try:
-            await asyncio.wait_for(self._ready_event.wait(), timeout=timeout)
+            # Also wakes on STANDBY, which will not turn READY within a
+            # handshake timeout; callers tell the two apart via ``is_standby``.
+            await asyncio.wait_for(self._settled_event.wait(), timeout=timeout)
         except asyncio.TimeoutError:
             return False
         return self.is_ready
-
-    async def wait_until_started(self, *, timeout: float) -> bool:
-        """READY, or STANDBY behind another process's instance lock (not a failure)."""
-        try:
-            await asyncio.wait_for(self._started_event.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
-            return False
-        return self._state in {ConnectionState.READY, ConnectionState.STANDBY}
 
     async def _set_state(self, state: ConnectionState) -> None:
         if self._state == state:
             return
         self._state = state
         if state in {ConnectionState.READY, ConnectionState.STANDBY}:
-            self._started_event.set()
+            self._settled_event.set()
         else:
-            self._started_event.clear()
+            self._settled_event.clear()
         if state == ConnectionState.READY:
             self._ready_event.set()
         else:
@@ -1455,8 +1466,11 @@ class ClawChatConnection:
                 if not await self._wait_for_instance_locks():
                     break
                 # The holder may have rotated credentials while we waited.
-                source_status = await self._recheck_activation_source(include_bootstrap=True)
-                if source_status in ("changed", "revoked") or self._activation_source_suspended or not self._instance_locks_ready():
+                if self._take_instance_lock_waited():
+                    source_status = await self._recheck_activation_source(include_bootstrap=True)
+                    if source_status in ("changed", "revoked") or self._activation_source_suspended:
+                        continue
+                if not self._instance_locks_ready():
                     continue
                 self._clear_refresh_rejection()
                 # §A.4 startup path (sqlite-first load or env bootstrap):
@@ -1484,10 +1498,11 @@ class ClawChatConnection:
                 continue
             if not await self._wait_for_instance_locks():
                 break
-            source_status = await self._recheck_activation_source(include_bootstrap=True)
-            if source_status == "changed":
-                startup_refresh_done = False
-                continue
+            if self._take_instance_lock_waited():
+                source_status = await self._recheck_activation_source(include_bootstrap=True)
+                if source_status == "changed":
+                    startup_refresh_done = False
+                    continue
             if not self._instance_locks_ready() or self._auth_failed or self._activation_source_suspended or not self._has_connect_credentials():
                 continue
             try:
@@ -1779,8 +1794,11 @@ class ClawChatConnection:
                 if not await self._wait_for_instance_locks():
                     return False
                 # Re-read after standby before using a potentially rotated pair.
-                status = await self._recheck_activation_source()
-                if status in ("changed", "revoked") or self._activation_source_suspended or not self._instance_locks_ready():
+                if self._take_instance_lock_waited():
+                    status = await self._recheck_activation_source()
+                    if status in ("changed", "revoked") or self._activation_source_suspended:
+                        continue
+                if not self._instance_locks_ready():
                     continue
                 self._activation_wait_logged = False
                 logger.info(
