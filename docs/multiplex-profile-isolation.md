@@ -10,6 +10,30 @@ The database account key remains `default`, so existing activation rows need no
 migration. Starting a replacement connection still stops an older connection for
 the same profile, but never another profile's connection.
 
+Canonical gateways also hold a per-profile OS lock at
+`<profile_home>/clawchat/gateway.lock` and, once the agent is known, an identity
+lock at `<hermes_root>/clawchat-locks/<sha256(user_id)[:16]>.lock`. The shared
+root comes from `profile_collision.hermes_root()`; per-profile homes still follow
+the multiplex override. Different processes serving the same profile or the
+same agent under two profiles cannot both connect or refresh. Process-local
+references share a held descriptor, including during supervisor replacement,
+so superseding a connection never opens an ownership gap.
+Because those references are process-local, two profiles bound to the same
+agent inside ONE multiplexed process share the identity lock rather than
+excluding each other; that case is still only reported by the profile-collision
+warning.
+
+A process waiting on either lock enters `ConnectionState.STANDBY` (`"standby"`)
+and Hermes counts its adapter as started. It retries every 30 seconds without
+using the reconnect retry budget; after holder exit, including `SIGKILL`, it
+automatically resumes startup. Read holder JSON or inspect
+`instance_lock_standby` / `instance_lock_acquired` logs to diagnose duplicates.
+Leftover files are harmless and must not be deleted while a gateway runs.
+Unsupported OS/filesystem locking warns and proceeds unlocked; different users
+with separate roots do not share identity locks. Standalone sibling-device
+senders are exempt. See [configuration](configuration.md#host-local-single-instance-locks)
+for metadata, log cadence, platform details and limits.
+
 Connection lifecycle and credential callbacks inherit the context captured at
 construction. Token rotation and logout therefore write the owning profile's
 files even when invoked from another context. Mention, reaction and media sends

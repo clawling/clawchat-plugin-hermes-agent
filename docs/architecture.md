@@ -46,6 +46,20 @@ reload or restart is still required before that waiting state exists. If
 activation cannot persist SQLite credentials, the default activation restart
 lets the next gateway process load credentials from `.env` and `config.yaml`.
 
+The canonical connection holds a host-local profile lock before activation
+loading and an identity lock before refresh or WebSocket connection. Contention
+enters `ConnectionState.STANDBY` (`"standby"`), which the adapter reports as
+started (so Hermes does not rebuild it in a loop). It performs neither connect
+nor refresh while waiting, retries every 30 seconds, and takes over after the
+holder exits. Refresh entry points and retry callbacks check ownership; the
+HTTP worker retains references through cancellation until the request ends.
+Activation polling acquires the newly loaded identity's lock before its startup
+refresh and rechecks credentials after waiting. Supersession retains references
+before stopping the old supervisor, and shutdown releases owned handles after
+the supervisor task ends. Sibling-device standalone connections are exempt. See
+[host-local locks](configuration.md#host-local-single-instance-locks) for paths,
+diagnostics and unsupported-filesystem behaviour.
+
 ## Self-echo hook (`pre_gateway_dispatch`)
 
 `__init__._clawchat_pre_gateway_dispatch` re-resolves the bot's own

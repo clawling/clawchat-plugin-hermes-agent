@@ -158,6 +158,16 @@ and reconnect with the new token** (§D) → re-arm timer from the new token's `
 
 "Do not hot-loop the same token." One in-flight refresh per process:
 
+Hermes canonical gateways additionally require host-local profile and identity
+ownership before any refresh, including startup, activation polling, proactive
+timers, REST recovery and hello-fail recovery. A contending gateway enters
+`STANDBY` and skips refresh until it acquires the locks; activation polling takes
+the identity lock before its refresh. Retry callbacks recheck ownership, and
+the HTTP worker retains lock references until the request finishes even if its
+async caller is cancelled. Unsupported locks warn and proceed unlocked;
+standalone sibling-device senders are exempt. See
+[configuration](configuration.md#host-local-single-instance-locks).
+
 - **In-flight dedupe:** concurrent callers (proactive timer + reactive 401 + reactive hello-fail)
   await the same in-flight promise/future rather than firing parallel refreshes.
 - **Rejected-token latch:** latch an access token rejected by hello or permanent refresh

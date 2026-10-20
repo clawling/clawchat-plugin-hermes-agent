@@ -2655,6 +2655,15 @@ capped at e.g. 30 s. On reconnect, supply the same `device_id` as before
 to resume the replay cursor — you do **not** need to track which messages
 you missed; the server does.
 
+Hermes also prevents duplicate canonical gateways on one host with profile and
+identity OS locks. A contending process enters `ConnectionState.STANDBY`
+(`"standby"`), opens no socket, refreshes no tokens, and retries every 30 seconds
+outside the reconnect retry budget. It resumes startup after holder exit,
+including abrupt termination. This is local client behaviour with no wire
+protocol change; standalone sibling-device senders are exempt. See
+[configuration](configuration.md#host-local-single-instance-locks) for lock paths,
+holder logs and unsupported-filesystem limits.
+
 ### 14.2 In-stream errors
 
 `message.failed` means **withdraw this stream, leave nothing behind**. The

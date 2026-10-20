@@ -1231,9 +1231,13 @@ class ClawChatAdapter(BasePlatformAdapter):
         ):
             logger.info("clawchat connect waiting for activation credentials")
             return True
-        ready = await self._connection.wait_until_ready(
+        started = await self._connection.wait_until_started(
             timeout=HANDSHAKE_TIMEOUT_SECONDS + 1.0,
         )
+        ready = self._connection.is_ready
+        if started and not ready:
+            logger.info("clawchat connect started in background state")
+            return True
         if not ready:
             logger.warning("clawchat connect returned before websocket ready")
         else:

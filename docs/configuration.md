@@ -1581,7 +1581,7 @@ similar owner tools again (they are refused); no session gains access.
 `ClawChatConfig` (`config.py`) and nothing consumes the field, so setting it to
 `true` changes no behaviour today. Do not rely on it for delivery guarantees.
 
-Three reconnect values are **fixed constants, not `extra.*` keys**
+These reconnect values are **fixed constants, not `extra.*` keys**
 (`clawchat_gateway/connection.py`):
 
 | Constant                          | Value   | Purpose |
@@ -1589,11 +1589,54 @@ Three reconnect values are **fixed constants, not `extra.*` keys**
 | `BACKOFF_RESET_AFTER_SECONDS`     | `5.0`   | READY time after which the exponential backoff resets to `reconnect_initial_delay_ms`. **Not applied when the connection ended in a takeover** — see below. |
 | `TAKEOVER_BACKOFF_FLOOR_SECONDS`  | `60.0`  | Minimum wait before reconnecting after msghub closed the socket with `4001` (a newer session for the same `(user_id, device_id)` took over). Doubles per consecutive eviction. |
 | `TAKEOVER_BACKOFF_MAX_SECONDS`    | `600.0` | Ceiling for that escalation. |
+| `INSTANCE_LOCK_RETRY_SECONDS`    | `30.0`  | Retry a host-local lock while in STANDBY; these waits do not consume `reconnect_max_retries`. |
+| `INSTANCE_LOCK_REMINDER_SECONDS` | `600.0` | Minimum interval between WARNING reminders while a lock remains held elsewhere. |
 
 The takeover floor exists because `reconnect_max_delay_ms` (15 s) is below the
 eviction periods measured in prod (9–163 s), so ordinary exponential backoff can
 never outrun a mutual-eviction loop between two instances sharing a device id.
 See `docs/client-integration.md` §3.6.
+
+### Host-local single-instance locks
+
+Before loading activation credentials or refreshing/connecting, a canonical
+gateway acquires `<profile_home>/clawchat/gateway.lock`. Once `user_id` is known,
+it also acquires `<hermes_root>/clawchat-locks/<sha256(user_id)[:16]>.lock`.
+`profile_home` follows Hermes' per-profile home override under multiplexing;
+`hermes_root` is the root owning `profiles/`, resolved by
+`profile_collision.hermes_root()`. The identity lock is shared across profiles
+under that root, including two processes bound to the same agent. Changing
+activation identity releases the old identity lock before acquiring the new one.
+Neither device IDs nor tokens, cursors, or stored activation data change.
+
+Contention sets `ConnectionState.STANDBY` (value `"standby"`): no WebSocket
+connection or token refresh occurs. Hermes counts the adapter as started, so its
+watcher does not repeatedly rebuild it. `instance_lock_standby` logs one ERROR
+with lock kind/path, holder pid/hostname/started_at, and retry interval, followed
+by WARNING reminders at most every ten minutes. On takeover,
+`instance_lock_acquired` logs INFO with `waited_seconds`. For diagnostics,
+`connection.instance_lock_status()` returns the waiting lock and holder details.
+
+Read the lock file as JSON to identify the holder. Records contain only pid,
+hostname, UTC start time, kind, profile home and plugin version; the identity
+filename hashes the user ID and the record contains no tokens or clear user ID.
+New directories use mode `0700`, lock files `0600`. The OS releases ownership
+when the holder exits, including after `SIGKILL` (`kill -9`); a standby gateway
+retries within 30 seconds, then resumes normal activation/startup refresh/connect.
+Shutdown cancels standby promptly. In-process replacement retains ownership
+across the old supervisor's stop; an in-flight HTTP worker retains its own
+reference until it finishes.
+
+Leftover lock files are harmless: ownership comes from the kernel lock, not
+file existence or JSON contents. **Do not delete lock files while a gateway
+runs**: another process could then lock a different inode at the same path.
+POSIX uses nonblocking `flock`; Windows locks one byte at a far offset so holder
+JSON remains readable. Unsupported locking (for example a network filesystem
+without lock support, or an unwritable path) logs one WARNING per path and
+proceeds without that lock. This safeguard is host-local: different OS users
+with separate `HERMES_HOME` roots do not share the identity lock, and separate
+hosts still rely on protocol takeover backoff. Standalone senders use a sibling
+connect device ID and are exempt from both locks.
 
 ## Typing
 

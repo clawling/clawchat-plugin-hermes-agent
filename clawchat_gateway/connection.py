@@ -23,6 +23,8 @@ except ImportError:  # pragma: no cover
 from clawchat_gateway import __version__
 from clawchat_gateway.config import ClawChatConfig
 from clawchat_gateway.hermes_home import hermes_home
+from clawchat_gateway import instance_lock
+from clawchat_gateway.profile_collision import hermes_root
 from clawchat_gateway.token_refresh import (
     RefreshManager,
     RefreshOutcome,
@@ -53,6 +55,8 @@ from clawchat_gateway.ws_state import ReconnectTracker
 logger = logging.getLogger("clawchat_gateway.connection")
 
 HANDSHAKE_TIMEOUT_SECONDS = 10.0
+INSTANCE_LOCK_RETRY_SECONDS = 30.0
+INSTANCE_LOCK_REMINDER_SECONDS = 600.0
 CREDENTIAL_READ_FAILURE_LIMIT = 3
 # Upper bound on the graceful ``ws.close()` in ``stop()``. A half-dead socket can
 # make ``close()`` block until the library's own close handshake gives up; bounding
@@ -290,6 +294,7 @@ class ConnectionState(str, enum.Enum):
     RECONNECTING = "reconnecting"
     AUTH_FAILED = "auth_failed"
     SUSPENDED = "suspended"
+    STANDBY = "standby"
     CLOSED = "closed"
 
 
@@ -371,6 +376,9 @@ class ClawChatConnection:
         self._profile_home = hermes_home().expanduser().resolve()
         self._profile_context = contextvars.copy_context()
         self._supervisor_key = (str(self._profile_home), account_id)
+        self._instance_root = hermes_root().expanduser().resolve()
+        self._instance_locks: dict[str, instance_lock.LockResult] = {}
+        self._instance_lock_waiting: instance_lock.LockResult | None = None
         self._state = ConnectionState.DISCONNECTED
         self._ws: Any = None
         self._stopping = False
@@ -398,6 +406,7 @@ class ClawChatConnection:
         self._credential_watch_task: asyncio.Task[None] | None = None
         self._hello_wait: asyncio.Future[bool] | None = None
         self._ready_event = asyncio.Event()
+        self._started_event = asyncio.Event()
         self._pending_connect_id: str | None = None
         self._hello_resolved_device_id: str | None = None
         self._hello_delivery_mode: str | None = None
@@ -439,6 +448,13 @@ class ClawChatConnection:
         # ours, so only one WS session per account is ever live in this process.
         prior = ClawChatConnection._live_supervisors.get(self._supervisor_key)
         if prior is not None and prior is not self:
+            # Take a process-local reference BEFORE stop can drop the OS lock.
+            # The old connection retains its own references until it has stopped.
+            if not self._connect_device_id:
+                for kind, held in prior._instance_locks.items():
+                    retained = held.retain()
+                    if retained is not None:
+                        self._instance_locks[kind] = retained
             logger.info(
                 format_ws_log(
                     event="supervisor_superseded",
@@ -450,7 +466,15 @@ class ClawChatConnection:
                     fields=[("reason", "replaced by fresh connection")],
                 )
             )
-            await prior.stop()
+            try:
+                await prior.stop()
+            except BaseException:
+                # Hermes may abandon a timed-out start before registering us.
+                # Do not strand references owned only by this replacement.
+                for held in self._instance_locks.values():
+                    held.release()
+                self._instance_locks.clear()
+                raise
         self._stopping = False
         self._auth_failed = False
         self._warn_if_device_id_volatile()
@@ -499,12 +523,109 @@ class ClawChatConnection:
         )
 
     async def _refresh_should_continue(self, refresh_config: ClawChatConfig | None) -> bool:
-        if self._auth_failed or self._activation_source_suspended or refresh_config is None:
+        if (
+            not self._instance_locks_ready() or self._auth_failed
+            or self._activation_source_suspended or refresh_config is None
+        ):
             return False
         if self._cfg.refresh_token != refresh_config.refresh_token:
             return False
         status = await self._recheck_activation_source(adopt_changes=False)
-        return status in ("ok", "unreadable") and not self._activation_source_suspended
+        return (
+            status in ("ok", "unreadable") and not self._activation_source_suspended
+            and self._instance_locks_ready()
+        )
+
+    def _instance_locks_ready(self) -> bool:
+        if self._stopping:
+            return False
+        # Standalone senders use a sibling WS device and must never wait on the gateway.
+        if self._connect_device_id:
+            return True
+        profile = self._instance_locks.get("profile")
+        identity = self._instance_locks.get("identity")
+        return bool(
+            profile is not None
+            and profile.outcome in ("acquired", "unsupported")
+            and (not self._cfg.user_id or (
+                identity is not None and identity.outcome in ("acquired", "unsupported")
+                and identity.path == instance_lock.identity_lock_path(
+                    self._instance_root, self._cfg.user_id,
+                )
+            ))
+        )
+
+    def instance_lock_status(self) -> dict[str, Any]:
+        waiting = self._instance_lock_waiting
+        return {
+            "state": "standby" if waiting else (
+                "exempt" if self._connect_device_id else (
+                    "unsupported" if any(lock.outcome == "unsupported" for lock in self._instance_locks.values())
+                    else "acquired" if self._instance_locks else "unlocked"
+                )
+            ),
+            "kind": waiting.kind if waiting else None,
+            "path": str(waiting.path) if waiting else None,
+            "holder": dict(waiting.holder) if waiting else {},
+        }
+
+    async def _wait_for_instance_locks(self, *, profile_only: bool = False) -> bool:
+        if self._connect_device_id:
+            return not self._stopping
+        waited_from = None
+        last_reminder = 0.0
+        while not self._stopping:
+            paths = [("profile", self._profile_home / "clawchat" / "gateway.lock")]
+            if not profile_only:
+                target = (
+                    instance_lock.identity_lock_path(self._instance_root, self._cfg.user_id)
+                    if self._cfg.user_id else None
+                )
+                old = self._instance_locks.get("identity")
+                if old is not None and old.path != target:
+                    self._instance_locks.pop("identity").release()
+                if target is not None:
+                    paths.append(("identity", target))
+            blocked = None
+            for kind, path in paths:
+                if kind in self._instance_locks:
+                    continue
+                result = instance_lock.acquire(path, kind=kind, profile_home=self._profile_home)
+                if result.outcome == "held":
+                    blocked = result
+                    break
+                self._instance_locks[kind] = result
+            if blocked is None:
+                self._instance_lock_waiting = None
+                if waited_from is not None:
+                    logger.info(format_ws_log(
+                        event="instance_lock_acquired", account_id=self._account_id,
+                        attempt=self._attempt, reconnect_count=self._reconnect_count,
+                        state=self._state.value, action="continue",
+                        fields=[("waited_seconds", round(time.monotonic() - waited_from, 3))],
+                    ))
+                    await self._set_state(ConnectionState.DISCONNECTED)
+                return True
+            self._instance_lock_waiting = blocked
+            now = time.monotonic()
+            first = waited_from is None
+            if first:
+                waited_from = now
+            await self._set_state(ConnectionState.STANDBY)
+            if first or now - last_reminder >= INSTANCE_LOCK_REMINDER_SECONDS:
+                last_reminder = now
+                logger.log(logging.ERROR if first else logging.WARNING, format_ws_log(
+                    event="instance_lock_standby", account_id=self._account_id,
+                    attempt=self._attempt, reconnect_count=self._reconnect_count,
+                    state=self._state.value, action="wait",
+                    fields=[("kind", blocked.kind), ("path", str(blocked.path)),
+                            ("holder_pid", blocked.holder.get("pid")),
+                            ("holder_hostname", blocked.holder.get("hostname")),
+                            ("holder_started_at", blocked.holder.get("started_at")),
+                            ("retry_seconds", INSTANCE_LOCK_RETRY_SECONDS)],
+                ))
+            await asyncio.sleep(INSTANCE_LOCK_RETRY_SECONDS)
+        return False
 
     def _clear_pending_permanent(self) -> None:
         self._pending_permanent_credentials = None
@@ -716,15 +837,38 @@ class ClawChatConnection:
         return not self._stopping
 
     def _build_refresh_client(self) -> Any:
-        from clawchat_gateway.api_client import ClawChatApiClient
+        from clawchat_gateway.api_client import ClawChatApiClient, ClawChatApiError
 
         base_url = self._cfg.base_url or self._cfg.websocket_url
-        return ClawChatApiClient(
+        client = ClawChatApiClient(
             base_url=base_url,
             token="",  # /v1/auth/refresh is unauthenticated; token unused.
             user_id=self._cfg.user_id,
             device_id=self._refresh_device_id(),
         )
+        request_config = self._cfg
+        request_locks = tuple(self._instance_locks.values())
+        refresh_sync = client._auth_refresh_sync
+
+        def guarded_refresh_sync(*args: Any) -> Any:
+            # urllib's thread can survive cancellation/timeout of its coroutine.
+            # Pin the OS locks through the actual request, including on stop().
+            leases = []
+            try:
+                for held in request_locks:
+                    lease = held.retain()
+                    if lease is None:
+                        raise ClawChatApiError(kind="instance_lock", message="instance locks released", connect_failed=True)
+                    leases.append(lease)
+                if not self._instance_locks_ready() or self._cfg is not request_config:
+                    raise ClawChatApiError(kind="instance_lock", message="instance ownership changed", connect_failed=True)
+                return refresh_sync(*args)
+            finally:
+                for lease in leases:
+                    lease.release()
+
+        client._auth_refresh_sync = guarded_refresh_sync
+        return client
 
     def _resolve_device_id(self) -> tuple[str, bool]:
         """Connect-time device id used as ``X-Device-Id`` on connect AND refresh (§E).
@@ -1121,6 +1265,13 @@ class ClawChatConnection:
             except (asyncio.CancelledError, Exception):
                 pass
             self._supervisor_task = None
+        # A refresh request already in flight on a worker thread keeps its own
+        # lease (``_build_refresh_client``), so releasing here never lets another
+        # process refresh concurrently with it.
+        for held in self._instance_locks.values():
+            held.release()
+        self._instance_locks.clear()
+        self._instance_lock_waiting = None
         # Release our slot only if a newer ``start`` hasn't already claimed it.
         if ClawChatConnection._live_supervisors.get(self._supervisor_key) is self:
             del ClawChatConnection._live_supervisors[self._supervisor_key]
@@ -1225,10 +1376,22 @@ class ClawChatConnection:
             return False
         return self.is_ready
 
+    async def wait_until_started(self, *, timeout: float) -> bool:
+        """READY, or STANDBY behind another process's instance lock (not a failure)."""
+        try:
+            await asyncio.wait_for(self._started_event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return False
+        return self._state in {ConnectionState.READY, ConnectionState.STANDBY}
+
     async def _set_state(self, state: ConnectionState) -> None:
         if self._state == state:
             return
         self._state = state
+        if state in {ConnectionState.READY, ConnectionState.STANDBY}:
+            self._started_event.set()
+        else:
+            self._started_event.clear()
         if state == ConnectionState.READY:
             self._ready_event.set()
         else:
@@ -1248,6 +1411,8 @@ class ClawChatConnection:
         reconnect_reason = "-"
         startup_refresh_done = False
         while not self._stopping:
+            if not await self._wait_for_instance_locks(profile_only=True):
+                break
             if self._activation_source_suspended:
                 if not await self._wait_for_activation_source():
                     break
@@ -1276,6 +1441,12 @@ class ClawChatConnection:
                 # _wait_for_activation_credentials already applied §A.4.
                 startup_refresh_done = True
             elif not startup_refresh_done:
+                if not await self._wait_for_instance_locks():
+                    break
+                # The holder may have rotated credentials while we waited.
+                source_status = await self._recheck_activation_source(include_bootstrap=True)
+                if source_status in ("changed", "revoked") or self._activation_source_suspended or not self._instance_locks_ready():
+                    continue
                 self._clear_refresh_rejection()
                 # §A.4 startup path (sqlite-first load or env bootstrap):
                 # refresh-if-near-expiry before the FIRST connect (the polling
@@ -1299,6 +1470,14 @@ class ClawChatConnection:
                     self._refresh_pending_reconnect = False
             await self._recheck_activation_source()
             if self._auth_failed or self._activation_source_suspended or not self._has_connect_credentials():
+                continue
+            if not await self._wait_for_instance_locks():
+                break
+            source_status = await self._recheck_activation_source(include_bootstrap=True)
+            if source_status == "changed":
+                startup_refresh_done = False
+                continue
+            if not self._instance_locks_ready() or self._auth_failed or self._activation_source_suspended or not self._has_connect_credentials():
                 continue
             try:
                 await self._set_state(ConnectionState.CONNECTING)
@@ -1527,6 +1706,8 @@ class ClawChatConnection:
         return True
 
     async def _wait_for_activation_credentials(self) -> bool:
+        if not await self._wait_for_instance_locks(profile_only=True):
+            return False
         if self._auth_failed or self._rejected_activation_token or self._refresh_rejection_fingerprints():
             await self._set_state(ConnectionState.AUTH_FAILED)
         if not self._activation_wait_logged:
@@ -1584,6 +1765,12 @@ class ClawChatConnection:
                     await asyncio.sleep(ACTIVATION_CREDENTIAL_POLL_INTERVAL_SECONDS)
                     continue
                 self._apply_activation_credentials(credentials)
+                if not await self._wait_for_instance_locks():
+                    return False
+                # Re-read after standby before using a potentially rotated pair.
+                status = await self._recheck_activation_source()
+                if status in ("changed", "revoked") or self._activation_source_suspended or not self._instance_locks_ready():
+                    continue
                 self._activation_wait_logged = False
                 logger.info(
                     format_ws_log(
@@ -1686,9 +1873,13 @@ class ClawChatConnection:
         message; here we drop the in-memory creds and latch the rejected token so
         the supervisor stops opening sockets with the dead token.
         """
+        if not self._instance_locks_ready():
+            return RefreshOutcome(status="skipped", error="instance locks not held")
         if self._activation_source_suspended:
             return RefreshOutcome(status="skipped", error="activation credential source suspended")
         source_status = await self._recheck_activation_source()
+        if not self._instance_locks_ready():
+            return RefreshOutcome(status="skipped", error="instance locks not held")
         if source_status in ("changed", "revoked") or self._activation_source_suspended:
             return RefreshOutcome(status="skipped", error="activation credential source changed")
         manager = self._refresh_manager
@@ -1831,6 +2022,8 @@ class ClawChatConnection:
             logger.warning("clawchat stale socket close failed")
 
     async def _run_one_connection(self) -> bool:
+        if not self._instance_locks_ready():
+            return False
         # A source check can invalidate this attempt while connect/hello awaits.
         self._connection_credential_generation = self._credential_generation
         self._connection_token = self._cfg.token

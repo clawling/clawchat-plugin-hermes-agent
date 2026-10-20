@@ -184,8 +184,11 @@ tmp
 #     missing readers give a clear error while plugin modules remain importable.
 #   * takeover_close_backoff — real WebSocket closes keep the 4001/4002
 #     reconnect floors when the read loop raises or the handshake times out.
+#   * instance_lock — host-local ownership gates sockets and token refresh,
+#     survives in-process replacement, and permits takeover after a crash.
 tests/*
 !tests/conftest.py
+!tests/test_instance_lock.py
 !tests/test_takeover_close_backoff.py
 !tests/test_credential_revocation.py
 !tests/test_multiplex_isolation.py
