@@ -56,13 +56,16 @@ addopts = "-q"
 pythonpath = ["."]
 ```
 
-The `tests/` directory is **not** tracked in this repo
-(`.gitignore: tests/`) — the published plugin checkout intentionally
-excludes development-only material. To work on tests:
+The `tests/` directory is ignored by default (`.gitignore: tests/*`),
+with named exceptions for tracked tests and their shared `conftest.py`.
+To include a new test in the repository, add a `!tests/<file>` entry to
+`.gitignore` and a comment above the list describing the invariant it pins.
+Without that exception, the test stays local. Run the tracked tests from
+a clean checkout with:
 
 ```bash
-uv run pytest                  # if a local tests/ directory exists
-uv run pytest tests/test_x.py
+uv run --extra test pytest
+uv run --extra test pytest tests/test_x.py
 ```
 
 Most of the adapter, protocol, and tool wiring is testable without a
@@ -135,12 +138,13 @@ skips without one, so run it with one present before a release.
 
 ## Excluded from this checkout
 
-`.gitignore` excludes runtime-only Python artefacts plus several
-development directories (`tests/`, `.e2e/`, `deploy/`, `scripts/`,
-`AGENTS.md`, `CLAUDE.md`). Those exist in private working trees and are
-intentionally kept out of the install payload — every file in the
-tracked tree is copied into `$HERMES_HOME/plugins/clawchat/` on every
-install.
+`.gitignore` excludes runtime-only Python artefacts, development
+directories (`.e2e/`, `deploy/`, `scripts/`) and local agent instructions
+(`AGENTS.md`, `CLAUDE.md`) from the install payload. In `tests/`, only the
+named exceptions, including `conftest.py`, are tracked; other tests stay
+local. Every tracked file, including those tests, is copied into
+`$HERMES_HOME/plugins/clawchat/` on every install and must pass the Hermes
+install scanner described above.
 
 ## Packaging caveats
 

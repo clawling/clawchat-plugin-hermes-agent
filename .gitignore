@@ -186,6 +186,54 @@ tmp
 #     reconnect floors when the read loop raises or the handshake times out.
 #   * instance_lock — host-local ownership gates sockets and token refresh,
 #     survives in-process replacement, and permits takeover after a crash.
+#   * behavior_single_source — Pins mention routing, group guidance precedence,
+#     and the platform privacy floor.
+#   * close_code_capture — Pins takeover close-code capture from real sockets
+#     and connection teardown.
+#   * connect_client_version — Pins plugin version telemetry in the connect handshake.
+#   * connect_next_action — Pins connect failure guidance and bounded wait-retry
+#     behavior.
+#   * downlink_ping — Pins rejection of unsolicited application-level ping
+#     responses.
+#   * exec_approval_routing — Pins owner approval routing, concurrent codes,
+#     scopes, and route cleanup.
+#   * friend_greeting — Pins one greeting per friend event in the resolved
+#     direct conversation.
+#   * greeting_language — Pins language suffixes on default and overridden
+#     greeting prompts.
+#   * group_batch_flush_regate — Pins group settings checks when queued batches
+#     flush.
+#   * hello_fail_classification — Pins exact terminal authentication matching
+#     and transient unknown reasons.
+#   * inbound_claim_fail_closed — Pins fail-closed inbound dispatch when ledger
+#     claims are unavailable.
+#   * liveware_agent_status — Pins positive-only Liveware status detection from stdout.
+#   * liveware_intro_i18n — Pins localized intro lookup and warnings on every
+#     fallback path.
+#   * liveware_register — Pins Liveware multipart registration, icon validation,
+#     and tool schema.
+#   * message_recall — Pins recall ledger purging, preview eviction, and truthful
+#     failure logging.
+#   * onboarding_context — Pins onboarding telemetry vocabulary and omission of
+#     unknown fields.
+#   * onboarding_report — Pins validation and relay of optional onboarding report
+#     fields.
+#   * owner_language — Pins owner locale normalization and unknown greeting
+#     language handling.
+#   * recall_tombstone — Pins permanent account-scoped recall tombstones across
+#     ingest and restart.
+#   * reconnect_copy — Pins owner recovery guidance to the public reconnect
+#     workflow.
+#   * reconnect_takeover_backoff — Pins takeover escalation and server-directed
+#     duplicate-session backoff.
+#   * refresh_revoked — Pins durable refresh rejection guards and recovery
+#     through fresh activation.
+#   * runtime_defaults_encoding — Pins UTF-8 environment rewrites and the
+#     websockets asyncio dependency floor.
+#   * runtime_status_notices — Pins runtime notice suppression without removing
+#     ordinary reply text.
+#   * token_refresh_grace — Pins refresh deadlines and retry spacing within the
+#     grace window.
 tests/*
 !tests/conftest.py
 !tests/test_instance_lock.py
@@ -259,16 +307,37 @@ tests/*
 !tests/test_tool_grants_ask.py
 !tests/test_tool_grants_tools.py
 !tests/test_tool_grants_versions.py
+!tests/test_tool_grants_v2.py
+!tests/test_tool_requests.py
+!tests/test_turn_attachments.py
+!tests/test_message_timestamps.py
+!tests/test_behavior_single_source.py
+!tests/test_close_code_capture.py
+!tests/test_connect_client_version.py
+!tests/test_connect_next_action.py
+!tests/test_downlink_ping.py
+!tests/test_exec_approval_routing.py
+!tests/test_friend_greeting.py
+!tests/test_greeting_language.py
+!tests/test_group_batch_flush_regate.py
+!tests/test_hello_fail_classification.py
+!tests/test_inbound_claim_fail_closed.py
+!tests/test_liveware_agent_status.py
+!tests/test_liveware_intro_i18n.py
+!tests/test_liveware_register.py
+!tests/test_message_recall.py
+!tests/test_onboarding_context.py
+!tests/test_onboarding_report.py
+!tests/test_owner_language.py
+!tests/test_recall_tombstone.py
+!tests/test_reconnect_copy.py
+!tests/test_reconnect_takeover_backoff.py
+!tests/test_refresh_revoked.py
+!tests/test_runtime_defaults_encoding.py
+!tests/test_runtime_status_notices.py
+!tests/test_token_refresh_grace.py
 deploy/
 scripts/
 docs/superpowers/
 AGENTS.md
 CLAUDE.md
-
-!tests/test_tool_grants_v2.py
-
-!tests/test_tool_requests.py
-
-!tests/test_turn_attachments.py
-
-!tests/test_message_timestamps.py
