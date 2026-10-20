@@ -899,17 +899,39 @@ def test_state_lock_unavailable_refuses_all_mutations(monkeypatch, tmp_path, cap
     assert tmp_path.resolve() not in identity._failed_writes
     with pytest.raises(identity.StateLockUnavailable):
         identity.clear_superseded(tmp_path)
+    # A durable event already blocks; it is returned, never re-cached in memory.
     assert identity.record_superseded(tmp_path, state) == (state, False)
-    assert identity._failed_writes[tmp_path.resolve()] == state
+    assert tmp_path.resolve() not in identity._failed_writes
     assert not identity.retry_superseded_write(tmp_path)
-    assert identity._failed_writes[tmp_path.resolve()] == state
     assert identity.read_superseded(tmp_path) == state
     assert identity.install_status(tmp_path)["is_superseded"] is True
     assert identity.superseded_path(tmp_path).read_bytes() == original
     write.assert_not_called()
-    assert "cannot persist superseded installation" in caplog.text
+    assert "cannot lock superseded installation state" in caplog.text
     assert "cannot update superseded owner notice" in caplog.text
     assert sum("file lock unavailable" in record.message for record in caplog.records) == 1
+
+
+def test_lock_failure_over_durable_event_cannot_undo_reclaim(monkeypatch, tmp_path):
+    state = blocked(tmp_path)
+    unavailable = [True]
+    real_lock = identity._lock_state_file
+
+    def lock(fd, *, release=False):
+        if unavailable[0] and not release:
+            raise OSError("locking unavailable")
+        return real_lock(fd, release=release)
+
+    monkeypatch.setattr(identity, "_lock_state_file", lock)
+    # Process A sees 4010 while the lock is unavailable: the disk event blocks it.
+    assert identity.record_superseded(tmp_path, dict(state)) == (state, False)
+    # The lock recovers and process B reclaims.
+    unavailable[0] = False
+    assert identity.clear_superseded(tmp_path) is True
+    # A's standby retry must not recreate the reclaimed event.
+    assert not identity.retry_superseded_write(tmp_path)
+    assert identity.read_superseded(tmp_path) is None
+    assert not identity.superseded_path(tmp_path).exists()
 
 
 @pytest.mark.asyncio

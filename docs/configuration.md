@@ -1717,7 +1717,10 @@ waiting connections immediately. Successful activation, including `--repair` and
 `--new-account`, clears the state too. If that cleanup fails, activation still
 succeeds and logs a warning to retry `hermes clawchat reclaim`. The compatibility
 `clawchat_cli.py` accepts both `status` and `reclaim`. Status is read-only: an absent
-or invalid seed produces no install ID and creates no files or directories.
+or invalid seed produces no install ID and creates no seed, state or lock file,
+and the plugin database is opened read-only without initialization or
+migration (SQLite may still maintain its own `-wal` / `-shm` side files for
+an existing WAL database).
 If no disk state exists but logs
 show `cannot persist superseded installation`, use `/clawchat-reclaim` in that
 Hermes process or restart the gateway; a restart without a disk state connects

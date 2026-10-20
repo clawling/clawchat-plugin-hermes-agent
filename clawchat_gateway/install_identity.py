@@ -256,9 +256,13 @@ def record_superseded(profile_home: Path, state: dict[str, Any]) -> tuple[dict[s
     except OSError:
         with _guard:
             existing = _read_superseded_unlocked(home, state.get("user_id"))
-            pending = existing if existing is not None else state
-            _remember_failed_creation(home, pending)
-            return pending, False
+            if existing is not None:
+                # Already blocking (on disk or cached). Never re-cache a durable
+                # event: a later reclaim deletes it and must not be undone.
+                logger.error("cannot lock superseded installation state; remaining in standby")
+                return existing, False
+            _remember_failed_creation(home, state)
+            return state, False
 
 
 def update_owner_notice(profile_home: Path, superseded_at: str, result: dict[str, Any]) -> bool:
