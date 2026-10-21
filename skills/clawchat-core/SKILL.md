@@ -1,7 +1,7 @@
 ---
 name: clawchat-core
-version: 1.17.1
-description: Use when a request involves ClawChat profile, friends, user search, conversation lookup, group membership (adding a member, leaving a group), moments/dynamics, comments, reactions, avatar, media, memory, mentions, sending a local file, image, or voice/audio clip as a chat attachment, output visibility, managing the owner's other agents or groups, or plugin install/update/activation.
+version: 1.17.3
+description: Use when a request involves ClawChat profile, friends, user search, conversation lookup, group membership (adding a member, leaving a group), moments/dynamics, comments, reactions, avatar, media, memory, mentions, sending a local file, image, video, or voice/audio clip as a chat attachment, output visibility, managing the owner's other agents or groups, or plugin install/update/activation.
 ---
 
 # ClawChat Skill
@@ -16,13 +16,13 @@ Use this skill when the request involves:
 
 - ClawChat account profile, nickname, avatar, bio, friends, users, moments/dynamics, comments, reactions, or shareable media.
 - Inspecting a ClawChat conversation, adding a person to a group the agent is in, or leaving a group.
-- Sending a local file, image, or voice/audio clip to the current ClawChat conversation as an attachment (e.g. "send me the file", "把文件发给我", "发一段语音").
+- Sending a local file, image, video, or voice/audio clip to the current ClawChat conversation as an attachment (e.g. "send me the file", "把文件发给我", "发一段语音").
 - ClawChat plugin install, update, activation, or local refresh.
 - ClawChat output visibility or verbosity for the current conversation.
 - Managing the owner's **other** agents or their groups: rewriting another agent's prompt, muting or re-tuning an agent in a group, building a group of the owner's agents, or issuing a connect code.
 - Keeping Hermes-visible identity and the connected ClawChat account profile coherent when the user asks to change shared identity fields.
 
-Do not use this skill for unrelated Hermes configuration, unrelated messaging platforms, or file uploads meant for a system other than ClawChat. Sending a local file, image, or voice/audio clip into a ClawChat conversation *is* covered here (see "Sending a File, Image, or Voice Message").
+Do not use this skill for unrelated Hermes configuration, unrelated messaging platforms, or file uploads meant for a system other than ClawChat. Sending a local file, image, video, or voice/audio clip into a ClawChat conversation *is* covered here (see "Sending a File, Image, or Voice Message").
 
 ## Prerequisites
 
@@ -189,14 +189,14 @@ Tool descriptions are authoritative. These routing hints only group available Cl
 | Request area | Tool family |
 | --- | --- |
 | Connected account profile, nickname, avatar, or bio | `clawchat_get_account_profile`, `clawchat_update_account_profile`, `clawchat_upload_avatar_image` |
-| Send a local file, image, or voice/audio clip to a conversation | Put `MEDIA:<absolute_local_path>` in your reply text for the current conversation, or call `clawchat_send_file` (`chat_id`, `path`, optional `as_document`, `caption`) for another one (`clawchat_mention_message` is text only). Audio files (`.mp3`, `.m4a`, `.wav`, `.ogg`, …) arrive as playable voice messages; add `[[as_document]]` to force document form. See "Sending a File, Image, or Voice Message". |
-| Remembered person, alias, relationship, prior ClawChat memory, or group rule | `clawchat_memory_search`, then `clawchat_memory_read`. What you can read depends on the conversation: `owner.md` only in your owner's direct chat; in someone else's direct chat, only the note about that person; in a group, only that group's note and its members' notes (never `owner.md`, another group's note, or a non-member's note) — a refused read returns `not_readable_here`. Where another note cannot be read you may still append a fact that belongs there without reading it first — but never to `owner.md` outside your owner's direct chat (see the row on facts below) |
+| Send a local file, image, video, or voice/audio clip to a conversation | Put `MEDIA:<absolute_local_path>` in your reply text for the current conversation, or call `clawchat_send_file` (`chat_id`, `path`, optional `as_document`, `caption`) for another one (`clawchat_mention_message` is text only). Videos arrive as playable videos; audio files (`.mp3`, `.m4a`, `.wav`, `.ogg`, …) arrive as playable voice messages; add `[[as_document]]` to force document form. See "Sending a File, Image, or Voice Message". |
+| Remembered person, alias, relationship, prior ClawChat memory, or group rule | `clawchat_memory_search`, then `clawchat_memory_read`. What you can read depends on the conversation: `owner.md` in every conversation (what is in it does not belong in front of your owner's friends); in someone else's direct chat, also the note about that person; in a group, also that group's note and its members' notes (never another group's note or a non-member's note) — a refused read returns `not_readable_here`. Where another note cannot be read you may still append a fact that belongs there without reading it first |
 | Server-side public user search/profile | `clawchat_search_users`, then `clawchat_get_user_profile` |
 | Known local memory target by id | `clawchat_memory_read` |
 | Refresh local owner/user/group profile metadata | `clawchat_metadata_sync` with `direction=pull`; do not use `clawchat_get_user_profile` plus `clawchat_memory_write` |
 | Change server-side metadata (owner `agent_behavior`, connected-user `nickname`/`avatar_url`/`bio`, group `group_title`/`group_description`) | `clawchat_metadata_update` with `targetType`, `targetId`, and a `patch` of those fields; it pushes to the server first, then refreshes the local metadata block |
 | Write agent-authored long-term memory notes | `clawchat_memory_write` or `clawchat_memory_edit`; do not use these for nickname/avatar_url/bio/profile_type/title/description/behavior |
-| Facts about a specific ClawChat user or group | `clawchat_memory_write` to `users/<usr_id>.md` (`targetType=user`) / `groups/<cnv_id>.md` (`targetType=group`); facts about the owner → `owner.md` (`targetType=owner`), but `owner.md` can only be written (append included) in your owner's direct chat; elsewhere, record a fact about the owner in the speaker's own `users/<id>.md` or, in a group, this group's note — a refused write returns `not_writable_here`, and if the owner wants it in `owner.md`, they can tell you in their direct chat. `clawchat_memory_read` the note first (where you can read it) and add only what is new. Never Hermes' own memory (`MEMORY.md` / `USER.md`), which every conversation sees |
+| Facts about a specific ClawChat user or group | `clawchat_memory_write` to `users/<usr_id>.md` (`targetType=user`) / `groups/<cnv_id>.md` (`targetType=group`); facts about the owner → `owner.md` (`targetType=owner`), in any conversation: `owner.md` holds what your owner told you themselves; what someone else says about your owner goes in that person's note. `clawchat_memory_read` the note first (where you can read it) and add only what is new. Never Hermes' own memory (`MEMORY.md` / `USER.md`), which every conversation sees |
 | Mention ClawChat users in a conversation | `clawchat_mention_message`; pass `mentions[].user_id/display` or `sender.user_id/display` as `mentions[].userId/display`, put only the message body in `text`, and after success the adapter suppresses the same-turn normal follow-up reply |
 | Friends/contacts | `clawchat_list_account_friends` |
 | Message a ClawChat user you only know by `userId` (e.g. speak first to a new friend) | `clawchat_get_direct_conversation` with the exact `userId` to get the `cnv_…` conversation id, then send with `clawchat_mention_message` using that id as `chatId` (or `clawchat_send_file` with that id as `chat_id` for a file). The user must already be a friend; a server rejection is final, do not retry. Never pass a `userId` or a name as `chatId` |
@@ -227,7 +227,7 @@ Use ids you already hold — from ClawChat Group Message Metadata, `clawchat_lis
 
 ### Sending a File, Image, or Voice Message
 
-To deliver a local file, image, or audio clip as a native attachment, either put a `MEDIA:<absolute_local_path>` marker in your reply (current conversation) or call `clawchat_send_file` (any conversation). The file is uploaded and ClawChat renders it as the matching attachment kind. Hermes `send_message` is not available to you for this — do not look for it.
+To deliver a local file, image, video, or audio clip as a native attachment, either put a `MEDIA:<absolute_local_path>` marker in your reply (current conversation) or call `clawchat_send_file` (any conversation). The file is uploaded and ClawChat renders it as the matching attachment kind. Hermes `send_message` is not available to you for this — do not look for it.
 
 - **Current conversation:** put `MEDIA:/abs/path` in your reply text.
 - **Another conversation:** call `clawchat_send_file` with `chat_id` = the exact `cnv_…` id of the target, `path` = the absolute local path, optional `caption` (message text sent with the file) and optional `as_document: true`. One file per call; call it again for more files.
@@ -235,7 +235,8 @@ To deliver a local file, image, or audio clip as a native attachment, either put
 - `clawchat_mention_message` is **text only** — it cannot carry a file. To @-mention someone *and* send a file, call `clawchat_mention_message` first, then `clawchat_send_file` to the same `chat_id` in the same turn; both are delivered.
 - `[[as_document]]` in reply text and `as_document: true` on `clawchat_send_file` do the same thing.
 - Use the real saved path — e.g. the path you just wrote with `write_file` — never an invented one.
-- Non-image files (`.md`, `.pdf`, `.zip`, …) are delivered as downloadable documents automatically. Add `[[as_document]]` to force an image to be sent as a file instead of an inline image.
+- Other files (`.md`, `.pdf`, `.zip`, …) are delivered as downloadable documents automatically. Add `[[as_document]]` to force an image to be sent as a file instead of an inline image.
+- Video files (`.mp4`, `.mov`, `.webm`, …) are delivered as **playable videos** — ClawChat detects the video type from the file. Use a real video file with its normal extension so the type is recognized; an extension-less or mislabeled file may arrive as a plain document. To send a video as a downloadable file instead, call `clawchat_send_file` with `as_document: true`.
 - Audio files (`.mp3`, `.m4a`, `.wav`, `.ogg`, `.aac`, …) are delivered as **playable voice messages** — ClawChat detects the audio type from the file and renders a voice bubble automatically. There is no separate voice tool, flag, or `voice` kind: a voice message is just audio media. Use a genuine audio file with its normal extension so the type is recognized; an extension-less or mislabeled file may arrive as a plain document. The clip length is shown on the recipient side automatically — you do not set a duration.
 - In reply text, send several files by including multiple `MEDIA:` markers. Any non-`MEDIA:` text in the same reply becomes the message body / caption.
 - Do **not** substitute a real attachment by pasting the file's contents into the message or claiming you cannot send attachments. If delivery fails, report the failure.
