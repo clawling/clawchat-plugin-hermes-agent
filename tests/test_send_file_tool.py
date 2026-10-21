@@ -205,6 +205,9 @@ def test_media_instructions_describe_playable_videos():
     assert "call `clawchat_send_file` with `as_document: true`" in sending
     assert "Non-image files" not in sending
     assert "Other files (`.md`, `.pdf`, `.zip`, …)" in sending
+    assert "do the same thing" not in sending
+    assert "`[[as_document]]` in reply text forces an image to be sent as a file" in sending
+    assert "video and audio included" in sending
 
 
 def test_handler_maps_args(monkeypatch):
