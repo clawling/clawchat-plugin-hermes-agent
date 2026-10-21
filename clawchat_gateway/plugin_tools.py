@@ -1552,12 +1552,13 @@ def register_tools(ctx) -> None:
         {
             "name": "clawchat_send_file",
             "description": _direct_tool_description(
-                "Send a local file (image, document, archive, any type) into a ClawChat conversation: "
+                "Send a local file (image, video, audio, document, archive, any type) into a ClawChat conversation: "
                 "the current one or ANY other chat this agent is in, e.g. when the owner says in a direct chat "
                 "\"send this file to group X\". "
                 "Pass that conversation's id as chat_id (from ClawChat metadata or memory notes, or "
                 "clawchat_get_direct_conversation for a friend's direct chat) and the file's absolute local path as path. "
-                "Images go out inline; set as_document=true to send any file, images included, as a downloadable file. "
+                "Images go out inline, videos as playable videos, audio as playable voice messages; "
+                "set as_document=true to send any file as a downloadable file. "
                 "caption is optional text sent with the file. "
                 "Files under credential or system locations (~/.ssh, ~/.aws, /etc, the Hermes .env …) are refused. "
                 "After this tool succeeds the file has already been delivered; do not send it again with MEDIA:. "
@@ -1576,7 +1577,7 @@ def register_tools(ctx) -> None:
                     },
                     "as_document": {
                         "type": "boolean",
-                        "description": "Send as a downloadable file even when it is an image. Defaults to false.",
+                        "description": "Send as a downloadable file even when it is an image, video, or audio file. Defaults to false.",
                     },
                     "caption": {
                         "type": "string",

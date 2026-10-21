@@ -180,6 +180,31 @@ def test_tool_is_registered_with_its_schema():
     assert set(params["properties"]) == {"chat_id", "path", "as_document", "caption"}
     assert params["required"] == ["chat_id", "path"]
     assert "send_message" not in schema["description"]
+    assert "image, video, audio, document, archive, any type" in schema["description"]
+    assert "videos as playable videos" in schema["description"]
+    assert "audio as playable voice messages" in schema["description"]
+    assert "set as_document=true to send any file as a downloadable file" in schema["description"]
+    assert "image, video, or audio file" in params["properties"]["as_document"]["description"]
+
+
+def test_media_instructions_describe_playable_videos():
+    from clawchat_gateway.plugin_prompts import platform_prompt
+
+    prompt = platform_prompt()
+    assert "file, image, video, or voice/audio clip" in prompt
+    assert "is delivered as a playable video" in prompt
+    assert "send or share a file, image, video, or voice clip you have" in prompt
+
+    skill = (Path(__file__).resolve().parents[1] / "skills/clawchat-core/SKILL.md").read_text(encoding="utf-8")
+    frontmatter = skill.split("---", 2)[1]
+    assert "file, image, video, or voice/audio clip" in frontmatter
+    assert "Videos arrive as playable videos" in skill
+    sending = skill.split("### Sending a File, Image, or Voice Message\n", 1)[1].split("\n### ", 1)[0]
+    assert "local file, image, video, or audio clip" in sending
+    assert "Video files (`.mp4`, `.mov`, `.webm`, …) are delivered as **playable videos**" in sending
+    assert "call `clawchat_send_file` with `as_document: true`" in sending
+    assert "Non-image files" not in sending
+    assert "Other files (`.md`, `.pdf`, `.zip`, …)" in sending
 
 
 def test_handler_maps_args(monkeypatch):
