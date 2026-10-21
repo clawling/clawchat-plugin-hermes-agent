@@ -249,6 +249,7 @@ def _isolate_hermes_home(tmp_path_factory, monkeypatch):
         if token is not None:
             reset_override(token)
 
+
 @pytest.fixture(scope="session")
 def original_os_home() -> Path:
     """The real home, captured before any per-test environment patching."""
