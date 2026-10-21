@@ -43,12 +43,14 @@ to another profile's ambient environment.
 
 Credential reads stay delegated to Hermes rather than re-deciding the fallback
 here. `_get_env` takes its scoped branch whenever a secret scope is installed
-*or* multiplexing is on, and lets `get_scoped_secret` separate the three shapes:
+*or* multiplexing is on, and lets `get_scoped_secret` separate the fallback cases:
 the default profile (multiplex on, unscoped) and a single-profile deployment
-(scoped, multiplex off) both still reach `os.environ`, because there it is their
-own value and env-injected deployments keep nothing else; only a scoped profile
-under multiplexing fails closed on a miss. Narrowing that condition, or dropping
-to a bare `get_secret`, silently 401s cron deliveries and env-only containers.
+(own-home scope, multiplex off) both still reach `os.environ`, because there it
+is their own value and env-injected deployments keep nothing else. A foreign-home
+scope also fails closed on a miss under Hermes 0.21.6+, just like a scoped
+secondary profile under multiplexing; the host decides and the plugin follows.
+Narrowing that condition, or dropping to a bare `get_secret`, silently 401s cron
+deliveries and env-only containers.
 
 Auto-logout leaves a tombstone. `clear_persisted_credentials` writes
 `CLAWCHAT_TOKEN` / `CLAWCHAT_REFRESH_TOKEN` back EMPTY instead of deleting the
@@ -114,7 +116,7 @@ warning per inbound message on every non-launch profile.
 ## Regression checks
 
 Run from this repository using a Hermes installation with multiplex support
-(validated with Hermes 0.21.3). These integration checks import the real Hermes
+(validated with Hermes 0.22.0). These integration checks import the real Hermes
 scope/config helpers; installing the plugin's test extra alone is insufficient.
 
 ```bash
@@ -125,7 +127,8 @@ tests/test_multiplex_isolation.py
 ```
 
 Any Hermes 0.21+ checkout on `PYTHONPATH` works; the plugin's own dependencies
-are not needed for this file.
+are not needed for this file. Strict foreign-home fail-closed assertions require
+Hermes 0.21.6+; older hosts only check that the plugin agrees with the host.
 
 Note the suite has TWO run modes and neither runs everything:
 
@@ -143,8 +146,9 @@ double.
 The tests use temporary profiles, synthetic credentials and an offline supervisor.
 They cover connection coexistence and replacement, A/B/A database identity,
 scoped sends, missing secrets and the two env-fallback shapes that must survive,
-cross-context token rotation/logout, and device identity compatibility. They do
-not contact ClawChat or change existing profiles.
+foreign-home scope behavior without multiplexing, cross-context token
+rotation/logout, and device identity compatibility. They do not contact ClawChat
+or change existing profiles.
 
 This file is one of the few exceptions to the repository's `tests/` ignore rule —
 see `.gitignore` for the list and the reasoning. The device-id trio is tracked

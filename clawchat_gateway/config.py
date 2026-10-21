@@ -150,13 +150,15 @@ def _get_env(*names: str) -> str:
       and sends unscoped. A bare ``get_secret`` raises ``UnscopedSecretError``;
       ``get_scoped_secret`` catches it and reads ``os.environ``, which for that
       profile is its OWN value.
-    * Scope installed, multiplex OFF — a single-profile deployment whose scope
-      is a ``.env`` overlay, not a blindfold. ``get_secret`` falls through to
+    * Own-home scope installed, multiplex OFF — a single-profile deployment
+      whose scope is a ``.env`` overlay. ``get_secret`` falls through to
       ``os.environ`` itself; credentials injected by systemd / ``op run`` /
       a container live nowhere else, and cutting it 401s every cron delivery.
-    * Scope installed AND multiplex ON — a secondary profile. Only here does
-      ``os.environ`` provably belong to someone else, and only here does a miss
-      correctly resolve to "".
+    * Foreign-home scope installed, multiplex OFF — a routed profile whose
+      ambient env belongs to the launch profile. Hermes 0.21.6+ treats a miss
+      as fail-closed; the plugin follows the host's decision.
+    * Scope installed AND multiplex ON — a secondary profile. A miss correctly
+      resolves to "".
 
     Ahead of all of that, a tombstone (``_env_tombstoned``) wins outright: a
     revoked credential must never be resurrected from a scope snapshot or from
@@ -164,7 +166,7 @@ def _get_env(*names: str) -> str:
     for why an empty value cannot mean "revoked" anywhere else, aliases
     included.
 
-    ``tests/test_multiplex_isolation.py`` pins all three.
+    ``tests/test_multiplex_isolation.py`` pins these fallback cases.
     """
     for name in names:
         if _env_tombstoned(name):
