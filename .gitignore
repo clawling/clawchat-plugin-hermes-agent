@@ -234,6 +234,9 @@ tmp
 #     ordinary reply text.
 #   * token_refresh_grace — Pins refresh deadlines and retry spacing within the
 #     grace window.
+#   * home_isolation — Pins conftest's autouse isolation: every test runs
+#     with HERMES_HOME, the OS home and CLAWCHAT_* env pointed away from the
+#     developer's real Hermes install (.env credentials, SQLite).
 tests/*
 !tests/conftest.py
 !tests/test_instance_lock.py
@@ -298,6 +301,7 @@ tests/*
 !tests/test_group_command_receipt.py
 !tests/test_yaml_compat.py
 !tests/test_local_path_turn_policy.py
+!tests/test_home_isolation.py
 !tests/test_tool_grants.py
 !tests/test_tool_grants_storage.py
 !tests/test_turn_grants.py

@@ -32,7 +32,11 @@ verification, which was taken against real Hermes source.
 
 from __future__ import annotations
 
+import atexit
+import os
+import shutil
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -41,6 +45,22 @@ from typing import Any
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+_ORIGINAL_OS_HOME = Path.home().resolve()
+
+# A real host reads its home while being imported below (``gateway.platforms.base``
+# keeps home-derived constants), before any fixture can run. Point the whole
+# session at a throwaway home first; ``_isolate_hermes_home`` then gives every
+# test its own.
+_SESSION_HOME = Path(tempfile.mkdtemp(prefix="clawchat-test-home-"))
+atexit.register(shutil.rmtree, _SESSION_HOME, ignore_errors=True)
+os.environ.update(
+    HOME=str(_SESSION_HOME),
+    USERPROFILE=str(_SESSION_HOME),
+    LOCALAPPDATA=str(_SESSION_HOME / "AppData" / "Local"),
+    HERMES_HOME=str(_SESSION_HOME / ".hermes"),
+)
+for _name in [n for n in os.environ if n.startswith("CLAWCHAT_")]:
+    del os.environ[_name]
 
 # Option A from docs/hermes-source-lookup.md: an ignored local checkout.
 _LOCAL_HERMES = _REPO_ROOT / "tmp" / "hermes"
@@ -187,7 +207,56 @@ def clawchat_host_is_double() -> bool:
 
 
 @pytest.fixture(autouse=True)
-def _restore_clawchat_senders():
+def _isolate_hermes_home(tmp_path_factory, monkeypatch):
+    """Keep credentials, stores and legacy OS-home files off the real home."""
+    # Separate from tmp_path: some tests need that directory to start empty.
+    fake_os_home = tmp_path_factory.mktemp("hermes-home")
+    home = fake_os_home / ".hermes"
+    home.mkdir()
+    local_appdata = fake_os_home / "AppData" / "Local"
+    local_appdata.mkdir(parents=True)
+    for name, path in (
+        ("HOME", fake_os_home),
+        ("USERPROFILE", fake_os_home),
+        ("LOCALAPPDATA", local_appdata),
+        ("HERMES_HOME", home),
+    ):
+        monkeypatch.setenv(name, str(path))
+    for name in tuple(os.environ):
+        if name.startswith("CLAWCHAT_"):
+            monkeypatch.delenv(name)
+
+    try:
+        import hermes_constants
+    except ImportError:
+        hermes_constants = None
+    set_override = getattr(hermes_constants, "set_hermes_home_override", None)
+    reset_override = getattr(hermes_constants, "reset_hermes_home_override", None)
+    # Clear ambient multiplex context, preserving tests' ability to set it.
+    token = set_override("") if callable(set_override) and callable(reset_override) else None
+    try:
+        # Fail closed: a host whose resolver ignores the patched environment
+        # would otherwise send every test to the developer's real home.
+        from clawchat_gateway.hermes_home import hermes_home
+
+        resolved = [hermes_home()]
+        if callable(getattr(hermes_constants, "get_hermes_home", None)):
+            resolved.append(Path(hermes_constants.get_hermes_home()))
+        if any(path.resolve() != home.resolve() for path in resolved):
+            pytest.fail(f"HERMES_HOME isolation failed: resolved {resolved}, expected {home}")
+        yield home
+    finally:
+        if token is not None:
+            reset_override(token)
+
+@pytest.fixture(scope="session")
+def original_os_home() -> Path:
+    """The real home, captured before any per-test environment patching."""
+    return _ORIGINAL_OS_HOME
+
+
+@pytest.fixture(autouse=True)
+def _restore_clawchat_senders(_isolate_hermes_home):
     """Each ClawChatAdapter registers itself as this process's sender; a test's
     adapter must not make the next test look like a running gateway."""
     from clawchat_gateway import terminal_send
