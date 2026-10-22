@@ -506,6 +506,10 @@ raises costs that frame only. Lanes survive a reconnect (a chat's order
 holds across it) and are cancelled by `ClawChatConnection.stop()`, which
 spares the lane that called it.
 
+The WebSocket, send queue, ACK futures and timeout timers belong to the loop
+where the connection starts; `send_frame` calls from another loop (including
+Hermes tools) are forwarded there and return `False` if that loop is unavailable.
+
 ### Group turns run one at a time
 
 A group is one shared Hermes session, so the group coalescer

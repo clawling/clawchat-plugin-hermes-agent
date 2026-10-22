@@ -427,6 +427,7 @@ class ClawChatConnection:
         self._last_close_reason: str | None = None
         self._takeover_streak = 0
         self._supervisor_task: asyncio.Task[None] | None = None
+        self._owner_loop: asyncio.AbstractEventLoop | None = None
         self._read_task: asyncio.Task[None] | None = None
         self._credential_watch_task: asyncio.Task[None] | None = None
         self._hello_wait: asyncio.Future[bool] | None = None
@@ -469,6 +470,7 @@ class ClawChatConnection:
     async def start(self) -> None:
         if self._supervisor_task is not None:
             return
+        self._owner_loop = asyncio.get_running_loop()
         # Supersede any orphaned supervisor for the same account before starting
         # ours, so only one WS session per account is ever live in this process.
         if self._connect_device_id:
@@ -1345,6 +1347,43 @@ class ClawChatConnection:
             del ClawChatConnection._live_supervisors[self._supervisor_key]
 
     async def send_frame(
+        self,
+        frame: dict[str, Any],
+        *,
+        wait_for_ack: bool = False,
+        queue_when_unready: bool = True,
+    ) -> bool:
+        owner = self._owner_loop
+        if owner is None or owner is asyncio.get_running_loop():
+            return await self._send_frame_here(
+                frame, wait_for_ack=wait_for_ack, queue_when_unready=queue_when_unready,
+            )
+        if owner.is_closed() or not owner.is_running():
+            self._log_send_dropped(
+                self._queued_frame(frame, "", wait_for_ack=False), reason="stopped",
+            )
+            return False
+        # Hermes runs tools on another loop; socket, queue, ACK future and timer
+        # must all stay on the connection loop. Submission copies caller ContextVars.
+        coro = self._send_frame_here(
+            frame, wait_for_ack=wait_for_ack, queue_when_unready=queue_when_unready,
+        )
+        try:
+            fut = asyncio.run_coroutine_threadsafe(coro, owner)
+        except RuntimeError:
+            # The owner may close between the availability check and submission.
+            coro.close()
+            self._log_send_dropped(
+                self._queued_frame(frame, "", wait_for_ack=False), reason="stopped",
+            )
+            return False
+        try:
+            return await asyncio.wrap_future(fut)
+        except asyncio.CancelledError:
+            fut.cancel()
+            raise
+
+    async def _send_frame_here(
         self,
         frame: dict[str, Any],
         *,
