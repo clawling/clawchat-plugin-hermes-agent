@@ -109,7 +109,7 @@ def test_real_dispatch_propagates_call_and_session_context_to_async_worker(monke
 
 
 @pytest.mark.asyncio
-async def test_scheduled_heartbeat_without_owner_snapshot_keeps_both_tools_blocked(monkeypatch):
+async def test_scheduled_heartbeat_without_owner_snapshot_keeps_both_tools_blocked(monkeypatch, clawchat_test_platform):
     from dataclasses import replace
     from gateway.run_goals import GatewayGoalsMixin
     from clawchat_gateway.adapter import ClawChatAdapter, BasePlatformAdapter
@@ -140,3 +140,19 @@ async def test_scheduled_heartbeat_without_owner_snapshot_keeps_both_tools_block
     finally:
         clear_session_vars(tokens)
         clear_clawchat_mention_sender(a)
+
+
+def test_platform_placeholder_registration_is_scoped():
+    from conftest import _temporary_clawchat_platform
+    from gateway.config import Platform
+    from gateway.platform_registry import platform_registry
+
+    previous = platform_registry.snapshot_registration('clawchat')
+    enum_maps = {name: dict(getattr(Platform, name))
+                 for name in ('_value2member_map_', '_member_map_')}
+    with _temporary_clawchat_platform():
+        assert platform_registry.snapshot_registration('clawchat')[0] is not previous[0]
+        assert Platform('clawchat').value == 'clawchat'
+    assert platform_registry.snapshot_registration('clawchat') == previous
+    for name, contents in enum_maps.items():
+        assert getattr(Platform, name) == contents

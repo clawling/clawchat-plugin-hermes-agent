@@ -207,7 +207,7 @@ async def test_cancel_all_cancels_timers(throttle, clock):
 
 
 @pytest.fixture
-def adapter(monkeypatch, tmp_path, clock):
+def adapter(monkeypatch, tmp_path, clock, clawchat_test_platform):
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
     a = ClawChatAdapter({})
     a._clawchat_config = replace(a._clawchat_config, user_id='usr_agent', owner_user_id='usr_owner', token='test-token')
@@ -456,3 +456,102 @@ async def test_disconnect_during_resolution_cannot_send_or_refill_cache(adapter,
     assert 'error' in await task
     adapter._connection.send_frame.assert_not_awaited()
     assert not adapter._widget_target_cache and not adapter._widget_throttle.keys
+
+
+async def test_immediate_failure_rearms_pending_against_restored_start(throttle, clock):
+    await throttle.submit('a', 'x', DOC, AsyncMock())  # t0
+    await clock.advance(61)
+    started, fail = asyncio.Event(), asyncio.Event()
+
+    async def failing():
+        started.set()
+        await fail.wait()
+        raise RuntimeError('ack failed')
+
+    immediate = asyncio.create_task(throttle.submit('a', 'x', DOC, failing))
+    await started.wait()
+    await clock.advance(1)  # t62
+    pending = AsyncMock()
+    assert await throttle.submit('a', 'x', DOC, pending) == {'queued': True, 'due': 121}
+    original_timer = clock.handles[-1]
+    await clock.advance(1)  # t63
+    fail.set()
+    with pytest.raises(RuntimeError, match='ack failed'):
+        await immediate
+    assert throttle.keys['a', 'x'].last_start == 0
+    assert original_timer.cancelled and clock.handles[-1].due == 63
+    pending.assert_not_awaited()
+    await clock.advance(0)
+    pending.assert_awaited_once()
+    assert throttle.keys['a', 'x'].last_start == 63
+    assert (await throttle.submit('a', 'x', DOC, AsyncMock()))['due'] == 123
+    await clock.advance(58)  # t121: the cancelled timer must not send again.
+    pending.assert_awaited_once()
+
+
+@pytest.mark.parametrize('number', ['9' * 5000, '9' * 5000 + '.5e9999'])
+async def test_large_json_numbers_preserve_shape_without_conversion(number):
+    doc = '{"v":1,"id":"todo","value":' + number + '}'
+    assert len(doc.encode('utf-8')) < 16384
+    assert check_widget_for_send(doc) == {'id': 'todo'}
+    send = AsyncMock(return_value={'sent': True})
+    assert (await run_widget_tool(doc, send))['sent']
+    send.assert_awaited_once_with(doc, 'todo')
+    assert check_widget_for_send('{"v":1,"id":' + number + '}')['code'] == 'bad_id'
+    assert check_widget_for_send(number)['code'] == 'not_json'
+
+
+async def test_socket_close_after_write_before_ack_fails_without_replay(adapter, monkeypatch):
+    from clawchat_gateway import connection as connection_mod
+
+    class Socket:
+        def __init__(self):
+            self.sent = []
+            self.written = asyncio.Event()
+            self.closed = asyncio.Event()
+
+        async def send(self, text):
+            self.sent.append(json.loads(text))
+            self.written.set()
+
+        async def close(self):
+            self.closed.set()
+
+    first, reconnected = Socket(), Socket()
+    conn = connection_mod.ClawChatConnection(adapter._clawchat_config, on_message=AsyncMock())
+    conn._store = None
+    conn._owner_loop = asyncio.get_running_loop()
+    adapter._connection = conn
+    adapter._store.get_activation_widget_target = lambda **_: ('usr_owner', 'cnv_' + 'A' * 26, 'g')
+    monkeypatch.setattr(connection_mod, '_ws_connect', AsyncMock(side_effect=[first, reconnected]))
+    monkeypatch.setattr(conn, '_connection_credentials_current', lambda: True)
+    monkeypatch.setattr(conn, '_watch_activation_credentials', AsyncMock())
+
+    async def read_loop(socket):
+        conn._hello_wait.set_result(True)
+        await socket.closed.wait()
+
+    monkeypatch.setattr(conn, '_read_loop', read_loop)
+    connections, send = [], None
+    try:
+        connections.append(asyncio.create_task(conn._run_one_connection()))
+        await asyncio.wait_for(conn._ready_event.wait(), 2)
+        send = asyncio.create_task(tools.widget_send(DOC))
+        await asyncio.wait_for(first.written.wait(), 2)
+        assert len(first.sent) == 1 and first.sent[0]['payload']['message_mode'] == 'widget'
+        assert conn._pending_acks and not send.done() and not conn._send_queue
+        await first.close()
+        assert await asyncio.wait_for(connections[0], 2) is False
+        result = await asyncio.wait_for(send, 2)
+        assert result['error'] == 'transport' and result['message'] == 'connection disconnected'
+        assert not conn._pending_acks and not conn._send_queue
+        connections.append(asyncio.create_task(conn._run_one_connection()))
+        await asyncio.wait_for(conn._ready_event.wait(), 2)
+        await settle()
+        assert conn.is_ready and reconnected.sent == [] and not conn._send_queue
+    finally:
+        await first.close()
+        await reconnected.close()
+        await asyncio.gather(*connections, return_exceptions=True)
+        if send is not None:
+            await asyncio.gather(send, return_exceptions=True)

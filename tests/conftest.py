@@ -33,6 +33,7 @@ verification, which was taken against real Hermes source.
 from __future__ import annotations
 
 import atexit
+from contextlib import contextmanager
 import os
 import shutil
 import sys
@@ -79,14 +80,36 @@ def _real_host_available() -> bool:
 
 _USING_DOUBLE = not _real_host_available()
 
-if not _USING_DOUBLE:
+
+@contextmanager
+def _temporary_clawchat_platform():
+    if _USING_DOUBLE:
+        yield
+        return
+    from gateway.config import Platform
     from gateway.platform_registry import PlatformEntry, platform_registry
 
-    # The production plugin registers its platform before constructing adapters.
-    platform_registry.register(PlatformEntry(
-        name="clawchat", label="ClawChat", adapter_factory=lambda config: None,
-        check_fn=lambda: True,
-    ))
+    previous = platform_registry.snapshot_registration("clawchat")
+    with pytest.MonkeyPatch.context() as patch:
+        # Platform(value) caches pseudo-members separately from the registry.
+        for name in ("_value2member_map_", "_member_map_"):
+            patch.setattr(Platform, name, dict(getattr(Platform, name)))
+        platform_registry.register(PlatformEntry(
+            name="clawchat", label="ClawChat", adapter_factory=lambda config: None,
+            check_fn=lambda: True,
+        ))
+        current = platform_registry.snapshot_registration("clawchat")
+        try:
+            yield
+        finally:
+            platform_registry.restore_registration("clawchat", current, previous)
+
+
+@pytest.fixture
+def clawchat_test_platform():
+    """Register the test platform only while a test constructs real-host adapters."""
+    with _temporary_clawchat_platform():
+        yield
 
 
 def _install_double() -> None:

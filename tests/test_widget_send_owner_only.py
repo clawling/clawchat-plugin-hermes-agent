@@ -138,7 +138,7 @@ def test_strict_origin_requires_same_context(host, field, value):
 
 @pytest.mark.parametrize('chat,kind,allowed', [('cnv_owner', 'direct', True),
     ('cnv_friend', 'direct', False), ('cnv_owner', 'group', False)])
-async def test_host_internal_turn_uses_existing_owner_dm_attribution(host, monkeypatch, chat, kind, allowed):
+async def test_host_internal_turn_uses_existing_owner_dm_attribution(host, monkeypatch, chat, kind, allowed, clawchat_test_platform):
     from dataclasses import dataclass
     from clawchat_gateway.adapter import ClawChatAdapter, BasePlatformAdapter
     from clawchat_gateway.terminal_send import clear_clawchat_mention_sender

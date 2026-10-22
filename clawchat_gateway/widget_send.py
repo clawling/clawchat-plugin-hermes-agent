@@ -122,8 +122,11 @@ def check_widget_for_send(doc: str) -> dict:
     def reject_constant(value):
         raise ValueError(value)
 
+    # Preserve numeric shape without Python's integer digit limit or float conversion.
+    number = object()
     try:
-        value = json.loads(doc, parse_constant=reject_constant)
+        value = json.loads(doc, parse_int=lambda _: number, parse_float=lambda _: number,
+                           parse_constant=reject_constant)
     except (ValueError, RecursionError):
         return refuse("not_json")
     if not isinstance(value, dict):
@@ -197,7 +200,7 @@ class WidgetSendThrottle:
         def fire():
             self._spawn(self._flush(key, state, handle))
 
-        due = (state.last_start if state.last_start is not None else self.now()) + 60
+        due = state.last_start + 60 if state.last_start is not None else self.now()
         schedule = self.call_later or asyncio.get_running_loop().call_later
         handle = schedule(max(0, due - self.now()), fire)
         state.timer = handle
@@ -234,6 +237,9 @@ class WidgetSendThrottle:
                 async with state.lock:
                     if state.sequence == sequence:
                         state.last_start = previous
+                        if state.pending is not None:
+                            self._cancel_timer(state)
+                            self._arm(key, state)
                 raise
         finally:
             async with state.lock:

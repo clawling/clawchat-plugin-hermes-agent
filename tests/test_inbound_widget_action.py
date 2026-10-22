@@ -11,7 +11,7 @@ from clawchat_gateway.terminal_send import clear_clawchat_mention_sender
 
 
 @pytest.fixture
-def adapter(monkeypatch, tmp_path):
+def adapter(monkeypatch, tmp_path, clawchat_test_platform):
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
     a = ClawChatAdapter({})
     a._clawchat_config = replace(a._clawchat_config, user_id='usr_agent', owner_user_id='usr_owner')

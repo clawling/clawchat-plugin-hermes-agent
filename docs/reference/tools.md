@@ -578,8 +578,9 @@ while that send is pending, or within the minute, replaces the one pending
 snapshot. At the due time only the newest snapshot is sent. A flush starts the
 next minute, so a new update just after it queues for the following minute.
 The due-time flush does not wait for an earlier send's ACK. An immediate failure
-is returned to the model and restores the previous start time; a timed flush
-consumes its minute even if it fails, and only logs the widget id, byte count
+is returned to the model and restores the previous start time, rescheduling any
+pending snapshot against that restored window (immediately if already due).
+A timed flush consumes its minute even if it fails, and only logs the widget id, byte count
 and error type, never the document. Queued results include `HH:MM:SS UTC`;
 successful immediate sends return:
 
