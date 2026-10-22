@@ -2,8 +2,10 @@
 
 Pure functions only; the adapter decides which notes belong in a turn.
 
-* ``cap_note`` keeps whole leading paragraphs that fit (falling back to whole
-  lines, then to a hard cut of the first line) and marks the cut.
+* ``cap_note`` keeps a short opening profile paragraph and the newest whole
+  paragraphs that fit, with a marker between them. If the last paragraph is too
+  long, it keeps trailing whole lines, then falls back to a hard cut of the end.
+  The marker and its separating newlines are outside the note-text limit.
 * ``fit_turn_budget`` shares one per-turn budget between several notes: short
   notes are kept whole and the longest give way first (each is cut to a common
   ceiling chosen so the total fits).
@@ -18,30 +20,40 @@ _PARAGRAPH_SPLIT_RE = re.compile(r"\n[ \t]*\n")
 
 def _truncation_marker(read_hint: str) -> str:
     if read_hint:
-        return f"(truncated — {read_hint} for the rest)"
-    return "(truncated)"
+        return f"(earlier part truncated — {read_hint} for the rest)"
+    return "(earlier part truncated)"
 
 
 def cap_note(body: str, limit: int, *, read_hint: str = "") -> str:
-    """Return *body* cut to at most *limit* characters of note text."""
+    """Keep a short profile and the latest text within *limit* characters.
+
+    The marker and its separating newlines do not count toward the limit;
+    paragraph and line separators within the retained tail do count.
+    """
     text = (body or "").strip()
     if len(text) <= limit:
         return text
-    kept = ""
-    for paragraph in _PARAGRAPH_SPLIT_RE.split(text):
-        candidate = f"{kept}\n\n{paragraph}" if kept else paragraph
-        if len(candidate) > limit:
+    paragraphs = _PARAGRAPH_SPLIT_RE.split(text)
+    head = ""
+    if len(paragraphs) >= 2 and len(paragraphs[0]) <= limit // 3:
+        head = paragraphs.pop(0)
+    remaining = limit - len(head)
+    tail = ""
+    for paragraph in reversed(paragraphs):
+        candidate = f"{paragraph}\n\n{tail}" if tail else paragraph
+        if len(candidate) > remaining:
             break
-        kept = candidate
-    if not kept:
-        for line in text.split("\n"):
-            candidate = f"{kept}\n{line}" if kept else line
-            if len(candidate) > limit:
+        tail = candidate
+    if not tail:
+        for line in reversed(paragraphs[-1].split("\n")):
+            candidate = f"{line}\n{tail}" if tail else line
+            if len(candidate) > remaining:
                 break
-            kept = candidate
-    if not kept:
-        kept = text[:limit]
-    return f"{kept.rstrip()}\n{_truncation_marker(read_hint)}"
+            tail = candidate
+    if not tail:
+        tail = text[-remaining:] if remaining > 0 else ""
+    marker = _truncation_marker(read_hint)
+    return f"{head}\n{marker}\n{tail}" if head else f"{marker}\n{tail}"
 
 
 def fit_turn_budget(lengths: list[int], budget: int) -> list[int]:

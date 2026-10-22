@@ -136,10 +136,16 @@ has no section. Sizes come from the plugin keys `note-cap-user` (each person,
 `owner.md` included, factory 1500 chars), `note-cap-group` (the group note,
 2000) and `note-cap-turn` (the whole section, 4000), see
 [`../configuration.md`](../configuration.md#session-and-note-keys). A note over
-its cap keeps its leading whole paragraphs and ends with `(truncated — …)`
-naming the `clawchat_memory_read` call that shows the rest; when the notes
-together exceed `note-cap-turn`, short ones stay whole and the longest are cut
-to a common ceiling (`clawchat_gateway/note_injection.py`).
+its cap keeps its opening profile paragraph if it is at most one third of
+the cap, then the latest whole paragraphs that fit, with
+`(earlier part truncated — …)` between the profile and the latest text (or at
+the start if no profile is kept). The marker names the `clawchat_memory_read`
+call that shows the omitted text. If the last paragraph does not fit, trailing
+whole lines are kept, falling back to the final characters. Retained note text
+fits the cap; the marker and its separating newlines are outside it. When the
+notes together exceed `note-cap-turn`, short ones stay whole and the longest
+are cut to a common ceiling using the same direction
+(`clawchat_gateway/note_injection.py`).
 
 Every turn, direct or group, also carries one `Memory routing:` line
 (`adapter.MEMORY_ROUTING_REMINDER`): a fact about a ClawChat person, group or
