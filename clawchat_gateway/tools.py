@@ -1590,9 +1590,10 @@ async def _orchestrate(call, *, purpose, operation):
         from clawchat_gateway.turn_grants import get_snapshot, session_context_value
         snapshot = get_snapshot(session_context_value("HERMES_SESSION_MESSAGE_ID"))
         return orchestrate_owner_only(operation, snapshot)
-    if not isinstance(purpose, str) or not purpose.strip():
+    purpose = purpose.strip()[:60].strip() if isinstance(purpose, str) else ""
+    if not purpose:
         return _validation_error("purpose is required")
-    origin = dict(origin, purpose=purpose[:60])
+    origin = dict(origin, purpose=purpose)
     client, err = _build_client()
     if err is not None:
         return err

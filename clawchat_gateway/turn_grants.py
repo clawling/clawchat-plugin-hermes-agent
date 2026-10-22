@@ -82,7 +82,9 @@ def register_turn(*, account_id: str, chat_id: str, speakers: tuple[str, ...],
             return item.owner_side or item.legacy_owner_tools or item.orchestrate_retry
 
         new_orch = bool((owner_side or orchestrate_retry or legacy_owner_tools) and not ids
-                        and all(not item.non_owner_speakers for item in overlaps))
+                        # A fresh approved_retry receipt may follow a turn the receipt itself revoked.
+                        and all(not item.non_owner_speakers and (orchestrate_retry or orch_ok(item))
+                                for item in overlaps))
         if overlaps:
             frozen = intersect_turn_grants([frozen, *(item.grants for item in overlaps)])
             ids |= frozenset(id_ for item in overlaps for id_ in item.non_owner_speakers)

@@ -1029,8 +1029,8 @@ live snapshot before use; a released or revoked snapshot cannot authorize a call
 Group-info guidance names `clawchat_get_conversation` only when it is both in the
 host catalog and visible under the current snapshot.
 
-Every call requires `purpose`, a nonblank string, truncated to 60 Unicode code
-points for the approval card. Requests include trusted
+Every call requires `purpose`, a nonblank string, trimmed and truncated to 60
+Unicode code points for the approval card. Requests include trusted
 `X-Clawchat-Origin-Conversation` and `X-Clawchat-Origin-Initiator`, plus
 `X-Clawchat-Purpose` encoded with UTF-8 percent escapes (including `+` and `%`).
 Missing trusted origin prevents a request. Backend `21007` returns

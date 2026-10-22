@@ -196,11 +196,11 @@ An owner-DM host internal event qualifies through its existing owner snapshot.
 Native cron workers that clear ClawChat session context remain blocked.
 Retry receipts open only orchestration. Overlapping owner batches retain that
 authority; non-owner speakers or overlapping turns without orchestration authority
-revoke it. Neither `all` nor exact per-person grants include these tools;
+revoke it, except that a fresh trusted retry receipt keeps its own authority. Neither `all` nor exact per-person grants include these tools;
 listing one in `public-tools` rejects the entire list with an `owner-only tool` warning.
 
-Each orchestration call requires a nonblank `purpose` (at most 60 Unicode code
-points). The pre-hook stores trusted conversation/owner attribution by tool-call
+Each orchestration call requires a nonblank `purpose` (trimmed, at most 60
+Unicode code points). The pre-hook stores trusted conversation/owner attribution by tool-call
 id and snapshot nonce in a locked, bounded ten-minute cache. The handler consumes
 it and rechecks the live snapshot and initiator; revoked or released snapshots
 fail closed. Without an entry it checks the current session snapshot before

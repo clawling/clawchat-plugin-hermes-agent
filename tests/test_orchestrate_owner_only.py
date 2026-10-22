@@ -275,9 +275,10 @@ async def test_purpose_truncation_and_headers_for_all_routes(host, monkeypatch, 
         assert result == {"code": 0}
         headers = dict(request.await_args.kwargs["extra_headers"])
         assert headers.pop("content-type", "application/json") == "application/json"
+        sent = purpose.strip()[:60].strip()
+        assert sent and sent == unquote(headers["X-Clawchat-Purpose"])
         assert headers == {"X-Clawchat-Origin-Conversation": CHAT, "X-Clawchat-Origin-Initiator": OWNER,
-                           "X-Clawchat-Purpose": quote(purpose[:60], safe="")}
-        assert unquote(headers["X-Clawchat-Purpose"]) == purpose[:60]
+                           "X-Clawchat-Purpose": quote(sent, safe="")}
         if request.await_args.kwargs.get("body"):
             assert "purpose" not in json.loads(request.await_args.kwargs["body"])
 
@@ -479,6 +480,32 @@ async def test_retry_and_owner_overlap_preserve_only_orchestration_in_both_order
                                                turn_id="turn")["action"] == "block"
         assert (await tools.orchestrate_list_agents(purpose="check"))["status"] == "owner_turn_only"
     assert client.orch_list_agents.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_owner_batch_after_ordinary_receipt_overlap_gains_no_orchestration(host, monkeypatch):
+    receipt = host.start()
+    owner = host.start(speakers=(OWNER,), owner_side=True)
+    build = Mock()
+    monkeypatch.setattr(tools, "_build_client", build)
+    for item in (receipt, owner):
+        snapshot = turns.get_snapshot(item.nonce)
+        assert not snapshot.owner_side and not snapshot.orchestrate_retry
+        assert guard.orchestrate_owner_turn(snapshot) is None
+        host.session["HERMES_SESSION_MESSAGE_ID"] = snapshot.nonce
+        names = {item["function"]["name"] for item in guard._filter_grant_definitions(DEFINITIONS, snapshot)}
+        assert names.isdisjoint(OWNER_ONLY_TOOLS)
+        assert guard._clawchat_pre_tool_decision(tool_name=OWNER_ONLY_TOOLS[0], session_id="session",
+                                               turn_id="turn", tool_call_id="call:" + item.nonce)["action"] == "block"
+        assert (await tools.orchestrate_list_agents(purpose="check"))["status"] == "owner_turn_only"
+    build.assert_not_called()
+
+
+def test_fresh_retry_receipt_after_ordinary_receipt_keeps_only_its_own_authority(host):
+    receipt = host.start()
+    retry = host.start(orchestrate_retry=True)
+    assert guard.orchestrate_owner_turn(turns.get_snapshot(retry.nonce)) == ORIGIN
+    assert guard.orchestrate_owner_turn(turns.get_snapshot(receipt.nonce)) is None
 
 
 def test_ordinary_permission_result_overlap_revokes_orchestration_with_owner_side_as_before(host):
