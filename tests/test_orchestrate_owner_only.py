@@ -335,6 +335,32 @@ def test_only_deduped_orchestration_retry_receipt_sets_private_marker(operation,
         permission_result._seen_request_ids.clear()
 
 
+@pytest.mark.parametrize("request_id", ["", None, "missing"], ids=["empty", "null", "missing"])
+def test_orchestration_retry_receipt_without_request_id_gains_nothing(request_id):
+    permission_result._seen_request_ids.clear()
+    metadata = dict(kind="permission_result", operation="orchestrate.read", outcome="approved_retry")
+    if request_id != "missing":
+        metadata["request_id"] = request_id
+    try:
+        assert permission_result.handle_permission_result(
+            dict(chat_id=CHAT, chat_type="group", payload={"metadata": metadata})) is None
+        assert not permission_result._seen_request_ids
+    finally:
+        permission_result._seen_request_ids.clear()
+
+
+def test_duplicate_orchestration_retry_receipt_gains_nothing_the_second_time():
+    permission_result._seen_request_ids.clear()
+    frame = dict(chat_id=CHAT, chat_type="group", payload={"metadata": dict(kind="permission_result",
+                 request_id="prq_duplicate", operation="orchestrate.read", outcome="approved_retry")})
+    try:
+        assert permission_result.handle_permission_result(frame).orchestrate_retry
+        for _ in range(2):
+            assert permission_result.handle_permission_result(dict(frame)) is None
+    finally:
+        permission_result._seen_request_ids.clear()
+
+
 def test_raw_fields_cannot_forge_retry_marker():
     from clawchat_gateway.config import ClawChatConfig
     raw = dict(chat_id=CHAT, chat_type="group", sender={"id": FRIEND}, text="hello",
