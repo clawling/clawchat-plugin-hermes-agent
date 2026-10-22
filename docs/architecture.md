@@ -472,8 +472,14 @@ standalone path otherwise.
 lifecycle (`clawchat_gateway.connection`), inbound frame parsing
 (`clawchat_gateway.inbound`), outbound frame construction
 (`clawchat_gateway.protocol`), media handling
-(`clawchat_gateway.media_runtime`), and per-turn channel-prompt
-injection (`_compose_channel_prompt`).
+(`clawchat_gateway.media_runtime`), and prompt assembly
+(`_compose_channel_prompt_parts`). When the host declares
+`MessageEvent.channel_context`, stable conversation sections stay in the system
+`channel_prompt`; per-turn limits, timestamps, message/batch metadata, group
+speaker notes and reply guidance go into `channel_context`, which Hermes
+persists before `[New message]` in the user message to preserve the model's
+system prefix. Older hosts receive the identical legacy prompt entirely in
+`channel_prompt` (see [`reference/prompt-injection.md`](reference/prompt-injection.md)).
 
 Besides real inbound messages, three server signals produce **synthetic
 turns** through the same `_handle_inbound` path (each `raw_message` carries
