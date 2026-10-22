@@ -4817,10 +4817,13 @@ class ClawChatAdapter(BasePlatformAdapter):
     async def _dispatch_orchestrate_retry_when_idle(self, inbound: InboundMessage) -> None:
         key = self._grant_session_key(inbound)
         deadline = time.monotonic() + TURN_TRIGGER_TTL_SECONDS
-        while time.monotonic() < deadline and self._grant_session_busy(key):
+        busy = True
+        while time.monotonic() < deadline and (busy := self._grant_session_busy(key)):
             await asyncio.sleep(ORCHESTRATE_RETRY_IDLE_POLL_SECONDS)
-        logger.info("clawchat orchestration retry dispatched after idle chat_id=%s request_id=%s",
-                    inbound.chat_id, inbound.raw_message.get("request_id"))
+        # Past the deadline the receipt still goes in, as before this wait existed:
+        # the model then reports the retry as unavailable instead of never hearing of it.
+        logger.info("clawchat orchestration retry dispatched chat_id=%s request_id=%s after=%s",
+                    inbound.chat_id, inbound.raw_message.get("request_id"), "timeout" if busy else "idle")
         await self._handle_inbound(inbound, retry_deferred=True)
 
     async def _handle_inbound(self, inbound: InboundMessage, *, retry_deferred: bool = False) -> None:
