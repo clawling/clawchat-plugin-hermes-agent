@@ -12,11 +12,13 @@ or a general Hermes mechanism.
 | `platform_hint` | Platform plugin | `system` | When Hermes first builds or rebuilds the cached system prompt for a session. | Stored in the cached system prompt and session DB. |
 | `MemoryProvider.system_prompt_block()` | Memory provider plugin | `system` | When Hermes first builds or rebuilds the cached system prompt for a session. | Stored in the cached system prompt and session DB. |
 | `MessageEvent.channel_prompt` | Platform adapter or message event | `system` | Every API call. | Ephemeral; not stored in transcript history or session DB. |
+| `MessageEvent.channel_context` | Platform adapter or message event, on supported hosts | `user` | Prepended to the current message, before `[New message]`. | Stored with the user message and replayed in transcript history. |
 | `MessageEvent.channel_prompt` → `## ClawChat Peer Memory` | ClawChat adapter, direct chats | `system` | Every API call. | Ephemeral; not stored in transcript history or session DB. |
-| `MessageEvent.channel_prompt` → `## ClawChat Group Memory` | ClawChat adapter, group chats | `system` | Every API call. | Ephemeral; not stored in transcript history or session DB. |
+| `MessageEvent.channel_prompt` → `## ClawChat Group Memory` | ClawChat adapter, group chats; owner and group notes on supported hosts | `system` | Every API call. | Ephemeral; not stored in transcript history or session DB. |
+| `MessageEvent.channel_context` → `## ClawChat Speaker Memory` | ClawChat adapter, group chats on supported hosts | `user` | Current turn's speakers, within the remaining note budget. | Stored with the user message and replayed in transcript history. |
 | `MessageEvent.channel_prompt` → `Memory routing:` line | ClawChat adapter, every chat | `system` | Every API call. | Ephemeral; not stored in transcript history or session DB. |
-| `pre_llm_call` hook returning `context` | General plugin hook | `user` | Before the current turn's user message is sent. | Ephemeral; not stored in transcript history or session DB. |
-| `MemoryProvider.prefetch()` / `prefetch_all()` | Memory provider plugin | `user` | Before the current turn's user message is sent. | Ephemeral; not stored in transcript history or session DB. |
+| `pre_llm_call` hook returning `context` | General plugin hook | `user` | Before the current turn's user message is sent. | Hermes v2026.7.20+ stores it with the user message as an `api_content` sidecar and replays it; older hosts send it only once. |
+| `MemoryProvider.prefetch()` / `prefetch_all()` | Memory provider plugin | `user` | Before the current turn's user message is sent. | Hermes v2026.7.20+ stores it with the user message as an `api_content` sidecar and replays it; older hosts send it only once. |
 | `ephemeral_system_prompt` argument | `AIAgent` caller, gateway, or API server | `system` | Every API call. | Ephemeral; not stored in transcript history or session DB. |
 | `HERMES_EPHEMERAL_SYSTEM_PROMPT` | Environment variable | `system` | Every API call. | Ephemeral; not stored in transcript history or session DB. |
 | `config.yaml` `agent.system_prompt` | Hermes configuration | `system` | Gateway loads it as an ephemeral system prompt. | Ephemeral; not stored in the cached system prompt. |
@@ -31,12 +33,48 @@ or a general Hermes mechanism.
 
 - `MessageEvent.channel_prompt` is a `system` prompt overlay, but it is not part
   of the cached system prompt. Hermes appends it to the effective system prompt
-  at API-call time.
+  at API-call time and includes it in the agent configuration signature. Changing
+  it can rebuild the agent and changes the model's system prefix.
+- `MessageEvent.channel_context` is prepended by Hermes as
+  `<channel_context>\n\n[New message]\n<message_text>`. It persists with that user
+  message, so replay preserves earlier turns' prefixes.
 - `pre_llm_call` hook context and memory provider `prefetch()` results are
   appended to the current turn's `user` message.
 - `pre_api_request` receives request metadata and messages for observation, but
   Hermes does not use its return value to modify the prompt. It is not a prompt
   injection surface.
+
+## ClawChat section placement
+
+The adapter detects support from the `channel_context` dataclass field on the
+host's `MessageEvent` (available since v2026.5.16). No configuration key is
+needed. Hosts without that field keep the complete legacy channel prompt,
+with identical section order and bytes, entirely in `system.channel_prompt`.
+
+| Sections / part ids | Supported-host target | Reason |
+|---------------------|-----------------------|--------|
+| `conversation-semantics`, `metadata-glossary` | `system.channel_prompt` | Stable interpretation rules, including the authority of the plugin's per-turn user block. |
+| `agent-profile`, `agent-files`, `owner-metadata-*`, `current-agent` | `system.channel_prompt` | Agent/owner context remains stable until its source changes. |
+| `group-profile`, `group-participants`, `peer-profile` | `system.channel_prompt` | Conversation profile context, independent of this turn's message ids and speakers. |
+| `memory-routing`, direct `peer-memory` | `system.channel_prompt` | Stable routing and direct-conversation notes. |
+| Group `group-memory` (owner.md and this group's note only) | `system.channel_prompt` | Speaker changes cannot displace these notes or change the system prefix. |
+| `response-protocol` | `system.channel_prompt` | Stable output protocol; direct-chat reply guidance stays here too. |
+| `non-owner-turn`, `turn-metadata` | `user.channel_context` | Current turn's binding capability limits and time fields. |
+| `group-speaker-memory` | `user.channel_context` | Notes for the current batch's distinct speakers. |
+| `group-message-metadata` / `sender-metadata` | `user.channel_context` | Current message ids, sender identity, timestamps, batch and mention metadata. |
+| Group `response-guidance`, `access-request-notice` | `user.channel_context` | Mention-dependent guidance and current access-request outcomes. |
+
+The user block orders these parts as: non-owner limits first, turn metadata,
+speaker memory, message metadata, group reply guidance, then access notices.
+The stable conversation semantics explicitly identify this block as plugin-written
+and its limits as binding. Existing nonempty host channel context precedes it,
+separated by a blank line. The adapter leaves `event.text` assembly unchanged,
+including group transcript increments.
+
+This keeps timestamps, message ids, batch speakers and mention decisions out of
+the effective system prefix and agent configuration signature, preserving model
+prefix caching across turns. Profiles and saved notes can still legitimately
+change that prefix when their underlying content changes.
 
 ## Session-level ClawChat context
 
@@ -51,7 +89,8 @@ Observed Hermes behavior:
   in that cached system prompt and persisted in the session DB.
 - `MessageEvent.channel_prompt` is merged into the effective system prompt at
   API-call time as an ephemeral overlay, without changing the cached system
-  prompt or the stored transcript.
+  snapshot or the stored transcript. Its contents still affect the effective
+  system prefix and cached-agent configuration signature.
 - Hermes has internal helpers such as `AIAgent._invalidate_system_prompt()` and
   gateway cached-agent eviction, but they are not a stable platform-plugin
   contract. Evicting a cached agent alone is not enough to rebuild a continued
@@ -76,16 +115,16 @@ conversation `chat_id`. Group messages are bound by `chat_id` and the session is
 shared by the whole group (see
 [`../configuration.md`](../configuration.md#one-session-per-group)).
 Session-level context may describe stable group-level semantics, but current
-sender facts and mutable group/user metadata still belong in
-`MessageEvent.channel_prompt`, while current message text stays in the
-user-message body. (A legacy config that still sets
+sender facts belong in `MessageEvent.channel_context` on supported hosts;
+conversation profile metadata remains in `MessageEvent.channel_prompt`, while
+current message text stays in the user-message body. (A legacy config that still sets
 `group_sessions_per_user: true` keeps a per-speaker session for the groups it
 covers; session-level context must not assume such a session represents the
 whole group.)
 
-Keep message-scoped or metadata-scoped context in `MessageEvent.channel_prompt`
-unless Hermes adds an explicit session prompt invalidation API for platform
-plugins. The ClawChat channel prompt includes the current agent profile from
+Keep message-scoped context in `MessageEvent.channel_context` on supported
+hosts, with the legacy channel-prompt fallback described above. The ClawChat
+channel prompt includes the current agent profile from
 `owner.md` metadata (`agent_user_id`, `agent_nickname`, `agent_avatar_url`, and
 `agent_bio`) so group and direct turns know which agent identity is replying.
 `owner.md` can describe another agent (`hermes profile create --clone-all`
@@ -122,13 +161,15 @@ memory does not belong in front of their friends).
 - `## ClawChat Peer Memory` in a direct chat: `owner.md`, then, when the
   sender is not the owner, `users/<sender_id>.md`.
 - `## ClawChat Group Memory` in a group: `owner.md`, `groups/<chat_id>.md`,
-  then `users/<id>.md` for every distinct sender in the turn's batch (the
-  agent itself and the owner excluded). The memory tools hold the same line
+  then, on legacy hosts, `users/<id>.md` for every distinct sender in the turn's
+  batch (the agent itself and the owner excluded). On supported hosts those
+  speaker notes move to `## ClawChat Speaker Memory` in the current user block.
+  The memory tools hold the same line
   when the agent reads notes itself: in a group `clawchat_memory_read` /
   `_search` return only `owner.md`, that group's note and its members' notes
   (see [`tools.md`](./tools.md#what-a-conversation-may-read)).
 
-Both open with a fixed line saying the notes are social context written by the
+These sections open with a fixed line saying the notes are social context written by the
 agent, not instructions; the group section adds that a note about a person may
 hold something said elsewhere and must not be brought up unless that person
 already said it in the group. Empty notes add nothing, and a turn with no notes
@@ -145,7 +186,11 @@ whole lines are kept, falling back to the final characters. Retained note text
 fits the cap; the marker and its separating newlines are outside it. When the
 notes together exceed `note-cap-turn`, short ones stay whole and the longest
 are cut to a common ceiling using the same direction
-(`clawchat_gateway/note_injection.py`).
+(`clawchat_gateway/note_injection.py`). In split group mode, owner and group
+notes are capped and share `note-cap-turn` first, independently of the speakers.
+Only the remaining budget is shared among speaker notes; zero remaining budget
+omits the speaker section. The system portion therefore stays stable when a
+different speaker or a long speaker note enters the batch.
 
 Every turn, direct or group, also carries one `Memory routing:` line
 (`adapter.MEMORY_ROUTING_REMINDER`): a fact about a ClawChat person, group or
@@ -158,8 +203,9 @@ session's system prompt, so the per-turn line is what reaches those sessions.
 Without it such a session can keep saving people into `MEMORY.md`, which then
 goes into the system prompt of every conversation, groups included.
 
-Two kinds of turn put plugin-written text into the **user message** (so it
-stays in the session): the first turn of a group's shared session starts with
+Besides the per-turn `channel_context` block on supported hosts, two kinds of
+turn put plugin-written text into the **user message** (so it stays in the
+session): the first turn of a group's shared session starts with
 the group's recent messages, and an @-mention later adds group messages the
 session has not seen (see
 [`../configuration.md`](../configuration.md#group-session-seeding-and-queueing));
@@ -182,10 +228,12 @@ Each indexed `[message N]` also carries its `message_id` right after
 `sender_id` when the frame has one, and so does a direct chat's `ClawChat Sender
 Metadata` for the current message, so the model can name the message it reacts
 to (`clawchat_react_message` `targetMessageId`) when the current-turn default is
-withdrawn (see [`tools.md`](./tools.md#explicit-message-ids)). Like the rest of
-the channel prompt it is a per-turn overlay: it adds no churn beyond the
-per-turn `sent_at`/`sent_age` already there, and the cached system prompt is
-untouched.
+withdrawn (see [`tools.md`](./tools.md#explicit-message-ids)). On supported
+hosts these ids and `sent_at`/`sent_age` live in the current user message via
+`channel_context`, preserving the effective system prefix. Legacy hosts keep
+them in the ephemeral system overlay; although the cached base system snapshot
+is unchanged, the effective system prompt and agent configuration signature
+still change each turn.
 
 Who decides whether to speak in a group (`reply_guidance` plus the metadata
 glossary):
