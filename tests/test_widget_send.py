@@ -112,10 +112,21 @@ async def test_guide_does_not_send(widget):
     send.assert_not_awaited()
 
 
-async def test_trimmed_document_is_not_reserialized():
+async def test_original_document_is_sent_verbatim():
     send = AsyncMock(return_value={'sent': True})
-    assert (await run_widget_tool('\n' + DOC + '  ', send))['message'] == WIDGET_SENT
-    send.assert_awaited_once_with(DOC, 'todo')
+    padded = '\n' + DOC + '  '
+    assert (await run_widget_tool(padded, send))['message'] == WIDGET_SENT
+    send.assert_awaited_once_with(padded, 'todo')
+
+
+async def test_outer_whitespace_counts_toward_the_size_limit():
+    send = AsyncMock()
+    body = '{"v":1,"id":"todo","t":"' + 'x' * (16384 - 26) + '"}'
+    assert len(body.encode('utf-8')) == 16384
+    assert 'error' not in check_widget_for_send(body)
+    result = await run_widget_tool(body + ' ', send)
+    assert result['code'] == 'too_large'
+    send.assert_not_awaited()
 
 
 async def test_first_concurrent_ack_and_coalescing(throttle, clock):
@@ -239,7 +250,7 @@ async def test_transport_exact_owner_frame_and_no_terminal(adapter, monkeypatch)
     frame = call.args[0]
     assert frame['event'] == 'message.send' and frame['chat_id'] == 'cnv_owner'
     assert frame['payload']['message_mode'] == 'widget'
-    assert frame['payload']['message']['body']['fragments'] == [{'kind': 'widget', 'text': DOC}]
+    assert frame['payload']['message']['body']['fragments'] == [{'kind': 'widget', 'text': '\n' + DOC + '  '}]
     assert frame['payload']['message']['context'] == {'mentions': [], 'reply': None}
     assert frame['payload']['message_id']
     adapter.client.get_direct_conversation.assert_not_awaited()

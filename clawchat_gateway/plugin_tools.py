@@ -380,8 +380,8 @@ async def handle_clawchat_widget_send(args, **kw):
     from clawchat_gateway.widget_send import check_widget_for_send
 
     widget = args.get("widget")
-    doc = widget.strip() if isinstance(widget, str) else ""
-    checked = check_widget_for_send(doc) if doc else {}
+    doc = widget if isinstance(widget, str) else ""
+    checked = check_widget_for_send(doc) if doc.strip() else {}
     logger.info("clawchat_widget_send id=%r bytes=%d", checked.get("id"), len(doc.encode("utf-8")))
     return _tool_result(await tools.widget_send(widget))
 

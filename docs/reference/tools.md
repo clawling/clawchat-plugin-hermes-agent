@@ -559,8 +559,8 @@ cached in-process per owner and activation generation (a digest, never raw
 tokens), invalidated on identity changes and cleared on disconnect.
 
 Missing/non-string/blank `widget` returns the guide without sending. Otherwise
-outer whitespace is trimmed, and that exact document is checked and sent without
-JSON reserialization. Validation checks, in order:
+the original string, including any outer whitespace, is checked and sent
+byte-for-byte without JSON reserialization. Validation checks, in order:
 
 1. UTF-8 size at most 16384 bytes, before JSON parsing (exactly 16384 passes).
 2. JSON must parse as an object, excluding arrays, strings, numbers and null;
@@ -600,7 +600,7 @@ fallback.
 
 The outbound frame is `message.send` with `message_mode: "widget"`, empty
 mentions, `reply: null`, a fresh message id and exactly one fragment:
-`{"kind":"widget","text":<the original trimmed JSON document>}`. The phone
+`{"kind":"widget","text":<the original JSON document>}`. The phone
 hides it from chat and draws the widget. Inbound behavior stays unchanged:
 `widget_action` plus `text` reaches the host as that text; only `widget_action`
 reaches the host as an empty-text event. Non-normal mode messages are dropped

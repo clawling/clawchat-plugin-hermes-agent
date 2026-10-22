@@ -145,9 +145,10 @@ def widget_queued(widget_id: str, due: float) -> str:
 
 
 async def run_widget_tool(widget, send):
-    doc = widget.strip() if isinstance(widget, str) else ""
-    if not doc:
+    if not isinstance(widget, str) or not widget.strip():
         return {"message": WIDGET_V1_GUIDE}
+    # The original string is checked and sent byte-for-byte; whitespace counts toward the size.
+    doc = widget
     checked = check_widget_for_send(doc)
     if "error" in checked:
         return {"error": "validation", "code": checked["code"], "message": checked["error"]}
