@@ -39,14 +39,18 @@ class OrchestrationRegistrationTest(unittest.TestCase):
 
     def test_schema_name_matches_the_registered_name(self):
         for name in EXPECTED:
-            self.assertEqual(self.ctx.tools[name]["schema"]["name"], name)
+            schema = self.ctx.tools[name]["schema"]
+            self.assertEqual(schema["name"], name)
+            self.assertEqual(schema["parameters"]["required"][-1], "purpose")
+            self.assertEqual(schema["parameters"]["properties"]["purpose"]["maxLength"], 60)
+            self.assertTrue(schema["description"].startswith("OWNER-ONLY. "))
 
     def test_every_orchestration_tool_is_async(self):
         for name in EXPECTED:
             self.assertTrue(self.ctx.tools[name]["kw"].get("is_async"), name)
 
     def test_required_params_match_the_route_table(self):
-        req = lambda n: self.ctx.tools[n]["schema"]["parameters"].get("required", [])
+        req = lambda n: self.ctx.tools[n]["schema"]["parameters"].get("required", [])[:-1]
         self.assertEqual(req("clawchat_orchestrate_list_agents"), [])
         self.assertEqual(req("clawchat_orchestrate_get_agent"), ["agentId"])
         self.assertEqual(req("clawchat_orchestrate_set_agent_behavior"), ["agentId", "behavior"])
@@ -84,12 +88,14 @@ class OrchestrationRegistrationTest(unittest.TestCase):
         self.assertIn(f'"{stage_line}"', group)
         self.assertIn("its own rules go nowhere else", group)
 
-    def test_stage_descriptions_open_with_a_short_pointer(self):
-        # Tool-search hosts list only the first ~60 characters of a
-        # description, so where a stage's rules go has to be the opening
-        # words, in one short first sentence.
+    def test_stage_descriptions_keep_the_pointer_after_the_owner_only_prefix(self):
+        # The owner-only notice precedes the existing short stage pointer.
         for name in ("clawchat_orchestrate_set_agent_behavior", "clawchat_orchestrate_set_group_prompt"):
             description = self.ctx.tools[name]["schema"]["description"]
+            prefix = ("OWNER-ONLY. Raises an approval card on the owner's phone. "
+                      "Never call it in a group or for someone else. ")
+            self.assertTrue(description.startswith(prefix), name)
+            description = description[len(prefix):]
             self.assertTrue(description.startswith("Stage/room speaking rules go "), name)
             first_sentence = description[: description.index(". ") + 1]
             self.assertLessEqual(len(first_sentence), 200, name)
@@ -200,6 +206,7 @@ class OrchestrationHandlerWiringTest(unittest.IsolatedAsyncioTestCase):
 
     async def _invoke(self, tool_name, args):
         handler = self.ctx.tools[tool_name]["handler"]
+        args["purpose"] = "test"
         return await handler(args)
 
     async def test_each_tool_calls_its_own_orchestrate_function_with_the_right_arguments(self):
@@ -208,7 +215,7 @@ class OrchestrationHandlerWiringTest(unittest.IsolatedAsyncioTestCase):
                 mock = AsyncMock(return_value={"code": 0, "data": {}})
                 with patch.object(tools, func_name, mock):
                     await self._invoke(tool_name, dict(args))
-                mock.assert_awaited_once_with(*expect_args, **expect_kwargs)
+                mock.assert_awaited_once_with(*expect_args, purpose="test", **expect_kwargs)
 
     async def test_muted_false_is_distinguishable_from_muted_omitted(self):
         mock = AsyncMock(return_value={"code": 0, "data": {}})
@@ -218,7 +225,7 @@ class OrchestrationHandlerWiringTest(unittest.IsolatedAsyncioTestCase):
                 {"conversationId": "conv-1", "agentId": "agent-1", "muted": False},
             )
         mock.assert_awaited_once_with(
-            "conv-1", "agent-1", muted=False, reply_mode=None, batch_delay_seconds=None
+            "conv-1", "agent-1", muted=False, reply_mode=None, batch_delay_seconds=None, purpose="test"
         )
 
     async def test_omitted_settings_fields_arrive_as_none_not_false(self):
@@ -229,7 +236,7 @@ class OrchestrationHandlerWiringTest(unittest.IsolatedAsyncioTestCase):
                 {"conversationId": "conv-1", "agentId": "agent-1"},
             )
         mock.assert_awaited_once_with(
-            "conv-1", "agent-1", muted=None, reply_mode=None, batch_delay_seconds=None
+            "conv-1", "agent-1", muted=None, reply_mode=None, batch_delay_seconds=None, purpose="test"
         )
 
     async def test_non_list_agent_ids_reaches_the_function_as_an_empty_list(self):
@@ -239,7 +246,7 @@ class OrchestrationHandlerWiringTest(unittest.IsolatedAsyncioTestCase):
                 "clawchat_orchestrate_create_group",
                 {"title": "Squad", "agentIds": "not-a-list"},
             )
-        mock.assert_awaited_once_with("Squad", [])
+        mock.assert_awaited_once_with("Squad", [], purpose="test")
 
     async def test_handler_only_reads_args_keys_declared_in_its_own_schema(self):
         # This is the check that makes a silent rename impossible to

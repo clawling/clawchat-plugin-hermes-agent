@@ -3,6 +3,7 @@
 Backend gate codes (confirmed live contract):
   21001 — pending owner approval (payload: {request_id, operation, expires_at})
   21003 — policy forbidden       (payload: {operation})
+  21007 — owner turn only        (payload: {operation})
 
 Returns None for any other code so callers can fall through to normal handling.
 """
@@ -21,6 +22,20 @@ PERMISSION_RECEIPT_RULE_TEXT = (
 )
 
 
+OWNER_ONLY_INSTRUCTION = (
+    "Owner-only: only your owner can ask for this. Tell the person how to do it themselves "
+    "(group settings → Agent management)"
+)
+
+
+def owner_turn_only(operation: str, *, conversation_available: bool = False) -> dict[str, Any]:
+    instruction = OWNER_ONLY_INSTRUCTION
+    if conversation_available:
+        instruction += "; for group info use clawchat_get_conversation"
+    return dict(status="owner_turn_only", reason="owner_turn_only", operation=operation,
+                instruction=instruction + ".")
+
+
 def map_gate_outcome(
     code: int | None,
     data: dict[str, Any],
@@ -32,7 +47,7 @@ def map_gate_outcome(
         data: The envelope ``data`` field from the backend response.
 
     Returns:
-        A structured dict for code 21001 or 21003, or None for any other code.
+        A structured dict for code 21001, 21003 or 21007, or None for any other code.
     """
     if code == 21001:
         request_id_raw = data.get("request_id")
@@ -45,6 +60,9 @@ def map_gate_outcome(
             "expires_at": expires_at_raw if isinstance(expires_at_raw, (int, float)) else 0,
             "instruction": PERMISSION_RECEIPT_RULE_TEXT,
         }
+    if code == 21007:
+        operation = data.get("operation")
+        return owner_turn_only(operation if isinstance(operation, str) else "")
     if code == 21003:
         operation_raw = data.get("operation")
         return {

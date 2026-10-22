@@ -804,24 +804,24 @@ def _s(args, key: str) -> str:
 
 
 _ORCHESTRATION_HANDLERS = {
-    "clawchat_orchestrate_list_agents": lambda t, a: t.orchestrate_list_agents(),
-    "clawchat_orchestrate_get_agent": lambda t, a: t.orchestrate_get_agent(_s(a, "agentId")),
+    "clawchat_orchestrate_list_agents": lambda t, a: t.orchestrate_list_agents(purpose=a.get("purpose")),
+    "clawchat_orchestrate_get_agent": lambda t, a: t.orchestrate_get_agent(_s(a, "agentId"), purpose=a.get("purpose")),
     "clawchat_orchestrate_set_agent_behavior": lambda t, a: t.orchestrate_set_agent_behavior(
-        _s(a, "agentId"), _s(a, "behavior")
+        _s(a, "agentId"), _s(a, "behavior"), purpose=a.get("purpose")
     ),
-    "clawchat_orchestrate_list_groups": lambda t, a: t.orchestrate_list_groups(),
-    "clawchat_orchestrate_get_group": lambda t, a: t.orchestrate_get_group(_s(a, "conversationId")),
+    "clawchat_orchestrate_list_groups": lambda t, a: t.orchestrate_list_groups(purpose=a.get("purpose")),
+    "clawchat_orchestrate_get_group": lambda t, a: t.orchestrate_get_group(_s(a, "conversationId"), purpose=a.get("purpose")),
     "clawchat_orchestrate_set_group_prompt": lambda t, a: t.orchestrate_set_group_prompt(
-        _s(a, "conversationId"), _s(a, "description")
+        _s(a, "conversationId"), _s(a, "description"), purpose=a.get("purpose")
     ),
     "clawchat_orchestrate_create_group": lambda t, a: t.orchestrate_create_group(
-        _s(a, "title"), a.get("agentIds") if isinstance(a.get("agentIds"), list) else []
+        _s(a, "title"), a.get("agentIds") if isinstance(a.get("agentIds"), list) else [], purpose=a.get("purpose")
     ),
     "clawchat_orchestrate_add_group_member": lambda t, a: t.orchestrate_add_group_member(
-        _s(a, "conversationId"), _s(a, "agentId")
+        _s(a, "conversationId"), _s(a, "agentId"), purpose=a.get("purpose")
     ),
     "clawchat_orchestrate_remove_group_member": lambda t, a: t.orchestrate_remove_group_member(
-        _s(a, "conversationId"), _s(a, "agentId")
+        _s(a, "conversationId"), _s(a, "agentId"), purpose=a.get("purpose")
     ),
     "clawchat_orchestrate_set_group_agent_settings": lambda t, a: t.orchestrate_set_group_agent_settings(
         _s(a, "conversationId"),
@@ -829,9 +829,10 @@ _ORCHESTRATION_HANDLERS = {
         muted=a.get("muted") if isinstance(a.get("muted"), bool) else None,
         reply_mode=a.get("replyMode") if isinstance(a.get("replyMode"), str) else None,
         batch_delay_seconds=_optional_int_arg(a.get("batchDelaySeconds")),
+        purpose=a.get("purpose"),
     ),
-    "clawchat_orchestrate_create_connect_code": lambda t, a: t.orchestrate_create_connect_code(),
-    "clawchat_orchestrate_get_connect_code": lambda t, a: t.orchestrate_get_connect_code(_s(a, "code")),
+    "clawchat_orchestrate_create_connect_code": lambda t, a: t.orchestrate_create_connect_code(purpose=a.get("purpose")),
+    "clawchat_orchestrate_get_connect_code": lambda t, a: t.orchestrate_get_connect_code(_s(a, "code"), purpose=a.get("purpose")),
 }
 
 
@@ -2073,6 +2074,13 @@ def register_tools(ctx) -> None:
          {"code": {"type": "string", "minLength": 1, "description": "The connect code to look up."}}, ["code"]),
     ]
     for tool_name, label, description, properties, required in orchestration_specs:
+        description = ("OWNER-ONLY. Raises an approval card on the owner's phone. "
+                       "Never call it in a group or for someone else. " + description)
+        properties = dict(properties, purpose={
+            "type": "string", "minLength": 1, "maxLength": 60,
+            "description": "Why the owner wants this, in a few words (shown on the owner's approval card).",
+        })
+        required = [*required, "purpose"]
         ctx.register_tool(
             tool_name,
             "clawchat",

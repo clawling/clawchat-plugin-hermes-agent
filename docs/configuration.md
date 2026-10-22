@@ -1001,7 +1001,7 @@ list**: a non-string, an empty or malformed name, `all`, a `cap:`, `tool:` or
 `group:` selector, any member of the six sensitive capabilities (Terminal,
 Files, Code execution, Sub-agents, Scheduled tasks, Browser and desktop control),
 their verified host aliases, any `browser_` name, or any of the four
-authorization tools. One warning identifies only the first problem item and
+authorization tools, or any owner-only `clawchat_orchestrate_*` tool. One warning identifies only the first problem item and
 its reason, never the whole configuration; non-string values use a placeholder.
 A non-array value is also rejected. Repeated reads of the same invalid value
 do not repeat the warning. An omitted value or empty array adds nothing and
@@ -1014,6 +1014,28 @@ tool does not lift the plugin's per-call restrictions on `skill_manage` writes,
 `skill_view` with inline shell, local-file media parameters, or
 `text_to_speech.output_path`. Public access covers only the current chat;
 cross-chat delivery still needs an explicit matching grant.
+
+The twelve `clawchat_orchestrate_*` tools are always owner-only. They are
+excluded from `all` and exact per-person grants/requests; stored rules naming
+them are ignored. Making one public invalidates the whole `public-tools` list
+(reason: `owner-only tool`). Catalog filtering, the pre-call hook and the handler
+each check the trusted ClawChat turn. Owner-only batches, trusted owner actions
+and owner-DM host internal turns qualify; mixed batches, review forks, grant
+receipts and process completions do not. An orchestration `approved_retry`
+receipt enables only orchestration, without changing other tool grants. Overlaps
+with owner batches preserve that authority; non-owner speakers or a turn without
+orchestration authority revoke it. Cached origins are rechecked against their
+live snapshot before use; a released or revoked snapshot cannot authorize a call.
+Group-info guidance names `clawchat_get_conversation` only when it is both in the
+host catalog and visible under the current snapshot.
+
+Every call requires `purpose`, a nonblank string, truncated to 60 Unicode code
+points for the approval card. Requests include trusted
+`X-Clawchat-Origin-Conversation` and `X-Clawchat-Origin-Initiator`, plus
+`X-Clawchat-Purpose` encoded with UTF-8 percent escapes (including `+` and `%`).
+Missing trusted origin prevents a request. Backend `21007` returns
+`status: owner_turn_only` with owner-only guidance; other orchestration business
+codes retain their envelope.
 
 #### Selectors and capabilities
 

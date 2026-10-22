@@ -2730,3 +2730,36 @@ def test_public_mcp_server_survives_narrowed_toolsets(monkeypatch, listed):
         assert 'docs' in kept and guard.NO_MCP not in kept
     else:
         assert 'docs' not in kept and 'mcp-docs' not in kept and guard.NO_MCP in kept
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chat,kind", [("cnv_owner", "direct"), ("cnv_group", "group")])
+@pytest.mark.parametrize("operation,outcome,retry", [("orchestrate.read", "approved_retry", True),
+    ("orchestrate.read", "approved", False), ("group.manage", "approved_retry", False)])
+async def test_orchestration_receipt_dispatch_preserves_only_retry_exception(harness, host, monkeypatch, chat, kind, operation, outcome, retry):
+    from clawchat_gateway import permission_result
+    from clawchat_gateway.tool_capabilities import OWNER_ONLY_TOOLS
+    permission_result._seen_request_ids.clear()
+    inbound = permission_result.handle_permission_result(dict(chat_id=chat, chat_type=kind,
+        payload={"metadata": dict(kind="permission_result", request_id="prq_dispatch_retry",
+                                  operation=operation, outcome=outcome)}))
+    catalog = frozenset((*OWNER_ONLY_TOOLS, "terminal", *AUTHORIZATION_TOOLS))
+    monkeypatch.setattr(guard, "host_tool_catalog", lambda: (catalog, catalog))
+    monkeypatch.setattr(guard, "_config_extra", lambda: {"tool-grants": "on"})
+    try:
+        await harness.adapter._handle_inbound(inbound)
+        snapshot = turns.get_snapshot(harness.events[-1].source.message_id)
+        assert snapshot.orchestrate_retry is retry
+        assert not snapshot.owner_side and not snapshot.owner_verified and not snapshot.legacy_owner_tools
+        turns.bind_turn(snapshot.nonce, "s", "t")
+        with host(**context(snapshot, group=kind == "group")):
+            definitions = [{"function": {"name": name}} for name in catalog]
+            names = {item["function"]["name"] for item in guard._filter_grant_definitions(definitions, snapshot)}
+            assert set(OWNER_ONLY_TOOLS) <= names if retry else names.isdisjoint(OWNER_ONLY_TOOLS)
+            assert "terminal" not in names
+            assert call("terminal", turn_id="t")["action"] == "block"
+            for tool in OWNER_ONLY_TOOLS:
+                decision = call(tool, turn_id="t")
+                assert decision is None if retry else decision["action"] == "block"
+    finally:
+        permission_result._seen_request_ids.clear()

@@ -10,6 +10,21 @@ AUTHORIZATION_TOOLS = (
     "clawchat_tool_grant", "clawchat_tool_revoke", "clawchat_tool_grants_list", "clawchat_tool_request",
 )
 
+OWNER_ONLY_TOOLS = (
+    "clawchat_orchestrate_list_agents",
+    "clawchat_orchestrate_get_agent",
+    "clawchat_orchestrate_set_agent_behavior",
+    "clawchat_orchestrate_list_groups",
+    "clawchat_orchestrate_get_group",
+    "clawchat_orchestrate_set_group_prompt",
+    "clawchat_orchestrate_create_group",
+    "clawchat_orchestrate_add_group_member",
+    "clawchat_orchestrate_remove_group_member",
+    "clawchat_orchestrate_set_group_agent_settings",
+    "clawchat_orchestrate_create_connect_code",
+    "clawchat_orchestrate_get_connect_code",
+)
+
 # Mirror only verified host aliases: model_tools._LEGACY_TOOL_ALIASES and
 # tools.todo_tool.TODO_LEGACY_ALIASES. Keep persisted selectors unchanged.
 HOST_TOOL_ALIASES = MappingProxyType({
@@ -92,7 +107,7 @@ def parse_grant_selector(value: str) -> GrantSelector:
         return GrantSelector("capability", what)
     what = value[5:] if value.startswith("tool:") else value
     if (not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.:/-]*", what)
-            or what.startswith("group:") or what in AUTHORIZATION_TOOLS):
+            or what.startswith("group:") or what in AUTHORIZATION_TOOLS + OWNER_ONLY_TOOLS):
         raise ValueError("invalid-what")
     return GrantSelector("tool", what)
 
@@ -227,6 +242,8 @@ def get_public_tools_override(raw_list, logger=None) -> frozenset[str] | None:
                 reason = "selectors are not exact tool names"
             elif canonical_tool_name(name) in AUTHORIZATION_TOOLS:
                 reason = "authorization tool"
+            elif canonical_tool_name(name) in OWNER_ONLY_TOOLS:
+                reason = "owner-only tool"
             elif is_sensitive_tool(name):
                 reason = "sensitive tool"
             if reason:

@@ -182,10 +182,34 @@ approval is unavailable. See [rule and card details](./configuration.md#per-pers
 non-owner default row used by dispatch, execution, short hints, missing-snapshot
 turns and `tool-grants: off`. Any invalid item rejects the whole list with one
 warning naming only the first problem item and reason; omitted/empty lists are
-silent. Sensitive tools and authorization tools cannot be public. Explicit
+silent. Sensitive tools, authorization tools and owner-only orchestration tools cannot be public. Explicit
 matching deny still wins when grants are enabled, and per-call skill, media and
 output-path restrictions remain. The list is configuration only, absent from
 grant listings and unchangeable in chat; see [Public tools](configuration.md#public-tools).
+
+The twelve `clawchat_orchestrate_*` tools are owner-only: catalog filtering,
+`pre_tool_call` and a handler check each enforce a matching ClawChat turn
+snapshot. Owner-only speaker batches (including owner batches in groups),
+trusted owner actions and orchestration `approved_retry` receipts qualify;
+review forks, mixed batches, grant receipts and process completions do not.
+An owner-DM host internal event qualifies through its existing owner snapshot.
+Native cron workers that clear ClawChat session context remain blocked.
+Retry receipts open only orchestration. Overlapping owner batches retain that
+authority; non-owner speakers or overlapping turns without orchestration authority
+revoke it. Neither `all` nor exact per-person grants include these tools;
+listing one in `public-tools` rejects the entire list with an `owner-only tool` warning.
+
+Each orchestration call requires a nonblank `purpose` (at most 60 Unicode code
+points). The pre-hook stores trusted conversation/owner attribution by tool-call
+id and snapshot nonce in a locked, bounded ten-minute cache. The handler consumes
+it and rechecks the live snapshot and initiator; revoked or released snapshots
+fail closed. Without an entry it checks the current session snapshot before
+constructing a client. Group-info guidance appears only when the conversation
+tool is both in the host catalog and visible under the current snapshot.
+Requests carry `X-Clawchat-Origin-Conversation`, `X-Clawchat-Origin-Initiator`
+and UTF-8 percent-encoded `X-Clawchat-Purpose`; writes retain JSON content-type.
+Backend code `21007` becomes `owner_turn_only`; other orchestration business
+envelopes remain intact. Missing trusted session attribution fails closed.
 
 The adapter freezes speaker rules into a nonce in the source message id.
 `pre_llm_call` binds it to the exact host session and turn; the tool hook checks

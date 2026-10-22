@@ -250,6 +250,9 @@ tests/*
 !tests/test_orchestration_api_client.py
 !tests/test_orchestration_tools.py
 !tests/test_orchestration_registration.py
+# Orchestration stays owner-only across catalog, dispatch and host worker threads.
+!tests/test_orchestrate_owner_only.py
+!tests/test_orchestrate_real_host_context.py
 !tests/test_restart_outcome.py
 !tests/test_pre_dispatch_self_echo.py
 !tests/test_command_gating.py

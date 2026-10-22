@@ -41,6 +41,8 @@ class TurnSnapshot:
     request_origin: RequestOrigin | None = None
     # Host-started turns that inherit a starter's grants never use approve.
     approve_eligible: bool = True
+    # Retained orchestration owner authority: approved_retry or overlapping owner turns.
+    orchestrate_retry: bool = False
 
 
 _lock = threading.Lock()
@@ -61,7 +63,7 @@ def register_turn(*, account_id: str, chat_id: str, speakers: tuple[str, ...],
                   speaker_names: tuple[str, ...] = (), owner_verified: bool = False,
                   owner_side: bool = False, non_owner_speakers: frozenset[str] | None = None,
                   legacy_owner_tools: bool = False, request_origin: RequestOrigin | None = None,
-                  approve_eligible: bool = True) -> TurnSnapshot:
+                  approve_eligible: bool = True, orchestrate_retry: bool = False) -> TurnSnapshot:
     with _lock:
         nonce = NONCE_PREFIX + secrets.token_urlsafe(24)
         owner_side = bool(owner_side and speakers and all(isinstance(id_, str) and id_.strip() for id_ in speakers))
@@ -76,19 +78,25 @@ def register_turn(*, account_id: str, chat_id: str, speakers: tuple[str, ...],
         # tools without representing a speaker or gaining management powers.
         legacy_owner_tools = bool(legacy_owner_tools and not speakers and not owner_verified
                                   and not ids and all(not item.non_owner_speakers for item in overlaps))
+        def orch_ok(item):
+            return item.owner_side or item.legacy_owner_tools or item.orchestrate_retry
+
+        new_orch = bool((owner_side or orchestrate_retry) and not ids
+                        and all(not item.non_owner_speakers and orch_ok(item) for item in overlaps))
         if overlaps:
             frozen = intersect_turn_grants([frozen, *(item.grants for item in overlaps)])
             ids |= frozenset(id_ for item in overlaps for id_ in item.non_owner_speakers)
             for item in overlaps:
                 _snapshots[item.nonce] = replace(item, grants=frozen, non_owner_speakers=ids,
                                                 owner_side=item.owner_side and owner_side,
-                                                legacy_owner_tools=item.legacy_owner_tools and not ids)
+                                                legacy_owner_tools=item.legacy_owner_tools and not ids,
+                                                orchestrate_retry=bool(orch_ok(item) and new_orch and not ids))
         snapshot = TurnSnapshot(
             nonce, account_id, chat_id, tuple(speakers),
             frozen, time.monotonic(), frozenset(any_granted_tools),
             tuple(speaker_names), owner_verified is True and (account_id, session_key) not in _unverified_inputs,
             ids, owner_side and all(item.owner_side for item in overlaps),
-            legacy_owner_tools, request_origin if not owner_side else None, bool(approve_eligible),
+            legacy_owner_tools, request_origin if not owner_side else None, bool(approve_eligible), new_orch,
         )
         _snapshots[nonce] = snapshot
         _active[account_id, session_key] = nonce

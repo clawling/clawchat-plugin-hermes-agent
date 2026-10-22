@@ -220,13 +220,26 @@ class UploadResult:
 _ORCH = "/v1/agents/me/orchestration"
 
 
-def _orch_json(payload: dict) -> dict:
+def _orch_headers(origin: dict) -> dict[str, str]:
+    if not isinstance(origin, dict) or any(
+            not isinstance(origin.get(key), str) or not origin[key].strip()
+            for key in ("conversation_id", "initiator_id")) or (
+            not isinstance(origin.get("purpose"), str) or not origin["purpose"]):
+        raise ValueError("orchestration origin and purpose are required")
+    return {
+        "X-Clawchat-Origin-Conversation": origin["conversation_id"],
+        "X-Clawchat-Origin-Initiator": origin["initiator_id"],
+        "X-Clawchat-Purpose": quote(origin["purpose"][:60], safe=""),
+    }
+
+
+def _orch_json(payload: dict, origin: dict) -> dict:
     """Body + content-type for an orchestration write, in one place.
 
     Every orchestration write is a small JSON object and the backend rejects a
     missing content-type, so the two always travel together.
     """
-    return {"body": json.dumps(payload).encode("utf-8"), "extra_headers": {"content-type": "application/json"}}
+    return {"body": json.dumps(payload).encode("utf-8"), "extra_headers": {"content-type": "application/json", **_orch_headers(origin)}}
 
 
 def _is_liveware_view(view: object) -> bool:
@@ -405,45 +418,46 @@ class ClawChatApiClient:
     # Twelve routes, 1:1 with docs/features/agentorch.md. Every response is
     # HTTP 200 with the business code in the envelope. These methods call
     # `_call_envelope`, NOT `_call_json` — the envelope must reach the caller
-    # untouched (code/msg/data, unwrapped nowhere along the way) so the model
-    # can read `code` itself; `_call_json`'s raise-on-nonzero-code and
+    # intact (code/msg/data) so the tool layer can map 21007 and the model
+    # can read every other code itself; `_call_json`'s raise-on-nonzero-code and
     # unwrap-data behavior would destroy exactly that.
 
-    async def orch_list_agents(self) -> dict:
-        return await self._call_envelope("GET", f"{_ORCH}/agents")
+    async def orch_list_agents(self, *, origin: dict) -> dict:
+        return await self._call_envelope("GET", f"{_ORCH}/agents", extra_headers=_orch_headers(origin))
 
-    async def orch_get_agent(self, agent_id: str) -> dict:
-        return await self._call_envelope("GET", f"{_ORCH}/agents/{quote(agent_id, safe='')}")
+    async def orch_get_agent(self, agent_id: str, *, origin: dict) -> dict:
+        return await self._call_envelope("GET", f"{_ORCH}/agents/{quote(agent_id, safe='')}", extra_headers=_orch_headers(origin))
 
-    async def orch_set_agent_behavior(self, agent_id: str, behavior: str) -> dict:
+    async def orch_set_agent_behavior(self, agent_id: str, behavior: str, *, origin: dict) -> dict:
         return await self._call_envelope(
-            "PATCH", f"{_ORCH}/agents/{quote(agent_id, safe='')}", **_orch_json({"behavior": behavior})
+            "PATCH", f"{_ORCH}/agents/{quote(agent_id, safe='')}", **_orch_json({"behavior": behavior}, origin)
         )
 
-    async def orch_list_groups(self) -> dict:
-        return await self._call_envelope("GET", f"{_ORCH}/groups")
+    async def orch_list_groups(self, *, origin: dict) -> dict:
+        return await self._call_envelope("GET", f"{_ORCH}/groups", extra_headers=_orch_headers(origin))
 
-    async def orch_get_group(self, cid: str) -> dict:
-        return await self._call_envelope("GET", f"{_ORCH}/groups/{quote(cid, safe='')}")
+    async def orch_get_group(self, cid: str, *, origin: dict) -> dict:
+        return await self._call_envelope("GET", f"{_ORCH}/groups/{quote(cid, safe='')}", extra_headers=_orch_headers(origin))
 
-    async def orch_set_group_prompt(self, cid: str, description: str) -> dict:
+    async def orch_set_group_prompt(self, cid: str, description: str, *, origin: dict) -> dict:
         return await self._call_envelope(
-            "PATCH", f"{_ORCH}/groups/{quote(cid, safe='')}", **_orch_json({"description": description})
+            "PATCH", f"{_ORCH}/groups/{quote(cid, safe='')}", **_orch_json({"description": description}, origin)
         )
 
-    async def orch_create_group(self, title: str, agent_ids: list[str]) -> dict:
+    async def orch_create_group(self, title: str, agent_ids: list[str], *, origin: dict) -> dict:
         return await self._call_envelope(
-            "POST", f"{_ORCH}/groups", **_orch_json({"title": title, "agent_ids": list(agent_ids)})
+            "POST", f"{_ORCH}/groups", **_orch_json({"title": title, "agent_ids": list(agent_ids)}, origin)
         )
 
-    async def orch_add_group_member(self, cid: str, agent_id: str) -> dict:
+    async def orch_add_group_member(self, cid: str, agent_id: str, *, origin: dict) -> dict:
         return await self._call_envelope(
-            "POST", f"{_ORCH}/groups/{quote(cid, safe='')}/members", **_orch_json({"agent_id": agent_id})
+            "POST", f"{_ORCH}/groups/{quote(cid, safe='')}/members", **_orch_json({"agent_id": agent_id}, origin)
         )
 
-    async def orch_remove_group_member(self, cid: str, agent_id: str) -> dict:
+    async def orch_remove_group_member(self, cid: str, agent_id: str, *, origin: dict) -> dict:
         return await self._call_envelope(
-            "DELETE", f"{_ORCH}/groups/{quote(cid, safe='')}/members/{quote(agent_id, safe='')}"
+            "DELETE", f"{_ORCH}/groups/{quote(cid, safe='')}/members/{quote(agent_id, safe='')}",
+            extra_headers=_orch_headers(origin),
         )
 
     async def orch_set_group_agent_settings(
@@ -451,6 +465,7 @@ class ClawChatApiClient:
         cid: str,
         agent_id: str,
         *,
+        origin: dict,
         muted: bool | None = None,
         reply_mode: str | None = None,
         batch_delay_seconds: int | None = None,
@@ -468,14 +483,14 @@ class ClawChatApiClient:
         return await self._call_envelope(
             "PATCH",
             f"{_ORCH}/groups/{quote(cid, safe='')}/agents/{quote(agent_id, safe='')}",
-            **_orch_json(payload),
+            **_orch_json(payload, origin),
         )
 
-    async def orch_create_connect_code(self) -> dict:
-        return await self._call_envelope("POST", f"{_ORCH}/connect-codes")
+    async def orch_create_connect_code(self, *, origin: dict) -> dict:
+        return await self._call_envelope("POST", f"{_ORCH}/connect-codes", extra_headers=_orch_headers(origin))
 
-    async def orch_get_connect_code(self, code: str) -> dict:
-        return await self._call_envelope("GET", f"{_ORCH}/connect-codes/{quote(code, safe='')}")
+    async def orch_get_connect_code(self, code: str, *, origin: dict) -> dict:
+        return await self._call_envelope("GET", f"{_ORCH}/connect-codes/{quote(code, safe='')}", extra_headers=_orch_headers(origin))
 
     async def send_friend_request(self, *, user_id: str, greeting: str | None = None) -> dict:
         if not user_id.strip():

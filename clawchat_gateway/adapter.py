@@ -4934,6 +4934,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 speaker_names=self._grant_speaker_names(inbound, speakers),
                 owner_verified=self._verified_owner_inbound(inbound),
                 owner_side=getattr(grants, "owner_only", False),
+                orchestrate_retry=inbound.orchestrate_retry,
                 legacy_owner_tools=(inbound.is_owner_action
                                     and inbound.sender_id == self._owner_user_id()
                                     and inbound.chat_type == "direct"

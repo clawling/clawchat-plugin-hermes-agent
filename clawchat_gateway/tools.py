@@ -1581,87 +1581,123 @@ def _require_id(value, field: str):
     return None
 
 
-async def _orchestrate(call):
-    """Run one orchestration call, mapping only transport-level failures.
-
-    The envelope is returned untouched: every orchestration response is HTTP
-    200 and the business code (21003, 29002, …) is the model's to read.
-    """
+async def _orchestrate(call, *, purpose, operation):
+    """Run an owner-attributed call; only 21007 replaces the business envelope."""
+    from clawchat_gateway.host_tools_guard import orchestrate_handler_origin, orchestrate_owner_only
+    from clawchat_gateway.gate_outcome import map_gate_outcome
+    origin = orchestrate_handler_origin()
+    if origin is None:
+        from clawchat_gateway.turn_grants import get_snapshot, session_context_value
+        snapshot = get_snapshot(session_context_value("HERMES_SESSION_MESSAGE_ID"))
+        return orchestrate_owner_only(operation, snapshot)
+    if not isinstance(purpose, str) or not purpose.strip():
+        return _validation_error("purpose is required")
+    origin = dict(origin, purpose=purpose[:60])
     client, err = _build_client()
     if err is not None:
         return err
     try:
-        return await call(client)
+        result = await call(client, origin)
+        if isinstance(result, dict) and result.get("code") == 21007:
+            return map_gate_outcome(21007, result.get("data") if isinstance(result.get("data"), dict) else {})
+        return result
     except ClawChatApiError as exc:
         return _api_error(exc)
     except Exception as exc:  # noqa: BLE001
         return _unknown_error(exc)
 
 
-async def orchestrate_list_agents() -> dict[str, Any]:
-    return await _orchestrate(lambda c: c.orch_list_agents())
+async def orchestrate_list_agents(*, purpose: str | None = None) -> dict[str, Any]:
+    return await _orchestrate(
+        lambda c, origin: c.orch_list_agents(origin=origin),
+        purpose=purpose, operation="clawchat_orchestrate_list_agents",
+    )
 
 
-async def orchestrate_get_agent(agent_id: str) -> dict[str, Any]:
+async def orchestrate_get_agent(agent_id: str, *, purpose: str | None = None) -> dict[str, Any]:
     if (err := _require_id(agent_id, "agentId")) is not None:
         return err
-    return await _orchestrate(lambda c: c.orch_get_agent(agent_id))
+    return await _orchestrate(
+        lambda c, origin: c.orch_get_agent(agent_id, origin=origin),
+        purpose=purpose, operation="clawchat_orchestrate_get_agent",
+    )
 
 
-async def orchestrate_set_agent_behavior(agent_id: str, behavior: str) -> dict[str, Any]:
+async def orchestrate_set_agent_behavior(agent_id: str, behavior: str, *, purpose: str | None = None) -> dict[str, Any]:
     if (err := _require_id(agent_id, "agentId")) is not None:
         return err
     if not isinstance(behavior, str):
         return _validation_error("behavior must be a string")
     if len(behavior) > _BEHAVIOR_MAX_RUNES:
         return _validation_error(f"behavior exceeds {_BEHAVIOR_MAX_RUNES} runes (got {len(behavior)})")
-    return await _orchestrate(lambda c: c.orch_set_agent_behavior(agent_id, behavior))
+    return await _orchestrate(
+        lambda c, origin: c.orch_set_agent_behavior(agent_id, behavior, origin=origin),
+        purpose=purpose, operation="clawchat_orchestrate_set_agent_behavior",
+    )
 
 
-async def orchestrate_list_groups() -> dict[str, Any]:
-    return await _orchestrate(lambda c: c.orch_list_groups())
+async def orchestrate_list_groups(*, purpose: str | None = None) -> dict[str, Any]:
+    return await _orchestrate(
+        lambda c, origin: c.orch_list_groups(origin=origin),
+        purpose=purpose, operation="clawchat_orchestrate_list_groups",
+    )
 
 
-async def orchestrate_get_group(conversation_id: str) -> dict[str, Any]:
+async def orchestrate_get_group(conversation_id: str, *, purpose: str | None = None) -> dict[str, Any]:
     if (err := _require_id(conversation_id, "conversationId")) is not None:
         return err
-    return await _orchestrate(lambda c: c.orch_get_group(conversation_id))
+    return await _orchestrate(
+        lambda c, origin: c.orch_get_group(conversation_id, origin=origin),
+        purpose=purpose, operation="clawchat_orchestrate_get_group",
+    )
 
 
-async def orchestrate_set_group_prompt(conversation_id: str, description: str) -> dict[str, Any]:
+async def orchestrate_set_group_prompt(conversation_id: str, description: str, *, purpose: str | None = None) -> dict[str, Any]:
     if (err := _require_id(conversation_id, "conversationId")) is not None:
         return err
     if not isinstance(description, str):
         return _validation_error("description must be a string")
     if len(description) > _BEHAVIOR_MAX_RUNES:
         return _validation_error(f"description exceeds {_BEHAVIOR_MAX_RUNES} runes (got {len(description)})")
-    return await _orchestrate(lambda c: c.orch_set_group_prompt(conversation_id, description))
+    return await _orchestrate(
+        lambda c, origin: c.orch_set_group_prompt(conversation_id, description, origin=origin),
+        purpose=purpose, operation="clawchat_orchestrate_set_group_prompt",
+    )
 
 
-async def orchestrate_create_group(title: str, agent_ids: list[str]) -> dict[str, Any]:
+async def orchestrate_create_group(title: str, agent_ids: list[str], *, purpose: str | None = None) -> dict[str, Any]:
     if not isinstance(title, str) or not (1 <= len(title) <= _GROUP_TITLE_MAX_RUNES):
         return _validation_error(f"title must be 1..{_GROUP_TITLE_MAX_RUNES} runes")
     if not isinstance(agent_ids, list) or not agent_ids:
         return _validation_error("agentIds must be a non-empty list")
     if any(not isinstance(a, str) or not a.strip() for a in agent_ids):
         return _validation_error("every agentIds entry must be a non-empty string")
-    return await _orchestrate(lambda c: c.orch_create_group(title, agent_ids))
+    return await _orchestrate(
+        lambda c, origin: c.orch_create_group(title, agent_ids, origin=origin),
+        purpose=purpose, operation="clawchat_orchestrate_create_group",
+    )
 
 
-async def orchestrate_add_group_member(conversation_id: str, agent_id: str) -> dict[str, Any]:
+async def orchestrate_add_group_member(conversation_id: str, agent_id: str, *, purpose: str | None = None) -> dict[str, Any]:
     if (err := _require_id(conversation_id, "conversationId")) is not None:
         return err
     if (err := _require_id(agent_id, "agentId")) is not None:
         return err
-    return await _orchestrate(lambda c: c.orch_add_group_member(conversation_id, agent_id))
+    return await _orchestrate(
+        lambda c, origin: c.orch_add_group_member(conversation_id, agent_id, origin=origin),
+        purpose=purpose, operation="clawchat_orchestrate_add_group_member",
+    )
 
 
-async def orchestrate_remove_group_member(conversation_id: str, agent_id: str) -> dict[str, Any]:
+async def orchestrate_remove_group_member(conversation_id: str, agent_id: str, *, purpose: str | None = None) -> dict[str, Any]:
     if (err := _require_id(conversation_id, "conversationId")) is not None:
         return err
     if (err := _require_id(agent_id, "agentId")) is not None:
         return err
-    return await _orchestrate(lambda c: c.orch_remove_group_member(conversation_id, agent_id))
+    return await _orchestrate(
+        lambda c, origin: c.orch_remove_group_member(conversation_id, agent_id, origin=origin),
+        purpose=purpose, operation="clawchat_orchestrate_remove_group_member",
+    )
 
 
 async def orchestrate_set_group_agent_settings(
@@ -1670,6 +1706,8 @@ async def orchestrate_set_group_agent_settings(
     muted: bool | None = None,
     reply_mode: str | None = None,
     batch_delay_seconds: int | None = None,
+    *,
+    purpose: str | None = None,
 ) -> dict[str, Any]:
     if (err := _require_id(conversation_id, "conversationId")) is not None:
         return err
@@ -1687,24 +1725,32 @@ async def orchestrate_set_group_agent_settings(
         if not (1 <= batch_delay_seconds <= 3600):
             return _validation_error("batchDelaySeconds must be in 1..3600")
     return await _orchestrate(
-        lambda c: c.orch_set_group_agent_settings(
+        lambda c, origin: c.orch_set_group_agent_settings(
             conversation_id,
             agent_id,
             muted=muted,
             reply_mode=reply_mode,
             batch_delay_seconds=batch_delay_seconds,
-        )
+            origin=origin,
+        ),
+        purpose=purpose, operation="clawchat_orchestrate_set_group_agent_settings",
     )
 
 
-async def orchestrate_create_connect_code() -> dict[str, Any]:
-    return await _orchestrate(lambda c: c.orch_create_connect_code())
+async def orchestrate_create_connect_code(*, purpose: str | None = None) -> dict[str, Any]:
+    return await _orchestrate(
+        lambda c, origin: c.orch_create_connect_code(origin=origin),
+        purpose=purpose, operation="clawchat_orchestrate_create_connect_code",
+    )
 
 
-async def orchestrate_get_connect_code(code: str) -> dict[str, Any]:
+async def orchestrate_get_connect_code(code: str, *, purpose: str | None = None) -> dict[str, Any]:
     if (err := _require_id(code, "code")) is not None:
         return err
-    return await _orchestrate(lambda c: c.orch_get_connect_code(code))
+    return await _orchestrate(
+        lambda c, origin: c.orch_get_connect_code(code, origin=origin),
+        purpose=purpose, operation="clawchat_orchestrate_get_connect_code",
+    )
 
 
 def _tool_request_context(session_id):
