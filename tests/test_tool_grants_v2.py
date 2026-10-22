@@ -2738,7 +2738,7 @@ def test_public_mcp_server_survives_narrowed_toolsets(monkeypatch, listed):
     ("orchestrate.read", "approved", False), ("group.manage", "approved_retry", False)])
 async def test_orchestration_receipt_dispatch_preserves_only_retry_exception(harness, host, monkeypatch, chat, kind, operation, outcome, retry):
     from clawchat_gateway import permission_result
-    from clawchat_gateway.tool_capabilities import OWNER_ONLY_TOOLS
+    from clawchat_gateway.tool_capabilities import OWNER_ONLY_TOOLS, OWNER_TURN_STRICT_TOOLS
     permission_result._seen_request_ids.clear()
     inbound = permission_result.handle_permission_result(dict(chat_id=chat, chat_type=kind,
         payload={"metadata": dict(kind="permission_result", request_id="prq_dispatch_retry",
@@ -2755,12 +2755,14 @@ async def test_orchestration_receipt_dispatch_preserves_only_retry_exception(har
         with host(**context(snapshot, group=kind == "group")):
             definitions = [{"function": {"name": name}} for name in catalog]
             names = {item["function"]["name"] for item in guard._filter_grant_definitions(definitions, snapshot)}
-            assert set(OWNER_ONLY_TOOLS) <= names if retry else names.isdisjoint(OWNER_ONLY_TOOLS)
+            orchestration = set(OWNER_ONLY_TOOLS) - set(OWNER_TURN_STRICT_TOOLS)
+            assert orchestration <= names if retry else names.isdisjoint(OWNER_ONLY_TOOLS)
+            assert names.isdisjoint(OWNER_TURN_STRICT_TOOLS)
             assert "terminal" not in names
             assert call("terminal", turn_id="t")["action"] == "block"
             for tool in OWNER_ONLY_TOOLS:
                 decision = call(tool, turn_id="t")
-                assert decision is None if retry else decision["action"] == "block"
+                assert decision is None if retry and tool not in OWNER_TURN_STRICT_TOOLS else decision["action"] == "block"
     finally:
         permission_result._seen_request_ids.clear()
 

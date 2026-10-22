@@ -854,6 +854,27 @@ async def add_group_member(conversation_id: str, user_id: str) -> dict[str, Any]
         return _unknown_error(exc)
 
 
+async def widget_send(widget=None) -> dict[str, Any]:
+    from clawchat_gateway.host_tools_guard import orchestrate_handler_origin
+    from clawchat_gateway.widget_send import run_widget_tool, widget_owner_only
+
+    if orchestrate_handler_origin(strict=True) is None:
+        return widget_owner_only()
+
+    async def send(doc, widget_id):
+        sender = get_clawchat_sender()
+        if not callable(getattr(sender, "send_widget_message", None)):
+            raise RuntimeError("no live ClawChat connection in this process")
+        return await sender.send_widget_message(doc, widget_id)
+
+    try:
+        return await run_widget_tool(widget, send)
+    except ClawChatApiError as exc:
+        return _api_error(exc)
+    except Exception as exc:  # noqa: BLE001 - tool errors are model-visible
+        return {"error": "transport", "message": str(exc)}
+
+
 async def mention_message(
     chat_id: Any,
     *,

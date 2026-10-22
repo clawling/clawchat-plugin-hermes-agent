@@ -1015,6 +1015,16 @@ tool does not lift the plugin's per-call restrictions on `skill_manage` writes,
 `text_to_speech.output_path`. Public access covers only the current chat;
 cross-chat delivery still needs an explicit matching grant.
 
+`clawchat_widget_send` is also owner-only and excluded from public overrides,
+`all` and exact grants. Its catalog, hook and handler use the same matching
+ClawChat snapshot checks, but require `owner_side` or `legacy_owner_tools`;
+orchestration `approved_retry` authority alone is insufficient. Existing host
+internal turns in the owner DM qualify. Current scheduled heartbeats are
+non-internal and have no owner snapshot; they and native cron workers without
+ClawChat context remain blocked. It sends only to the effective owner's resolved DM, needs no
+`purpose`, and leaves normal follow-up replies enabled. See
+[widget tools](reference/tools.md#owner-home-screen-widgets).
+
 The twelve `clawchat_orchestrate_*` tools are always owner-only. They are
 excluded from `all` and exact per-person grants/requests; stored rules naming
 them are ignored. Making one public invalidates the whole `public-tools` list

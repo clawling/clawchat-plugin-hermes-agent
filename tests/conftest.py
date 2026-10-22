@@ -79,6 +79,15 @@ def _real_host_available() -> bool:
 
 _USING_DOUBLE = not _real_host_available()
 
+if not _USING_DOUBLE:
+    from gateway.platform_registry import PlatformEntry, platform_registry
+
+    # The production plugin registers its platform before constructing adapters.
+    platform_registry.register(PlatformEntry(
+        name="clawchat", label="ClawChat", adapter_factory=lambda config: None,
+        check_fn=lambda: True,
+    ))
+
 
 def _install_double() -> None:
     import types

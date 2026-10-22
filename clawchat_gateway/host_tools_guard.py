@@ -478,13 +478,14 @@ _ORCHESTRATE_ORIGIN_TTL = 600
 _MAX_ORCHESTRATE_ORIGINS = 512
 
 
-def orchestrate_owner_turn(snapshot):
+def orchestrate_owner_turn(snapshot, *, strict=False):
     """Attribute only a trusted owner execution in the current ClawChat chat."""
     from clawchat_gateway.turn_grants import session_context_value
     if (snapshot is None or not snapshot.chat_id
             or snapshot.chat_id != session_context_value("HERMES_SESSION_CHAT_ID")
             or session_context_value("HERMES_SESSION_PLATFORM") != "clawchat"
-            or not (snapshot.owner_side or snapshot.legacy_owner_tools or snapshot.orchestrate_retry)):
+            or not (snapshot.owner_side or snapshot.legacy_owner_tools
+                    or not strict and snapshot.orchestrate_retry)):
         return None
     try:
         owner = _owner_user_id()
@@ -518,18 +519,18 @@ def take_orchestrate_origin(tool_call_id):
         return (record[1], dict(record[2])) if record and time.monotonic() - record[0] < _ORCHESTRATE_ORIGIN_TTL else None
 
 
-def orchestrate_handler_origin():
+def orchestrate_handler_origin(*, strict=False):
     from clawchat_gateway.turn_grants import get_snapshot, session_context_value
     try:
         from tools.approval_context import _approval_tool_call_id
         record = take_orchestrate_origin(_approval_tool_call_id.get())
         if record is not None:
             nonce, origin = record
-            current = orchestrate_owner_turn(get_snapshot(nonce))
+            current = orchestrate_owner_turn(get_snapshot(nonce), strict=strict)
             return origin if current == origin else None
     except ImportError:
         pass
-    return orchestrate_owner_turn(get_snapshot(session_context_value("HERMES_SESSION_MESSAGE_ID")))
+    return orchestrate_owner_turn(get_snapshot(session_context_value("HERMES_SESSION_MESSAGE_ID")), strict=strict)
 
 
 def orchestrate_owner_only(operation, snapshot=None):
@@ -546,7 +547,7 @@ def orchestrate_owner_only(operation, snapshot=None):
 
 
 def _filter_grant_definitions(definitions, snapshot, *, owner_fork=False):
-    from clawchat_gateway.tool_capabilities import AUTHORIZATION_TOOLS, OWNER_ONLY_TOOLS
+    from clawchat_gateway.tool_capabilities import AUTHORIZATION_TOOLS, OWNER_ONLY_TOOLS, OWNER_TURN_STRICT_TOOLS
     if owner_fork:
         return [item for item in definitions if item["function"]["name"] not in AUTHORIZATION_TOOLS + OWNER_ONLY_TOOLS]
     from clawchat_gateway.tool_grants import tool_grant_visible
@@ -554,7 +555,7 @@ def _filter_grant_definitions(definitions, snapshot, *, owner_fork=False):
 
     def allowed(tool):
         if tool in OWNER_ONLY_TOOLS:
-            return orchestrate_owner_turn(snapshot) is not None
+            return orchestrate_owner_turn(snapshot, strict=tool in OWNER_TURN_STRICT_TOOLS) is not None
         if tool == "clawchat_tool_request":
             return _tool_grants_enabled() and not (snapshot and (snapshot.owner_side or snapshot.legacy_owner_tools))
         if tool in AUTHORIZATION_TOOLS:
@@ -1599,11 +1600,14 @@ def _clawchat_pre_tool_decision(*, tool_name: str = "", args: Any = None, **kwar
             if (bound and bound.chat_id == chat_id
                     and session_context_value("HERMES_SESSION_PLATFORM") == "clawchat"):
                 snapshot = bound
-        from clawchat_gateway.tool_capabilities import OWNER_ONLY_TOOLS
+        from clawchat_gateway.tool_capabilities import OWNER_ONLY_TOOLS, OWNER_TURN_STRICT_TOOLS
         orchestrate_origin = None
         if tool_name in OWNER_ONLY_TOOLS:
-            orchestrate_origin = orchestrate_owner_turn(snapshot)
+            orchestrate_origin = orchestrate_owner_turn(snapshot, strict=tool_name in OWNER_TURN_STRICT_TOOLS)
             if orchestrate_origin is None:
+                if tool_name in OWNER_TURN_STRICT_TOOLS:
+                    from clawchat_gateway.widget_send import WIDGET_OWNER_ONLY_MESSAGE
+                    return {"action": "block", "message": WIDGET_OWNER_ONLY_MESSAGE}
                 return {"action": "block", "message": orchestrate_owner_only(tool_name, snapshot)["instruction"]}
             _remember_orchestrate_origin(kwargs.get("tool_call_id"), orchestrate_origin, snapshot.nonce)
         if snapshot and (snapshot.owner_side or snapshot.legacy_owner_tools):

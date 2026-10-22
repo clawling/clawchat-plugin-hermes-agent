@@ -348,6 +348,9 @@ tests/*
 !tests/test_runtime_defaults_encoding.py
 !tests/test_runtime_status_notices.py
 !tests/test_token_refresh_grace.py
+!tests/test_widget_send.py
+!tests/test_widget_send_owner_only.py
+!tests/test_inbound_widget_action.py
 deploy/
 scripts/
 docs/superpowers/

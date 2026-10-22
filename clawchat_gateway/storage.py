@@ -1248,6 +1248,25 @@ class ClawChatStore:
         finally:
             conn.close()
 
+    def get_activation_widget_target(self, *, platform: str, account_id: str) -> tuple[str, str, str] | None:
+        """Read the owner, conversation and credential generation from one row."""
+        self.initialize()
+        if self._disabled:
+            return None
+        conn = sqlite3.connect(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT owner_user_id, conversation_id, user_id, access_token, activated_at "
+                "FROM activations WHERE platform = ? AND account_id = ?",
+                (platform, account_id),
+            ).fetchone()
+            if row is None:
+                return None
+            generation = hashlib.sha256(json.dumps(row).encode("utf-8")).hexdigest()
+            return (str(row[0] or ""), str(row[1] or ""), generation)
+        finally:
+            conn.close()
+
     def get_activation_conversation(
         self,
         *,

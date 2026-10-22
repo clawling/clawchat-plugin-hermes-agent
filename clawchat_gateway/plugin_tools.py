@@ -375,6 +375,17 @@ async def handle_clawchat_mention_message(args, **kw):
     return _tool_result(result)
 
 
+async def handle_clawchat_widget_send(args, **kw):
+    from clawchat_gateway import tools
+    from clawchat_gateway.widget_send import check_widget_for_send
+
+    widget = args.get("widget")
+    doc = widget.strip() if isinstance(widget, str) else ""
+    checked = check_widget_for_send(doc) if doc else {}
+    logger.info("clawchat_widget_send id=%r bytes=%d", checked.get("id"), len(doc.encode("utf-8")))
+    return _tool_result(await tools.widget_send(widget))
+
+
 async def handle_clawchat_send_file(args, **kw):
     task_id = kw.get("task_id") or "default"
     logger.info(
@@ -860,6 +871,15 @@ async def handle_clawchat_tool_grants_list(args, **kw):
     return _tool_result(await manage_tool_grants("list", args, session_id=kw.get("session_id", "")))
 
 def register_tools(ctx) -> None:
+    from clawchat_gateway.widget_send import WIDGET_DESCRIPTION
+    ctx.register_tool(
+        "clawchat_widget_send", "clawchat",
+        {"name": "clawchat_widget_send", "description": _direct_tool_description(WIDGET_DESCRIPTION),
+         "parameters": {"type": "object", "properties": {
+             "widget": {"type": "string", "description": "the widget/v1 document as a JSON string; omit to get the format"}}}},
+        handle_clawchat_widget_send, is_async=True,
+        description="Update An Owner Home-Screen Widget", emoji="📱",
+    )
     from clawchat_gateway.host_tools_guard import GRANT_MANAGEMENT_TOOLSET, _tool_grants_enabled
 
     try:

@@ -15,7 +15,10 @@ from clawchat_gateway import host_tools_guard as guard, tool_grants as grants, t
 from clawchat_gateway import api_client, plugin_tools, tools, permission_result
 from clawchat_gateway.gate_outcome import map_gate_outcome, owner_turn_only
 from clawchat_gateway.inbound import InboundMessage, parse_inbound_message
-from clawchat_gateway.tool_capabilities import OWNER_ONLY_TOOLS, AUTHORIZATION_TOOLS, get_public_tools_override
+from clawchat_gateway.tool_capabilities import OWNER_ONLY_TOOLS as ALL_OWNER_TOOLS, AUTHORIZATION_TOOLS, get_public_tools_override
+
+# These tests pin the twelve orchestration tools; strict owner tools have their own matrix.
+OWNER_ONLY_TOOLS = tuple(name for name in ALL_OWNER_TOOLS if name.startswith("clawchat_orchestrate_"))
 
 OWNER, FRIEND, CHAT = "usr_owner", "usr_friend", "cnv_group"
 ORIGIN = dict(conversation_id=CHAT, initiator_id=OWNER)

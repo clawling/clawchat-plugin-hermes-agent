@@ -187,6 +187,16 @@ matching deny still wins when grants are enabled, and per-call skill, media and
 output-path restrictions remain. The list is configuration only, absent from
 grant listings and unchangeable in chat; see [Public tools](configuration.md#public-tools).
 
+`clawchat_widget_send` is also owner-only and excluded from public overrides,
+`all` and exact grants. Its catalog, hook and handler use the same matching
+ClawChat snapshot checks, but require `owner_side` or `legacy_owner_tools`;
+orchestration `approved_retry` authority alone is insufficient. Existing host
+internal turns in the owner DM qualify. Current scheduled heartbeats are
+non-internal and have no owner snapshot; they and native cron workers without
+ClawChat context remain blocked. It sends only to the effective owner's resolved DM, needs no
+`purpose`, and leaves normal follow-up replies enabled. See
+[widget tools](reference/tools.md#owner-home-screen-widgets).
+
 The twelve `clawchat_orchestrate_*` tools are owner-only: catalog filtering,
 `pre_tool_call` and a handler check each enforce a matching ClawChat turn
 snapshot. Owner-only speaker batches (including owner batches in groups),

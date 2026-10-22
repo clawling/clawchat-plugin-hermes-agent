@@ -5,7 +5,7 @@ and `description` strings live in `clawchat_gateway/plugin_tools.py`
 inside `register_tools(...)`. This page is the human-readable index and
 must stay aligned with both.
 
-There are **52** tools, grouped by purpose.
+There are **53** tools, grouped by purpose.
 
 ## Account and identity
 
@@ -524,3 +524,83 @@ descriptions match the OpenClaw plugin's tool exactly.
   use `clawchat_memory_write` / `clawchat_memory_edit` to mutate
   profile metadata fields; use `clawchat_metadata_sync` /
   `clawchat_metadata_update` for those.
+
+## Owner home-screen widgets
+
+`clawchat_widget_send` takes an optional `widget` JSON string. Only after the
+owner asks for a widget, send a complete snapshot to their private chat,
+including when they ask from a group. Omit `widget` to read the widget/v1 format.
+Catalog filtering, the pre-tool hook and the handler each enforce a trusted
+owner turn in the same ClawChat chat. Owner-only speaker batches, trusted owner
+DM actions and host internal turns attributed to the owner DM qualify. An
+orchestration `approved_retry` receipt alone never unlocks widgets. Friends,
+mixed groups, review forks, process completions attributed to guests and other
+platforms are refused with `status: owner_turn_only` and:
+
+> Owner-only: only your owner can update their widgets.
+
+`public-tools`, `all`, exact grants and pending grant payloads cannot expose
+this tool. It has no `purpose` parameter, sends no orchestration origin headers,
+and does not mark the turn terminal or suppress a normal follow-up reply.
+Guide calls pass the same owner guard. Host events with `internal=True` in
+the activation-recorded owner DM inherit the existing owner snapshot. The
+current Hermes scheduled heartbeat sets `_heartbeat_session_id`, but keeps
+`internal=False` and clears the source message id: it has no owner snapshot, so
+both widgets and orchestration remain blocked. Native cron workers that clear
+ClawChat session context are also blocked.
+
+The current effective owner comes from configuration first, then activation.
+The activation conversation is used only when the owner in that same activation
+row matches the effective owner. Otherwise find-or-create
+`POST /v1/conversations/direct {peer_id: <owner>}` resolves the DM. Missing owner
+or conversation returns `no owner chat`; API failures retain code and message,
+including 19012 when the owner is not a friend. Resolved conversations are
+cached in-process per owner and activation generation (a digest, never raw
+tokens), invalidated on identity changes and cleared on disconnect.
+
+Missing/non-string/blank `widget` returns the guide without sending. Otherwise
+outer whitespace is trimmed, and that exact document is checked and sent without
+JSON reserialization. Validation checks, in order:
+
+1. UTF-8 size at most 16384 bytes, before JSON parsing (exactly 16384 passes).
+2. JSON must parse as an object, excluding arrays, strings, numbers and null;
+   NaN and Infinity are rejected, as in JavaScript JSON.parse.
+3. `v` must be present and non-null (any other value is accepted); `id` must be
+   a non-empty string. No other document constraints are enforced here.
+
+Failures return the matching `too_large`, `not_json`, `bad_version` or `bad_id`
+refusal and guide hint, and never touch the throttle. The guide and refusal
+sentences describe the phone's stricter widget/v1 format.
+
+Per account and widget `id`, sends coalesce over 60 seconds measured from send
+start. The first snapshot is sent immediately and waits for its ACK. A call
+while that send is pending, or within the minute, replaces the one pending
+snapshot. At the due time only the newest snapshot is sent. A flush starts the
+next minute, so a new update just after it queues for the following minute.
+The due-time flush does not wait for an earlier send's ACK. An immediate failure
+is returned to the model and restores the previous start time; a timed flush
+consumes its minute even if it fails, and only logs the widget id, byte count
+and error type, never the document. Queued results include `HH:MM:SS UTC`;
+successful immediate sends return:
+
+> Sent. It shows on their home screen once their phone has it.
+
+Before admission and again immediately before sending, owner, activation and
+connection are checked. A changed target or failed resolution at flush drops
+that snapshot with a log entry. An unready connection or failed transport return
+produces `ClawChat is not connected; try again later`. Sending waits for the ACK
+and disables offline queueing; it never uses the normal outbound queue or the
+thinking-mode path. Timers and target cache belong to the live adapter loop;
+shutdown cancels pending widget timers. State is in-process only: a restart
+forgets the throttle and pending snapshots. A process/profile without a live
+adapter, including standalone `hermes send` and out-of-process cron, returns
+`no live ClawChat connection in this process` for a send; there is no standalone
+fallback.
+
+The outbound frame is `message.send` with `message_mode: "widget"`, empty
+mentions, `reply: null`, a fresh message id and exactly one fragment:
+`{"kind":"widget","text":<the original trimmed JSON document>}`. The phone
+hides it from chat and draws the widget. Inbound behavior stays unchanged:
+`widget_action` plus `text` reaches the host as that text; only `widget_action`
+reaches the host as an empty-text event. Non-normal mode messages are dropped
+whole, including any accompanying text.

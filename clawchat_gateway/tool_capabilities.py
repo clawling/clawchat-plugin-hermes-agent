@@ -23,7 +23,11 @@ OWNER_ONLY_TOOLS = (
     "clawchat_orchestrate_set_group_agent_settings",
     "clawchat_orchestrate_create_connect_code",
     "clawchat_orchestrate_get_connect_code",
+    "clawchat_widget_send",
 )
+
+# These tools require owner authority independent of orchestration retries.
+OWNER_TURN_STRICT_TOOLS = ("clawchat_widget_send",)
 
 # Mirror only verified host aliases: model_tools._LEGACY_TOOL_ALIASES and
 # tools.todo_tool.TODO_LEGACY_ALIASES. Keep persisted selectors unchanged.
