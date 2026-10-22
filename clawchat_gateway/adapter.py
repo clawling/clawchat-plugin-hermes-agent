@@ -924,6 +924,7 @@ _MESSAGE_ID_ECHO_LIMIT = 64
 # swallows a non-cancellation BaseException) would otherwise keep its chat
 # "busy" forever and switch the react default off there for good.
 TURN_TRIGGER_TTL_SECONDS = 30 * 60
+ORCHESTRATE_RETRY_IDLE_POLL_SECONDS = 0.2
 
 
 def is_plausible_message_id(value: Any) -> bool:
@@ -4813,7 +4814,24 @@ class ClawChatAdapter(BasePlatformAdapter):
                 task.add_done_callback(self._request_wake_tasks.discard)
         return True
 
-    async def _handle_inbound(self, inbound: InboundMessage) -> None:
+    async def _dispatch_orchestrate_retry_when_idle(self, inbound: InboundMessage) -> None:
+        key = self._grant_session_key(inbound)
+        deadline = time.monotonic() + TURN_TRIGGER_TTL_SECONDS
+        while time.monotonic() < deadline and self._grant_session_busy(key):
+            await asyncio.sleep(ORCHESTRATE_RETRY_IDLE_POLL_SECONDS)
+        logger.info("clawchat orchestration retry dispatched after idle chat_id=%s request_id=%s",
+                    inbound.chat_id, inbound.raw_message.get("request_id"))
+        await self._handle_inbound(inbound, retry_deferred=True)
+
+    async def _handle_inbound(self, inbound: InboundMessage, *, retry_deferred: bool = False) -> None:
+        if inbound.orchestrate_retry and not retry_deferred and self._grant_session_busy(self._grant_session_key(inbound)):
+            # The host runs input that lands mid-turn as a follow-up under the
+            # running turn's nonce, which this receipt itself revokes. The retry
+            # authority lives on the receipt's own nonce, so it waits for idle.
+            task = asyncio.create_task(self._dispatch_orchestrate_retry_when_idle(inbound))
+            self._request_wake_tasks.add(task)
+            task.add_done_callback(self._request_wake_tasks.discard)
+            return
         try:
             self._check_request_wake(inbound)
         except Exception:

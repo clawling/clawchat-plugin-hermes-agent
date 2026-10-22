@@ -196,7 +196,10 @@ An owner-DM host internal event qualifies through its existing owner snapshot.
 Native cron workers that clear ClawChat session context remain blocked.
 Retry receipts open only orchestration. Overlapping owner batches retain that
 authority; non-owner speakers or overlapping turns without orchestration authority
-revoke it, except that a fresh trusted retry receipt keeps its own authority. Neither `all` nor exact per-person grants include these tools;
+revoke it, except that a fresh trusted retry receipt keeps its own authority.
+A retry receipt that lands while its session is busy waits for idle before
+dispatch: Hermes runs mid-turn input as a follow-up under the running turn's
+nonce, which the receipt itself would revoke. Neither `all` nor exact per-person grants include these tools;
 listing one in `public-tools` rejects the entire list with an `owner-only tool` warning.
 
 Each orchestration call requires a nonblank `purpose` (trimmed, at most 60
