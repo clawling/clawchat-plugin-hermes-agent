@@ -134,12 +134,13 @@ def test_guest_overlap_revokes_retry_in_both_directions(host, order):
     assert guard.orchestrate_owner_turn(turns.get_snapshot(first.nonce)) is None
 
 
-def test_owner_dm_retry_survives_synthetic_input_mark_without_owner_authority(host):
+def test_owner_dm_retry_registered_after_synthetic_input_mark_keeps_only_orchestration(host):
     snapshot = host.start(chat="cnv_owner", orchestrate_retry=True)
     turns.mark_unverified_input(snapshot.account_id, "owner-only:cnv_owner")
     try:
+        # The mark revokes every live nonce; the receipt's own turn, registered after it, keeps the retry.
+        assert not turns.get_snapshot(snapshot.nonce).orchestrate_retry
         retry = host.start(chat="cnv_owner", orchestrate_retry=True)
-        assert turns.get_snapshot(snapshot.nonce).orchestrate_retry
         assert retry.orchestrate_retry and not retry.owner_side
         assert guard.orchestrate_owner_turn(retry) == dict(conversation_id="cnv_owner", initiator_id=OWNER)
     finally:
@@ -496,3 +497,29 @@ def test_owner_only_hint_omits_conversation_tool_without_snapshot_or_when_filter
     assert guard.orchestrate_owner_only("op") == owner_turn_only("op")
     monkeypatch.setattr(guard, "_filter_grant_definitions", Mock(side_effect=RuntimeError("filter failed")))
     assert guard.orchestrate_owner_only("op", snapshot) == owner_turn_only("op")
+
+
+def test_unverified_input_revokes_derived_orchestration_of_live_owner_turns(host):
+    owner = host.start(speakers=(OWNER,), owner_side=True)
+    assert turns.get_snapshot(owner.nonce).orchestrate_retry
+    turns.mark_unverified_input("usr_agent", "owner-only:" + CHAT)
+    try:
+        assert guard.orchestrate_owner_turn(turns.get_snapshot(owner.nonce)) is None
+        # A later owner batch is downgraded by the mark too.
+        assert guard.orchestrate_owner_turn(host.start(speakers=(OWNER,), owner_side=True)) is None
+    finally:
+        turns.clear_unverified_input("usr_agent", "owner-only:" + CHAT)
+
+
+@pytest.mark.parametrize("order", ["owner-first", "action-first"])
+def test_owner_and_owner_action_overlap_keep_orchestration_in_both_orders(host, order):
+    owner = lambda: host.start(chat="cnv_owner", speakers=(OWNER,), owner_side=True)
+    action = lambda: host.start(chat="cnv_owner", legacy_owner_tools=True)
+    first, second = (owner(), action()) if order == "owner-first" else (action(), owner())
+    for item in (first, second):
+        snapshot = turns.get_snapshot(item.nonce)
+        host.session["HERMES_SESSION_MESSAGE_ID"] = snapshot.nonce
+        assert guard.orchestrate_owner_turn(snapshot) == dict(conversation_id="cnv_owner", initiator_id=OWNER)
+    host.start(chat="cnv_owner", speakers=(FRIEND,))
+    for item in (first, second):
+        assert guard.orchestrate_owner_turn(turns.get_snapshot(item.nonce)) is None

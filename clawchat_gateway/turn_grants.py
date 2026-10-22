@@ -81,8 +81,8 @@ def register_turn(*, account_id: str, chat_id: str, speakers: tuple[str, ...],
         def orch_ok(item):
             return item.owner_side or item.legacy_owner_tools or item.orchestrate_retry
 
-        new_orch = bool((owner_side or orchestrate_retry) and not ids
-                        and all(not item.non_owner_speakers and orch_ok(item) for item in overlaps))
+        new_orch = bool((owner_side or orchestrate_retry or legacy_owner_tools) and not ids
+                        and all(not item.non_owner_speakers for item in overlaps))
         if overlaps:
             frozen = intersect_turn_grants([frozen, *(item.grants for item in overlaps)])
             ids |= frozenset(id_ for item in overlaps for id_ in item.non_owner_speakers)
@@ -141,7 +141,7 @@ def _revoke_owner_verification_locked(account_id: str, session_key: str) -> None
             # Unattributed input may be merged under this nonce by the host.
             # Retain denies, but intersect with the ordinary default row.
             _snapshots[nonce] = replace(snapshot, owner_verified=False, owner_side=False, legacy_owner_tools=False,
-                                        grants=intersect_turn_grants([snapshot.grants, {}]))
+                                        orchestrate_retry=False, grants=intersect_turn_grants([snapshot.grants, {}]))
 
 
 def mark_unverified_input(account_id: str, session_key: str) -> None:
