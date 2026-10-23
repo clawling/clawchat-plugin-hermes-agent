@@ -232,8 +232,12 @@ tmp
 #     websockets asyncio dependency floor.
 #   * runtime_status_notices — Pins runtime notice suppression without removing
 #     ordinary reply text.
+#   * source_doc_links — Pins every docs/*.md path cited in source to a file in
+#     this repository.
 #   * token_refresh_grace — Pins refresh deadlines and retry spacing within the
 #     grace window.
+#   * version_consistency — Pins plugin.yaml's manifest version to
+#     clawchat_gateway.__version__.
 #   * home_isolation — Pins conftest's autouse isolation: every test runs
 #     with HERMES_HOME, the OS home and CLAWCHAT_* env pointed away from the
 #     developer's real Hermes install (.env credentials, SQLite).
@@ -351,6 +355,8 @@ tests/*
 !tests/test_widget_send.py
 !tests/test_widget_send_owner_only.py
 !tests/test_inbound_widget_action.py
+!tests/test_version_consistency.py
+!tests/test_source_doc_links.py
 deploy/
 scripts/
 docs/superpowers/

@@ -53,9 +53,8 @@ server-controlled.
 | non-200 + parseable JSON integer `10003` | invalid refresh, including an urllib HTTPError body | **PERMANENT** → auto-logout |
 | all other non-200 responses (including `400`) / network errors | HTML, malformed JSON and string codes do not prove revocation | **TRANSIENT** → retry |
 
-**Peer difference:** OpenClaw treats every non-200 refresh response as
-**TRANSIENT**, regardless of body; it does not apply Hermes' non-200 `10003`
-classification. The failure matrix in §B and logout rule in §C describe Hermes.
+OpenClaw applies the same classification, including the non-200 `10003`
+row. The failure matrix in §B and logout rule in §C describe Hermes.
 
 - The refreshed access token preserves the agent identity (`aid`/`oid`); scopes are read live server-side.
 - Token lifetimes are determined by the server; use JWT `exp` for access expiry.
@@ -354,8 +353,7 @@ using a different value per profile. Boot warns when the resolved id is volatile
 - JWT `exp` decode: valid / no-exp / malformed → fallback.
 - Refresh client: HTTP 200 `code` matrix (0 rotated / 10003 permanent / 400 permanent /
   1 transient); non-200 + parseable JSON integer 10003 permanent, every other non-200
-  response (including 400) transient. OpenClaw instead treats all non-200 responses
-  as transient. Assert `X-Device-Id` = stored device id and
+  response (including 400) transient (OpenClaw asserts the same matrix). Assert `X-Device-Id` = stored device id and
   **no** Authorization header; transient failures keep credentials and write no marker.
 - Single-flight (N concurrent callers → 1 HTTP call), rejected-token latch, min-interval.
 - Hermes access-token-only hello rejection: several activation polls never reconnect
