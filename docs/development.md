@@ -143,7 +143,9 @@ skips without one, so run it with one present before a release.
 
 `.gitignore` excludes runtime-only Python artefacts, development
 directories (`.e2e/`, `deploy/`, `scripts/`) and local agent instructions
-(`AGENTS.md`, `CLAUDE.md`) from the install payload. In `tests/`, only the
+(`CLAUDE.md`) from the install payload. `AGENTS.md` is tracked — PR review
+reads its review rules — so it is installed too; it holds only code review
+rules and no instructions for a running agent. In `tests/`, only the
 named exceptions, including `conftest.py`, are tracked; other tests stay
 local. Every tracked file, including those tests, is copied into
 `$HERMES_HOME/plugins/clawchat/` on every install and must pass the Hermes
