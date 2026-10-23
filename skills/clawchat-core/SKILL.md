@@ -118,7 +118,8 @@ Step 1 — print the current state and report it before acting:
 
 ```bash
 echo "HERMES_HOME=${HERMES_HOME:-<unset>}"
-cat "${HERMES_HOME:-$HOME/.hermes}/active_profile" 2>/dev/null || echo "active_profile=default"
+root="${HERMES_HOME:-$HOME/.hermes}"; case "$root" in */profiles/*) root="${root%/profiles/*}" ;; esac
+cat "$root/active_profile" 2>/dev/null || echo "active_profile=default"
 hermes profile list
 ```
 
@@ -126,6 +127,7 @@ Windows (PowerShell):
 
 ```powershell
 $root = if ($env:HERMES_HOME) { $env:HERMES_HOME } else { Join-Path $env:LOCALAPPDATA 'hermes' }
+if ($root -match '[\\/]profiles[\\/][^\\/]+$') { $root = Split-Path (Split-Path $root -Parent) -Parent }
 "HERMES_HOME=$(if ($env:HERMES_HOME) { $env:HERMES_HOME } else { '<unset>' })"
 $active = Join-Path $root 'active_profile'
 if (Test-Path $active) { Get-Content $active } else { 'active_profile=default' }
