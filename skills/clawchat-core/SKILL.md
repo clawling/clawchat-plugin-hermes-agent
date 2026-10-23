@@ -1,6 +1,6 @@
 ---
 name: clawchat-core
-version: 1.18.0
+version: 1.18.1
 description: Use when a request involves ClawChat profile, friends, user search, conversation lookup, group membership (adding a member, leaving a group), moments/dynamics, comments, reactions, avatar, media, memory, mentions, sending a local file, image, video, or voice/audio clip as a chat attachment, output visibility, managing the owner's other agents or groups, updating the owner's home-screen widgets, or plugin install/update/activation.
 ---
 
@@ -118,7 +118,7 @@ Step 1 — print the current state and report it before acting:
 
 ```bash
 echo "HERMES_HOME=${HERMES_HOME:-<unset>}"
-cat "$HOME/.hermes/active_profile" 2>/dev/null || echo "active_profile=default"
+cat "${HERMES_HOME:-$HOME/.hermes}/active_profile" 2>/dev/null || echo "active_profile=default"
 hermes profile list
 ```
 
@@ -235,7 +235,7 @@ To deliver a local file, image, video, or audio clip as a native attachment, eit
 - `clawchat_mention_message` is **text only** — it cannot carry a file. To @-mention someone *and* send a file, call `clawchat_mention_message` first, then `clawchat_send_file` to the same `chat_id` in the same turn; both are delivered.
 - `[[as_document]]` in reply text forces an image to be sent as a file; `as_document: true` on `clawchat_send_file` does that for any file type, video and audio included.
 - Use the real saved path — e.g. the path you just wrote with `write_file` — never an invented one.
-- Other files (`.md`, `.pdf`, `.zip`, …) are delivered as downloadable documents automatically. Add `[[as_document]]` to force an image to be sent as a file instead of an inline image.
+- Other files (`.md`, `.pdf`, `.zip`, …) are delivered as downloadable documents automatically.
 - Video files (`.mp4`, `.mov`, `.webm`, …) are delivered as **playable videos** — ClawChat detects the video type from the file. Use a real video file with its normal extension so the type is recognized; an extension-less or mislabeled file may arrive as a plain document. To send a video as a downloadable file instead, call `clawchat_send_file` with `as_document: true`.
 - Audio files (`.mp3`, `.m4a`, `.wav`, `.ogg`, `.aac`, …) are delivered as **playable voice messages** — ClawChat detects the audio type from the file and renders a voice bubble automatically. There is no separate voice tool, flag, or `voice` kind: a voice message is just audio media. Use a genuine audio file with its normal extension so the type is recognized; an extension-less or mislabeled file may arrive as a plain document. The clip length is shown on the recipient side automatically — you do not set a duration.
 - In reply text, send several files by including multiple `MEDIA:` markers. Any non-`MEDIA:` text in the same reply becomes the message body / caption.
