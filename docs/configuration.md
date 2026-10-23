@@ -1294,17 +1294,54 @@ artifacts. Ending the turn immediately clears pending permits and artifacts.
 
 Guest delivery rejects symlinks (including parent directories), hard links,
 non-regular files, credential/system paths, and files changed since declaration.
-Artifact registration opens the file and records its kernel-reported real path
-and `fstat` identity, rather than combining a resolved path with pathname stats.
-Guest attachment uploads open one descriptor, look up its actual path (`/proc/self/fd`
-on Linux, `F_GETPATH` on macOS, `GetFinalPathNameByHandle` on Windows), reapply
-the complete path policy to that path, and compare device/inode/size/mtime/ctime
-and link count from `fstat`. Both paths are resolved for comparison; Windows
-prefixes and case are normalized too. Missing descriptor-path support refuses
-guest delivery. The reader uses at most the checked size (100 MiB limit), rechecks the descriptor
-path, policy and identity after the read and final pathname check, and uploads
-only those bytes. Owner and local-operator delivery keep their original path
-checks and byte reads without descriptor lookup or additional rejection rules.
+On POSIX (Linux and macOS), registration and guest reads open the root directory,
+then each requested component with `openat` (`os.open` with `dir_fd`) and
+`O_NOFOLLOW`. Directory opens use `O_DIRECTORY | O_CLOEXEC` and Linux's `O_PATH`
+when available, otherwise `O_RDONLY`; the final file uses
+`O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`. Missing required flags or
+directory-fd support refuses delivery. After user-home expansion, paths must
+be absolute with a single leading separator and no NUL, empty, `.` or `..`
+components (including repeated or trailing separators and the root alone).
+The complete delivery policy must return exactly the requested traversal path.
+macOS system symlink aliases are refused too; use the actual `/private/...`
+path where applicable, still subject to the same denylist. macOS additionally
+uses `F_GETPATH` after opening and after every verification walk: the kernel's
+actual path spelling must match the traversal path exactly and pass the full
+policy without normalization. This rejects case aliases that could bypass
+string policy on case-insensitive volumes; failed queries refuse delivery.
+Linux uses no kernel query returning canonical case. Denied paths on
+case-insensitive directories or mounts (including ext4/f2fs casefold and vfat)
+are matched by string policy; case aliases there are outside the guarantees.
+macOS verifies actual spelling with `F_GETPATH`; Windows uses `normcase`.
+
+The recorded identity combines this verified traversal path with the original
+fd's device/inode/size/mtime/ctime and link count from `fstat`. Only a regular
+file with one link is accepted. Before reading, and twice after reading, the
+reader reapplies policy, checks the original fd, reopens the entire path from
+the root using an extra fd, compares its complete identity and closes it.
+It then takes a strict pathname sample with `os.stat(..., follow_symlinks=False)`,
+reapplies policy, and performs the final path sample with `lstat` from the root:
+every ancestor must exist as a real directory, and the leaf's complete identity
+must match. The original fd is then checked again. Every identity comparison
+includes all recorded fields. Extra fds only
+verify identity; bytes come only from the original fd, up to its checked size
+(100 MiB limit), with short reads refused. A final turn authorization check
+precedes delivery.
+Windows retains `GetFinalPathNameByHandleW`, checking the opened handle's path
+against the complete policy and `fstat` identity, with prefix, case and native
+short-name normalization. The expected path is normalized before opening;
+rechecks bracket the normalized source-path policy check with two handle
+identity checks. Failed handle queries refuse delivery.
+
+Persistent parent moves or links left at the original location are refused by
+the final `lstat` chain, including moves after the preceding stat or policy
+check. File replacement and deletion are also refused. Changes during the final
+chain can escape observation: user-space path queries are not atomic and cannot
+prove the namespace stayed unchanged throughout reading. Paths do not establish
+a file's historical origin, and mount
+aliases (including bind mounts) are not symlinks; an alias of the same object
+cannot always be distinguished. Mount switches that change identity are refused.
+Owner and local-operator delivery keep their original path checks and byte reads.
 Avatar, moment image, app icon and media upload tools also retain their original
 read paths. Files direct does not relax public-address checks for remote media.
 

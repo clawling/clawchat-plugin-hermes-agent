@@ -18,9 +18,8 @@ separated), read out of the same checkout with ``git show``; a tag the checkout
 does not have is skipped.
 
 The newer scanners in :data:`HIGH_CLEAN_SCANNER_TAGS` (override with
-``HERMES_HIGH_CLEAN_SCAN_TAGS``, comma separated) must also report exactly
-the registered high findings in :data:`EXPECTED_HIGH_FINDINGS`. Unexpected
-high findings and exceptions that no longer occur both fail the check.
+``HERMES_HIGH_CLEAN_SCAN_TAGS``, comma separated) and the checkout's HEAD
+scanner must report zero high findings as well as zero critical findings.
 
 This check runs the real scanner, so it needs a Hermes Agent source checkout:
 ``$HERMES_SOURCE_DIR``, or the ignored ``tmp/hermes`` / ``tmp/hermes-agent``
@@ -47,9 +46,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #: reads tests/ at full severity.
 PINNED_SCANNER_TAGS = ("v2026.8.31",)
 HIGH_CLEAN_SCANNER_TAGS = ("v0.22.5",)
-# _descriptor_path must query the opened file's kernel path to reject parent
-# symlink swaps into credential directories; see its Linux-branch source comment.
-EXPECTED_HIGH_FINDINGS = {("clawchat_gateway/turn_attachments.py", "proc_access")}
 
 
 def _scanner_tags(
@@ -188,7 +184,7 @@ def test_tracked_tree_passes_the_install_scanner_of_older_hermes(tmp_path, tag):
     _scanner_tags("HERMES_HIGH_CLEAN_SCAN_TAGS", HIGH_CLEAN_SCANNER_TAGS)
     or [pytest.param("", marks=pytest.mark.skip(reason="no high-clean pinned tags"))],
 )
-def test_tracked_tree_has_only_registered_high_findings(tmp_path, tag):
+def test_tracked_tree_has_no_high_findings(tmp_path, tag):
     hermes = _hermes_source()
     if hermes is None:
         pytest.skip("no Hermes source checkout (set HERMES_SOURCE_DIR or use tmp/hermes)")
@@ -203,9 +199,7 @@ def test_tracked_tree_has_only_registered_high_findings(tmp_path, tag):
 
     assert result["critical"] == [], (tag, result["critical"])
     assert result["verdict"] != "dangerous", (tag, result["reason"])
-    high = {tuple(finding) for finding in result["high"]}
-    assert high <= EXPECTED_HIGH_FINDINGS, (tag, "unexpected high findings", high - EXPECTED_HIGH_FINDINGS)
-    assert EXPECTED_HIGH_FINDINGS <= high, (tag, "stale high exceptions", EXPECTED_HIGH_FINDINGS - high)
+    assert result["high"] == [], (tag, result["high"])
 
 
 def test_tracked_tree_is_not_blocked_by_the_hermes_install_scanner(tmp_path):
@@ -235,4 +229,5 @@ def test_tracked_tree_is_not_blocked_by_the_hermes_install_scanner(tmp_path):
     result = json.loads(proc.stdout.strip().splitlines()[-1])
 
     assert result["critical"] == [], result["critical"]
+    assert result["high"] == [], result["high"]
     assert result["verdict"] != "dangerous", result["reason"]
