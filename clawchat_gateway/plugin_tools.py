@@ -1581,7 +1581,7 @@ def register_tools(ctx) -> None:
                 "Images go out inline, videos as playable videos, audio as playable voice messages; "
                 "set as_document=true to send any file as a downloadable file. "
                 "caption is optional text sent with the file. "
-                "Files under credential or system locations (~/.ssh, ~/.aws, /etc, the Hermes .env …) are refused. "
+                "Files in credential or system locations (the .ssh and .aws directories in your home directory, /etc, the Hermes .env …) are refused. "
                 "After this tool succeeds the file has already been delivered; do not send it again with MEDIA:. "
                 "It is delivered even right after clawchat_mention_message into the same chat."
             ),

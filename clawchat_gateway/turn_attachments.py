@@ -153,6 +153,10 @@ def _descriptor_path(fd: int) -> str:
     """Ask the kernel which file is open; never substitute the requested path."""
     try:
         if sys.platform.startswith("linux"):
+            # On Linux, /proc/self/fd is the only standard-library kernel-path lookup,
+            # like macOS F_GETPATH or Windows GetFinalPathNameByHandleW; /dev/fd is the same mechanism.
+            # Comparing fstat(fd) with stat(requested_path) still follows intermediate symlinks:
+            # a swapped parent pointing into credentials can pass, so recheck the kernel path.
             path = os.readlink(f"/proc/self/fd/{fd}")
             if path.endswith(" (deleted)"):
                 raise ValueError("attachment was removed")

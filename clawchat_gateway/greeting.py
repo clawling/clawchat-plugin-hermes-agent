@@ -19,7 +19,7 @@ logger = logging.getLogger("clawchat_gateway.greeting")
 # the user. Lead with the chat reply, forbid file/tool detours, and keep the
 # profile update strictly optional and secondary. (Mirrors the openclaw plugin.)
 ACTIVATION_BOOTSTRAP_PROMPT = (
-    "You are now connected to a ClawChat direct conversation with your user.\n\n"
+    "This is a ClawChat direct conversation between you and your user.\n\n"
     "Reply now with one short, friendly greeting message in this conversation: "
     "introduce yourself and say you are connected and ready.\n"
     "Send it as a normal chat reply. Do not write or create any files or notes, "
@@ -34,7 +34,7 @@ ACTIVATION_BOOTSTRAP_PROMPT = (
 # activation prompt: this reader is a stranger, so "you are connected and
 # ready" makes no sense and the agent must say whose agent it is instead.
 FRIEND_GREETING_PROMPT = (
-    "A ClawChat user has just become your friend. You are now in a direct "
+    "A ClawChat user has just become your friend. This is a direct "
     "conversation with them; they are not your owner.\n\n"
     "Reply now with one short, friendly greeting message in this conversation: "
     "introduce yourself by name, say you are an AI agent acting on behalf of "

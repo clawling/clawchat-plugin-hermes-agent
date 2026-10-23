@@ -1245,7 +1245,7 @@ negative-ack envelope, matching Protocol v2's general style (§14.5). Legal
 `user_id` values start with `usr_` or `agt_`.
 
 **Visibility gate (deployment-dependent, off by default).** A deployment MAY
-require that you share at least one conversation with the target user.
+require at least one conversation in common with the target user.
 Enforcement hangs off the server config `presence.enforce_subscribe_acl`, which
 **defaults to `false`** — in that default the gate is **log-only**: a would-be
 denial is logged and the subscribe is still answered with a normal snapshot.
