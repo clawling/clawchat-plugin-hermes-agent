@@ -3,8 +3,8 @@
 Documentation for the `clawchat` Hermes plugin (Python package
 `clawchat-gateway`, source `clawling/clawchat-plugin-hermes-agent`). The plugin
 registers a `clawchat` gateway platform inside a running Hermes Agent
-v0.12.0+ process, ships a bundled `clawchat:clawchat-core` skill, and exposes
-fifty-one `clawchat_*` tools to the agent.
+v0.12.0+ process, ships all bundled `skills/*/SKILL.md` skills (currently six),
+and exposes all `clawchat_*` tools listed in `plugin.yaml`'s `provides_tools`.
 
 ## I want to…
 
@@ -13,6 +13,7 @@ fifty-one `clawchat_*` tools to the agent.
 | Install the plugin in a Hermes Agent                         | [`./install.md`](./install.md)                          |
 | Activate the plugin in a Hermes Agent                        | [`./activation.md`](./activation.md)                    |
 | Run several agents on one host / avoid pairing the wrong Hermes profile | [`./install.md#confirm-the-target-profile-before-every-install--activate`](./install.md#confirm-the-target-profile-before-every-install--activate) |
+| Run several profiles under one multiplexed gateway | [`./multiplex-profile-isolation.md`](./multiplex-profile-isolation.md) |
 | Understand automatic token refresh & auto-logout             | [`./token-refresh.md`](./token-refresh.md)              |
 | Understand how the plugin plugs into the Hermes runtime      | [`./architecture.md`](./architecture.md)                |
 | Configure ClawChat output visibility                         | [`./output-visibility.md`](./output-visibility.md)      |
@@ -44,8 +45,7 @@ fifty-one `clawchat_*` tools to the agent.
 4. The install guide is [`./install.md`](./install.md). Keep install and
    activation instructions there so published docs have one operator-facing
    source of truth.
-5. The wire protocol is documented in
-   [`./client-integration.md`](./client-integration.md) — the authoritative
-   Protocol v2 contract for this plugin. This plugin and `openclaw-clawchat`
-   are peer Protocol-v2 clients; update the protocol doc when the WebSocket
-   protocol changes.
+5. [`./client-integration.md`](./client-integration.md) is a plugin-side
+   derivative of the server's Protocol v2 contract. The server implementation
+   takes precedence if they disagree. Change the server contract first, then
+   this copy and the peer Protocol-v2 clients.

@@ -24,14 +24,18 @@ These names refer to different layers and are not interchangeable:
 | Call                                                         | Provided by              | Effect                                                                                       |
 |--------------------------------------------------------------|--------------------------|----------------------------------------------------------------------------------------------|
 | `ctx.register_platform(name="clawchat", ...)`                | `__init__._register_platform` | Registers the gateway platform. Requires Hermes v0.12.0+; raises otherwise.            |
-| `ctx.register_tool(name, "clawchat", schema, handler, ...)`  | `clawchat_gateway.plugin_tools.register_tools` | Registers all 51 `clawchat_*` tools. List is also in `plugin.yaml`. |
-| `ctx.register_skill("clawchat-core", path, description=...)` | `__init__._register_skill` | Registers the bundled Plugin Bundle skill `clawchat:clawchat-core` (path `skills/clawchat-core/SKILL.md`), then any extra skills present in the managed manifest (`$HERMES_HOME/clawchat-skills/manifest.json`) that were delivered by a dynamic skill update, so they survive restarts. Also captures the registrar (`skill_update.set_skill_registrar`) so a brand-new skill applied after owner consent is hot-registered immediately (`skill_update.hot_register_new_skills`) without a restart. Skipped silently if the host does not implement `register_skill`. Load also runs `skill_update.ensure_external_skills_dir()`, which idempotently adds `clawchat-skills` to the host config's `skills.external_dirs` so all managed skills additionally appear in the `<available_skills>` index / `skills_list` under their bare names. |
+| `ctx.register_tool(name, "clawchat", schema, handler, ...)`  | `clawchat_gateway.plugin_tools.register_tools` | Registers all `clawchat_*` tools listed in `plugin.yaml`'s `provides_tools`. |
+| `ctx.register_skill(skill_id, path, description=...)` | `__init__._register_skill` | Registers all bundled `skills/*/SKILL.md` skills (currently six; see [skill updates](./skill-updates.md#bundled-ids-are-auto-discovered-not-hardcoded)), then any extra skills present in the managed manifest (`$HERMES_HOME/clawchat-skills/manifest.json`) that were delivered by a dynamic skill update, so they survive restarts. Also captures the registrar (`skill_update.set_skill_registrar`) so a brand-new skill applied after owner consent is hot-registered immediately (`skill_update.hot_register_new_skills`) without a restart. Skipped silently if the host does not implement `register_skill`. Load also runs `skill_update.ensure_external_skills_dir()`, which idempotently adds `clawchat-skills` to the host config's `skills.external_dirs` so all managed skills additionally appear in the `<available_skills>` index / `skills_list` under their bare names. |
 | `ctx.register_cli_command("clawchat", ...)`                  | `__init__._register_cli_commands` | Adds `hermes clawchat activate <CODE>`, `reclaim`, and `status` on Hermes builds that expose `register_cli_command`. |
 | `ctx.register_command("clawchat-activate", ...)`             | `__init__._register_commands` | Adds the `/clawchat-activate <CODE>` slash command for in-session activation.        |
 | `ctx.register_command("clawchat-reclaim", ...)` | `__init__._register_commands` | Clears superseded state and immediately wakes local waiting connections. |
 | `ctx.register_command("clawchat-output", ...)`               | `__init__._register_commands` | Adds the `/clawchat-output minimal\|normal\|full` slash command ([`./output-visibility.md`](./output-visibility.md)). |
 | `ctx.register_hook("pre_api_request", ...)`                  | `__init__._register_llm_context_debug_hooks` | Installs the LLM-context debug observer (inert unless `CLAWCHAT_LLM_CONTEXT_DEBUG` is set). |
 | `ctx.register_hook("post_api_request", ...)`                 | `__init__._register_session_usage_hook` | Records the prompt size of each ClawChat conversation's latest model request (`clawchat_gateway.sediment`), which times the sediment turn before compression. |
+| `ctx.register_hook("pre_api_request", ...)` | `__init__._register_session_usage_hook` | Records the output-token reservation for sediment timing. |
+| `ctx.register_hook("pre_tool_call", ...)` | `__init__._register_host_tools_guard` | Enforces host-tool permissions and routing limits before execution. |
+| `ctx.register_hook("post_tool_call", ...)` | `__init__._register_host_tools_guard` | Registers `turn_attachments.post_tool_call` when supported by the host, capturing tool artifacts and background-process origins. |
+| `ctx.register_hook("pre_llm_call", ...)` | `__init__._register_host_tools_guard` | Binds per-turn permissions on hosts that support the hook. |
 | `ctx.register_hook("pre_gateway_dispatch", ...)`             | `__init__._clawchat_pre_gateway_dispatch` | Drops frames whose sender matches the bot's own ClawChat `user_id` (self-echo). |
 
 `adapter_factory`, `setup_fn`, `check_fn`, `validate_config`, and
@@ -414,7 +418,8 @@ contract**, pinned by the tracked fixture
 `clawchat_gateway/fixtures/permission_events/invalid-chat-id-outbound.json`
 — a byte-identical copy of the openclaw plugin's fixture. The fixture is the
 shared artefact; the parity assertions over it live in each plugin's own test
-suite, which is **not** part of this published checkout (`.gitignore: tests/`).
+suite. Named tests are tracked through `.gitignore` exceptions; other tests
+stay local (see [development](./development.md#running-tests)).
 The openclaw side enforces the same rule at
 its own structured boundaries (`sendRawEnvelope`, `sendAlignedAckableEnvelope`,
 `sendOpenclawClawlingReaction`).
@@ -423,8 +428,8 @@ Every ClawChat conversation id is minted by member-backend with the `cnv_`
 prefix and msghub resolves a chat_id only through member-backend, so anything
 else is refused upstream with `code=400: invalid conversation id` — a wasted
 round trip and an ERROR line in msghub for a frame that never had a recipient.
-Production (2026-07-30) saw agents address peers by their `usr_…` idcode and by
-a host-composed `direct:{self}:{peer}` key.
+An agent may accidentally address a peer by a `usr_…` idcode or a
+host-composed `direct:{self}:{peer}` key; neither is a conversation id.
 
 The gate lives at the connection boundary rather than at any single caller
 because the plugin forwards a chat_id chosen upstream — by the host's target
@@ -662,14 +667,15 @@ Routes are bounded by:
 ## Wire protocol
 
 This plugin and the sibling `openclaw-clawchat` plugin are **peer
-Protocol-v2 clients**. The wire contract is documented in
-[`./client-integration.md`](./client-integration.md) — the authoritative
-Protocol v2 reference for this plugin (envelope, events, routing, replay,
-streaming, and canonical wire examples).
+Protocol-v2 clients**. [`./client-integration.md`](./client-integration.md)
+is a plugin-side derivative of the server's Protocol v2 contract (envelope,
+events, routing, replay, streaming, and wire examples). The server implementation
+takes precedence if they disagree.
 
 When the wire shape changes:
 
-1. Update [`./client-integration.md`](./client-integration.md) first.
+1. Update the server's Protocol v2 contract first, then
+   [`./client-integration.md`](./client-integration.md).
 2. Update `clawchat_gateway/protocol.py` (frame builders) and
    `clawchat_gateway/inbound.py` (frame parsing) here.
 3. Mirror the same change in `clawchat-plugin-openclaw/src/`.

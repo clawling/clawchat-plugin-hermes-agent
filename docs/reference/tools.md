@@ -165,7 +165,8 @@ are on, and per-call skill, media and output-path limits remain.
 Only authorization-card wakeups and registered process completions inherit
 requester grants (`ORIGIN_INHERITANCE_POLICY = "receipt-and-process-completion"`).
 For a successful guest `terminal` call with `background: true` and
-`notify_on_complete: true`, `post_tool_call` records the process, starting turn's
+`notify: true` (falling back to `notify_on_complete` only when `notify` is absent
+or `None`), `post_tool_call` records the process, starting turn's
 plugin nonce, speakers and source session. A host `internal=True` completion
 must match metadata `notification_origin=process_registry_synthetic`,
 `original_trigger_message_id` equal to that nonce, the recorded
@@ -435,7 +436,7 @@ Allowed metadata fields per target:
 
 ## Cloud orchestration (`agent.orchestrate`)
 
-Twelve routes, 1:1 with `docs/features/agentorch.md`. Every response is HTTP
+Twelve routes, corresponding to the server's cloud orchestration API. Every response is HTTP
 200 with the business outcome in the envelope (`code`/`msg`/`data`); these
 tools hand that envelope to the model unchanged instead of raising, since the
 model's error handling is keyed on the top-level `code` (e.g. `21003` means

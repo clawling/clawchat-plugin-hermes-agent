@@ -17,15 +17,17 @@ same modules Hermes loads.
 ├── MANIFEST.in                  # Bundles prompts/*.md when building a wheel
 ├── clawchat_gateway/            # All runtime modules — adapter, connection, protocol, tools, …
 ├── prompts/                     # Required platform.md + optional defaults
-├── skills/                      # Four bundled skill dirs (each a SKILL.md) + manifest.json
+├── skills/                      # All bundled */SKILL.md skills (currently six) + manifest.json
+├── tests/                       # Tracked by named .gitignore exceptions
+├── uv.lock                      # Locked development and test environment
 └── docs/                        # This documentation tree
 ```
 
 ## Setting up a local environment
 
-The package metadata supports plain `pip` and `uv`. The repo does not
-ship a lockfile for runtime dependencies (only the wheel constraints in
-`pyproject.toml`).
+The package metadata supports plain `pip` and `uv`. The tracked `uv.lock`
+locks the development and test environment. Hermes installs the source tree
+without using this lockfile; runtime requirements are in `pyproject.toml`.
 
 ### With `uv`
 
@@ -111,8 +113,9 @@ already in `.gitignore`; nothing committed depends on it.
 
 ## Modifying the wire protocol
 
-The Protocol v2 contract is documented in
-[`./client-integration.md`](./client-integration.md). Update it first, then
+[`./client-integration.md`](./client-integration.md) is a plugin-side derivative
+of the server's Protocol v2 contract; the server implementation takes precedence
+if they disagree. Update the server contract first, then this copy and
 update `clawchat_gateway/protocol.py` (outbound builders) and
 `clawchat_gateway/inbound.py` (parsing). Mirror the same change in
 `clawchat-plugin-openclaw/src/` — the two plugins are peers.
@@ -157,10 +160,8 @@ formatting and comments.
 
 `MANIFEST.in` only ships `prompts/*.md`, and `[tool.setuptools.packages.find]`
 in `pyproject.toml` only includes the `clawchat_gateway*` package. The
-top-level `skills/` tree — all four bundled skill directories
-(`skills/clawchat-core/`, `skills/clawchat-liveware/`,
-`skills/clawchat-liveware-sample/`, `skills/clawchat-set-greeting/`, each with
-a `SKILL.md`) **and**
+top-level `skills/` tree — all bundled `skills/*/SKILL.md` directories
+(currently six; see [skill updates](./skill-updates.md#bundled-ids-are-auto-discovered-not-hardcoded)) **and**
 `skills/manifest.json` — lives outside that package and is not referenced by
 `MANIFEST.in` either, so none of it is included in a built wheel. A
 wheel-only install therefore has an empty `bundled_skill_ids()` result (the

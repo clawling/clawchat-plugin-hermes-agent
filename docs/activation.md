@@ -176,9 +176,10 @@ Without multiplexing, give the profile a gateway of its own instead:
 Prefer a bare `hermes profile create` over `--clone` for a second ClawChat
 agent: cloning copies credentials that the new profile must not reuse.
 
-The ClawChat backend and msghub already key sessions on the composite
-`(user_id, device_id)`, so both agents coexist, stay online together, and can
-join the same group — a shared host `device_id` is not a conflict.
+New profiles derive distinct, agent-scoped device ids, so both agents can
+coexist and join the same group. If you pin `CLAWCHAT_DEVICE_ID` manually,
+use a different value for each profile; pairing and plugin reports also key
+on device id alone.
 
 Successful activation prints `clawchat: activation complete for <user_id>` and
 exits 0. Treat any non-zero exit as a hard failure. Activation codes are
@@ -296,7 +297,7 @@ Activation writes:
 |---|---|
 | `$HERMES_HOME/.env` | `CLAWCHAT_TOKEN`, `CLAWCHAT_REFRESH_TOKEN`, optional `CLAWCHAT_HOME_CHANNEL*`. |
 | `$HERMES_HOME/config.yaml` | `platforms.clawchat.enabled=true`, `extra.base_url`, `extra.websocket_url`, `extra.user_id`, `extra.agent_id`, `extra.owner_user_id`, missing `extra.output_visibility=normal`, derived `extra.runtime_status_messages=false`, forced agent quiet defaults (`gateway_notify_interval=0`, `gateway_timeout_warning=0`), forced global ClawChat display defaults (`busy_input_mode=queue`, `busy_ack_enabled=false`, `background_process_notifications=off`, `tool_progress_command=false`), missing `display.platforms.clawchat.*` normal-preset defaults, and forced memory routing defaults (`memory.user_profile_enabled=false`, `memory.nudge_interval=0`; see [`./configuration.md`](./configuration.md#hermes-built-in-memory)), and a missing `compression.threshold_tokens` filled from `session-cap-tokens` (see [`./configuration.md`](./configuration.md#sediment-turns)). Operators may edit the ClawChat platform display block manually after activation. |
-| `$HERMES_HOME/clawchat.sqlite` | Latest activation row, including access token, optional refresh token, user ids, activation conversation id, and the connect-time `device_id` (`activations.device_id`); plus the `owner_profile` cache row (last-known owner nickname/avatar/bio/locale, refreshed on every owner-metadata pull, advisory only). |
+| `$HERMES_HOME/clawchat/clawchat.sqlite` (named profiles: `clawchat-<profile>.sqlite`; see [database location](./configuration.md#database-location)) | Latest activation row, including access token, optional refresh token, user ids, activation conversation id, and the connect-time `device_id` (`activations.device_id`); plus the `owner_profile` cache row (last-known owner nickname/avatar/bio/locale, refreshed on every owner-metadata pull, advisory only). |
 
 Returned `.env` tokens and `config.yaml` user ids overwrite any previously
 configured ClawChat activation credentials — which is why activation refuses to
@@ -351,8 +352,8 @@ connect-time device id):
 
 On success the rotated `{access_token, refresh_token}` pair is written to **both**
 `$HERMES_HOME/.env` (`CLAWCHAT_TOKEN` / `CLAWCHAT_REFRESH_TOKEN`) and plugin
-SQLite, then the WebSocket reconnects with the new token. Agents no longer die
-at the 24h mark.
+SQLite, then the WebSocket reconnects with the new token. Access-token expiry
+comes from JWT `exp`, with timing determined by the server.
 
 Each refresh attempt has a 20s total deadline
 (`REFRESH_ATTEMPT_CEILING_SECONDS` in `clawchat_gateway/api_client.py`; the 15s
@@ -361,9 +362,9 @@ transient. When a transient failure may have reached the server (deadline hit,
 reset, non-200), the next attempt with the same refresh token starts 31–35s
 after the failed attempt began instead of the usual 1s/2s/4s backoff; failures
 that provably never reached the server, and `code:1`, keep the fast backoff.
-That spacing lets a retry after a lost response redeem the same refresh token
-inside the backend's refresh grace window (requires server grace window
-(member-backend ≥ release TBD)). A `10003` on that retry still logs out. See
+That spacing supports retrying after a lost response within the server's refresh
+grace window. Its duration and replay budget are server-controlled; a `10003`
+on that retry still logs out. See
 [`./token-refresh.md`](./token-refresh.md) §B.
 
 Integer business code `10003` in parseable JSON is permanent even in a non-200
@@ -652,15 +653,15 @@ conversation id.
 
 ## Verification
 
-The regression suite for activation writes lives in `tests/`, which is **not**
-part of this published checkout (`.gitignore: tests/` — see
-[`./development.md`](./development.md)). Run it from a working tree that has
-one; the smallest command that covers the activation change being touched:
+The regression suite for activation writes lives in `tests/`. Named tests
+and shared fixtures are tracked through `.gitignore` exceptions; other tests
+stay local (see [`./development.md`](./development.md#running-tests)). Use
+the smallest command that covers the activation change being touched:
 
 ```bash
-uv run pytest tests/           # scoped to the file covering the change
-uv run pytest
+uv run --extra test pytest tests/  # scope to the file covering the change
+uv run --extra test pytest
 ```
 
-For install, activation, Gateway startup, or real ClawChat connectivity changes,
-read `.e2e/docs/testing.md` before running E2E.
+For a live Hermes setup, see
+[`./development.md`](./development.md#live-debugging-against-a-hermes-process).

@@ -85,9 +85,9 @@ After install, the plugin source is at `$HERMES_HOME/plugins/clawchat/`.
 
 - Copy the plugin source into `$HERMES_HOME/plugins/clawchat/`.
 - On `enable`, register the `clawchat` gateway platform via
-  `ctx.register_platform(...)`, register the bundled `clawchat:clawchat-core`
-  skill via `ctx.register_skill(...)`, register the 51
-  `clawchat_*` tools, and install the `pre_gateway_dispatch` hook.
+  `ctx.register_platform(...)`, register all bundled `skills/*/SKILL.md`
+  skills (currently six) via `ctx.register_skill(...)`, register all
+  `clawchat_*` tools in `plugin.yaml`'s `provides_tools`, and install the `pre_gateway_dispatch` hook.
 - **No** credentials are written. `CLAWCHAT_TOKEN` and
   `CLAWCHAT_REFRESH_TOKEN` do not exist until activation runs.
 
@@ -163,6 +163,11 @@ docker exec hermes sh -lc \
 |----------------|---------------------------------------------------------|
 | `--restart`    | Compatibility flag; activation requests a detached Hermes gateway restart by default. |
 | `--no-restart` | Skip the detached Hermes gateway restart after activation. |
+| `--new-account` | Explicitly replace this profile's existing activation with a different identity. |
+| `--repair` | Explicitly re-pair the identity already bound to this profile. |
+
+For the complete CLI syntax and flag rules, see
+[`./reference/cli.md`](./reference/cli.md#flag-summary).
 
 The restart is only *requested*: activation prints where its outcome is logged
 (`$HERMES_HOME/clawchat/gateway-restart.log`) and skips it with a next step when
@@ -174,8 +179,8 @@ the profile has no gateway yet or is served by a multiplexing gateway. See
 | File                                       | Contents (per `clawchat_gateway/activate.py`)                                 |
 |--------------------------------------------|--------------------------------------------------------------------------------|
 | `$HERMES_HOME/.env`                        | `CLAWCHAT_TOKEN`, `CLAWCHAT_REFRESH_TOKEN`, optional `CLAWCHAT_HOME_CHANNEL*`. |
-| `$HERMES_HOME/config.yaml`                 | `platforms.clawchat.enabled=true`, `extra.base_url`, `extra.websocket_url`, `extra.user_id`, `extra.agent_id`, `extra.owner_user_id`, missing `extra.output_visibility=normal`, derived `extra.runtime_status_messages=false`, forced agent quiet defaults (`gateway_notify_interval=0`, `gateway_timeout_warning=0`), forced global ClawChat display defaults (`busy_input_mode=queue`, `busy_ack_enabled=false`, `background_process_notifications=off`, `tool_progress_command=false`), and missing `display.platforms.clawchat.*` normal-preset defaults. Operators may edit the ClawChat platform display block manually after activation. |
-| `$HERMES_HOME/clawchat.sqlite`             | Latest activation row (access token, optional refresh token, user ids, activation conversation id) plus the `owner_profile` cache row (last-known owner nickname/avatar/bio/locale, refreshed on every owner-metadata pull). |
+| `$HERMES_HOME/config.yaml`                 | `platforms.clawchat.enabled=true`, `extra.base_url`, `extra.websocket_url`, `extra.user_id`, `extra.agent_id`, `extra.owner_user_id`, missing `extra.output_visibility=normal`, derived `extra.runtime_status_messages=false`, forced agent quiet defaults (`gateway_notify_interval=0`, `gateway_timeout_warning=0`), forced global ClawChat display defaults (`busy_input_mode=queue`, `busy_ack_enabled=false`, `background_process_notifications=off`, `tool_progress_command=false`), missing `display.platforms.clawchat.*` normal-preset defaults, forced `memory.user_profile_enabled=false` and `memory.nudge_interval=0`, and missing `compression.threshold_tokens` filled from `session-cap-tokens`. Operators may edit the ClawChat platform display block manually after activation. See [persisted state](./activation.md#persisted-state) for details. |
+| `$HERMES_HOME/clawchat/clawchat.sqlite` (named profiles: `clawchat-<profile>.sqlite`; see [database location](./configuration.md#database-location)) | Latest activation row (access token, optional refresh token, user ids, activation conversation id, connect-time device id) plus the `owner_profile` cache row (last-known owner nickname/avatar/bio/locale, refreshed on every owner-metadata pull). |
 
 Successful activation via the CLI, slash-command, or compatibility-script
 paths prints `clawchat: activation complete for <user_id>` and exits 0; the

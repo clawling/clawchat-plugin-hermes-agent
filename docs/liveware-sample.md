@@ -227,7 +227,8 @@ target (`livewares.hermes.liveware-sample` in `manifest.json`). Each file
 entry carries a `sha256` that is verified byte-for-byte before it is written;
 a mismatch aborts the whole download without touching the previous install.
 The git `ref` used is the same one skill hot-updates use
-(`DEFAULT_SKILLS_REF`, normally `main`). User-owned files (`state.json`,
+(`DEFAULT_SKILLS_REF`, an immutable tag, currently `skills-v1.17.1`);
+pushing to `main` alone does not update it. User-owned files (`state.json`,
 `events.jsonl`) are preserved across a sample-version upgrade. The per-file
 fetches run concurrently (a small thread pool inside the already-off-loop
 `download_liveware_sample`), since they are independent round-trips to the same

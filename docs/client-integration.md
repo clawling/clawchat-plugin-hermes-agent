@@ -3,8 +3,8 @@
 **Audience.** Anyone implementing a client (mobile, desktop, web, or agent
 adapter) that talks to a ClawlingChat Message Hub server.
 
-**Scope.** This document is the complete contract for the WebSocket wire and the
-HTTP media upload. Three event families (`chat.metadata.invalidated`,
+**Scope.** This document is a plugin-side derivative of the server's Protocol v2
+contract for the WebSocket wire and HTTP media upload. Three event families (`chat.metadata.invalidated`,
 `notify.signal`, `permission.request` / `permission.resolved`) are deliberately
 content-free: they tell a client *that* something changed, and the authoritative
 state is then read from the deployment's companion REST API, which is a separate
@@ -26,16 +26,32 @@ directions.
 implementation disagree, the implementation is authoritative — please file
 an issue against this document in the repository that ships it.
 
-**Provenance.** Forked from `clawchat-msghub`
-`docs/features/msghub/protocol-v2-client-integration.md`; last re-synced
-2026-09-16 against msghub `da47fed`. Divergences kept on purpose for this
+**Provenance.** Derived from the server's Protocol v2 client guide; last full
+sync recorded here is 2026-09-16 at server commit `da47fed`. Change the server
+contract first, then update this copy. Divergences kept on purpose for this
 adapter: the 60 s → 600 s eviction reconnect floor (§3.6), local `chat_id`
 validation (§5.1), the receive-only view of `message.recall` (§6 row, §9.8),
-the `4002` not-yet-implemented note (§14.1), and the dropped cross-links to
-msghub's `protocol-v2-reference.md`. Re-sync by 3-way merging msghub's changes
-since that commit on top of this file — do not overwrite it with a plain copy. The
+the Hermes `4002` implementation note (§14.1), and omitted server-internal
+cross-links. Re-sync by merging the server guide's changes since that commit
+on top of this file — do not overwrite it with a plain copy. The
 2026-10-12 upstream correction that legacy delivery is not at-most-once (§6
 `reliable_delivery` row, §11, §11.7, §17 checklist) is already applied here.
+The `install_id` / terminal `4010` additions, stream-withdrawal and same-id
+full-reply recovery guidance (including unstreamed group replies), and the
+server-controlled recall marker retention correction are also applied separately.
+
+Known upstream changes after that sync **not yet incorporated** in this copy:
+
+- `agent_muted` rejection and recovery semantics.
+- `replay.done`'s `truncation_check` and v2 `ack_epoch` fields, and revised
+  `history.truncated` rules for fresh cursors and a single boundary per connection.
+- Compatible versus strict ack-silence clocks and the `ack_progress_clock` capability.
+- JWT `nbf`, session revocation, and revocation-check failure modes.
+- Server stamping of `history.transit.origin_device_id`.
+- Agent guidance for v2-only capability negotiation and continued legacy support.
+- Full handshake attempt-limit guidance and transient cursor-initialization
+  failures that close without either hello frame. The `4002` table below already
+  acknowledges handshake limiting, but the detailed upstream guidance is pending.
 
 ---
 
@@ -119,6 +135,12 @@ require it, and `hello-ok` does not return it. Obtain it **out-of-band** from
 your identity provider at startup (in the ClawChat deployment, the companion REST
 API's "current user" endpoint) and cache it for the process lifetime — do **not**
 derive it by decoding the token.
+
+**Hermes-specific deviation.** This plugin targets JWT-backed ClawChat sessions:
+`clawchat_gateway.config` reads `sub` from `CLAWCHAT_TOKEN` and uses it in
+preference to a disagreeing configured `user_id`, logging a warning. It also
+decodes `exp` for refresh timing. These are adapter assumptions, not requirements
+for other Protocol v2 clients; they do not validate a token locally.
 
 ---
 
@@ -376,9 +398,8 @@ To dampen such storms the server judges on two horizons. **Burst:** more than
 3 takeovers of the same `(user_id, device_id)` within a 10s window add a small
 bounded backoff (≤2s) before the new socket is installed. **Sustained:** a
 decaying per-key score (+1.0 per takeover, halving every 10 min) crossing 4.0
-marks a slow self-sustaining loop — the shape the burst window cannot see, and
-the one measured in production at 9–163s per eviction, which no burst rule ever
-caught.
+marks a slow self-sustaining loop whose evictions occur too far apart for
+the burst window to catch.
 
 **The server may refuse your socket (opt-in, off by default).** Where the
 operator has enabled `takeover_refuse_enabled`, a socket arriving at a key that
@@ -409,12 +430,10 @@ reconnecting into the other's eviction. **Run exactly one process per
 distinct `device_id` — and accept that each then maintains its own replay cursor
 and its own inbox backlog.
 
-**A 5-second floor is not enough — measured.** Earlier revisions of this section
-suggested one. Prod on 2026-08-18 showed why it fails: six devices sat in a
-mutual-eviction loop for hours at **9–163 s per eviction**, i.e. every round
-kept the socket alive far longer than any few-second floor, and longer than the
-window most clients use to decide a connection was "stable" and reset their
-backoff. That reset is the actual engine of the loop — not the floor's size.
+**A 5-second floor is not enough.** A mutual-eviction loop can keep each socket
+alive longer than a few-second floor, and longer than the window a client uses
+to decide a connection was "stable" and reset its backoff. Resetting backoff
+after a takeover can therefore sustain the loop even with a reconnect floor.
 
 This plugin therefore does two things on a `4001` close, and any other client
 should do the same:
@@ -1883,8 +1902,9 @@ the msghub Protocol v2 client guide §9.8.
   `BEGIN IMMEDIATE`, which makes the arrival order irrelevant in both
   directions. Tombstones are never expired — they are three columns per
   recalled message.
-  The server's own `rcl:<target>` marker is swept after 72h, so the local
-  tombstone is the only durable record.
+  The server's own `rcl:<target>` marker is swept according to server-controlled
+  inbox retention, which is not a protocol guarantee. The permanent local
+  tombstone remains necessary after that marker expires.
 - What is **not** attempted: removing the message from the Hermes host's own
   conversation history, and injecting a synthetic "the user retracted a message"
   turn. The first would mean owning host context management wholesale; the
@@ -2643,11 +2663,10 @@ The server may close the connection in several scenarios:
 | Code | When | Client action |
 |---|---|---|
 | `4001` | your `(user_id, device_id)` was taken over by a newer session | Back off before reconnecting (raise the floor — an instant reconnect causes a mutual-eviction storm). The token is still valid. |
-| `4002` | you tried to take over a `(user_id, device_id)` in a sustained eviction loop while the session holding it was provably alive | Wait the `retry_after_ms` in the JSON close reason before reconnecting; it doubles per consecutive refusal (60s → 300s cap). The token is still valid. |
+| `4002` | handshake attempt limit exceeded, or sustained takeover refusal protecting a proven-live incumbent (`takeover_refuse_enabled`) | Wait at least the JSON close reason's `retry_after_ms` before reconnecting. The server determines the delay; the token is still valid and no `hello-ok` was sent. |
 | `4010` | a different installation displaced this session (both install IDs present and distinct, displaced client opted in) | Terminal: persist superseded state, stop reconnect and refresh, notify the owner once; wait for explicit local reclaim. Token remains valid. |
 | `1009` | an inbound frame exceeded the server's frame cap (8 MiB post-auth, 64 KiB for the pre-auth `connect` frame) | Split the payload, or use media upload (§15). Never resend the frame. |
 | `1005` / close with no status | server-initiated kick: backpressure, ack-silence, unacked-ledger depth, `device.cursor.reset` | Reconnect with backoff; replay recovers the messages. |
-| `4002` | your `connect` was **turned away** instead of being allowed to evict a provably-healthy incumbent session for the same `(user_id, device_id)` — see §3.6 | Wait at least `retry_after_ms` (below) before retrying. The token is still valid, and no `hello-ok` was sent. |
 | `1006` (abnormal, no CLOSE frame) | handshake rejection, or a transport drop | **Read the last frame you received**: a `hello-fail` arrives immediately before the close and carries the real reason (§3.5). |
 
 `4001`, `4002`, and `4010` are the only application (4000–4999) close codes the server emits.
@@ -2776,7 +2795,7 @@ rule to this event.
 
 > **Two size limits, and only one of them yields a `message.error`.** The
 > WebSocket read limit is **8 MiB** per frame (`websocket.max_message_size`,
-> the default prod runs; the pre-auth `connect` frame is held to a tighter fixed
+> the server default; the pre-auth `connect` frame is held to a tighter fixed
 > 64 KiB). A frame over that limit is a transport failure, not a protocol one:
 > the server closes the socket with WS status **1009** (message too big) and you
 > never see a `message.error`. The produce cap is **1,000,000 bytes** (a server-side

@@ -1,35 +1,35 @@
-# ClawChat Agent Plugins — Token Refresh & Auto-Logout (canonical parity spec)
+# ClawChat Agent Plugins — Token Refresh & Auto-Logout
 
-> **Byte-identical duplicate.** The same file lives in both adapter repos, at
+> **Independently maintained guides.** Each adapter keeps its own version at
 > `clawchat-plugin-openclaw/docs/token-refresh.md` and
-> `clawchat-plugin-hermes-agent/docs/token-refresh.md`. Mirror every edit into
-> the other repo in the same change (`sha256sum` both copies to check), and
-> **never renumber a section** — source comments in both repos cite them by
-> number (`token_refresh.py` §A/§B/§C, `api_client.py` §0, `adapter.py` §C.1,
-> `openclaw-vs-hermes.md` §C.2).
+> `clawchat-plugin-hermes-agent/docs/token-refresh.md`. Behavior differences
+> are noted here; the files are not required to match. Keep section numbers
+> stable — source comments in both repos cite them by
+> number (`token_refresh.py` §A/§B/§C, `api_client.py` §0, `adapter.py` §C.1).
 
-This spec is implemented identically by both adapters:
+This guide describes Hermes behavior and compares the peer adapter where noted:
 
 - **OpenClaw** (TypeScript) — `clawchat-plugin-openclaw/`
 - **Hermes** (Python) — `clawchat-plugin-hermes-agent/`
 
-The two plugins are parallel adapters of one Protocol v2. Behavior described here MUST be
-identical across both. When changing the wire shape, update both plugins (and the msghub
-Protocol v2 contract doc (owner)) together.
+The two plugins are parallel adapters of one Protocol v2, maintained separately.
+When changing the wire shape, update the server's Protocol v2 contract first,
+then the plugin guides and implementations.
 
 ## Problem
 
-Both plugins receive and store a `refresh_token` from `POST /v1/agents/connect` but never use
-it. The `access_token` expires after **24h**; when it does the WebSocket handshake fails with
-`hello-fail` and the plugin is unusable until a human re-pairs it. This spec adds automatic
-refresh, correct auto-logout on permanent expiry, and protocol-correct WebSocket continuation.
+Both plugins store a `refresh_token` from `POST /v1/agents/connect` and use it
+for automatic refresh. Hermes implements proactive and reactive refresh,
+auto-logout on permanent refresh failure, and WebSocket reconnection with the
+new token. Access-token expiry comes from JWT `exp`; token lifetimes are
+server-controlled.
 
 ## Confirmed product decisions
 
 | # | Decision |
 |---|----------|
 | Scope | **Proactive + reactive** refresh (not reactive-only). |
-| Hermes device id | Persist a `device_id` column **and** require deployments to pin `CLAWCHAT_DEVICE_ID`; warn on boot if unpinned. |
+| Hermes device id | Activation persists the connect-time `device_id`; refresh reuses it. Deployments must pin `CLAWCHAT_DEVICE_ID` for new pairings; boot warns when only a volatile fallback is available. |
 | Hermes recovery | Successful refresh persists to **both** `.env` and SQLite before adoption. Every permanent refresh failure persists the revoked fingerprint, closes WS and waits for activation without a restart, including env bootstrap failures. Adoption must pass the access-token latch and fingerprint guard. |
 | Auto-logout UX | On permanent failure, surface a user-visible status/chat message (in addition to logs). |
 
@@ -42,7 +42,7 @@ refresh, correct auto-logout on permanent expiry, and protocol-correct WebSocket
 - **Unauthenticated** — send **no** `Authorization` header; the refresh token in the body is the credential.
 - **Required header:** `X-Device-Id` — must equal the device id baked into the session at connect time (the backend rejects any mismatch against the session's device id). ≤128 bytes.
 - **Body:** `{ "refresh_token": "<64-char hex>" }`.
-- **Normally returns HTTP 200.** Classify both the HTTP status and the integer envelope `code`:
+- **Normally returns HTTP 200.** Hermes classifies both the HTTP status and the integer envelope `code`:
 
 | HTTP status / integer `code` | meaning | class |
 |--------|---------|-------|
@@ -53,20 +53,24 @@ refresh, correct auto-logout on permanent expiry, and protocol-correct WebSocket
 | non-200 + parseable JSON integer `10003` | invalid refresh, including an urllib HTTPError body | **PERMANENT** → auto-logout |
 | all other non-200 responses (including `400`) / network errors | HTML, malformed JSON and string codes do not prove revocation | **TRANSIENT** → retry |
 
+**Peer difference:** OpenClaw treats every non-200 refresh response as
+**TRANSIENT**, regardless of body; it does not apply Hermes' non-200 `10003`
+classification. The failure matrix in §B and logout rule in §C describe Hermes.
+
 - The refreshed access token preserves the agent identity (`aid`/`oid`); scopes are read live server-side.
-- TTLs: access **24h**, refresh **60d** (sliding).
+- Token lifetimes are determined by the server; use JWT `exp` for access expiry.
 
 ### ⚠️ Rotation hazard (drives persistence ordering)
 
 Rotation is still single-use: on `code:0` the old refresh token is dead for normal use. The backend
 adds a **replay grace window that exists only to cover attempts whose outcome the client could not
-see** (the server rotated, the response was lost): the old token may be redeemed again **at most 2
-times**, only **~90s** or less after it was rotated (and no sooner than ~2s), only with the same
-device id, and only while the token that rotation issued has not itself been refreshed. Each
+see** (the server rotated, the response was lost): the old token may be redeemed again
+within a server-controlled window and replay budget, only with the same device id,
+and only while the token that rotation issued has not itself been refreshed. Each
 redemption revokes the token issued by the previous one. Outside the window — or after a logout /
 re-pair / explicit revocation — reuse returns `code:10003` exactly as before. **Clients must not
-rely on the window for anything else.** (Requires server grace window (member-backend ≥ release
-TBD); until then the backend is strict single-use and a lost response still ends in `10003`.)
+rely on the window for anything else.** The server supports this refresh grace
+window; its duration, minimum replay age, and replay budget are server-controlled.
 Therefore:
 
 > **Persist the new `{access_token, refresh_token}` durably BEFORE treating the refresh as
@@ -103,12 +107,13 @@ and, for OpenClaw, per transport:
 ### A.0 Knowing expiry — decode the JWT `exp` locally
 
 Decode the access token's `exp` claim (base64url-decode the payload segment, read `exp` as
-epoch seconds). **Fallback** if unparseable / no `exp`: `activated_at + 24h` from the
+epoch seconds). **Client fallback assumption** if unparseable / no `exp`:
+`activated_at + 24h` from the
 `activations` row. Do **not** persist a separate expiry column — derive it from the token on
 each load.
 
-- OpenClaw: add `decodeJwtExp(token): number | null`.
-- Hermes: add `_jwt_exp(token) -> int | None` next to the existing `_jwt_claim`.
+- OpenClaw: `decodeJwtExp(token): number | null`.
+- Hermes: `_jwt_exp(token) -> int | None` next to `_jwt_claim` in `config.py`.
 
 ### A.1 Proactive refresh
 
@@ -118,15 +123,15 @@ Compute `refresh_at = exp - max(30min, min(2h, 0.25 * (exp - iat)))`, plus `±5m
 - OpenClaw: a `setTimeout`-driven `refreshTimer`, armed when a connection becomes ready
   (from the live token's `exp`), re-armed after every successful refresh, cleared on
   disconnect/stop.
-- Hermes: fold the `exp` check into the existing per-connection `_watch_activation_credentials`
-  2s READY loop (or a sibling asyncio task on the supervisor's event loop).
+- Hermes: the per-connection `_watch_activation_credentials` READY loop calls
+  `_maybe_proactive_refresh` after checking for changed or revoked credentials.
 
 Flow: reach `refresh_at` → call refresh → persist (§0 ordering) → swap in-memory → **close WS
 and reconnect with the new token** (§D) → re-arm timer from the new token's `exp`.
 
 ### A.2 Reactive refresh
 
-1. **REST 401/403** — both clients classify these as an `auth` error today. On such an error
+1. **REST 401/403** — both clients classify these as an `auth` error. On such an error
    from any authenticated REST call, run the single-flight refresh; on success rebuild the
    api-client with the new token and **retry the original call once**.
 2. **WS `hello-fail`** — refresh **only** on genuine token rejection:
@@ -219,9 +224,8 @@ manual re-pair). If refresh returns PERMANENT → auto-logout immediately (skip 
   connection reset, non-200 — anything except a failure that provably never reached the server
   or an explicit `code:1`), the next attempt with the same refresh token starts **30–45s after
   the previous attempt began** (implementations: the 30s floor plus 1–5s jitter, or the floor
-  plus WS reconnect backoff). The lower bound keeps replays far above the backend's minimum
-  replay age and puts at most two of them inside the ~90s window (a third would start ≥ ~93s,
-  outside it); the upper bound keeps the first replay well inside. This applies to the
+  plus WS reconnect backoff). Whether a retry remains eligible for grace depends
+  on the server's configured window and replay budget. This applies to the
   proactive path too: a transient proactive refresh arms one retry instead of waiting for the
   next proactive arm.
 - **Transient→permanent escalation:** a network failure *after* the server committed the
@@ -244,7 +248,7 @@ connect code.
 ### C.0 The fork (be explicit)
 
 - **Access expired BUT refresh valid → NOT logout.** Refresh, persist, reconnect. Silent and
-  automatic. This is the common 24h case.
+  automatic.
 - **Refresh permanently invalid → DO logout.**
 
 ### C.1 What logout does (both plugins)
@@ -265,13 +269,13 @@ connect code.
    usually restores the incumbent identity on its own, and if activation still reports
    it as already paired, run it again with `--repair`. Credentials are re-fed to the
    wait-for-activation loop — no process restart needed.
-4. **User-visible notification** (decision): emit a status/chat message in addition to logs:
+4. **User-visible notification**: emit a status/chat message in addition to logs:
    *"ClawChat token expired and could not be refreshed. Ask your owner to send you the
    reconnect prompt from the ClawChat app, then follow
    https://agent-connection.clawling.com/reconnect.md."*
    Keep wording identical across both plugins.
 
-### C.2 Hermes recovery unification (decision)
+### C.2 Hermes recovery unification
 
 On every **successful** refresh, write the rotated token to **both** `.env` and SQLite
 before adopting it, and set `_using_activation_db_credentials = True`.
@@ -314,9 +318,10 @@ returns `skipped`, never permanent failure or auto-logout. The single owner noti
 uses the existing token without refresh; if it fails it is not retried. Restart
 keeps waiting until local reclaim or successful activation clears the state.
 Two retryable closes carry timing the client must honour: **`4001`** (takeover) → raise the reconnect
-floor to ≥ 5 s (msghub §3.6); **`4002`** (`duplicate_session_throttled`, opt-in) → wait the JSON
-close reason's `retry_after_ms` (60 s, doubling to 300 s) — longer than openclaw's `maxDelay`
-of 15 s. Both clients read the close code today: openclaw in `ws-client.ts`'s
+floor per §3.6 of [the protocol guide](./client-integration.md#36-duplicate-session-policy);
+**`4002`** (`duplicate_session_throttled`, takeover refusal or handshake limiting)
+→ wait the JSON close reason's server-determined `retry_after_ms`.
+Both clients read the close code: openclaw in `ws-client.ts`'s
 `handleClose`, hermes in its supervisor loop in `connection.py`; each keeps its own
 takeover streak and applies these floors.
 
@@ -324,31 +329,33 @@ takeover streak and applies these floors.
 
 ## E. Device-id (refresh precondition)
 
-The refresh endpoint requires `X-Device-Id` equal to the **connect-time** device id. Neither
-plugin stores it today.
+The refresh endpoint requires `X-Device-Id` equal to the **connect-time** device id.
+Both plugins persist that value in `activations.device_id` when pairing.
 
 - **OpenClaw:** sends the constant `CHANNEL_ID = "clawchat-plugin-openclaw"` as `x-device-id` on
   every REST call including `/v1/agents/connect`, so that same constant is the correct refresh
   device id. (Do NOT use the hostname-derived WS id or any `resolved_device_id` — those are not
   the session device id.)
-- **Hermes:** uses `get_device_id()` (env `CLAWCHAT_DEVICE_ID` verbatim if `hermes-`-prefixed,
-  else host fingerprint). Risk: an unpinned fingerprint changes on pod reschedule → refresh
-  fails `10003` device-mismatch → spurious logout.
+- **Hermes:** activation writes the exact `x-device-id` used for pairing.
+  `_resolve_device_id()` prefers that stored value, then JWT `did`, then the
+  legacy host id for already-paired credentials. Only a fresh pairing uses the
+  current agent-scoped `get_device_id()` derivation. This preserves the paired id
+  even if the host fingerprint changes.
 
-**Fix (both):** add a `device_id` column to `activations`; at connect, write the **exact**
-`x-device-id` used (OpenClaw: `CHANNEL_ID`; Hermes: `get_device_id()` evaluated at connect). At
-refresh, read that column and send it verbatim. Backfill for legacy rows (no column value): fall
-back to the deterministic connect-time value. Hermes additionally requires `CLAWCHAT_DEVICE_ID`
-to be pinned (document + boot warning if unpinned).
+At refresh, both plugins reuse the stored pairing id, with compatibility
+fallbacks for legacy rows (OpenClaw: `CHANNEL_ID`; Hermes: the resolution above).
+Hermes deployments must pin `CLAWCHAT_DEVICE_ID` for durable new pairings,
+using a different value per profile. Boot warns when the resolved id is volatile.
 
 ---
 
-## F. Test obligations (per plugin, kept in parity)
+## F. Test obligations (Hermes, with peer differences noted)
 
 - JWT `exp` decode: valid / no-exp / malformed → fallback.
 - Refresh client: HTTP 200 `code` matrix (0 rotated / 10003 permanent / 400 permanent /
   1 transient); non-200 + parseable JSON integer 10003 permanent, every other non-200
-  response (including 400) transient. Assert `X-Device-Id` = stored device id and
+  response (including 400) transient. OpenClaw instead treats all non-200 responses
+  as transient. Assert `X-Device-Id` = stored device id and
   **no** Authorization header; transient failures keep credentials and write no marker.
 - Single-flight (N concurrent callers → 1 HTTP call), rejected-token latch, min-interval.
 - Hermes access-token-only hello rejection: several activation polls never reconnect

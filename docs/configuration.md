@@ -36,7 +36,7 @@ env credentials to take effect.
 
 | Env var                              | `extra.*` key      | Default | Notes |
 |--------------------------------------|--------------------|---------|-------|
-| `CLAWCHAT_TOKEN`                     | —                  | —       | Required for the gateway to start. Written to `$HERMES_HOME/.env` by activation. |
+| `CLAWCHAT_TOKEN`                     | —                  | —       | Required to connect to ClawChat. If absent, the adapter waits for activation without blocking gateway startup. Written to `$HERMES_HOME/.env` by activation. |
 | `CLAWCHAT_REFRESH_TOKEN`             | —                  | —       | Written to `$HERMES_HOME/.env` by activation. |
 | `CLAWCHAT_USER_ID`                   | `user_id`          | JWT `sub` claim from `CLAWCHAT_TOKEN` | ClawChat user id of the bot account. The token's `sub` claim is authoritative for the session the token creates: when the token carries `sub`, it **overrides** a disagreeing configured value (with a boot warning) and fills the value when none is configured. A wrong user_id (e.g. the owner's id) silently breaks self-echo detection — every owner message is dropped as the bot's own echo. |
 | `CLAWCHAT_AGENT_ID`                  | `agent_id`         | JWT `aid` claim from `CLAWCHAT_TOKEN` | Set by activation. This is the REST agent record id (`agt_...`), distinct from owner metadata `agent_user_id` (`usr_...`). |
@@ -379,34 +379,6 @@ Use these verified Hermes display keys when tuning ClawChat behavior:
 | `long_running_notifications` | no | yes | `display.platforms.clawchat.long_running_notifications: false` plus `agent.gateway_notify_interval: 0` | Controls long-running "still working" heartbeat messages. | A task runs for several minutes. | `agent.gateway_notify_interval: 0` disables gateway heartbeat messages such as "Still working...". |
 | `busy_ack_detail` | no | yes | `display.platforms.clawchat.busy_ack_detail: false` | Controls whether busy acknowledgments and long-running heartbeats include detailed runtime state. | The agent is busy and receives another message. | `false` keeps busy/heartbeat messages terse when those messages are enabled. |
 | `cleanup_progress` | no | yes | `display.platforms.clawchat.cleanup_progress: false` | Controls automatic deletion of progress/status bubbles on platforms whose adapter supports deletion. | Tool progress or heartbeat messages were sent earlier in the turn. | `false` leaves those messages in place instead of auto-deleting them. |
-
-Activation writes these global ClawChat defaults on every activation:
-
-```yaml
-agent:
-  gateway_notify_interval: 0
-  gateway_timeout_warning: 0
-display:
-  busy_input_mode: queue
-  busy_ack_enabled: false
-  background_process_notifications: "off"
-  tool_progress_command: false
-```
-
-Activation writes this platform-scoped ClawChat block when keys are missing:
-
-```yaml
-display:
-  platforms:
-    clawchat:
-      tool_progress: "off"
-      show_reasoning: false
-      streaming: false
-      interim_assistant_messages: true
-      long_running_notifications: false
-      busy_ack_detail: false
-      cleanup_progress: false
-```
 
 `interim_assistant_messages` is explicitly `true` in the ClawChat override
 block because activation defaults to the `normal` output visibility preset. The
@@ -1668,9 +1640,9 @@ These reconnect values are **fixed constants, not `extra.*` keys**
 | `INSTANCE_LOCK_RETRY_SECONDS`    | `30.0`  | Retry a host-local lock while in STANDBY; these waits do not consume `reconnect_max_retries`. |
 | `INSTANCE_LOCK_REMINDER_SECONDS` | `600.0` | Minimum interval between WARNING reminders while a lock remains held elsewhere. |
 
-The takeover floor exists because `reconnect_max_delay_ms` (15 s) is below the
-eviction periods measured in prod (9–163 s), so ordinary exponential backoff can
-never outrun a mutual-eviction loop between two instances sharing a device id.
+The takeover floor exists because mutual evictions can occur farther apart
+than `reconnect_max_delay_ms` (15 s), so ordinary exponential backoff alone
+cannot reliably break a loop between two instances sharing a device id.
 See `docs/client-integration.md` §3.6.
 
 ### Host-local single-instance locks
