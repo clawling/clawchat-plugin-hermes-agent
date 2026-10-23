@@ -144,7 +144,7 @@ def _get_env(*names: str) -> str:
     own ``profile_scoped()``) thinking it is equivalent, and do NOT swap
     ``get_scoped_secret`` for a bare ``get_secret``. Both would cut a fallback
     the host deliberately keeps (``agent/secret_scope.py``,
-    ``docs/design/multiplexing-gateway.md``):
+    Hermes' ``website/docs/developer-guide/multiplexing-gateway.md``):
 
     * Multiplex ON, NO scope installed — the DEFAULT profile, which constructs
       and sends unscoped. A bare ``get_secret`` raises ``UnscopedSecretError``;

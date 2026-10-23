@@ -415,7 +415,8 @@ class ClawChatApiClient:
         return await self._call_json("GET", "/v1/friendships")
 
     # --- cloud orchestration (`agent.orchestrate`) -------------------------
-    # Twelve routes, 1:1 with docs/features/agentorch.md. Every response is
+    # Twelve routes, 1:1 with the server's orchestration contract (listed in
+    # docs/reference/http-endpoints.md, "Cloud orchestration"). Every response is
     # HTTP 200 with the business code in the envelope. These methods call
     # `_call_envelope`, NOT `_call_json` — the envelope must reach the caller
     # intact (code/msg/data) so the tool layer can map 21007 and the model

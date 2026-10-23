@@ -450,3 +450,23 @@ def test_owner_chat_lookup_failure_fails_closed(monkeypatch):
     assert guard.clawchat_pre_tool_call(tool_name="read_file", args={})["action"] == "block"
     # the owner speaking in their own chat does not need the lookup
     assert guard.toolsets_for_source(Source(OWNER_DM, "dm", OWNER), owner_user_id=OWNER) is None
+
+
+def test_plugin_manifest_declares_every_registered_hook():
+    """`hermes plugins validate` fails a plugin whose register() adds a hook
+    that plugin.yaml's provides_hooks does not declare, so every literal
+    register_hook("<name>", ...) in the plugin must be listed there."""
+    import re
+    from pathlib import Path
+
+    import yaml
+
+    root = Path(__file__).resolve().parent.parent
+    sources = [root / "__init__.py", *sorted((root / "clawchat_gateway").glob("*.py"))]
+    registered = set()
+    for source in sources:
+        registered.update(re.findall(r"register_hook\(\s*[\"']([a-z_]+)[\"']", source.read_text()))
+    assert {"pre_tool_call", "post_tool_call", "pre_llm_call"} <= registered
+
+    manifest = yaml.safe_load((root / "plugin.yaml").read_text())
+    assert sorted(registered - set(manifest["provides_hooks"])) == []

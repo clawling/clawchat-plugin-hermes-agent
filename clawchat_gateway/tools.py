@@ -1586,7 +1586,8 @@ async def liveware_login() -> dict[str, Any]:
 
 
 # --- cloud orchestration ---------------------------------------------------
-# Local validation mirrors docs/features/agentorch.md so an obviously-bad call
+# Local validation mirrors the server's orchestration contract (see
+# docs/reference/http-endpoints.md, "Cloud orchestration") so an obviously-bad call
 # fails without a round trip. It deliberately does NOT check id prefixes:
 # 29002/29003/29005 fold "not yours" into "does not exist", and a local prefix
 # check would hand the model a distinction the server refuses to make.
