@@ -175,3 +175,59 @@ publish to PyPI, packaging must be reworked first (extend `MANIFEST.in` and
 the packaging config to carry `skills/` alongside the package, and adjust
 `bundled_skills_dir()`'s path resolution if the layout changes) or a
 wheel-based install will silently ship with zero bundled skills.
+
+## Branches and releasing
+
+`hermes plugins install clawling/clawchat-plugin-hermes-agent` installs from
+this repository's `main` branch, not from a tag or a package index. **Merging
+into `main` is therefore the publication itself**: from that moment new
+installs and reinstalls get the new code.
+
+Everything reaches `main` through a GitHub PR; nothing is pushed to `main`
+directly.
+
+- Day-to-day, non-urgent changes are merged into the `pre-release` branch, not
+  `main`, also through a GitHub PR (`--base pre-release`) that is
+  squash-merged. `main` only moves when a release is cut, so it always equals
+  the newest released version.
+- An urgent fix (security, widespread connection failure) may target `main`
+  directly with a squash-merged PR that includes the version bump; tag it like
+  any release and afterwards merge `main` back into `pre-release`.
+
+A release runs in this fixed order:
+
+1. **Bump the version on `pre-release`.** The plugin reports it to the server
+   at pairing, so every release bumps both `clawchat_gateway/__init__.py`
+   `__version__` and `plugin.yaml` `version` in lockstep (a test guards that
+   they match); the `-N` suffix is the release counter, e.g. `0.14.0-31` →
+   `0.14.0-32`. Recent release commits are titled
+   `chore(release): <old> -> <new>`. Run `uv run pytest` before moving on.
+2. **Merge `pre-release` into `main` through a PR, with a merge commit** —
+   this is the moment the release goes live:
+
+   ```bash
+   gh pr create --base main --head pre-release --title "release: <version>"
+   gh pr merge <n> --merge          # merge commit, not squash
+   git fetch origin
+   git push origin origin/main:pre-release   # fast-forward pre-release to main (not a force push)
+   ```
+
+3. **Tag the merge commit on `main` right away and push the tag.** The tag
+   name equals the version, without a `v`:
+
+   ```bash
+   git fetch origin --tags
+   git log -1 --format='%h %P %s' origin/main    # the merge commit of the release PR
+   git tag -a <version> origin/main -m "<version>: <one-line summary>"
+   git push origin <version>
+   ```
+
+   Installers never read the tag. It records exactly which `main` commit was
+   served as that version and is the reference for rollback and for anything
+   built from this release later (always build from a clean checkout of the
+   tag, never from a branch). Since `main` only moves through release PRs,
+   the newest tag and `main` point at the same commit; a merge into `main`
+   without a version bump and a tag ships code that no version number names.
+
+Never tag a commit that is not on `main`. Tag messages, PR titles and PR
+bodies are public like commit messages.

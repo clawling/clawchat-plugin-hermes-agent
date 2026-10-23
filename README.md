@@ -42,6 +42,7 @@ See [installation conflicts](docs/configuration.md#installation-conflicts-and-re
 | Activation CLI surfaces        | [`docs/reference/cli.md`](docs/reference/cli.md)                    |
 | Shipped prompt files           | [`docs/reference/prompts.md`](docs/reference/prompts.md)            |
 | Local development              | [`docs/development.md`](docs/development.md)                        |
+| Branches and releasing         | [`docs/development.md`](docs/development.md#branches-and-releasing) |
 | Hermes host source lookup      | [`docs/hermes-source-lookup.md`](docs/hermes-source-lookup.md)      |
 | Full doc index                 | [`docs/README.md`](docs/README.md)                                  |
 
