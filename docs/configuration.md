@@ -1299,7 +1299,10 @@ then each requested component with `openat` (`os.open` with `dir_fd`) and
 `O_NOFOLLOW`. Directory opens use `O_DIRECTORY | O_CLOEXEC` and Linux's `O_PATH`
 when available, otherwise `O_RDONLY`; the final file uses
 `O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`. Missing required flags or
-directory-fd support refuses delivery. After user-home expansion, paths must
+directory-fd support refuses delivery. Because macOS opens directories with
+`O_RDONLY`, a file under an ancestor directory that grants search (execute)
+but not read permission, such as mode `0711`, is refused there even though
+it could be opened by path. After user-home expansion, paths must
 be absolute with a single leading separator and no NUL, empty, `.` or `..`
 components (including repeated or trailing separators and the root alone).
 The complete delivery policy must return exactly the requested traversal path.
@@ -1337,7 +1340,11 @@ Persistent parent moves or links left at the original location are refused by
 the final `lstat` chain, including moves after the preceding stat or policy
 check. File replacement and deletion are also refused. Changes during the final
 chain can escape observation: user-space path queries are not atomic and cannot
-prove the namespace stayed unchanged throughout reading. Paths do not establish
+prove the namespace stayed unchanged throughout reading. For example, if a
+parent directory is moved into a denied location while the final chain is
+running and a link to its new location is left at the original place, the
+chain can still pass; the bytes delivered are those already read from the
+file that the no-follow walk opened at the allowed path. Paths do not establish
 a file's historical origin, and mount
 aliases (including bind mounts) are not symlinks; an alias of the same object
 cannot always be distinguished. Mount switches that change identity are refused.
