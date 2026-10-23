@@ -194,32 +194,82 @@ directly.
   directly with a squash-merged PR that includes the version bump; tag it like
   any release and afterwards merge `main` back into `pre-release`.
 
-A release runs in this fixed order:
+A release runs in this fixed order. Run the commands from the repository root
+in Bash, using a version-bump topic branch based on the latest `origin/pre-release`.
+Dev-only images and deployments are not releases and are exempt from this order.
 
-1. **Bump the version on `pre-release`.** The plugin reports it to the server
+1. **Prepare the version bump for `pre-release`.** The plugin reports it to the server
    at pairing, so every release bumps both `clawchat_gateway/__init__.py`
-   `__version__` and `plugin.yaml` `version` in lockstep (a test guards that
-   they match); the `-N` suffix is the release counter, e.g. `0.14.0-31` →
+   `__version__` and `plugin.yaml` `version` in lockstep; the `-N` suffix is
+   the release counter, e.g. `0.14.0-31` →
    `0.14.0-32`. Recent release commits are titled
-   `chore(release): <old> -> <new>`. Run `uv run pytest` before moving on.
-2. **Merge `pre-release` into `main` through a PR, with a merge commit** —
-   this is the moment the release goes live:
+   `chore(release): <old> -> <new>`. After editing both fields, set the intended
+   version and display the values:
 
    ```bash
-   gh pr create --base main --head pre-release --title "release: <version>"
-   gh pr merge <n> --merge          # merge commit, not squash
-   git fetch origin
-   git push origin origin/main:pre-release   # fast-forward pre-release to main (not a force push)
+   read -r -p 'New version (without v): ' release_version &&
+     test -n "$release_version" || exit 1
+   rg -n '^(__version__ =|version:)' clawchat_gateway/__init__.py plugin.yaml || exit 1
+   ```
+
+   **Manually check that both displayed values equal `$release_version` and
+   differ from the previous release; stop if any value is wrong.** The tracked
+   tests do not compare these two fields, so this check is required. Then run
+   the suite with its optional test dependencies (including the install scanner
+   with a Hermes source checkout, as described above):
+
+   ```bash
+   uv run --extra test pytest || exit 1
+   ```
+
+   Commit and push the bump before opening its PR, then squash-merge it into
+   `pre-release`. These commands assume the topic branch contains only the
+   intended release changes; review the diff before committing:
+
+   ```bash
+   git diff -- clawchat_gateway/__init__.py plugin.yaml || exit 1
+   git add clawchat_gateway/__init__.py plugin.yaml &&
+     git commit -m "chore(release): $release_version" &&
+     git push -u origin HEAD || exit 1
+   bump_pr=$(gh pr create --base pre-release --title "chore(release): $release_version" \
+     --body "Bump runtime and manifest versions to $release_version.") || exit 1
+   gh pr merge "$bump_pr" --squash || exit 1
+   ```
+
+2. **Merge `pre-release` into `main` through a PR, with a merge commit** —
+   this is the moment the release goes live. First fetch and repeat the manual
+   version check on the remote branch. Stop unless both values equal
+   `$release_version`; do not open the release PR until the bump PR is merged:
+
+   ```bash
+   git fetch origin || exit 1
+   git show origin/pre-release:clawchat_gateway/__init__.py || exit 1
+   git show origin/pre-release:plugin.yaml || exit 1
+   ```
+
+   ```bash
+   release_pr=$(gh pr create --base main --head pre-release --title "release: $release_version" \
+     --body "Release $release_version from pre-release.") || exit 1
+   gh pr merge "$release_pr" --merge || exit 1
    ```
 
 3. **Tag the merge commit on `main` right away and push the tag.** The tag
    name equals the version, without a `v`:
 
    ```bash
-   git fetch origin --tags
-   git log -1 --format='%h %P %s' origin/main    # the merge commit of the release PR
-   git tag -a <version> origin/main -m "<version>: <one-line summary>"
-   git push origin <version>
+   git fetch origin --tags || exit 1
+   release_commit=$(git rev-parse origin/main) || exit 1
+   git log -1 --format='%H %P %s' "$release_commit" || exit 1
+   ```
+
+   Verify that the displayed commit is the merge commit of `$release_pr`;
+   **stop if it is not**. Then tag that exact commit and push the tag before
+   fast-forwarding `pre-release`:
+
+   ```bash
+   git tag -a "$release_version" "$release_commit" -m "Release $release_version" &&
+     git push origin "refs/tags/$release_version" || exit 1
+   git push origin "$release_commit:refs/heads/pre-release" || exit 1
    ```
 
    Installers never read the tag. It records exactly which `main` commit was
@@ -229,5 +279,6 @@ A release runs in this fixed order:
    the newest tag and `main` point at the same commit; a merge into `main`
    without a version bump and a tag ships code that no version number names.
 
-Never tag a commit that is not on `main`. Tag messages, PR titles and PR
-bodies are public like commit messages.
+Never tag a commit that is not on `main`. Never move or delete a pushed release
+tag; if a release needs a correction, use a new version and a new release PR.
+Tag messages, PR titles and PR bodies are public like commit messages.
