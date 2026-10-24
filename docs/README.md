@@ -26,7 +26,7 @@ and exposes all `clawchat_*` tools listed in `plugin.yaml`'s `provides_tools`.
 | Find a specific `clawchat_*` tool                            | [`./reference/tools.md`](./reference/tools.md)          |
 | See every outbound HTTP / WS endpoint the plugin calls       | [`./reference/http-endpoints.md`](./reference/http-endpoints.md) |
 | Use one of the activation CLIs                               | [`./reference/cli.md`](./reference/cli.md)              |
-| Look up a wire-protocol shape (envelope, events, streaming)  | [`./client-integration.md`](./client-integration.md)    |
+| Look up the Hermes Protocol v2 subset                       | [`./client-integration.md`](./client-integration.md)    |
 | Edit a prompt that ships with the plugin                     | [`./reference/prompts.md`](./reference/prompts.md)      |
 | Understand Hermes prompt injection surfaces                  | [`./reference/prompt-injection.md`](./reference/prompt-injection.md) |
 | Understand dynamic skill updates & skill registration        | [`./skill-updates.md`](./skill-updates.md)              |
@@ -48,7 +48,7 @@ and exposes all `clawchat_*` tools listed in `plugin.yaml`'s `provides_tools`.
    Credential lifecycle implementation details live in the
    [Hermes appendix](./token-refresh.md#h-hermes-appendix--credential-lifecycle-and-races).
    Elsewhere, summarize and link to these references.
-5. [`./client-integration.md`](./client-integration.md) is a plugin-side
-   derivative of the server's Protocol v2 contract. The server implementation
-   takes precedence if they disagree. Change the server contract first, then
-   this copy and the peer Protocol-v2 clients.
+5. [`./client-integration.md`](./client-integration.md) covers the Protocol v2
+   subset used by this plugin. The server owns the wire contract and its
+   implementation takes precedence. Change that contract first, then update
+   this subset and the peer Protocol-v2 clients.
