@@ -14,6 +14,7 @@ and exposes all `clawchat_*` tools listed in `plugin.yaml`'s `provides_tools`.
 | Activate the plugin in a Hermes Agent                        | [`./activation.md`](./activation.md)                    |
 | Run several agents on one host / avoid pairing the wrong Hermes profile | [`./install.md#confirm-the-target-profile-before-every-install--activate`](./install.md#confirm-the-target-profile-before-every-install--activate) |
 | Run several profiles under one multiplexed gateway | [`./multiplex-profile-isolation.md`](./multiplex-profile-isolation.md) |
+| Diagnose local locks or recover a displaced installation | [Instance locks and installation conflicts](./instance-locks-and-install-conflicts.md) |
 | Inspect credential deletion, suspension and persistence races | [Hermes appendix](./token-refresh.md#h-hermes-appendix--credential-lifecycle-and-races) |
 | Understand automatic token refresh & auto-logout             | [`./token-refresh.md`](./token-refresh.md)              |
 | Understand how the plugin plugs into the Hermes runtime      | [`./architecture.md`](./architecture.md)                |
