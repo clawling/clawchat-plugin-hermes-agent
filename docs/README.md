@@ -14,6 +14,7 @@ and exposes all `clawchat_*` tools listed in `plugin.yaml`'s `provides_tools`.
 | Activate the plugin in a Hermes Agent                        | [`./activation.md`](./activation.md)                    |
 | Run several agents on one host / avoid pairing the wrong Hermes profile | [`./install.md#confirm-the-target-profile-before-every-install--activate`](./install.md#confirm-the-target-profile-before-every-install--activate) |
 | Run several profiles under one multiplexed gateway | [`./multiplex-profile-isolation.md`](./multiplex-profile-isolation.md) |
+| Inspect credential deletion, suspension and persistence races | [Hermes appendix](./token-refresh.md#h-hermes-appendix--credential-lifecycle-and-races) |
 | Understand automatic token refresh & auto-logout             | [`./token-refresh.md`](./token-refresh.md)              |
 | Understand how the plugin plugs into the Hermes runtime      | [`./architecture.md`](./architecture.md)                |
 | Configure ClawChat output visibility                         | [`./output-visibility.md`](./output-visibility.md)      |
@@ -42,9 +43,11 @@ and exposes all `clawchat_*` tools listed in `plugin.yaml`'s `provides_tools`.
 3. **`skills/clawchat-core/SKILL.md`** is a *runtime artefact* loaded by
    Hermes via `ctx.register_skill(...)`. Treat it as agent-facing
    documentation, not as a developer or operator guide.
-4. The install guide is [`./install.md`](./install.md). Keep install and
-   activation instructions there so published docs have one operator-facing
-   source of truth.
+4. Installation steps live in [`./install.md`](./install.md); activation
+   entrypoints, flags and persisted state live in [`./activation.md`](./activation.md).
+   Credential lifecycle implementation details live in the
+   [Hermes appendix](./token-refresh.md#h-hermes-appendix--credential-lifecycle-and-races).
+   Elsewhere, summarize and link to these references.
 5. [`./client-integration.md`](./client-integration.md) covers the Protocol v2
    subset used by this plugin. The server owns the wire contract and its
    implementation takes precedence. Change that contract first, then update
