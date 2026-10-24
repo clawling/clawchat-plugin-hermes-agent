@@ -191,6 +191,9 @@ never break plugin load.
 
 ## Registration: bundled, managed extras, and hot registration
 
+If the host does not implement `ctx.register_skill`, `_register_skill` silently
+returns without running these registration or host-discovery steps.
+
 `__init__.py::_register_skill(ctx)` does five things at plugin load, in this
 order:
 
@@ -230,7 +233,8 @@ order:
    managed copy and `ctx.register_skill(id, managed_path, description=...)`,
    each in its own `try`/`except` — one bad or missing skill directory logs a
    warning and is skipped without affecting any other bundled skill.
-5. **Managed extras**: any id present in the managed manifest but not bundled —
+5. **Managed extras**: any id present in the managed manifest
+   (`$HERMES_HOME/clawchat-skills/manifest.json`) but not bundled —
    i.e. delivered earlier by a dynamic update — is registered too, with its
    description read from the SKILL.md frontmatter. Without this, a dynamically
    delivered skill would vanish from the host on every restart. A tombstoned
