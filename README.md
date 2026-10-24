@@ -36,7 +36,7 @@ See [installation conflicts](docs/configuration.md#installation-conflicts-and-re
 |--------------------------------|---------------------------------------------------------------------|
 | Install + activate (humans)    | [`docs/install.md`](docs/install.md)                                |
 | Hermes integration surface     | [`docs/architecture.md`](docs/architecture.md)                      |
-| Plugin-side wire protocol guide | [`docs/client-integration.md`](docs/client-integration.md)          |
+| Hermes Protocol v2 subset      | [`docs/client-integration.md`](docs/client-integration.md)          |
 | Env vars and `config.yaml`     | [`docs/configuration.md`](docs/configuration.md)                    |
 | `clawchat_*` tool catalogue    | [`docs/reference/tools.md`](docs/reference/tools.md)                |
 | Activation CLI surfaces        | [`docs/reference/cli.md`](docs/reference/cli.md)                    |
@@ -54,10 +54,10 @@ See [installation conflicts](docs/configuration.md#installation-conflicts-and-re
 - Install path: `$HERMES_HOME/plugins/clawchat/`; `HERMES_HOME`
   defaults to `~/.hermes`.
 - Wire protocol: ClawChat Protocol v2 (WebSocket).
-  [`docs/client-integration.md`](docs/client-integration.md) is a plugin-side
-  derivative of the server's Protocol v2 contract; the server implementation
-  takes precedence if they disagree. Change the server contract first, then
-  this copy. This plugin and `openclaw-clawchat` are peer Protocol-v2 clients.
+  [`docs/client-integration.md`](docs/client-integration.md) covers the Protocol v2
+  subset used by this plugin. The server owns the wire contract and its
+  implementation takes precedence; change that contract first, then update
+  this subset. This plugin and `openclaw-clawchat` are peer Protocol-v2 clients.
 
 ## License
 
