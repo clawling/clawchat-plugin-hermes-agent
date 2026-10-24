@@ -96,98 +96,47 @@ surface.
 
 ## Activate
 
-Activation exchanges a one-time activation code for credentials and
-writes them to `$HERMES_HOME/.env` plus `$HERMES_HOME/config.yaml`
-(non-secret settings under `platforms.clawchat.extra`).
-
-For Hermes-specific activation entry points, flags, persisted state, restart
-behavior, home-channel bootstrap, implementation references, and verification,
-see [`./activation.md`](./activation.md).
-
-### Interactive (`hermes gateway setup`)
+Run the interactive setup and enter the owner's activation code:
 
 ```bash
 hermes gateway setup
 ```
 
-Prompts for the activation code and the API base URL, then lets Hermes
-finish its normal gateway service flow (start / restart). This is the
-preferred path on Hermes builds that surface plugin setup functions
-through `gateway setup`.
+[Activation](./activation.md) is the reference for entrypoints, flags, persisted
+state and recovery. Confirm the [target profile](#confirm-the-target-profile-before-every-install--activate)
+before pairing.
+
+### Interactive (`hermes gateway setup`)
+
+See [Interactive Setup](./activation.md#interactive-setup).
 
 ### Non-interactive — Hermes plugin subcommand
 
-Hermes builds newer than v0.12.0 expose plugin CLI commands via the
-top-level `hermes` parser:
-
-```bash
-hermes clawchat activate <CODE>
-```
+See [Hermes Plugin Subcommand](./activation.md#hermes-plugin-subcommand).
 
 ### Non-interactive — v0.12.0 compatibility entrypoint
 
-Hermes v0.12.0 registers the plugin CLI internally but does **not**
-expose it through the top-level `hermes` parser. Run the bundled
-compatibility script in the Hermes Python environment:
-
-```bash
-python "${HERMES_HOME:-$HOME/.hermes}/plugins/clawchat/clawchat_cli.py" activate <CODE>
-```
-
-```powershell
-$root = if ($env:HERMES_HOME) { $env:HERMES_HOME } else { Join-Path $env:LOCALAPPDATA 'hermes' }
-python (Join-Path $root 'plugins\clawchat\clawchat_cli.py') activate <CODE>
-```
-
-This path has **no `-p` flag**: it resolves the profile from `HERMES_HOME`
-alone and ignores `hermes profile use`. On a multi-profile host, export
-`HERMES_HOME` for the target profile explicitly — see
-[Confirm the target profile](#confirm-the-target-profile-before-every-install--activate).
+See [v0.12.0 Compatibility Entrypoint](./activation.md#v0120-compatibility-entrypoint).
+This script resolves the profile from `HERMES_HOME` alone and has no `-p` flag;
+see [Confirm the target profile](#confirm-the-target-profile-before-every-install--activate).
 
 ### From inside a Hermes session
 
-```text
-/clawchat-activate <CODE>
-```
+See [In-Session Slash Command](./activation.md#in-session-slash-command).
 
 ### Docker activation
 
-```bash
-docker exec hermes sh -lc \
-  'HERMES_HOME=/opt/data /opt/hermes/.venv/bin/python /opt/data/plugins/clawchat/clawchat_cli.py activate <CODE>'
-```
+See [Docker Activation](./activation.md#docker-activation).
 
 ### Activation flags
 
-| Flag           | Effect                                                  |
-|----------------|---------------------------------------------------------|
-| `--restart`    | Compatibility flag; activation requests a detached Hermes gateway restart by default. |
-| `--no-restart` | Skip the detached Hermes gateway restart after activation. |
-| `--new-account` | Explicitly replace this profile's existing activation with a different identity. |
-| `--repair` | Explicitly re-pair the identity already bound to this profile. |
-
-For the complete CLI syntax and flag rules, see
-[`./reference/cli.md`](./reference/cli.md#flag-summary).
-
-The restart is only *requested*: activation prints where its outcome is logged
-(`$HERMES_HOME/clawchat/gateway-restart.log`) and skips it with a next step when
-the profile has no gateway yet or is served by a multiplexing gateway. See
-[`./activation.md`](./activation.md#restart-or-reload).
+See [Flags](./activation.md#flags) and
+[Restart Or Reload](./activation.md#restart-or-reload), including how to verify
+`gateway-restart.log`.
 
 ### What gets written
 
-| File                                       | Contents (per `clawchat_gateway/activate.py`)                                 |
-|--------------------------------------------|--------------------------------------------------------------------------------|
-| `$HERMES_HOME/.env`                        | `CLAWCHAT_TOKEN`, `CLAWCHAT_REFRESH_TOKEN`, optional `CLAWCHAT_HOME_CHANNEL*`. |
-| `$HERMES_HOME/config.yaml`                 | `platforms.clawchat.enabled=true`, `extra.base_url`, `extra.websocket_url`, `extra.user_id`, `extra.agent_id`, `extra.owner_user_id`, missing `extra.output_visibility=normal`, derived `extra.runtime_status_messages=false`, forced agent quiet defaults (`gateway_notify_interval=0`, `gateway_timeout_warning=0`), forced global ClawChat display defaults (`busy_input_mode=queue`, `busy_ack_enabled=false`, `background_process_notifications=off`, `tool_progress_command=false`), missing `display.platforms.clawchat.*` normal-preset defaults, forced `memory.user_profile_enabled=false` and `memory.nudge_interval=0`, and missing `compression.threshold_tokens` filled from `session-cap-tokens`. Operators may edit the ClawChat platform display block manually after activation. See [persisted state](./activation.md#persisted-state) for details. |
-| `$HERMES_HOME/clawchat/clawchat.sqlite` (named profiles: `clawchat-<profile>.sqlite`; see [database location](./configuration.md#database-location)) | Latest activation row (access token, optional refresh token, user ids, activation conversation id, connect-time device id) plus the `owner_profile` cache row (last-known owner nickname/avatar/bio/locale, refreshed on every owner-metadata pull). |
-
-Successful activation via the CLI, slash-command, or compatibility-script
-paths prints `clawchat: activation complete for <user_id>` and exits 0; the
-interactive `hermes gateway setup` flow instead prints
-`ClawChat activation complete.` (no user_id). Treat any non-zero exit as a hard failure — activation
-codes are single-use, so do **not** retry the same code; surface stderr
-to the operator and request a fresh code.
+See [Persisted State](./activation.md#persisted-state).
 
 ## Verify the install
 

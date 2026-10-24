@@ -124,6 +124,31 @@ update `clawchat_gateway/protocol.py` (outbound builders) and
 `clawchat_gateway/inbound.py` (parsing). Mirror the same change in
 `clawchat-plugin-openclaw/src/` — the two plugins are peers.
 
+## Re-syncing client-integration.md
+
+`client-integration.md` covers this plugin's Protocol v2 subset. The server owns
+the wire contract and its implementation takes precedence; change the server
+contract first, then this subset and the peer client implementations.
+
+1. Read the provenance sync commit and pending-upstream list at the top of
+   `client-integration.md`; retain that record rather than declaring a full sync.
+2. Use the upstream guide at that commit as the merge base, its desired revision
+   as upstream, and this subset as local. Three-way merge the relevant changes;
+   never overwrite the subset with the full guide. Check server code on conflicts.
+3. Preserve every existing heading and section number. Keep Hermes behavior in
+   place under **Hermes:** and record which pending items were actually applied.
+4. Subset whitelist: retain connection/envelope/routing, materialized messages,
+   opt-in streaming, typing, metadata/notification/permission/result handling,
+   reactions/recall/system messages, fragments, legacy replay, heartbeat/errors
+   and media. Keep §9.2, §9.7, §11.4, §11.6 and §14.4 as stubs; §11.7 keeps only
+   legacy dedup plus defensive truncation, §16 has no examples, §17 is Hermes-only.
+   Do not restore full unsupported-frame semantics elsewhere in the guide.
+5. Compare `connection.py:build_connect_capabilities` with the OpenClaw peer,
+   honoring its “keep in sync with OpenClaw” comment; an upstream feature does
+   not authorize adding its capability to either plugin.
+6. Diff heading text, resolve all § references and verify constants/error names
+   against both implementations. Update provenance without exposing private paths.
+
 ## Hermes install scanner
 
 `hermes plugins install` clones this repository and runs Hermes' own

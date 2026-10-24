@@ -350,7 +350,7 @@ finalizing edit `message.done` followed by the acked `message.reply` under the
 same `message_id` — so the conversation keeps one message. Group replies are
 buffered and sent whole either way. The holds, the `message.failed` cases and
 the post-turn sweep of unfinished replies (opt-in only) are described in
-[`./client-integration.md`](./client-integration.md) §8.0.
+this plugin's [Protocol v2 subset](./client-integration.md) §8.0.
 
 ### Sediment turns before reset and compression
 
@@ -435,13 +435,13 @@ Routes are bounded by:
 
 This plugin and the sibling `openclaw-clawchat` plugin are **peer
 Protocol-v2 clients**. [`./client-integration.md`](./client-integration.md)
-is a plugin-side derivative of the server's Protocol v2 contract (envelope,
-events, routing, replay, streaming, and wire examples). The server implementation
+covers the Protocol v2 subset used by this plugin (envelope, events, routing,
+replay and streaming). The server owns the wire contract and its implementation
 takes precedence if they disagree.
 
 When the wire shape changes:
 
-1. Update the server's Protocol v2 contract first, then
+1. Update the server's Protocol v2 contract first, then this plugin's subset in
    [`./client-integration.md`](./client-integration.md).
 2. Update `clawchat_gateway/protocol.py` (frame builders) and
    `clawchat_gateway/inbound.py` (frame parsing) here.
