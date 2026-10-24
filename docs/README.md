@@ -22,6 +22,8 @@ and exposes all `clawchat_*` tools listed in `plugin.yaml`'s `provides_tools`.
 | Set per-person direct / ask / deny rules, capabilities or all tools | [Tool grants](./configuration.md#per-person-tool-grants) |
 | Check cross-session execution limits and cross-chat messaging | [Routing limits](./configuration.md#cross-session-routing-and-known-limits) |
 | Upgrade the grant database safely | [Storage upgrade](./configuration.md#storage-upgrade) |
+| Configure tool grants and handle guest access requests | [Owner and operator guide](./tool-grants.md) |
+| Audit non-owner tools, origins and attachment safety | [Non-owner boundaries](./non-owner-boundaries.md) |
 | Find a specific `clawchat_*` tool                            | [`./reference/tools.md`](./reference/tools.md)          |
 | See every outbound HTTP / WS endpoint the plugin calls       | [`./reference/http-endpoints.md`](./reference/http-endpoints.md) |
 | Use one of the activation CLIs                               | [`./reference/cli.md`](./reference/cli.md)              |

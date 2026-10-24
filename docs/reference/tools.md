@@ -17,13 +17,9 @@ There are **53** tools, grouped by purpose.
 
 ## Per-person tool grants
 
-These three management tools require `tool-grants: on` and a real owner
-message in the activation-recorded ClawChat direct chat. Hook and handler both
-verify the nonce, chat, session and execution turn. Groups (including trusted
-owner-only batches), friends, synthetic turns and other platforms cannot manage
-grants. Execution ids and `pre_llm_call` binding support are required; unknown
-host capabilities fail closed. See [configuration](../configuration.md#per-person-tool-grants)
-for the capability table, resolution order, approval policy and host limits.
+See [tool grants](../tool-grants.md) for eligibility, selectors, precedence, cards and request policy.
+See [non-owner boundaries](../non-owner-boundaries.md) for execution, routing and attachment checks;
+[process notifications](../non-owner-boundaries.md#spontaneous-turns-and-origin-inheritance) use `notify`, with the legacy `notify_on_complete` fallback.
 
 | Tool | Parameters |
 |---|---|
@@ -31,21 +27,11 @@ for the capability table, resolution order, approval policy and host limits.
 | `clawchat_tool_revoke` | `userId: string`; optional nonempty `tools: string[]` using the same selectors. Omission deletes all rules for the person, including deny. `tools: ["all"]` removes only the all rule. Stored selectors can be removed even after their tools are uninstalled. |
 | `clawchat_tool_grants_list` | No parameters. Lists flat unexpired rules, including deny. |
 
-`tools` accepts `tool:<exact-name>`, `cap:<capability-id>`, bare tool names or
-capability IDs, and `all`. Capability IDs and bare `all` are reserved; use
-`tool:` for colliding exact names. No wildcards, host `group:*` selectors,
-MCP server/toolset selectors or any of the four authorization tools are
-accepted. Unknown names return `invalid-what`; known but unavailable objects
-return `not-available`, with no pending record or card. The entire selection
-is validated before writing.
+`tools` accepts exact names, capabilities and `all`; see [selector syntax](../tool-grants.md#selectors-and-capabilities).
 
 `expiresAt` is a future ISO 8601 date (UTC) or datetime with explicit offset /
 `Z`; omitted means no limit. A timezone-free datetime is invalid. `label` is
 at most 40 Unicode code points, cleaned and quoted only as a card annotation.
-Code resolves every name. Group grants freeze current members, excluding this
-Agent and the owner; other people's agents may be included. Missing names or
-incomplete membership fail the entire operation. New members do not inherit
-access and leaving does not delete it.
 
 Direct and ask return exactly this pending shape after a successful card send:
 
@@ -53,38 +39,14 @@ Direct and ask return exactly this pending shape after a successful card send:
 {"pending": true, "note": "A confirmation card was sent to the owner. Nothing is granted until the owner taps it; do not say it is active."}
 ```
 
-The card freezes the requested mode. Only a real owner message in the activation
-direct chat can confirm with `/clawchat-allow <6-digit code>` within ten minutes,
-once. Wrong, expired and reused codes do not activate it; the code is never
-returned to the model. Sensitive tools can be direct. Ask requires genuine
-per-call approval; unavailable approval returns `error:"validation"`,
-`message:"ask-unavailable"` and a localized `note` explaining that only direct
-access or denial is supported (English fallback), without a card or grant write.
-Runtime never converts ask to direct. Lookup, storage or send failures
-return an error, never success.
-
-Proactive direct/ask cards for `cap:schedule`, `cap:subagent`, `all` or any exact
-member of those capabilities (including host aliases) include the self-running
-consequence line (R); deny does not:
-
-> Scheduled tasks, sub-agents, and kanban tasks that {names} starts run with the owner's configuration and all tools.
-
-This accompanies the Hermes restriction copy: non-owner turns cannot start
-the cross-session work those tools normally launch. Request cards for
-`schedule` or `subagent` show both lines as well.
-
 Deny saves immediately without a confirmation card:
 
 ```json
 {"applied": true, "mode": "deny", "count": 2}
 ```
 
-`count` is the number of person-selector rows written; a deny result must not
-be described as permission to use tools. Revoke saves immediately and returns
-`{"revoked": 2}` (deleted row count), including when deleting deny.
-`plan_deny_removal` returns `immediate`, with no confirmation card;
-removal returns to remaining rules or defaults. Grant/revoke changes affect
-subsequent turn snapshots, not a running snapshot.
+`count` is the number of person-selector rows written. Revoke returns
+`{"revoked": 2}` with the deleted row count.
 
 List returns the following camelCase shape; `whatKind` is `tool`, `capability`
 or `all`, `what` is the exact name, capability ID or `all`, and `expiresAt` is
@@ -94,12 +56,9 @@ UTC epoch milliseconds or `null`:
 {"grants": [{"granteeUserId": "usr_example", "granteeName": "Example", "whatKind": "capability", "what": "files", "mode": "deny", "expiresAt": null}]}
 ```
 
-`clawchat_tool_request({capability, reason})` is independently visible in all
-non-owner turns, including `all:deny`; it is excluded from `all` inheritance.
-Only the twelve capability IDs above are accepted, with one short reason.
-Extra fields, exact tool names and `all` are rejected. Caller and original
-chat/session/message come from the bound execution snapshot, never arguments.
-Denied, unavailable, already-granted and mixed-turn blocked requests send no card.
+`clawchat_tool_request({capability, reason})` takes one capability ID from
+[`TOOL_CAPABILITIES`](../../clawchat_gateway/tool_capabilities.py) and one short reason.
+Extra fields, exact tool names and `all` are rejected; caller and route come from the execution snapshot.
 
 Results contain no confirmation code or other people's permissions:
 
@@ -111,83 +70,9 @@ Results contain no confirmation code or other people's permissions:
 ```
 
 Results also include fixed English `note` guidance. Storage failure uses
-`storage-unavailable`. Only successful sending permits “I have asked the owner.”
-The code-generated card goes solely to the owner's activation direct chat.
-`/clawchat-allow`, `/clawchat-ask`, or `/clawchat-deny` plus its six-digit code
-select direct, ask, or deny in one step. No second confirmation is needed.
-Ask is omitted and refused when reliable per-call approval is unavailable.
-All three commands are consumed before model dispatch in every chat; only a
-real owner message in that account's activation direct chat can decide a card.
-Proactive cards still accept only `/clawchat-allow`, preserving the frozen mode.
-
-Request cards last 24 hours. A persistent six-hour person × capability cooldown
-and Agent-wide limit of 20 request cards in any rolling 24 hours serialize quota
-and code allocation (`REQUEST_DAILY_WINDOW_POLICY = "rolling-24h"`, window
-`(now − 24h, now]`, independent of owner timezone).
-Existing pending cards and any non-failed request within the six-hour cooldown,
-including a decided card, return `waiting`, `sent:false` with the same waiting
-guidance, without a new card, code or grant write. Daily quota exhaustion returns
-`blocked`, `reason:"rate-limited"`, `sent:false`; no request was sent.
-Send failures remain failed and consume
-only daily quota, permitting a retry before the person cooldown. `sending` cards can be confirmed after a crash if the owner received them.
-A decision atomically consumes the code, writes the rule and queues a wakeup
-in the requester's original session, with the requester as the speaker and
-permissions freshly loaded. Wake failures produce a one-time English notice
-on the requester's next real turn in that same session, until card expiry.
-Notices use a ten-minute claim lease and are consumed only after host acceptance;
-rejected or failed events release the notice for the next real turn.
-A group batch with the owner and one non-owner always requests for that
-non-owner; batches with multiple non-owners create no request context.
-Subagent and schedule cards also display the proactive card's Hermes limits
-and self-running consequence line (R).
-With `tool-grants: off`, all four authorization tools stop and rules are retained.
-
-Non-owner mention, reaction and file sends to another chat need an explicit
-matching grant (`CROSS_CHAT_GATE_POLICY = "grant"`): direct runs, ask asks the
-owner per call (`ask-unavailable` if that cannot be done), and missing/deny/batch
-failures return `not-granted`, `denied` or `batch-intersection`. Missing or
-unresolvable targets count as cross-chat. Default tools, `public-tools` and
-group approve cover only the current chat; with grants off or no execution
-binding, non-owner cross-chat sends are `not-granted`. Owner-side turns are
-exempt. Target and resource checks remain, including local attachment limits.
-No grant allows a non-owner turn to start or continue another execution session;
-such calls still return `cross-session`, even with cross-chat access.
-In particular, subagent/schedule grants currently allow only non-routing read
-or management actions. See the [audited route list](../configuration.md#cross-session-routing-and-known-limits).
-
-[`public-tools`](../configuration.md#public-tools) is a configuration-only
-exact-name array added to non-owner defaults, including turns without snapshots
-and grants-off turns. Invalid entries reject the whole list; sensitive and
-authorization tools cannot be public. It is absent from grant listings and
-cannot be changed in chat. Explicit matching deny still applies when grants
-are on, and per-call skill, media and output-path limits remain.
-
-Only authorization-card wakeups and registered process completions inherit
-requester grants (`ORIGIN_INHERITANCE_POLICY = "receipt-and-process-completion"`).
-For a successful guest `terminal` call with `background: true` and
-`notify: true` (falling back to `notify_on_complete` only when `notify` is absent
-or `None`), `post_tool_call` records the process, starting turn's
-plugin nonce, speakers and source session. A host `internal=True` completion
-must match metadata `notification_origin=process_registry_synthetic`,
-`original_trigger_message_id` equal to that nonce, the recorded
-`gateway_session_key` and source chat. The first-line process ID narrows the
-match; text never supplies the requester. The match is consumed once and current
-grants are re-read into a new non-owner turn snapshot, intersecting multiple
-starters. Revoked/expired grants are ineffective and group approve never fills
-unmatched permissions. The in-memory registry holds 512 origins for up to seven
-days; restart, expiry, eviction, watch/heartbeat or batched events and mismatches
-leave only default tools. Process inheritance is disabled with grants off.
-Scheduled tasks, sub-agent reports and Kanban work do not inherit requester grants.
-
-Unattributed spontaneous turns get defaults without group approve on every
-host, including with `tool-grants: off`. Hosts lacking `pre_llm_call` keep
-approve only for plugin turns that name their speakers. Separately, host `internal=True` turns in the owner's
-direct chat without a plugin snapshot use ordinary owner tools for the owner's
-own jobs, heartbeats, exec completions and sub-agent reports, excluding the four
-authorization tools. This relies on `cross-session` checks preventing guest
-turns from reaching that chat; newly added host execution routes require an
-updated plugin audit to preserve the boundary. Plugin synthetic-turn rules are
-unchanged. See [origin inheritance](../configuration.md#spontaneous-turns-and-origin-inheritance).
+`storage-unavailable`; ask validation failure uses `error:"validation"`,
+`message:"ask-unavailable"` and a localized `note` (English fallback).
+See [guest access requests](../tool-grants.md#guest-access-requests-and-resumption) for status semantics.
 
 ## Users and friends
 
