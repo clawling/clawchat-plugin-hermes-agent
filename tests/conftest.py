@@ -26,8 +26,9 @@ this repository's own state — ``_handle_message_recall`` touches only
 of which ``ClawChatAdapter.__init__`` creates itself. It is **not** good for
 anything that depends on host behaviour: base-class dispatch, the real
 ``MessageEvent`` shape the host constructs, or whether the host calls us at all.
-Do not use it to claim host-side facts — use ``docs/architecture.md``'s recorded
-verification, which was taken against real Hermes source.
+Do not use it to claim host-side facts — use the recorded verification in
+``docs/architecture.md``'s "Host MessageEvent verification (message-recall open
+item)" section, including its source version, date and recheck conditions.
 """
 
 from __future__ import annotations

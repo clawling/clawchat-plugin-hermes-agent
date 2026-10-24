@@ -1,5 +1,6 @@
 # How the plugin plugs into Hermes
 
+For plugin developers: a map of registration, host patches and adapter integration.
 The plugin is a Python module loaded at runtime by a Hermes Agent
 v0.12.0+ process. Its single public entrypoint is the `register(ctx)`
 function in the repo-root `__init__.py` (the Hermes entrypoint module —
@@ -24,8 +25,8 @@ These names refer to different layers and are not interchangeable:
 | Call                                                         | Provided by              | Effect                                                                                       |
 |--------------------------------------------------------------|--------------------------|----------------------------------------------------------------------------------------------|
 | `ctx.register_platform(name="clawchat", ...)`                | `__init__._register_platform` | Registers the gateway platform. Requires Hermes v0.12.0+; raises otherwise.            |
-| `ctx.register_tool(name, "clawchat", schema, handler, ...)`  | `clawchat_gateway.plugin_tools.register_tools` | Registers all `clawchat_*` tools listed in `plugin.yaml`'s `provides_tools`. |
-| `ctx.register_skill(skill_id, path, description=...)` | `__init__._register_skill` | Registers all bundled `skills/*/SKILL.md` skills (currently six; see [skill updates](./skill-updates.md#bundled-ids-are-auto-discovered-not-hardcoded)), then any extra skills present in the managed manifest (`$HERMES_HOME/clawchat-skills/manifest.json`) that were delivered by a dynamic skill update, so they survive restarts. Also captures the registrar (`skill_update.set_skill_registrar`) so a brand-new skill applied after owner consent is hot-registered immediately (`skill_update.hot_register_new_skills`) without a restart. Skipped silently if the host does not implement `register_skill`. Load also runs `skill_update.ensure_external_skills_dir()`, which idempotently adds `clawchat-skills` to the host config's `skills.external_dirs` so all managed skills additionally appear in the `<available_skills>` index / `skills_list` under their bare names. |
+| `ctx.register_tool(name, toolset, schema, handler, ...)` | `clawchat_gateway.plugin_tools.register_tools` | Registers the `clawchat_*` tools in `plugin.yaml`'s `provides_tools`; grant management/request tools are conditional on `tool-grants`. |
+| `ctx.register_skill(skill_id, path, description=...)` | `__init__._register_skill` | Registers bundled and managed skills; see [skill registration](./skill-updates.md#registration-bundled-managed-extras-and-hot-registration). |
 | `ctx.register_cli_command("clawchat", ...)`                  | `__init__._register_cli_commands` | Adds `hermes clawchat activate <CODE>`, `reclaim`, and `status` on Hermes builds that expose `register_cli_command`. |
 | `ctx.register_command("clawchat-activate", ...)`             | `__init__._register_commands` | Adds the `/clawchat-activate <CODE>` slash command for in-session activation.        |
 | `ctx.register_command("clawchat-reclaim", ...)` | `__init__._register_commands` | Clears superseded state and immediately wakes local waiting connections. |
@@ -38,38 +39,26 @@ These names refer to different layers and are not interchangeable:
 | `ctx.register_hook("pre_llm_call", ...)` | `__init__._register_host_tools_guard` | Binds per-turn permissions on hosts that support the hook. |
 | `ctx.register_hook("pre_gateway_dispatch", ...)`             | `__init__._clawchat_pre_gateway_dispatch` | Drops frames whose sender matches the bot's own ClawChat `user_id` (self-echo). |
 
-`adapter_factory`, `setup_fn`, `check_fn`, `validate_config`, and
-`is_connected` are passed through `register_platform`. `setup_fn` runs
-the interactive `hermes gateway setup` prompts (`clawchat_gateway.setup`);
-`validate_config` returns true when a `websocket_url` is available. Tokens are
-not required at validation time. When Hermes has already loaded the plugin and
-started the ClawChat adapter, a missing token/user credential bundle puts the
-adapter in the waiting-for-activation state; the background connection
-supervisor can then connect after activation writes SQLite credentials. If the
-plugin was only installed and the gateway has not loaded it yet, a normal Hermes
-reload or restart is still required before that waiting state exists. If
-activation cannot persist SQLite credentials, the default activation restart
-lets the next gateway process load credentials from `.env` and `config.yaml`.
+`register_platform` passes `adapter_factory`, `setup_fn` (interactive
+`hermes gateway setup`), `check_fn`, `validate_config`, and `is_connected`.
+It also supplies the label, emoji, platform prompt, install hint, empty
+`required_env`, `allowed_users_env`, `allow_all_env`, `env_enablement_fn`, and
+`max_message_length=0`; standalone/cron fields are described below.
+Validation requires a WebSocket URL, not credentials.
 
-The canonical connection holds a host-local profile lock before activation
-loading and an identity lock before refresh or WebSocket connection. Contention
-enters `ConnectionState.STANDBY` (`"standby"`), which the adapter reports as
-started (so Hermes does not rebuild it in a loop). It performs neither connect
-nor refresh while waiting, retries every 30 seconds, and takes over after the
-holder exits. Refresh entry points and retry callbacks check ownership; the
-HTTP worker retains references through cancellation until the request ends.
-Activation polling acquires the newly loaded identity's lock before its startup
-refresh and rechecks credentials after waiting. Supersession retains references
-before stopping the old supervisor, and shutdown releases owned handles after
-the supervisor task ends. Sibling-device standalone connections are exempt. See
-[host-local locks](configuration.md#host-local-single-instance-locks) for paths,
-diagnostics and unsupported-filesystem behaviour.
+A loaded adapter without credentials waits for [activation](./activation.md).
+An unloaded plugin still needs a Hermes reload/restart; failed SQLite credential
+persistence uses activation's default restart to load `.env`/`config.yaml`.
+Profile/identity lock contention enters `STANDBY`, reported as started;
+it neither connects nor refreshes, and retries every 30 seconds.
+See [host-local locks](./instance-locks-and-install-conflicts.md#host-local-single-instance-locks) for ownership and recovery.
 
 ## Self-echo hook (`pre_gateway_dispatch`)
 
 `__init__._clawchat_pre_gateway_dispatch` re-resolves the bot's own
-`user_id` from the loaded gateway config on every call (never cached —
-activation rewrites the value live) and returns
+`user_id` from the source profile's live adapter on every call, falling back to
+gateway config only for the launch profile (never cached — activation rewrites
+the value live), and returns
 `{"action": "skip", "reason": "clawchat-self-echo"}` when the inbound
 frame's `source.user_id` matches the bot. Without this, the
 interrupt-on-new-message logic in Hermes treats the WebSocket echo of
@@ -105,23 +94,9 @@ owner in a direct chat: `send_message(target="clawchat:cnv_<group>",
 message="caption MEDIA:/abs/path")`. `clawchat_mention_message` stays text
 only: a mention plus a file is two sends (the mention, then `send_message`),
 which keeps one media path, with the host's own `MEDIA:` path checks and the
-plugin's credential denylist, for every chat. In non-owner turns, plugin tools
-refuse local paths and local attachments are not sent, except through the two
-per-person grant paths (every Files tool granted as direct, or a declared output
-of a tool call allowed in this turn; see
-[Local attachments](configuration.md#local-attachments)). Hermes delivers a reply after the turn's session
-context is cleared; a trusted live nonce preserves the guest's attachment
-permission for that turn and conversation. Without that nonce, local delivery
-is allowed only into the owner's direct chat because only the owner receives
-it. In non-owner turns, HTTP(S) attachments are fetched only
-from globally routable unicast addresses. Connections use the checked IP
-directly, without proxies, and each redirect is resolved and checked again.
-In non-owner ClawChat turns, `send_message` to other platforms cannot carry
-attachments; ClawChat targets retain the local-file and remote-address policy.
-A ClawChat gateway process is never treated as a local
-operator surface. The denylist
-also covers the plugin data directory, `.env`, `config.yaml`, `auth.json` and
-plugin databases under resolved Hermes homes and named profiles.
+plugin's credential denylist, for every chat.
+Non-owner local/remote attachments, reply nonces and cross-platform sends follow
+the [Local attachments boundary](./non-owner-boundaries.md#local-attachments).
 
 Hermes' `[[as_document]]` arrives as `force_document`; it is passed to the
 adapter (`_clawchat_force_document`) and the standalone sender, and
@@ -137,15 +112,13 @@ explicit send is delivered and leaves the marker in place: a media send
 (detected on the call stack, and by the `terminal_send.explicit_tool_send()`
 context the patch sets around every ClawChat send — a context variable,
 because the host may run the adapter call on the gateway loop, where the
-stack no longer shows the tool). Before this, "mention the group, then send it
-the file" returned success and dropped the file.
+stack no longer shows the tool).
 
 ## `clawchat_send_file`
 
-Hermes v0.21 stopped handing the agent its built-in `send_message` tool
-(host-side outbound delivery goes through the `hermes send` CLI), so the patch
-above no longer gives the agent a way to put a file into another
-conversation. The plugin's own `clawchat_send_file(chat_id, path,
+Hermes v0.21+ exposes host-side outbound delivery through the `hermes send`
+CLI rather than a built-in `send_message` agent tool. The plugin's own
+`clawchat_send_file(chat_id, path,
 as_document=false, caption="")` (`tools.send_file`) does it on the same path:
 the live adapter's `send` as an immediate media send
 (`_clawchat_immediate_media_send`, `_clawchat_media_files_validated`,
@@ -191,12 +164,8 @@ The openclaw side enforces the same rule at
 its own structured boundaries (`sendRawEnvelope`, `sendAlignedAckableEnvelope`,
 `sendOpenclawClawlingReaction`).
 
-Every ClawChat conversation id is minted by member-backend with the `cnv_`
-prefix and msghub resolves a chat_id only through member-backend, so anything
-else is refused upstream with `code=400: invalid conversation id` — a wasted
-round trip and an ERROR line in msghub for a frame that never had a recipient.
-An agent may accidentally address a peer by a `usr_…` idcode or a
-host-composed `direct:{self}:{peer}` key; neither is a conversation id.
+Conversation ids use `cnv_`; a peer's `usr_…` idcode or a host-composed
+`direct:{self}:{peer}` key cannot address a conversation on the server.
 
 The gate lives at the connection boundary rather than at any single caller
 because the plugin forwards a chat_id chosen upstream — by the host's target
@@ -234,23 +203,13 @@ not the cron field keeps the sender.
 ClawChat has no REST send endpoint, so the standalone path opens an
 **ephemeral** `ClawChatConnection` (reusing credential loading, the challenge
 handshake, token refresh, and ack tracking), sends one `message.send` frame
-with `wait_for_ack=True`, and closes. Main connections advertise a stable
-installation hash and the terminal-conflict capability. A `4010` (including a
-pre-hello refusal) persists `install_superseded.json`, stops reconnect/refresh,
-and keeps the supervisor and instance locks alive in `SUPERSEDED`. The adapter
-returns success for this settled state so Hermes does not rebuild it repeatedly.
-`install_identity.py` owns identity generation and durable state; explicit local
-CLI/slash reclaim or successful activation resumes connection. See
-[configuration](./configuration.md#installation-conflicts-and-recovery).
-
-Ordinary standalone delivery is blocked while superseded. The one owner notice
-per live event uses an internal exception, a sibling connection with a separate
-supervisor slot, no install metadata, and no refresh. Its bounded background task
-is cancelled on stop; persisted pending/failed results are never retried on restart.
+with `wait_for_ack=True`, and closes.
+A terminal `4010` suspends the installation and blocks ordinary standalone sends;
+see [installation conflicts and recovery](./instance-locks-and-install-conflicts.md#installation-conflicts-and-recovery) for the owner-notice exception and reclaim.
 
 Two invariants:
 
-- **Sibling device id.** msghub enforces single-session per
+- **Sibling device id.** The server enforces single-session per
   `(user_id, device_id)` with takeover semantics — connecting with the
   canonical device id would kick a gateway daemon running in another process
   off its socket. The ephemeral session therefore presents
@@ -374,12 +333,9 @@ not the guard, ends the suppression). See
 When a dangerous command needs approval inside a **group**, Hermes calls
 `send_exec_approval(chat_id=<group>, command=…, session_key=…,
 description=…, metadata=…, allow_permanent=…, allow_session=…,
-smart_denied=…)`. The three scope flags exist on hosts since v2026.7.20;
-older hosts omit them and the defaults reproduce the previous behaviour.
-The signature also takes `**kwargs`: a host flag the adapter does not
-accept raises `TypeError`, which the host swallows and answers with a
-plain-text fallback that carries no route, so the owner's reply would
-resolve nothing. The prompt offers only the scopes the host allows (no
+smart_denied=…)`. Optional scope flags have defaults, and `**kwargs` accepts
+additional host flags so a signature mismatch cannot force a plain-text
+fallback without a reply route. The prompt offers only the scopes the host allows (no
 session/always choice for a Smart-DENY override, no always choice when
 nothing can be permanently allowlisted), mirroring Hermes' own text
 fallback.
@@ -400,13 +356,13 @@ codes are case-insensitive and may appear before or after the scope word):
 | Reply | Pending group approvals | Result |
 |---|---|---|
 | `/approve <code>` / `/deny <code>` (also `/always`, `/cancel`, `session` / `always` scope words, `all`) | any | Resolves that code's session only. |
-| bare `/approve` / `/deny` | exactly one | Resolves it (the single-approval UX is unchanged). |
+| bare `/approve` / `/deny` | exactly one | Resolves it. |
 | bare `/approve` / `/deny` | two or more | Nothing is resolved; the reply lists the pending codes and their groups. |
 | code that is unknown, resolved, or expired | any (including none) | Nothing is resolved; the reply lists the pending codes. A code-shaped reply is never handed to the host, which would otherwise apply it to the direct chat's own session. |
 | bare `/approve` / `/deny` | none | Not intercepted; the host's own `/approve` handler runs for the direct chat's session. |
 
 While any group route is pending, a bare `/approve` in the owner's direct
-chat is taken as a group decision, as before. Several approvals from the
+chat is taken as a group decision. Several approvals from the
 **same** group session get distinct codes, but the host resolves a
 session's queue oldest-first (it does not hand the adapter its
 `request_id`), so the code selects the session, not the individual
@@ -450,7 +406,7 @@ When the wire shape changes:
 ## Configuration loading
 
 `clawchat_gateway.config.ClawChatConfig.from_platform_config` resolves
-configuration in this priority order:
+configuration in this five-level priority order for unscoped reads:
 
 1. `hermes_cli.config.get_env_value_prefer_dotenv(...)` (if importable) — the
    profile's `.env`, then a scope-checked process-env fallback.
@@ -460,6 +416,10 @@ configuration in this priority order:
    [`./configuration.md`](./configuration.md).
 4. `platforms.clawchat.extra` from `config.yaml`.
 5. Hard-coded defaults from the dataclass.
+
+Credential tombstones override env fallback. In a scoped or multiplexed host,
+`_get_env` reads the profile's `.env`, then Hermes' `get_scoped_secret`, and
+does not add a raw process-env fallback after a scoped miss.
 
 `$HERMES_HOME` resolution itself lives in `clawchat_gateway.hermes_home` —
 exported value, else the platform-native default (`~/.hermes` on POSIX,
@@ -475,28 +435,7 @@ table.
 
 ## Host `MessageEvent` verification (message-recall open item)
 
-Verified 2026-08-20 against Hermes Agent 0.20.0 (a local Hermes source
-checkout at `tmp/hermes`, git commit `3aeff239bfc49a5e025eb05fb6fd3a724104a1d6`;
-no `hermes` binary is installed on this machine, so the version was read from that checkout's
-`pyproject.toml` — `[project] name = "hermes-agent"` / `version = "0.20.0"`
-— rather than from `hermes --version`). The live SQLite state at
-`$HOME/.hermes/clawchat.sqlite` and `$HOME/.hermes/clawchat/clawchat.sqlite`
-was also inspected (`sqlite3 <db> ".tables"`); neither contains the host's
-own `messages` table — both only hold this plugin's own `clawchat_messages`
-ledger (`activations`, `connections`, `owner_profile`, `tool_calls`,
-`liveware_sample`, `schema_migrations`, `clawchat_messages`) — so the
-`messages` schema below is taken from the source checkout, not a live DB.
-
-| Question | Answer |
-|---|---|
-| Does `gateway.platforms.base.MessageEvent` accept `message_id=`? | yes — it is a `@dataclass` (`gateway/platforms/base.py:2054`) whose fields include `text: str`, `message_type: MessageType = MessageType.TEXT`, `source: SessionSource = None`, `raw_message: Any = None`, `message_id: Optional[str] = None`, `platform_update_id: Optional[int] = None`, `media_urls: List[str] = field(default_factory=list)`, `media_types: List[str] = field(default_factory=list)`, `reply_to_message_id: Optional[str] = None`, `reply_to_text: Optional[str] = None`, plus further reply/prompt/skill/channel fields not relevant here. |
-| Does `messages.platform_message_id` exist? | yes — `hermes_state_common.py`'s `CREATE TABLE IF NOT EXISTS messages (... platform_message_id TEXT, ...)` (verbatim column declaration, no inline `UNIQUE`). |
-| Is it uniquely indexed? | **no.** The only index over it, created in `hermes_state_schema.py`'s `_init_schema`, is:<br>`CREATE INDEX IF NOT EXISTS idx_messages_platform_msg_id ON messages(session_id, platform_message_id) WHERE platform_message_id IS NOT NULL`<br>This is `CREATE INDEX`, not `CREATE UNIQUE INDEX` — it does not enforce uniqueness at all, let alone give a unique lookup keyed on `platform_message_id`. Separately (and this would matter even if it *were* unique): `platform_message_id` is not the leading column — `session_id` is — so a unique index here would still require supplying the host's internal `session_id` alongside `platform_message_id` to get the guarantee, and the adapter's `MessageEvent(...)` construction site (`clawchat_gateway/adapter.py`, method `_handle_inbound`) has no host `session_id` in scope at that point — it builds a ClawChat `source` (`chat_id`, `user_id`, `chat_name`, `chat_type`) via `self.build_source(...)`, not a Hermes-internal session id. Both gaps are independently sufficient to fail the criterion; the non-`UNIQUE` declaration alone already does. |
-
-**Decision:** do not populate `message_id=`. Outcome B: `MessageEvent` accepts `message_id=`, but `messages.platform_message_id` exists without a unique index (`CREATE INDEX`, not `CREATE UNIQUE INDEX`) — a non-unique column cannot be the basis of a host-side soft delete, and passing a kwarg nothing consumes as a reliable key would invite the next reader to assume a linkage that does not exist.
-
-This matters because it is the precondition for any future **host-side** soft
-delete of a recalled message. Today the `message.recall` purge reaches only this
-plugin's own `clawchat_messages` ledger; the host's conversation history is
-explicitly out of scope (spec §9.8, "What is **not** attempted"). Nothing
-about the column's schema may be asserted without re-running this verification.
+Recorded verification: 2026-10-23, Hermes Agent `v0.22.0-2-gd97007c32d` (git describe; commit `d97007c32d6340f7ba79ac1dfb5773cc00846448`).
+`MessageEvent` accepts `message_id`; `messages.platform_message_id` has only the non-unique index `(session_id, platform_message_id)` (`idx_messages_platform_msg_id`, filtered to non-NULL values).
+The adapter leaves `message_id` unset; recall purges only the plugin ledger, with host-history soft deletion out of scope (Protocol v2 subset §9.8).
+Recheck against real Hermes source when the event fields, host schema/indexes or recall integration change.
