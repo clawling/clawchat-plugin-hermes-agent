@@ -111,6 +111,10 @@ matching Hermes Agent v0.12.0+ checkout and follow
 [`./hermes-source-lookup.md`](./hermes-source-lookup.md). The path is
 already in `.gitignore`; nothing committed depends on it.
 
+## Writing docs
+
+Keep each `.md` under 40 KB (hard cap 60 KB); a change that leaves a file above 40 KB splits it in the same PR or says why in the PR. Docs describe current behavior only; version history goes to git history and the GitHub release notes, or to a one-line-per-item `Upgrade notes` list at the end. Write each rule in full in one place and link to it elsewhere. When splitting or trimming, keep every heading, anchor and `§` number that something links to (leave a same-named short section that links on). `tests/test_tool_grants_tools.py` reads `docs/configuration.md`, `clawchat_gateway/device_id.py` points at it (warning text and its Device id durability section), and source comments and tests cite `docs/client-integration.md` by `§` number — update them together.
+
 ## Modifying the wire protocol
 
 [`./client-integration.md`](./client-integration.md) is a plugin-side derivative
