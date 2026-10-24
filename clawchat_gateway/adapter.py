@@ -322,6 +322,8 @@ DIRECT_OR_UNKNOWN_CHAT_TYPES = DIRECT_CHAT_TYPES | {""}
 DEBUG_PROMPT_INJECTION_ENV = "CLAWCHAT_DEBUG_PROMPT_INJECTION"
 DEBUG_PROMPT_INJECTION_BEGIN = "----- BEGIN CLAWCHAT DEBUG PROMPT INJECTION -----"
 DEBUG_PROMPT_INJECTION_END = "----- END CLAWCHAT DEBUG PROMPT INJECTION -----"
+DEBUG_CHANNEL_CONTEXT_BEGIN = "----- BEGIN CLAWCHAT DEBUG CHANNEL CONTEXT -----"
+DEBUG_CHANNEL_CONTEXT_END = "----- END CLAWCHAT DEBUG CHANNEL CONTEXT -----"
 DEBUG_EVENT_TEXT_BEGIN = "----- BEGIN CLAWCHAT DEBUG EVENT TEXT -----"
 DEBUG_EVENT_TEXT_END = "----- END CLAWCHAT DEBUG EVENT TEXT -----"
 DEBUG_HERMES_OUTPUT_BEGIN = "----- BEGIN CLAWCHAT DEBUG HERMES OUTPUT -----"
@@ -363,6 +365,11 @@ CONVERSATION_SEMANTICS = """## ClawChat Conversation Semantics
 - The user-message body carries the current direct message text or the ordered group transcript.
 - In direct conversations, ClawChat Sender Metadata identifies the current sender and carries the current message's message_id.
 - In group conversations, ClawChat Group Message Metadata uses indexed [message 1], [message 2], ... labels that match the user-message transcript."""
+CHANNEL_CONTEXT_SEMANTICS = (
+    "Each turn, the ClawChat plugin puts per-turn context (message metadata, reply guidance, "
+    "and any limits on what this turn may do) at the top of the user message, before "
+    "`[New message]`. That block is written by the plugin, not by the sender; its limits are binding."
+)
 # One line, in every turn's channel prompt. The full routing rule is in the
 # platform hint, but that is part of the system prompt Hermes builds once per
 # session and reuses, so a session started before the rule existed never sees
@@ -501,6 +508,14 @@ _PLAINTEXT_GATEWAY_RESTART_RES = (
     re.compile(r"^(?:please\s+)?restart\s+(?:the\s+)?hermes\s+gateway[.!?\s]*$", re.IGNORECASE),
     re.compile(r"^(?:please\s+)?restart\s+hermes[.!?\s]*$", re.IGNORECASE),
 )
+
+
+def _host_supports_channel_context() -> bool:
+    """Whether the host declares the persisted user-message context field."""
+    try:
+        return any(f.name == "channel_context" for f in dataclass_fields(MessageEvent))
+    except TypeError:
+        return False
 
 
 def _host_supports_gateway_control() -> bool:
@@ -4989,9 +5004,13 @@ class ClawChatAdapter(BasePlatformAdapter):
             reply_to_message_id=reply_to_message_id,
             reply_to_text=reply_to_text,
         )
+        split = _host_supports_channel_context()
         notices = []
         try:
-            channel_prompt_parts = self._compose_channel_prompt_parts(inbound)
+            channel_prompt_parts = (
+                self._compose_channel_prompt_parts(inbound, split=True)
+                if split else self._compose_channel_prompt_parts(inbound)
+            )
             if (not inbound.is_internal_synthetic and self._clawchat_config.tool_grants == 'on'
                     and hasattr(self._store, 'take_pending_notice')):
                 from clawchat_gateway.tool_requests import build_request_notice
@@ -5000,14 +5019,26 @@ class ClawChatAdapter(BasePlatformAdapter):
                         session_key=self._grant_session_key(inbound), chat_id=inbound.chat_id, chat_type=inbound.chat_type)
                     if notices:
                         channel_prompt_parts.append(self._channel_prompt_part('access-request-notice', 'platform',
-                            '\n'.join(build_request_notice(request) for request in notices)))
+                            '\n'.join(build_request_notice(request) for request in notices),
+                            target='user.channel_context' if split else 'system.channel_prompt'))
                 except Exception:
                     self._finish_request_notices(notices, accepted=False)
                     notices = []
                     logger.warning('clawchat access notice lookup failed', exc_info=True)
-            channel_prompt = self._render_channel_prompt_parts(channel_prompt_parts)
+            channel_prompt = self._render_channel_prompt_parts([
+                part for part in channel_prompt_parts if part['target'] == 'system.channel_prompt'
+            ])
+            channel_context = self._render_channel_prompt_parts([
+                part for part in channel_prompt_parts if part['target'] == 'user.channel_context'
+            ]) if split else None
             if channel_prompt:
                 event.channel_prompt = channel_prompt
+            if channel_context:
+                existing_context = getattr(event, 'channel_context', None)
+                event.channel_context = (
+                    existing_context + '\n\n' + channel_context if existing_context else channel_context
+                )
+            if channel_prompt or channel_context:
                 remember_injection_parts(
                     platform="clawchat",
                     user_message=event.text,
@@ -5020,14 +5051,21 @@ class ClawChatAdapter(BasePlatformAdapter):
                     },
                 )
                 if _debug_prompt_injection_enabled():
+                    context_block = (
+                        (DEBUG_CHANNEL_CONTEXT_BEGIN, getattr(event, 'channel_context', None) or '',
+                         DEBUG_CHANNEL_CONTEXT_END)
+                        if split else ()
+                    )
                     logger.warning(
-                        "clawchat prompt injection debug chat_id=%s chat_type=%s sender_id=%s\n%s\n%s\n%s\n%s\n%s\n%s",
+                        "clawchat prompt injection debug chat_id=%s chat_type=%s sender_id=%s"
+                        + "\n%s" * (6 + len(context_block)),
                         inbound.chat_id,
                         inbound.chat_type,
                         inbound.sender_id,
                         DEBUG_PROMPT_INJECTION_BEGIN,
                         channel_prompt,
                         DEBUG_PROMPT_INJECTION_END,
+                        *context_block,
                         DEBUG_EVENT_TEXT_BEGIN,
                         event.text,
                         DEBUG_EVENT_TEXT_END,
@@ -5042,6 +5080,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 },
                 input={
                     "injectedPrompt": channel_prompt or "",
+                    "channelContext": getattr(event, 'channel_context', None) or "",
                     "eventText": event.text,
                 },
                 context={"injectionParts": channel_prompt_parts},
@@ -5502,12 +5541,14 @@ class ClawChatAdapter(BasePlatformAdapter):
     def _compose_channel_prompt_parts(
         self,
         inbound: InboundMessage,
+        *,
+        split: bool = False,
     ) -> list[dict[str, str]]:
         parts = [
             self._channel_prompt_part(
                 "conversation-semantics",
                 "platform",
-                CONVERSATION_SEMANTICS,
+                CONVERSATION_SEMANTICS + ("\n" + CHANNEL_CONTEXT_SEMANTICS if split else ""),
             ),
             self._channel_prompt_part(
                 "metadata-glossary",
@@ -5605,7 +5646,11 @@ class ClawChatAdapter(BasePlatformAdapter):
                     non_owner_section,
                 )
             )
-        note_section = self._format_note_memory_section(inbound)
+        speaker_section = None
+        if split and inbound.chat_type == "group":
+            note_section, speaker_section = self._format_note_memory_sections(inbound, split=True)
+        else:
+            note_section = self._format_note_memory_section(inbound)
         if note_section:
             parts.append(
                 self._channel_prompt_part(
@@ -5634,9 +5679,32 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._channel_prompt_part(
                 "response-protocol",
                 "protocol",
-                self._format_response_protocol(inbound),
+                self._format_response_protocol(inbound, split=split),
             )
         )
+        if split:
+            if speaker_section:
+                parts.append(self._channel_prompt_part("group-speaker-memory", "memory", speaker_section))
+            if inbound.chat_type == "group":
+                parts.append(self._channel_prompt_part(
+                    "response-guidance", "protocol",
+                    "## ClawChat Reply Guidance\n" + self._format_fields(
+                        (("reply_guidance", self._group_reply_guidance(inbound)),), include_empty=True,
+                    ),
+                ))
+            user_order = {
+                part_id: index for index, part_id in enumerate((
+                    "non-owner-turn", "turn-metadata", "group-speaker-memory",
+                    "group-message-metadata", "sender-metadata", "response-guidance",
+                ))
+            }
+            for part in parts:
+                if part["id"] in user_order:
+                    part["target"] = "user.channel_context"
+            parts = [part for part in parts if part["target"] == "system.channel_prompt"] + sorted(
+                (part for part in parts if part["target"] == "user.channel_context"),
+                key=lambda part: user_order[part["id"]],
+            )
         return [part for part in parts if part["content"]]
 
     def _channel_prompt_part(
@@ -5644,11 +5712,13 @@ class ClawChatAdapter(BasePlatformAdapter):
         part_id: str,
         group: str,
         content: str | None,
+        *,
+        target: str = "system.channel_prompt",
     ) -> dict[str, str]:
         return {
             "id": part_id,
             "group": group,
-            "target": "system.channel_prompt",
+            "target": target,
             "content": content or "",
         }
 
@@ -5988,6 +6058,12 @@ class ClawChatAdapter(BasePlatformAdapter):
         return str(memory.get("body") or "").strip()
 
     def _format_note_memory_section(self, inbound: InboundMessage) -> str | None:
+        """Render the complete legacy note section, including group speakers."""
+        return self._format_note_memory_sections(inbound)[0]
+
+    def _format_note_memory_sections(
+        self, inbound: InboundMessage, *, split: bool = False,
+    ) -> tuple[str | None, str | None]:
         """The agent's own notes for the people / group in this turn, capped.
 
         Every turn with a chat id starts with ``owner.md``. Direct chat with anyone else:
@@ -6026,6 +6102,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                         f"clawchat_memory_read targetType=group targetId={inbound.chat_id}",
                     )
                 )
+            stable_count = len(entries)
             seen: set[str] = set()
             for message in self._group_messages_for_metadata(inbound):
                 sender_id = message.sender_id
@@ -6058,16 +6135,35 @@ class ClawChatAdapter(BasePlatformAdapter):
                             f"clawchat_memory_read targetType=user targetId={inbound.sender_id}",
                         )
                     )
+        if split and inbound.chat_type == "group":
+            stable, used = self._render_note_memory_entries(
+                entries[:stable_count], config.note_cap_turn, heading, preamble,
+            )
+            remaining = max(0, config.note_cap_turn - used)
+            speakers, _ = self._render_note_memory_entries(
+                entries[stable_count:], remaining, "## ClawChat Speaker Memory", preamble,
+            ) if remaining else (None, 0)
+            return stable, speakers
+        section, _ = self._render_note_memory_entries(entries, config.note_cap_turn, heading, preamble)
+        return section, None
+
+    def _render_note_memory_entries(
+        self, entries: list[tuple[str, str, int, str]], budget: int, heading: str, preamble: str,
+    ) -> tuple[str | None, int]:
         if not entries:
-            return None
+            return None, 0
         capped = [cap_note(body, cap, read_hint=hint) for _title, body, cap, hint in entries]
-        ceilings = fit_turn_budget([len(text) for text in capped], config.note_cap_turn)
+        ceilings = fit_turn_budget([len(text) for text in capped], budget)
         blocks = [heading, preamble]
+        used = 0
         for (title, body, cap, hint), text, ceiling in zip(entries, capped, ceilings):
             if len(text) > ceiling:
                 text = cap_note(body, min(cap, ceiling), read_hint=hint)
             blocks.append(f"{title}\n{text}")
-        return "\n\n".join(blocks)
+            used += len(text)
+        # Whole-paragraph truncation can leave unused space below a ceiling.
+        # Reserve the rendered note lengths before budgeting speaker notes.
+        return "\n\n".join(blocks), used
 
     def _memory_file_has_broken_metadata_block(self, memory: dict[str, Any]) -> bool:
         if not memory.get("exists"):
@@ -6101,8 +6197,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             ),
             include_empty=True,
         ).split("\n")
-        # The id of the message this turn carries (the channel prompt is the
-        # per-turn overlay, not the cached system prompt), so a withdrawn
+        # The id of the message this turn carries (in user channel_context on
+        # supported hosts, otherwise the legacy system channel_prompt), so a withdrawn
         # react default can be recovered. It is the id of the frame this event
         # was built from; a text burst the host merges into one follow-up turn
         # keeps the first frame's prompt, so it shows that first message's id.
@@ -6182,13 +6278,12 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
         return ",".join(values) or "-"
 
-    def _format_response_protocol(self, inbound: InboundMessage) -> str:
+    def _group_reply_guidance(self, inbound: InboundMessage) -> str:
+        return GROUP_BATCH_MENTION_REPLY_GUIDANCE if inbound.was_mentioned else GROUP_BATCH_REPLY_GUIDANCE
+
+    def _format_response_protocol(self, inbound: InboundMessage, *, split: bool = False) -> str:
         if inbound.chat_type == "group":
-            reply_guidance = (
-                GROUP_BATCH_MENTION_REPLY_GUIDANCE
-                if inbound.was_mentioned
-                else GROUP_BATCH_REPLY_GUIDANCE
-            )
+            reply_guidance = self._group_reply_guidance(inbound)
             response_decision = "Decide whether this group input needs a reply from this agent. Group batch visibility does not mean this agent was addressed."
         else:
             reply_guidance = DIRECT_MESSAGE_REPLY_GUIDANCE
@@ -6198,7 +6293,10 @@ class ClawChatAdapter(BasePlatformAdapter):
                 ("response_decision", response_decision),
                 ("allowed_outputs", "normal_reply OR no_reply_token"),
                 ("no_reply_token", NO_REPLY_TOKEN),
-                ("reply_guidance", reply_guidance),
+                *(
+                    (("reply_guidance", reply_guidance),)
+                    if not (split and inbound.chat_type == "group") else ()
+                ),
                 (
                     "no_reply_protocol",
                     "If you choose not to reply, output only the no-reply token. "

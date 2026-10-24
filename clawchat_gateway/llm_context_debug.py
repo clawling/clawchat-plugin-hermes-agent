@@ -69,6 +69,7 @@ class ClawChatLlmContextDebug:
             },
             "input": {
                 "injectedPrompt": str(input.get("injectedPrompt") or ""),
+                "channelContext": str(input.get("channelContext") or ""),
                 "eventText": str(input.get("eventText") or ""),
                 "fullLlmInput": input.get("fullLlmInput"),
                 "requestMessages": list(input.get("requestMessages") or []),

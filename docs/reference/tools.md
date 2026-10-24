@@ -361,6 +361,7 @@ The `clawchat_memory_write` description carries the routing rule every turn:
 a fact about one person goes to `targetType=user` (their `usr_…` id), about a
 group to `targetType=group` (its `cnv_…` id), about the owner to
 `targetType=owner` with `targetId=owner`; read the note first and add only what is new.
+A note is a profile, not a log: once it passes about 1,000 characters, rewrite it compactly (`mode=replace`, or `clawchat_memory_edit`) instead of appending.
 `owner.md` holds what your owner told you themselves; what someone else says about your owner goes in that person's note.
 Never put such facts into Hermes' `memory` tool (MEMORY.md).
 `prompts/platform.md` states the same rule.

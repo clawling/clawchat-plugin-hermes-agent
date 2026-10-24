@@ -14,6 +14,8 @@ rest of the plugin tree into `$HERMES_HOME/plugins/clawchat/prompts/`.
 | `prompts/default-owner-behavior.md`    | Optional, present in this repo.                           | Returned by `default_owner_behavior_prompt()`; used as the default `agent_behavior` field when the owner-metadata block is empty. |
 | `prompts/default-group-bio.md`         | Optional, present in this repo.                           | Returned by `default_group_bio_prompt()`; used as the default `group_description` placeholder for groups that have not set one. |
 
+`platform.md` also tells the agent to keep each memory note a compact profile rather than an append-only log (rewrite it once it passes about 1,000 characters).
+
 The `PromptName` literal in
 `clawchat_gateway/plugin_prompts.py:15` is the canonical list of
 recognized prompt names. The loader treats `platform` as required and
