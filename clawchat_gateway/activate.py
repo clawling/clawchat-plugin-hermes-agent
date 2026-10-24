@@ -16,9 +16,22 @@ try:
         save_env_value,
     )
 except Exception as exc:
+    import sys
+
+    failed_module = exc.name if isinstance(exc, ModuleNotFoundError) else "hermes_cli.config"
     raise RuntimeError(
         "ClawChat activation requires hermes_cli.config helpers; "
-        "run activation through Hermes so config writes use the official API."
+        f"import failed for {failed_module}.\n"
+        f"{type(exc).__name__}: {exc}\n"
+        f"Python interpreter: {sys.executable}\n"
+        "Common causes: a system/shell Python outside the Hermes venv cannot import hermes_cli; "
+        "a Hermes build that is too old or too new lacks a required helper; "
+        "or a broken Hermes installation raises while importing hermes_cli.config.\n"
+        "Next step: run hermes clawchat activate <CODE> "
+        "(for a profile: hermes -p <profile> clawchat activate <CODE>).\n"
+        "On Hermes v0.12, run <HERMES_HOME>/plugins/clawchat/clawchat_cli.py activate <CODE> "
+        "with the Hermes venv's Python, e.g. ~/.hermes/hermes-agent/venv/bin/python, "
+        "/opt/hermes/.venv/bin/python in Docker, or the venv's Scripts\\python.exe on Windows."
     ) from exc
 
 from clawchat_gateway.api_client import (
