@@ -1,7 +1,7 @@
 # Activation
 
-Hermes activation connects the `clawchat` gateway platform to ClawChat by
-exchanging a one-time invite code for ClawChat credentials.
+For operators and agents: pair a Hermes profile, choose activation flags, and
+recover its ClawChat connection by exchanging a one-time invite code for credentials.
 
 ## Entry Points
 
@@ -37,6 +37,16 @@ the Hermes Python environment:
 python "${HERMES_HOME:-$HOME/.hermes}/plugins/clawchat/clawchat_cli.py" activate <CODE>
 ```
 
+For PowerShell:
+
+```powershell
+$root = if ($env:HERMES_HOME) { $env:HERMES_HOME } else { Join-Path $env:LOCALAPPDATA 'hermes' }
+python (Join-Path $root 'plugins\clawchat\clawchat_cli.py') activate <CODE>
+```
+
+The compatibility script has no `-p` flag and uses `HERMES_HOME`, ignoring
+`hermes profile use`; [pin the target profile](./install.md#confirm-the-target-profile-before-every-install--activate).
+
 ### In-Session Slash Command
 
 ```text
@@ -61,30 +71,24 @@ docker exec hermes sh -lc \
 
 #### Choosing between `--new-account` and `--repair`
 
-The two flags are not interchangeable, and the wrong one is not recoverable —
-it spends the code:
+Choose by whether this profile needs a new identity or is restoring its own:
 
 | Intent | Flag |
 |---|---|
 | This profile should end up with **its own new agent** — including when `config.yaml` already names an agent it inherited from a clone | `--new-account` |
 | This profile **already paired its own agent** and merely lost the token (auto-logout, wiped `.env`) and the owner wants that same agent back | `--repair` |
 
-`--repair` keeps the stored `user_id` in the replay, so the server re-pairs
-*that* agent and consumes the code on it — it never creates an agent. Pointing
-it at an inherited identity therefore re-pairs the **source** profile's agent
-and leaves this profile with nothing of its own, which is exactly what a fresh
-install on a cloned profile looks like from the flag's point of view: no token,
-an identity already in `config.yaml`.
+`--repair` replays the stored `user_id`, consuming the code to restore that
+agent. On a clone, an inherited identity would therefore restore the source
+profile's agent rather than create one for this profile.
 
-Activation therefore refuses `--repair` (`UnprovenRepairError`, a subclass of
-`ExistingActivationError`, exit 1, **code not sent**) unless the identity is
-provably this profile's own — either `extra.profile` names the active profile,
-or this profile's own SQLite `activations` row records the same `user_id`. The
-database is the one piece of per-profile state `--clone` does not copy. The
-check fails **open** if the local store cannot answer, so an unreadable
-database never strands a legitimate repair. To repair an identity the check
-cannot vouch for, record the ownership first by setting
-`platforms.clawchat.extra.profile` to the active profile, then re-run.
+`UnprovenRepairError` (a subclass of `ExistingActivationError`, exit 1) refuses
+repair unless `extra.profile` names the active profile or this profile's SQLite
+`activations` row records the same `user_id`. The database is not copied by
+`--clone`. An unavailable store fails open so legitimate repairs remain possible.
+If ownership cannot be proved, record it in `platforms.clawchat.extra.profile`
+before retrying. Refusal sends no code to `/connect` for redemption; the
+non-consuming `/connect/check` may already have run.
 
 ### One profile, one agent
 
@@ -92,32 +96,19 @@ A Hermes profile holds exactly **one** ClawChat identity: `config.yaml`
 (`platforms.clawchat.extra`), `.env` (`CLAWCHAT_TOKEN`) and the `activations`
 row (primary key `("hermes", "default")`) are all single-slot.
 
-The device id follows the same one-profile-one-agent line: it is agent-scoped
-(one per profile) precisely so a second agent on this host is never mistaken
-for the first one. It used to be host-scoped — every backend structure keyed
-on `(user_id, device_id)` didn't care, but the redeem safety gate
-(`paired_device_id`) and the plugin-report row are keyed on device id ALONE,
-so two agents sharing one id collide there. Already-paired profiles keep the
-id they connected with regardless — see
-[`docs/configuration.md`](./configuration.md) — Device id durability for the
-resolution mechanics (env pin → activations row → token `did` → legacy host
-id → new per-profile id, in that order of preference).
+If you pin `CLAWCHAT_DEVICE_ID`, use a different value for each profile.
+Each profile needs its own device id: pairing safety and plugin reports key on
+that id alone. Already-paired profiles retain their connect-time id. See
+[Device id durability](./configuration.md#device-id-durability-deployment-requirement) for resolution.
 
-Activating a **new** connect code in a profile that already holds an identity
-therefore cannot produce a second agent. The stored `user_id` is replayed as a
-re-pair hint, so the server binds the new code to the *existing* agent — the
-code is spent, no second agent and no second contact entry appear, and the
-local credentials are overwritten in place, losing the first agent.
-
-Activation refuses that case (`ExistingActivationError`, exit 1) **without
-sending the code**, so it stays redeemable. The refusal is not conditional on
-the profile still having a usable token: a logged-out profile (see auto-logout
-below) should ask its owner for the ClawChat app's reconnect prompt instead of
-a fresh code (see [`./token-refresh.md`](./token-refresh.md) §C.1) — the bound
-code usually restores it on its own, and `--repair` remains the fallback when
-activation still reports it as already paired. Identity-present-but-
-token-absent is exactly the shape a cloned profile has (below), and the
-unflagged replay used to spend the code on the *source* profile's agent.
+Activating another code in this profile would replay the stored `user_id`,
+spend the code on that existing agent and overwrite its credentials in place.
+It cannot create a second agent or contact entry. `ExistingActivationError`
+(exit 1) refuses this **without sending the code to `/connect` for redemption**
+unless `--new-account`, `--repair` or a bound reconnect code selects the intent.
+The refusal applies even without a usable token, since that state also describes
+a clone. A logged-out agent should request the owner's reconnect prompt;
+if activation still refuses, use `--repair` (see [recovery](./token-refresh.md#c1-what-logout-does-both-plugins)).
 
 #### Cloned profiles
 
@@ -135,17 +126,14 @@ rather than token-gated.
 
 #### Collision detection at load
 
-The guards prevent a *new* collision; they cannot undo one already written. If
-a mis-targeted activation stored another agent's `user_id` **and** stamped
-`extra.profile` with the profile it ran in, the identity is locally
-indistinguishable from one this profile earned, and every later guard — the
-clone check, the `--repair` provenance check — reads it as legitimate.
+Guards cannot identify an existing collision when another agent's `user_id`
+has already been stamped with this profile's `extra.profile`: it appears locally
+legitimate, including to the repair-provenance check.
 
-So the plugin checks at load (`clawchat_gateway/profile_collision.py`, called
-from `_register_platform`): it compares this profile's `extra.user_id` against
-every sibling `config.yaml` under the Hermes root (`<root>/config.yaml` plus
-`<root>/profiles/*/config.yaml`) and logs a warning naming both profiles when
-two hold the same identity on the same `base_url`:
+At load, `profile_collision.py` (via `_register_platform`) compares this
+profile's `extra.user_id` with sibling `config.yaml` files under the Hermes root
+(`<root>/config.yaml` and `<root>/profiles/*/config.yaml`). The same identity on
+the same `base_url` produces this warning:
 
 ```text
 ClawChat: Hermes profiles 'g' and 'default' are configured with the same
@@ -176,15 +164,10 @@ Without multiplexing, give the profile a gateway of its own instead:
 Prefer a bare `hermes profile create` over `--clone` for a second ClawChat
 agent: cloning copies credentials that the new profile must not reuse.
 
-New profiles derive distinct, agent-scoped device ids, so both agents can
-coexist and join the same group. If you pin `CLAWCHAT_DEVICE_ID` manually,
-use a different value for each profile; pairing and plugin reports also key
-on device id alone.
-
-Successful activation prints `clawchat: activation complete for <user_id>` and
-exits 0. Treat any non-zero exit as a hard failure. Activation codes are
-single-use, so do not retry the same code; surface stderr to the operator and
-request a fresh code. When the server sends connect-code guidance, stderr also
+CLI activation prints `clawchat: activation complete for <user_id>` and exits 0;
+Interactive setup prints `ClawChat activation complete.` Treat non-zero exits as
+failures and surface stderr. Codes are single-use: follow server guidance below
+before retrying; otherwise request a fresh code. When the server sends connect-code guidance, stderr also
 carries `clawchat: next_action=<value>` and `clawchat: hint: <sentence>` lines
 — follow them (see [Connect-code failure guidance](#connect-code-failure-guidance)).
 
@@ -213,15 +196,31 @@ sent there rather than to the public default. When
 `platforms.clawchat.extra.user_id` already contains a non-empty value,
 activation sends it as optional `user_id`; otherwise the field is omitted.
 
+### Pre-check and bound reconnect codes
+
+`plugin_version` carries the package `__version__` for backend build tracking.
+`activate()` first calls `POST /v1/agents/connect/check`, including the stored
+`user_id` only when `/connect` will replay it. Under `--new-account`, the
+pre-check still runs but omits the id so it cannot refuse that discarded id.
+Pre-check unavailability does not block redemption.
+
+A reconnect code reports `bound_agent: true` and can only restore its bound
+agent. Activation treats it as `--repair` when a local identity exists, without
+requiring local provenance because the server enforces the binding.
+`--new-account` is refused on a bound code before redemption: it cannot mint a
+new identity. Both calls attach `agent_kind` / `os` / `lane` / `wiki_version` /
+`matched_install` from `clawchat_gateway/onboarding.py` (`os` and `wiki_version`
+are omitted when unavailable).
+
+The response must include `access_token`, `agent.user_id`, `agent.owner_id`,
+and `conversation.id`; optional `agent.id` is persisted when returned.
+
 ### Stale `user_id` recovery
 
-The stored `user_id` is a *re-pair hint*, not a credential — the invite code
-alone decides which account the agent lands in. It can outlive the agent row it
-names (the owner deleted their ClawChat account; the config was copied to
-another machine or pointed at a different deployment), and a replayed dead id
-makes the server answer `16001 agent not found` for **every** invite code — the
-pre-check `POST /v1/agents/connect/check` never inspects `user_id`, so it keeps
-reporting `pairable: true` right up to the failure. Two defences:
+The stored `user_id` is a re-pair hint, not a credential: the code determines
+the account. A deleted agent or copied config can leave a dead id that returns
+`16001 agent not found` even when `/connect/check` reports the code pairable.
+Two defences apply:
 
 - **Environment guard.** The stored id is only replayed when `extra.base_url`
   matches the `base_url` being activated against (trailing slashes ignored).
@@ -235,9 +234,8 @@ reporting `pairable: true` right up to the failure. Two defences:
   mismatch (`16014`) is a genuine rejection, and a code that was never replayed
   has no stale state to shed.
 
-Recent backends fold this fallback into `POST /v1/agents/connect` itself (an
-unresolvable `user_id` degrades to a new pairing server-side), so the retry is
-only exercised against older deployments.
+The retry handles servers that return `16001` instead of pairing fresh for an
+unresolvable `user_id`.
 
 ### Connect-code failure guidance
 
@@ -269,25 +267,6 @@ against older backends.
   `/clawchat-activate` returns the same lines in-chat, and `hermes gateway
   setup` prints them before re-raising. Without guidance fields, every surface
   behaves exactly as before.
-`plugin_version` carries the package `__version__` so the backend can record
-which plugin build paired at connect time (optional, backward-compatible — the
-backend stores it when present and ignores its absence).
-
-Since 0.14.0-86, `activate()` runs that pre-check itself — with the
-stored `user_id` whenever `/connect` will replay it, so `user_id_status` is
-evaluated; never under `--new-account`, which drops the id and so must not be
-refused over it (and which is refused outright on a `bound_agent: true` code:
-without a `user_id` the server would restore the bound agent and spend the code,
-never mint one) — and attaches
-`agent_kind` / `os` / `lane` / `wiki_version` / `matched_install`
-(`clawchat_gateway/onboarding.py`) to both calls. A code issued from the agent's
-own reconnect card in the ClawChat app answers `bound_agent: true`; it can only
-restore this identity, so activation treats it as `--repair` without the flag
-and without the local-provenance check (the server enforces the binding).
-
-The Hermes activation path currently requires the response to include
-`access_token`, `agent.user_id`, `agent.owner_id`, and `conversation.id`.
-`agent.id` is optional and is persisted when returned.
 
 ## Persisted State
 
@@ -304,23 +283,12 @@ configured ClawChat activation credentials — which is why activation refuses t
 run against a live activation unless `--new-account` or `--repair` says which
 overwrite was intended (see [One profile, one agent](#one-profile-one-agent)).
 
-Credential tokens are stored in plugin SQLite as the authoritative runtime
-credential record and in `.env` as the bootstrap copy written by activation.
-At startup the runtime connection first adopts the latest complete activation
-row in plugin SQLite (`_load_startup_activation_credentials`). If no such row
-exists, the running adapter falls back to a complete env-backed credential
-bundle to connect, and that bundle is seeded into a SQLite row on the first
-token refresh (§C.2). The plugin never copies `CLAWCHAT_TOKEN` or
-`CLAWCHAT_REFRESH_TOKEN` into `config.yaml`.
-
-When Hermes has registered the ClawChat platform but no complete token/user
-credential bundle is available, the adapter starts in a waiting-for-activation
-state and returns control to Hermes so platform startup is not blocked by the
-connection timeout. A later successful activation writes SQLite and the
-background connection supervisor opens the WebSocket without requiring another
-Hermes restart. If Hermes has not registered the plugin platform at all, normal
-plugin reload or Gateway restart is still required before this waiting state can
-run.
+SQLite is the authoritative runtime credential record; `.env` is the bootstrap
+copy. Startup adopts a complete SQLite row, falling back to complete env/extra
+credentials; the first refresh seeds SQLite. Tokens never enter `config.yaml`.
+A registered platform with no complete credentials waits for activation without
+blocking startup, then adopts the new row without a restart. An unregistered
+platform still needs plugin reload or gateway restart. See [Hermes recovery](./token-refresh.md#c2-hermes-recovery-unification).
 
 Activation writes the WebSocket URL to `platforms.clawchat.extra.websocket_url`:
 the explicit `CLAWCHAT_WEBSOCKET_URL` (or `CLAWCHAT_WS_URL`) when set — the
@@ -329,255 +297,51 @@ otherwise one derived from `base_url` (`activate._derive_websocket_url`).
 
 ## Automatic Token Refresh & Auto-Logout
 
-The `access_token` minted at activation expires after **24h**. The plugin now
-uses the stored `refresh_token` to keep the agent connected without a human
-re-pairing it — previously the access token simply expired and the agent went
-dark until manual re-activation.
-
-For the full cross-plugin behavior (refresh timing, the `code` matrix,
-single-flight guards, WebSocket continuation), see the canonical spec
-[`./token-refresh.md`](./token-refresh.md). Operator-relevant
-summary:
+Token lifetime is server-controlled. The plugin refreshes before JWT `exp` using
+a lifetime-based margin, and reactively on REST `401`/`403` or a WebSocket
+`hello-fail` that rejects authentication. Timing, retries and persistence are
+specified in [token refresh](./token-refresh.md#a-refresh-timing).
 
 ### How refresh works
 
-The plugin calls `POST /v1/auth/refresh` (unauthenticated; the refresh token in
-the body is the credential, with an `X-Device-Id` header equal to the
-connect-time device id):
-
-- **Proactively** — roughly 2h before the 24h expiry (decoded from the access
-  token's `exp`), so a healthy agent rotates its token before it can fail.
-- **Reactively** — on a REST `401`/`403`, or when the WebSocket handshake fails
-  with a token-rejection `hello-fail`.
-
-On success the rotated `{access_token, refresh_token}` pair is written to **both**
-`$HERMES_HOME/.env` (`CLAWCHAT_TOKEN` / `CLAWCHAT_REFRESH_TOKEN`) and plugin
-SQLite, then the WebSocket reconnects with the new token. Access-token expiry
-comes from JWT `exp`, with timing determined by the server.
-
-Each refresh attempt has a 20s total deadline
-(`REFRESH_ATTEMPT_CEILING_SECONDS` in `clawchat_gateway/api_client.py`; the 15s
-`REFRESH_REQUEST_TIMEOUT_SECONDS` still bounds each socket operation). A hit is
-transient. When a transient failure may have reached the server (deadline hit,
-reset, non-200), the next attempt with the same refresh token starts 31–35s
-after the failed attempt began instead of the usual 1s/2s/4s backoff; failures
-that provably never reached the server, and `code:1`, keep the fast backoff.
-That spacing supports retrying after a lost response within the server's refresh
-grace window. Its duration and replay budget are server-controlled; a `10003`
-on that retry still logs out. See
-[`./token-refresh.md`](./token-refresh.md) §B.
-
-Integer business code `10003` in parseable JSON is permanent even in a non-200
-response or urllib HTTPError. Every other non-200 response, including integer
-`code:400`, HTML, malformed JSON and string codes, remains transient. Integer
-`code:400` is permanent only with HTTP 200.
+Successful refresh normally needs no operator action. Proactive refresh
+reconnects the WebSocket; REST recovery retries the failed request once and
+keeps a healthy socket. Transient failures retry without logging out; see
+[failure handling](./token-refresh.md#b-refresh-failure-handling).
 
 ### Auto-logout (permanent refresh failure)
 
-When the refresh token is **permanently invalid** — revoked, expired, or a
-device-mismatch (see
-[`./configuration.md`](./configuration.md#device-id-is-also-the-token-refresh-precondition))
-— the plugin cannot mint new tokens. It then:
+A confirmed permanent refresh failure clears credentials while preserving
+identity, closes the socket and waits for activation. The user sees:
 
-1. Writes the rejected refresh token's SHA-256 hex fingerprint and rejection
-   time to SQLite (`revoked_refresh_tokens`, migration 12), before clearing
-   credentials. The marker never contains the plaintext token.
-2. Writes empty `CLAWCHAT_TOKEN` / `CLAWCHAT_REFRESH_TOKEN` tombstones in `.env`
-   and blanks the SQLite `activations` token columns, preserving identity.
-   Each clear result is logged; a failed clear leaves the durable guard active.
-3. Clears in-memory credentials, sets `AUTH_FAILED`, closes the WebSocket and
-   waits for new activation for startup, proactive, REST and hello-fail failures.
-   On restart and during activation polling, an existing marker blocks empty
-   refresh tokens and tokens matching its fingerprint. Adopting a different
-   refresh token can be adopted only if its access token also differs from the
-   rejected access-token latch; only then are the latch and marker cleared.
-   Without a marker, access-token-only setups still connect unless that access
-   token has already been rejected by hello. Fresh installs keep their original
-   waiting status. A marker read failure preserves credentials; the in-memory
-   fingerprint guard and access-token latch still apply.
-4. Surfaces a user-visible message (in addition to logs):
+> ClawChat token expired and could not be refreshed. Ask your owner to send you the reconnect prompt from the ClawChat app, then follow https://agent-connection.clawling.com/reconnect.md.
 
-   > ClawChat token expired and could not be refreshed. Ask your owner to send you the reconnect prompt from the ClawChat app, then follow https://agent-connection.clawling.com/reconnect.md.
+The [Hermes appendix](./token-refresh.md#h1-confirmed-permanent-logout-and-adoption-guards)
+specifies the four logout steps, durable fingerprint guard and adoption checks.
 
 **Operator recovery:** do not spend a fresh connect code on it. The owner sends
 the agent the reconnect prompt from the ClawChat app (its code is bound to this
-agent), and the agent follows the reconnect page linked in the message above,
-re-activating with any activation entrypoint above (e.g. `/clawchat-activate
-<CODE>` or `hermes clawchat activate <CODE>`). Activation usually restores the
-identity on its own; if it still reports the identity as already paired, re-run
-it with `--repair`. The waiting-for-activation supervisor picks
-up the new credentials without a Hermes restart, including after an env-booted
+agent). Follow the reconnect page above and use any activation entrypoint.
+Activation usually restores the identity on its own; if it still reports the
+identity as already paired, re-run with `--repair`. The waiting supervisor adopts
+the new credentials without a Hermes restart, including after an env-booted
 process's first permanent refresh failure.
 
 ### Device-id column (SQLite migration)
 
-Refresh requires the same device id that was used at connect time. Activation now
-records it in the `activations.device_id` column (migration `6`,
-`activation_device_id`), and refresh reads it back verbatim for the
-`X-Device-Id` header. Legacy activation rows with no stored value backfill
-automatically from the deterministic connect-time device id. Keep
-`CLAWCHAT_DEVICE_ID` pinned so this value stays stable across restarts.
+Activation stores the connect-time id in `activations.device_id` (migration 6); refresh reuses it.
+See [device-id durability](./configuration.md#device-id-durability-deployment-requirement); pin the id when SQLite is not durable.
 
 ## Credential Deletion And Revocation
 
-The connection distinguishes three cases. Refresh classification and recovery
-still follow [`token-refresh.md`](./token-refresh.md) §A / §C / §D.
-
-| Case | Behavior and log events |
+| Case | Behavior |
 |---|---|
-| Never activated: no SQLite row and no complete env/extra credentials | Poll for an activation every 2 seconds without connecting or refreshing (unchanged). Logs `activation_wait`; DEBUG `activation_poll`. |
-| Activated from the SQLite row, then a source check reads `None` (row deleted or credentials cleared) | Checked by the watcher, before every connect (including after backoff), before refresh and during transient retry. Logs WARNING `activation_credentials_revoked action=wait_activation reason="activation credentials deleted"`, clears the in-memory access/refresh token and identity, latches the old access token, enters `AUTH_FAILED` and closes the WS. The supervisor then waits for a new activation: no reconnect with the old credentials and no proactive, hello-fail or REST reactive refresh. The refresh-permanent auto-logout message is not sent. Read errors use the bounded suspension policy below rather than being treated as deletion. |
-| Server-side revocation (session revoked and socket kicked) | The kick is an ordinary close (no status / `1005`), so the first reconnect uses normal backoff; a close code alone never proves revocation. The reconnect gets `hello-fail` `authentication failed`, triggers a refresh, and a permanent refresh failure (e.g. HTTP 401 with integer `code:10003`) takes the §C auto-logout path: logs `hello_fail_refresh` and `auth_logout action=re_pair_required`, clears credentials, closes the WS, enters `AUTH_FAILED` and waits for activation. The old token is not reconnected. |
+| Never activated: no SQLite row and no complete env/extra credentials | Poll for activation every 2 seconds; no connect or refresh. |
+| SQLite activation row deleted or credentials cleared | Clear memory, close WS and wait for activation; no refresh-permanent auto-logout message. Read errors suspend after a bounded count. |
+| Server-side session revocation | Reconnect normally, then refresh on authentication rejection; a confirmed permanent failure takes auto-logout. |
 
-When the server rejects the token and there is no refresh token, the existing
-`auth_failed` branch applies: SQLite-sourced credentials log
-`action=wait_activation` and wait for activation; env/extra credentials log
-`action=stop_reconnect` and stop that supervisor. Transient errors
-(`remote auth service unavailable`, 5xx, timeouts) still retry or
-backoff-reconnect per §A / §B and never revoke credentials. `4001` / `4002`
-keep their takeover / duplicate-session meaning. Terminal `4010` instead preserves
-credentials and waits for explicit local `hermes clawchat reclaim` or
-`/clawchat-reclaim`, without reconnect or refresh, including after restart.
-Successful activation (also `--repair` / `--new-account`) clears this state.
-
-After the owner re-activates, the poll adopts the new row (its access token
-differs from the latched one and passes the refresh fingerprint check), logs
-`activation_loaded` and reconnects without a process restart. If the row still
-exists but its token changed, the watcher keeps logging
-`activation_credentials_changed`, closes the old WS and reconnects with the new
-token (§D); that is not the revocation path.
-
-For SQLite-sourced connections, credential reads share one consecutive-failure
-counter; any successful credential read resets it. The first two failures keep
-the existing connection/retry behavior, while a failed persistence read always
-refuses its write. At `CREDENTIAL_READ_FAILURE_LIMIT` (currently 3), log WARNING
-`activation_credentials_unreadable action=suspend`, enter `SUSPENDED`, close the
-WS and stop reconnecting and refreshing. Suspension retains the in-memory
-credentials, writes no credential stores or revoked marker, latches no rejected
-token and sends no auto-logout message. Env/extra bootstrap connections and
-never-activated polling are unaffected by this counter.
-The disconnected connection record is finalized as `suspended`, including its
-disconnect timestamp, before recovery starts a new connection record.
-
-While suspended, the supervisor checks SQLite every 2 seconds. A readable row
-matching the retained credentials resumes connecting; a changed row is adopted
-and connected with its new token. Recovery logs
-`activation_credentials_readable action=reconnect`. A readable `None` instead
-takes the deletion/revocation path above. The same source check runs immediately
-before every `CONNECTING` transition and every refresh request: deletion stops
-both, and rotation adopts the new pair for connect or skips the old refresh.
-Each connection attempt retains its credential generation and token. If
-suspension, revocation, rotation or stopping invalidates an in-flight connect or
-handshake, the returned socket is closed with a timeout; it cannot send a stale
-connect frame or enter `READY`. Recovery does not revive that old attempt.
-
-An env/extra bootstrap session also suspends immediately if a permanent refresh
-cannot clear a matching SQLite row and strict `.env` reading is unavailable
-(`env_matched is None`). It logs `activation_credentials_unreadable action=suspend`,
-closes the WS and stops refresh/reconnect while retaining its in-memory pair.
-The unconfirmed failure writes no new rejection marker, latches no rejected pair
-and sends no auto-logout message. Bootstrap rejection markers are always deferred
-until logout confirms ownership, even when `.env` was readable at the rejection
-callback. Normal bootstrap logout with a matching pair or absent
-`.env` keys still writes tombstones and stops the rejected session.
-
-Bootstrap suspension polls every 2 seconds too, retaining the pending permanent
-failure's credential pair and reason. SQLite sessions also retain pending permanent
-failures when callback source checks reach the read-failure suspension limit,
-using the same recovery rules. Once SQLite or strict `.env` reads confirm
-that same pair (absent `.env` keys also confirm ownership), the gateway completes
-conditional logout, writes the revoked marker and latches the rejected pair,
-then enters `AUTH_FAILED` with auto-logout notification. It sends no connect frame
-and makes no additional HTTP refresh request. A new SQLite pair, including a
-refresh-only change, instead discards the pending result and adopts the new
-activation using the usual token/fingerprint checks before reconnecting.
-Adoption, revocation and stopping clear the pending result. Generic source
-suspension without a pending permanent failure can still resume the same pair.
-If `.env` holds a different pair, the gateway retains suspension and logs
-`activation_credentials_changed action=wait_activation`; tokens alone do not
-establish the replacement identity, so write a new SQLite activation to recover.
-Observing a different `.env` pair does not discard the pending failure: only
-actually adopting new activation credentials does. If `.env` returns to the
-original pair before adoption, the pending permanent failure completes logout.
-SQLite observation without adoption also retains the pending result.
-If SQLite cannot be read, or there is no usable row and `.env` remains
-unreadable, suspension continues without connecting or refreshing.
-Outside suspension, a confirmed different `.env` pair (`env_matched is False`)
-keeps the existing late-result discard behavior and does not trigger suspension.
-
-If the row is deleted while a refresh is in flight, the persist callback
-re-checks the credential source and revocation state. For a connection using
-SQLite credentials, persistence conditionally updates the row only if its
-access and refresh token still match the request's original pair. Even a
-refresh-only change rejects an old successful response. A cleared, rotated or
-deleted row rejects the write without seeding or touching `.env`; a successful
-SQLite update happens **before** the `.env` mirror. A late successful result
-cannot restore discarded in-memory credentials or overwrite a newly adopted
-activation. For env/extra bootstrap without a row yet, a missing row is normal
-and the watcher keeps the socket. Bootstrap refresh persistence also rechecks
-SQLite and binds the write to the full request pair. It first conditionally
-updates a matching row; when no row exists it may atomically seed one with
-`INSERT ... ON CONFLICT DO NOTHING`. A different or concurrently inserted row
-rejects the write. Strict `.env` reads must confirm the request pair (or absent
-token keys) before seeding and again before mirroring: unreadable or changed
-`.env` is never overwritten. SQLite succeeds before the `.env` write. A refused
-persist result remains transient and does not swap the in-memory pair. SQLite
-and `.env` are separate writes: a failure or change after the SQLite commit can
-leave that rotated row persisted while the `.env` mirror and memory stay old.
-
-An in-flight transient refresh also checks the credential source after each
-transient failure and before and after its backoff sleep. Even with unbounded
-retries, a deletion observed at those checks closes the WS and stops the next
-HTTP attempt, then the supervisor waits for activation. The last HTTP error
-remains transient, so this does not send a permanent-failure auto-logout
-message. Repeated store read failures reach the same suspension limit, stopping
-the in-flight retry loop before another HTTP attempt without clearing the
-retained credentials.
-
-Permanent-failure rejection and logout callbacks are bound to the pair that
-started the request, just like successful token persistence. If that pair no
-longer matches memory, the connection is already auth-failed/suspended, or the
-SQLite row's access/refresh pair has changed, the callbacks discard the late
-result and log INFO `refresh_result_discarded action=ignore`. They do not clear
-the newer row or memory, write a revoked marker or send auto-logout. Logout's SQLite clear also
-requires both the expected access and refresh token, preserving a row whose
-pair changes before that write. A credential read failure below the suspension
-limit still permits permanent-failure handling when the request's pair matches
-memory; the SQLite
-clear remains conditional on the complete request pair, including env/extra
-bootstrap requests. The `.env` clear also requires the stored values to match
-that pair: an unreadable `.env` or a different stored value is preserved, while
-absent keys (credentials supplied via the process environment or extra config)
-still receive the empty tombstone so a restart does not re-read the dead token. Read failures
-still count toward the same suspension limit. When a bootstrap request clears
-no SQLite row and `.env` contains a different pair, its permanent result is
-discarded, allowing a refresh-only replacement to load. The refresh manager latches the
-`(access_token, refresh_token)` pair only after both permanent-failure callbacks
-accept the result. A discarded result leaves no new rejection latch or logout
-flag, and a replacement refresh token is not rejected merely because its
-access token is unchanged. The existing refresh interval floor still applies.
-Terminal `hello-fail` credential changes finish before awaiting state observers,
-so an observer adopting a new activation cannot have it cleared by the old
-failure's continuation.
-
-Persistence still runs synchronously on the event loop,
-intentionally keeping the credential guard and write in the same task without
-an intervening `await`; slow storage can delay other tasks.
-The `.env` comparison and helper write are separate steps; another process can
-still change the file between them.
-The SQLite-then-`.env` order narrows but does not close the cross-process
-window: if another process clears both stores after the SQLite commit and
-before the `.env` mirror is written, the mirror can still receive the rotated
-pair (the next watcher poll still revokes the live connection, but a restart
-could bootstrap from `.env`). If the SQLite update succeeds and the `.env`
-write fails, the in-memory pair is not swapped; the watcher or a restart adopts
-the SQLite pair, and `.env` is not retried on its own.
-
-Deleting only the SQLite row does not remove env/extra bootstrap tokens (for
-example `CLAWCHAT_TOKEN` / `CLAWCHAT_REFRESH_TOKEN` in the Hermes `.env`). If
-they are still present, the next process start bootstraps from them again. To
-take the agent offline for good, stop the gateway or remove the plugin and
-clear those values as well.
+See the [Hermes appendix](./token-refresh.md#h-hermes-appendix--credential-lifecycle-and-races)
+for source checks, logs, suspension, conditional writes and cross-process races.
 
 ## Restart Or Reload
 
@@ -590,10 +354,10 @@ restart that cannot work; it prints the next step instead:
 
 | Detected | What activation does |
 |---|---|
-| No gateway has run for the default profile (neither `gateway.pid` nor `gateway_state.json` in `$HERMES_HOME`) | Prints `hermes gateway install` then `hermes gateway start`. A bare `hermes gateway restart` with no service installed would instead start an unmanaged foreground gateway. |
-| No gateway has run for a named profile, and no multiplexer serves it | Prints the preferred fix first — turn on `gateway.multiplex_profiles` in the default profile's `config.yaml` (adding the profile to `gateway.multiplex_profile_allowlist` if one is set) and run `hermes -p default gateway restart` — then, as the fallback without multiplexing, `hermes -p <name> gateway install` and `hermes -p <name> gateway start`. |
-| A named profile served by the default profile's multiplexing gateway (`gateway.multiplex_profiles` in the default profile's `config.yaml` or `GATEWAY_MULTIPLEX_PROFILES`, narrowed by `gateway.multiplex_profile_allowlist`) | Prints `hermes -p default gateway restart` and warns that it restarts every profile that gateway serves. Hermes refuses a per-profile restart there. |
-| Otherwise | Requests the restart; on the multiplexing default profile it notes that all served profiles restart. |
+| Default profile: neither `gateway.pid` nor `gateway_state.json` in `$HERMES_HOME` | Prints `hermes gateway install` then `hermes gateway start`; a bare restart without an installed service would start an unmanaged foreground gateway. |
+| Named profile: no gateway runtime files and no serving multiplexer | Recommends enabling `gateway.multiplex_profiles` in the default config, adding this profile to `gateway.multiplex_profile_allowlist` if set, then `hermes -p default gateway restart`. Fallback: `hermes -p <name> gateway install` then `hermes -p <name> gateway start`. |
+| Named profile served by the default multiplexer (`gateway.multiplex_profiles` or `GATEWAY_MULTIPLEX_PROFILES`, narrowed by the allowlist) | Prints `hermes -p default gateway restart`; all served profiles restart. Hermes refuses per-profile restart here. |
+| Otherwise | Requests restart; warns when the default gateway serves multiple profiles. |
 
 A requested restart is not a confirmed one. The detached process runs from
 `$HERMES_HOME` (never from the plugin folder, which a lingering process would
@@ -605,18 +369,13 @@ overwritten on each request. To verify:
 2. The Hermes log (under `$HERMES_HOME/logs/`) has a `clawchat state -> ready`
    line from after the activation.
 
-No `exit_code` line after a few minutes means the restart is still waiting
-(for example for open sessions to finish) or the launcher was stopped together
-with the old gateway; the ready line is what confirms the restart. What the
-check cannot see: a second, separately installed gateway holding the profile
-(seen on Windows), service-manager errors, and the drain wait itself; those only
-show up in the restart log.
+No `exit_code` after a few minutes means the restart may still be waiting for
+sessions or the launcher stopped with the old gateway; confirm with the ready
+line. This check cannot detect a separately installed gateway holding the
+profile, service-manager errors or drain waits; inspect the restart log.
 
-`hermes gateway setup` exchanges the code without scheduling that detached
-restart because the surrounding setup flow manages start/restart behavior.
-
-`--restart` is retained as a compatibility flag for command lines that already
-include it.
+`hermes gateway setup` leaves service lifecycle to Hermes. `--restart` remains
+a compatibility flag; CLI and slash activation restart by default.
 
 ## Activation Bootstrap
 
@@ -629,27 +388,12 @@ conversation id.
 
 ## Implementation References
 
-- `__init__.py`: platform, CLI, slash command, and home-channel registration.
-- `clawchat_gateway/commands.py`: `/clawchat-activate` parser.
-- `clawchat_gateway/cli.py`: `hermes clawchat activate` handler.
-- `clawchat_gateway/setup.py`: `hermes gateway setup` activation flow.
-- `clawchat_gateway/activate.py`: credential exchange, config and `.env` writes,
-  restart scheduling, and SQLite activation upsert.
-- `clawchat_gateway/connection.py`: waiting-for-activation credential polling,
-  WebSocket connection lifecycle, and the auto-logout path (`AUTO_LOGOUT_*`).
-- `clawchat_gateway/token_refresh.py`: proactive/reactive refresh scheduling,
-  single-flight + rejected-token guards, persist-then-swap ordering. Note:
-  proactive refresh is driven by a short poll loop comparing
-  `now >= exp - margin` (`connection.py` credential watch), never by a
-  long-armed one-shot timer — so the OpenClaw plugin's 30-day-token
-  `setTimeout` overflow (delay > 2^31-1 ms fires immediately; fixed there by
-  chunked re-arming) has no analogue here. Audited 2026-07-06.
-- `clawchat_gateway/api_client.py`: `agents_connect` and `auth_refresh`
-  (`POST /v1/auth/refresh`) HTTP requests.
-- `clawchat_gateway/device_id.py`: connect-time `X-Device-Id` and the
-  unpinned-`CLAWCHAT_DEVICE_ID` boot warning.
-- `docs/install.md`, `docs/reference/cli.md`, and `docs/configuration.md`:
-  operator-facing activation behavior and persisted state.
+- `__init__.py`: platform, CLI, slash and home-channel registration.
+- `clawchat_gateway/commands.py`, `cli.py`, `setup.py`: activation entrypoints.
+- `clawchat_gateway/activate.py`: exchange and persistence; `restart.py`: restart plans.
+- `clawchat_gateway/connection.py`: activation polling, WS lifecycle and auto-logout.
+- `clawchat_gateway/token_refresh.py`: timing, single-flight, latches and persist-before-swap.
+- `clawchat_gateway/api_client.py`: connect/refresh HTTP; `device_id.py`: pairing id.
 
 ## Verification
 
@@ -659,7 +403,7 @@ stay local (see [`./development.md`](./development.md#running-tests)). Use
 the smallest command that covers the activation change being touched:
 
 ```bash
-uv run --extra test pytest tests/  # scope to the file covering the change
+uv run --extra test pytest tests/test_activate_device_id.py
 uv run --extra test pytest
 ```
 
