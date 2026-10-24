@@ -183,7 +183,11 @@ wheel-based install will silently ship with zero bundled skills.
 `hermes plugins install clawling/clawchat-plugin-hermes-agent` installs from
 this repository's `main` branch, not from a tag or a package index. **Merging
 into `main` is therefore the publication itself**: from that moment new
-installs and reinstalls get the new code.
+installs and reinstalls get the new code. Hermes is the documented exception
+to **tag before publish**. Create and push the annotated tag immediately
+after the release PR merge, in the same sitting, before doing anything else
+or fast-forwarding `pre-release`; the tag records what was served. Any later
+build or publish must use a clean checkout of that tag.
 
 Everything reaches `main` through a GitHub PR; nothing is pushed to `main`
 directly.
@@ -259,14 +263,14 @@ Dev-only images and deployments are not releases and are exempt from this order.
    name equals the version, without a `v`:
 
    ```bash
+   release_commit=$(gh pr view "$release_pr" --json mergeCommit --jq .mergeCommit.oid) || exit 1
    git fetch origin --tags || exit 1
-   release_commit=$(git rev-parse origin/main) || exit 1
-   git log -1 --format='%H %P %s' "$release_commit" || exit 1
+   git merge-base --is-ancestor "$release_commit" origin/main || exit 1
    ```
 
-   Verify that the displayed commit is the merge commit of `$release_pr`;
-   **stop if it is not**. Then tag that exact commit and push the tag before
-   fast-forwarding `pre-release`:
+   Stop if any command fails. Use the PR's merge commit because the floating
+   `origin/main` tip may already include a later merge. Tag that exact commit
+   and push the tag before fast-forwarding `pre-release`:
 
    ```bash
    git tag -a "$release_version" "$release_commit" -m "Release $release_version" &&
@@ -277,10 +281,26 @@ Dev-only images and deployments are not releases and are exempt from this order.
    Installers never read the tag. It records exactly which `main` commit was
    served as that version and is the reference for rollback and for anything
    built from this release later (always build from a clean checkout of the
-   tag, never from a branch). Since `main` only moves through release PRs,
-   the newest tag and `main` point at the same commit; a merge into `main`
-   without a version bump and a tag ships code that no version number names.
+   tag, never from a branch). A merge into `main` without a version bump and
+   a tag ships code that no version number names.
+
+4. **Record the release.** Create a GitHub Release for the pushed tag, with
+   the version as its title and the exact commit in its notes:
+
+   ```bash
+   gh release create "$release_version" --verify-tag --title "$release_version" \
+     --notes "commit: $release_commit" || exit 1
+   ```
+
+   Add later facts with `gh release edit`, never by moving the tag.
 
 Never tag a commit that is not on `main`. Never move or delete a pushed release
 tag; if a release needs a correction, use a new version and a new release PR.
 Tag messages, PR titles and PR bodies are public like commit messages.
+
+**Open item: pin installs to a tag.** Installs currently follow `main`, so
+the release moment cannot be separated from the merge, and a bad merge
+reaches new installs at once. Investigate whether `hermes plugins install`
+can install a tag/ref (for example, an `@<tag>` ref), so installs could pin
+to the release tag and `main` merges would stop being publications. Until
+then, the exception above applies.
