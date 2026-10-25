@@ -472,8 +472,14 @@ standalone path otherwise.
 lifecycle (`clawchat_gateway.connection`), inbound frame parsing
 (`clawchat_gateway.inbound`), outbound frame construction
 (`clawchat_gateway.protocol`), media handling
-(`clawchat_gateway.media_runtime`), and per-turn channel-prompt
-injection (`_compose_channel_prompt`).
+(`clawchat_gateway.media_runtime`), and prompt assembly
+(`_compose_channel_prompt_parts`). When the host declares
+`MessageEvent.channel_context`, stable conversation sections stay in the system
+`channel_prompt`; per-turn limits, timestamps, message/batch metadata, group
+speaker notes and reply guidance go into `channel_context`, which Hermes
+persists before `[New message]` in the user message to preserve the model's
+system prefix. Older hosts receive the identical legacy prompt entirely in
+`channel_prompt` (see [`reference/prompt-injection.md`](reference/prompt-injection.md)).
 
 Besides real inbound messages, three server signals produce **synthetic
 turns** through the same `_handle_inbound` path (each `raw_message` carries
@@ -505,6 +511,10 @@ one at a time, while acks and other chats keep flowing. A handler that
 raises costs that frame only. Lanes survive a reconnect (a chat's order
 holds across it) and are cancelled by `ClawChatConnection.stop()`, which
 spares the lane that called it.
+
+The WebSocket, send queue, ACK futures and timeout timers belong to the loop
+where the connection starts; `send_frame` calls from another loop (including
+Hermes tools) are forwarded there and return `False` if that loop is unavailable.
 
 ### Group turns run one at a time
 

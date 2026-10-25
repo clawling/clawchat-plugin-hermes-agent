@@ -13,9 +13,9 @@ prompt:
 
 Caps come from the plugin config keys ``note-cap-user`` / ``note-cap-group`` /
 ``note-cap-turn`` (factory 1500 / 2000 / 4000), clamped to a safe range. An
-over-long note is cut at a paragraph boundary and marked ``(truncated)``; when
-the turn total is over, the longest notes give way first. Empty notes add
-nothing.
+over-long note keeps a short opening profile and the latest paragraphs, marked
+``(earlier part truncated)`` between them; when the turn total is over, the
+longest notes give way first. Empty notes add nothing.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from clawchat_gateway.adapter import ClawChatAdapter
 from clawchat_gateway.clawchat_memory import write_clawchat_memory_body
 from clawchat_gateway.config import ClawChatConfig
 from clawchat_gateway.inbound import InboundMessage
+from clawchat_gateway.note_injection import cap_note
 
 AGENT = "usr_agent"
 OWNER = "usr_owner"
@@ -108,14 +109,100 @@ def test_owner_dm_carries_owner_md(adapter):
     assert "should not be used" not in content
 
 
-def test_long_note_is_cut_at_a_paragraph_and_marked(adapter):
+def test_long_note_keeps_the_latest_paragraph_and_is_marked(adapter):
     first = "A" * 900
-    second = "B" * 900
-    _note(adapter, "user", FRIEND, f"{first}\n\n{second}")
+    middle = "B" * 900
+    last = "C" * 900
+    _note(adapter, "user", FRIEND, f"{first}\n\n{middle}\n\n{last}")
     content = _part(adapter._compose_channel_prompt_parts(direct(FRIEND)), "peer-memory")
-    assert first in content
-    assert "B" * 10 not in content
-    assert "(truncated" in content
+    assert last in content
+    assert middle not in content
+    assert first not in content
+    assert "(earlier part truncated" in content
+    assert content.count("(earlier part truncated") == 1
+
+
+def test_cap_note_keeps_a_short_profile_before_the_latest_paragraphs():
+    profile = "Prefers concise answers."
+    paragraphs = [f"Fact {index}: " + "x" * 40 for index in range(6)]
+    hint = "clawchat_memory_read"
+    content = cap_note("\n\n".join([profile, *paragraphs]), 150, read_hint=hint)
+    marker = f"(earlier part truncated — {hint} for the rest)"
+    assert content.startswith(f"{profile}\n{marker}\n")
+    assert content.count(profile) == 1
+    assert paragraphs[2] not in content
+    assert content.endswith("\n\n".join(paragraphs[-2:]))
+    assert content.count("(earlier part truncated") == 1
+    assert len(profile) + len(content.split(f"\n{marker}\n")[1]) <= 150
+
+
+def test_cap_note_drops_a_profile_over_one_third_of_the_limit():
+    profile = "P" * 41
+    middle = "M" * 90
+    last = "Latest rule."
+    content = cap_note(f"{profile}\n\n{middle}\n\n{last}", 120)
+    assert profile not in content
+    assert content.startswith("(earlier part truncated)\n")
+    assert content.endswith(last)
+
+
+@pytest.mark.parametrize("profile", ["", "Profile."])
+@pytest.mark.parametrize(
+    "last, expected_tail",
+    [
+        ("x" * 100 + "\nRecent line.\nLatest line.", "Recent line.\nLatest line."),
+        ("x" * 100 + "LATEST-END", None),
+    ],
+)
+def test_cap_note_falls_back_to_trailing_lines_then_characters(profile, last, expected_tail):
+    body = f"{profile}\n\n{last}" if profile else last
+    remaining = 40 - len(profile)
+    if expected_tail is None:
+        expected_tail = body[-remaining:]
+    marker = "(earlier part truncated)"
+    content = cap_note(body, 40)
+    expected = f"{profile}\n{marker}\n{expected_tail}" if profile else f"{marker}\n{expected_tail}"
+    assert content == expected
+    assert body.endswith(expected_tail)
+    assert len(profile) + len(expected_tail) <= 40
+
+
+def _appended_note(length):
+    profile = "Profile: prefers concise answers."
+    sections = [f"## 2026-10-{day:02d} update\n" for day in range(1, 21)]
+    latest = "## 2026-10-21 rule\nAlways include a short example."
+    padding = length - len("\n\n".join([profile, *sections, latest]))
+    width, extra = divmod(padding, len(sections))
+    filler = "Recorded long-term fact. "
+    sections = [
+        heading + (filler * (width // len(filler) + 1))[:width + (index < extra)]
+        for index, heading in enumerate(sections)
+    ]
+    return "\n\n".join([profile, *sections, latest]), profile, latest
+
+
+@pytest.mark.parametrize("length", [13373, 5000])
+def test_cap_note_keeps_the_profile_and_last_rule_in_an_appended_note(length):
+    body, profile, latest = _appended_note(length)
+    assert len(body) == length
+    content = cap_note(body, 1500)
+    marker = "(earlier part truncated)"
+    assert content.startswith(f"{profile}\n{marker}\n")
+    assert content.endswith(latest)
+    assert "## 2026-10-01 update" not in content
+    assert content.count(marker) == 1
+    tail = content.split(f"\n{marker}\n", 1)[1]
+    assert len(profile) + len(tail) <= 1500
+
+
+@pytest.mark.parametrize("body, limit", [("", 0), ("Short note.", 100), ("Head\n\nTail", 10)])
+def test_cap_note_returns_a_note_within_the_limit_unchanged(body, limit):
+    assert cap_note(body, limit) == body
+    assert cap_note(f" \n{body}\n ", limit) == body
+
+
+def test_cap_note_with_zero_budget_keeps_no_note_text():
+    assert cap_note("Latest rule.", 0) == "(earlier part truncated)\n"
 
 
 def test_group_turn_carries_group_and_speaker_notes(adapter):
@@ -149,7 +236,7 @@ def test_group_turn_total_cap_shrinks_the_longest_first(adapter):
     )
     assert "short group note" in content
     assert content.count("x" * 290) < 5 and content.count("y" * 290) < 5
-    assert content.count("(truncated") == 2
+    assert content.count("(earlier part truncated") == 2
 
 
 def test_note_caps_read_from_plugin_config_and_clamped():

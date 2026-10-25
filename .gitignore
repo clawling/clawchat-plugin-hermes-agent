@@ -256,10 +256,15 @@ tests/*
 !tests/test_register_platform_cron.py
 !tests/test_install_scan.py
 !tests/test_inbound_dispatch_lanes.py
+# Socket, queue, ACK futures and timers stay on the connection's owner loop.
+!tests/test_send_frame_cross_loop.py
 !tests/test_memory_defaults.py
 !tests/test_memory_append_dedupe.py
 !tests/test_memory_migration_hint.py
 !tests/test_note_injection.py
+# Stable system prompts and per-turn user context, including the real Hermes contract.
+!tests/test_channel_prompt_split.py
+!tests/test_channel_context_real_hermes.py
 !tests/test_memory_routing_text.py
 !tests/test_memory_read_scope.py
 !tests/test_group_shared_session.py
