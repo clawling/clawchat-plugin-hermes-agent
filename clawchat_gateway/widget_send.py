@@ -17,7 +17,8 @@ WIDGET_DESCRIPTION = (
     "Update a widget on your partner's phone home screen (ClawChat widget/v1). "
     "Only after they asked for one. Each call is the whole widget, not a change, "
     "and goes to your private chat with them. Call it once with no widget to read "
-    "the format before your first one."
+    "the format before your first one. It needs ClawChat app 1.0.29 or later on "
+    "their phone; older apps show it as unsupported content."
 )
 NOT_CONNECTED = "ClawChat is not connected; try again later"
 
