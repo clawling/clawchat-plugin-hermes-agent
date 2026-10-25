@@ -3,8 +3,8 @@
 Documentation for the `clawchat` Hermes plugin (Python package
 `clawchat-gateway`, source `clawling/clawchat-plugin-hermes-agent`). The plugin
 registers a `clawchat` gateway platform inside a running Hermes Agent
-v0.12.0+ process, ships a bundled `clawchat:clawchat-core` skill, and exposes
-fifty-one `clawchat_*` tools to the agent.
+v0.12.0+ process, ships all bundled `skills/*/SKILL.md` skills (currently six),
+and exposes all `clawchat_*` tools listed in `plugin.yaml`'s `provides_tools`.
 
 ## I want to…
 
@@ -13,6 +13,9 @@ fifty-one `clawchat_*` tools to the agent.
 | Install the plugin in a Hermes Agent                         | [`./install.md`](./install.md)                          |
 | Activate the plugin in a Hermes Agent                        | [`./activation.md`](./activation.md)                    |
 | Run several agents on one host / avoid pairing the wrong Hermes profile | [`./install.md#confirm-the-target-profile-before-every-install--activate`](./install.md#confirm-the-target-profile-before-every-install--activate) |
+| Run several profiles under one multiplexed gateway | [`./multiplex-profile-isolation.md`](./multiplex-profile-isolation.md) |
+| Diagnose local locks or recover a displaced installation | [Instance locks and installation conflicts](./instance-locks-and-install-conflicts.md) |
+| Inspect credential deletion, suspension and persistence races | [Hermes appendix](./token-refresh.md#h-hermes-appendix--credential-lifecycle-and-races) |
 | Understand automatic token refresh & auto-logout             | [`./token-refresh.md`](./token-refresh.md)              |
 | Understand how the plugin plugs into the Hermes runtime      | [`./architecture.md`](./architecture.md)                |
 | Configure ClawChat output visibility                         | [`./output-visibility.md`](./output-visibility.md)      |
@@ -21,10 +24,12 @@ fifty-one `clawchat_*` tools to the agent.
 | Set per-person direct / ask / deny rules, capabilities or all tools | [Tool grants](./configuration.md#per-person-tool-grants) |
 | Check cross-session execution limits and cross-chat messaging | [Routing limits](./configuration.md#cross-session-routing-and-known-limits) |
 | Upgrade the grant database safely | [Storage upgrade](./configuration.md#storage-upgrade) |
+| Configure tool grants and handle guest access requests | [Owner and operator guide](./tool-grants.md) |
+| Audit non-owner tools, origins and attachment safety | [Non-owner boundaries](./non-owner-boundaries.md) |
 | Find a specific `clawchat_*` tool                            | [`./reference/tools.md`](./reference/tools.md)          |
 | See every outbound HTTP / WS endpoint the plugin calls       | [`./reference/http-endpoints.md`](./reference/http-endpoints.md) |
 | Use one of the activation CLIs                               | [`./reference/cli.md`](./reference/cli.md)              |
-| Look up a wire-protocol shape (envelope, events, streaming)  | [`./client-integration.md`](./client-integration.md)    |
+| Look up the Hermes Protocol v2 subset                       | [`./client-integration.md`](./client-integration.md)    |
 | Edit a prompt that ships with the plugin                     | [`./reference/prompts.md`](./reference/prompts.md)      |
 | Understand Hermes prompt injection surfaces                  | [`./reference/prompt-injection.md`](./reference/prompt-injection.md) |
 | Understand dynamic skill updates & skill registration        | [`./skill-updates.md`](./skill-updates.md)              |
@@ -41,11 +46,12 @@ fifty-one `clawchat_*` tools to the agent.
 3. **`skills/clawchat-core/SKILL.md`** is a *runtime artefact* loaded by
    Hermes via `ctx.register_skill(...)`. Treat it as agent-facing
    documentation, not as a developer or operator guide.
-4. The install guide is [`./install.md`](./install.md). Keep install and
-   activation instructions there so published docs have one operator-facing
-   source of truth.
-5. The wire protocol is documented in
-   [`./client-integration.md`](./client-integration.md) — the authoritative
-   Protocol v2 contract for this plugin. This plugin and `openclaw-clawchat`
-   are peer Protocol-v2 clients; update the protocol doc when the WebSocket
-   protocol changes.
+4. Installation steps live in [`./install.md`](./install.md); activation
+   entrypoints, flags and persisted state live in [`./activation.md`](./activation.md).
+   Credential lifecycle implementation details live in the
+   [Hermes appendix](./token-refresh.md#h-hermes-appendix--credential-lifecycle-and-races).
+   Elsewhere, summarize and link to these references.
+5. [`./client-integration.md`](./client-integration.md) covers the Protocol v2
+   subset used by this plugin. The server owns the wire contract and its
+   implementation takes precedence. Change that contract first, then update
+   this subset and the peer Protocol-v2 clients.

@@ -8,6 +8,7 @@ from clawchat_gateway.protocol import MENTION_ALL_USER_ID
 
 _INTERNAL_SYNTHETIC = object()
 _OWNER_ACTION = object()
+_ORCHESTRATE_RETRY = object()
 
 
 @dataclass(frozen=True)
@@ -39,9 +40,14 @@ class InboundMessage:
     # Only the coalescer writes these from parsed messages; never wire fields.
     _batch_speakers: tuple[str, ...] | None = field(default=None, repr=False, compare=False)
     _batch_speaker_names: tuple[tuple[str, str], ...] = field(default=(), repr=False, compare=False)
+    _orchestrate_retry: object | None = field(default=None, repr=False, compare=False)
     _owner_action_origin: object | None = field(default=None, repr=False, compare=False)
 
     _grant_request_origin: tuple[str, str, int] | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def orchestrate_retry(self) -> bool:
+        return self.is_internal_synthetic and self._orchestrate_retry is _ORCHESTRATE_RETRY
 
     @property
     def grant_origin(self):
@@ -64,11 +70,12 @@ class InboundMessage:
         return self._synthetic_origin is _INTERNAL_SYNTHETIC
 
     @classmethod
-    def internal_synthetic(cls, *, owner_action: bool = False, grant_origin: tuple[str, str, int] | None = None, **kwargs: Any) -> InboundMessage:
+    def internal_synthetic(cls, *, owner_action: bool = False, orchestrate_retry: bool = False, grant_origin: tuple[str, str, int] | None = None, **kwargs: Any) -> InboundMessage:
         """Construct a plugin-owned event without granting trust to raw fields."""
         return cls(**kwargs, _synthetic_origin=_INTERNAL_SYNTHETIC,
                    _owner_action_origin=_OWNER_ACTION if owner_action and not grant_origin else None,
-                   _grant_request_origin=grant_origin)
+                   _grant_request_origin=grant_origin,
+                   _orchestrate_retry=_ORCHESTRATE_RETRY if orchestrate_retry else None)
 
 
 def _coerce_emitted_at(value: Any) -> int | None:

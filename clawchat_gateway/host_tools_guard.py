@@ -472,14 +472,90 @@ def host_tool_catalog() -> tuple[frozenset[str], frozenset[str]]:
     return known, available
 
 
+_ORCHESTRATE_ORIGINS_LOCK = threading.Lock()
+_ORCHESTRATE_ORIGINS: dict[str, tuple[float, str, dict[str, str]]] = {}
+_ORCHESTRATE_ORIGIN_TTL = 600
+_MAX_ORCHESTRATE_ORIGINS = 512
+
+
+def orchestrate_owner_turn(snapshot, *, strict=False):
+    """Attribute only a trusted owner execution in the current ClawChat chat."""
+    from clawchat_gateway.turn_grants import session_context_value
+    if (snapshot is None or not snapshot.chat_id
+            or snapshot.chat_id != session_context_value("HERMES_SESSION_CHAT_ID")
+            or session_context_value("HERMES_SESSION_PLATFORM") != "clawchat"
+            or not (snapshot.owner_side or snapshot.legacy_owner_tools
+                    or not strict and snapshot.orchestrate_retry)):
+        return None
+    try:
+        owner = _owner_user_id()
+        speakers = set(snapshot.speakers) if snapshot.owner_side else set()
+        if speakers and (len(speakers) != 1 or owner and speakers != {owner}):
+            return None
+        initiator = owner or (next(iter(speakers)) if speakers else "")
+        if not isinstance(initiator, str) or not initiator.startswith("usr_") or not initiator[4:].strip():
+            return None
+        return dict(conversation_id=snapshot.chat_id, initiator_id=initiator)
+    except Exception:  # noqa: BLE001 - unavailable owner identity supplies no authority
+        return None
+
+
+def _remember_orchestrate_origin(tool_call_id, origin, nonce):
+    if not isinstance(tool_call_id, str) or not tool_call_id:
+        return
+    with _ORCHESTRATE_ORIGINS_LOCK:
+        now = time.monotonic()
+        for key, (created, _, _) in list(_ORCHESTRATE_ORIGINS.items()):
+            if now - created >= _ORCHESTRATE_ORIGIN_TTL:
+                del _ORCHESTRATE_ORIGINS[key]
+        while len(_ORCHESTRATE_ORIGINS) >= _MAX_ORCHESTRATE_ORIGINS:
+            del _ORCHESTRATE_ORIGINS[next(iter(_ORCHESTRATE_ORIGINS))]
+        _ORCHESTRATE_ORIGINS[tool_call_id] = (now, nonce, dict(origin))
+
+
+def take_orchestrate_origin(tool_call_id):
+    with _ORCHESTRATE_ORIGINS_LOCK:
+        record = _ORCHESTRATE_ORIGINS.pop(tool_call_id, None)
+        return (record[1], dict(record[2])) if record and time.monotonic() - record[0] < _ORCHESTRATE_ORIGIN_TTL else None
+
+
+def orchestrate_handler_origin(*, strict=False):
+    from clawchat_gateway.turn_grants import get_snapshot, session_context_value
+    try:
+        from tools.approval_context import _approval_tool_call_id
+        record = take_orchestrate_origin(_approval_tool_call_id.get())
+        if record is not None:
+            nonce, origin = record
+            current = orchestrate_owner_turn(get_snapshot(nonce), strict=strict)
+            return origin if current == origin else None
+    except ImportError:
+        pass
+    return orchestrate_owner_turn(get_snapshot(session_context_value("HERMES_SESSION_MESSAGE_ID")), strict=strict)
+
+
+def orchestrate_owner_only(operation, snapshot=None):
+    from clawchat_gateway.gate_outcome import owner_turn_only
+    try:
+        import model_tools
+        available = bool(snapshot is not None
+                         and "clawchat_get_conversation" in (model_tools._last_resolved_tool_names or ())
+                         and _filter_grant_definitions(
+                             [{"function": {"name": "clawchat_get_conversation"}}], snapshot))
+    except Exception:  # noqa: BLE001 - uncertain per-turn availability supplies no hint
+        available = False
+    return owner_turn_only(operation, conversation_available=available)
+
+
 def _filter_grant_definitions(definitions, snapshot, *, owner_fork=False):
-    from clawchat_gateway.tool_capabilities import AUTHORIZATION_TOOLS
+    from clawchat_gateway.tool_capabilities import AUTHORIZATION_TOOLS, OWNER_ONLY_TOOLS, OWNER_TURN_STRICT_TOOLS
     if owner_fork:
-        return [item for item in definitions if item["function"]["name"] not in AUTHORIZATION_TOOLS]
+        return [item for item in definitions if item["function"]["name"] not in AUTHORIZATION_TOOLS + OWNER_ONLY_TOOLS]
     from clawchat_gateway.tool_grants import tool_grant_visible
     public = public_tool_names(item["function"]["name"] for item in definitions)
 
     def allowed(tool):
+        if tool in OWNER_ONLY_TOOLS:
+            return orchestrate_owner_turn(snapshot, strict=tool in OWNER_TURN_STRICT_TOOLS) is not None
         if tool == "clawchat_tool_request":
             return _tool_grants_enabled() and not (snapshot and (snapshot.owner_side or snapshot.legacy_owner_tools))
         if tool in AUTHORIZATION_TOOLS:
@@ -697,13 +773,13 @@ def _install_grant_catalog_filter() -> bool:
 
 
 def public_tool_names(available, *, args=None):
-    from clawchat_gateway.tool_capabilities import AUTHORIZATION_TOOLS
+    from clawchat_gateway.tool_capabilities import AUTHORIZATION_TOOLS, OWNER_ONLY_TOOLS
     from clawchat_gateway.config import public_tools_override
     override = public_tools_override() or frozenset()
     call = {} if args is None else args
     # Listing a tool never lifts the plugin's per-call limits (skill writes,
     # inline-shell skill views, local-file media): those reach the owner's host.
-    return frozenset(tool for tool in available if tool not in AUTHORIZATION_TOOLS
+    return frozenset(tool for tool in available if tool not in AUTHORIZATION_TOOLS + OWNER_ONLY_TOOLS
                      and (tool in override and not _limited_call(tool, call) or not _guarded_call(tool, call)))
 
 
@@ -1524,6 +1600,16 @@ def _clawchat_pre_tool_decision(*, tool_name: str = "", args: Any = None, **kwar
             if (bound and bound.chat_id == chat_id
                     and session_context_value("HERMES_SESSION_PLATFORM") == "clawchat"):
                 snapshot = bound
+        from clawchat_gateway.tool_capabilities import OWNER_ONLY_TOOLS, OWNER_TURN_STRICT_TOOLS
+        orchestrate_origin = None
+        if tool_name in OWNER_ONLY_TOOLS:
+            orchestrate_origin = orchestrate_owner_turn(snapshot, strict=tool_name in OWNER_TURN_STRICT_TOOLS)
+            if orchestrate_origin is None:
+                if tool_name in OWNER_TURN_STRICT_TOOLS:
+                    from clawchat_gateway.widget_send import WIDGET_OWNER_ONLY_MESSAGE
+                    return {"action": "block", "message": WIDGET_OWNER_ONLY_MESSAGE}
+                return {"action": "block", "message": orchestrate_owner_only(tool_name, snapshot)["instruction"]}
+            _remember_orchestrate_origin(kwargs.get("tool_call_id"), orchestrate_origin, snapshot.nonce)
         if snapshot and (snapshot.owner_side or snapshot.legacy_owner_tools):
             return None
         if not _host_supports_pre_llm_call():
@@ -1635,7 +1721,8 @@ def _clawchat_pre_tool_decision(*, tool_name: str = "", args: Any = None, **kwar
             _, available = host_tool_catalog()
         except Exception:  # noqa: BLE001 - old hosts retain ordinary defaults
             available = ()
-        default_allowed = (not guarded and not strict) or tool_name in public_tool_names(available, args=args)
+        default_allowed = (bool(orchestrate_origin) or (not guarded and not strict)
+                           or tool_name in public_tool_names(available, args=args))
         if strict:
             logger.warning(
                 "clawchat host tools: %s is not in the host registry and the memory provider's "

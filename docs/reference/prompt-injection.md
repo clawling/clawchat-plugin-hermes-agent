@@ -99,15 +99,15 @@ Observed Hermes behavior:
 - Gateway `reset_session()` creates a new session id. It is not an in-place
   cached-system-prompt rebuild for the same conversation.
 
-For ClawChat, use `MemoryProvider.system_prompt_block()` as the current
-session-level home for static ClawChat context semantics that should not be
-repeated on every message, even though this is a responsibility compromise:
-Hermes currently exposes this as a memory-provider surface, not as a general
-platform session-prompt surface. Keep this block limited to stable explanatory
-text, such as the merged ClawChat conversation semantics and metadata glossary.
-Do not include `agent_behavior`, current agent profile metadata, agent-owner
-metadata, peer profile metadata, group profile metadata, sender metadata, group
-message metadata, or other ClawChat data that can change within a session.
+ClawChat does not register a `MemoryProvider` or implement
+`MemoryProvider.system_prompt_block()`. Static platform guidance currently lives
+in `platform_hint=platform_prompt()`, while conversation semantics and the
+metadata glossary are also carried in each turn's `MessageEvent.channel_prompt`.
+If session-level static context is needed in future, `system_prompt_block()`
+could be considered, although Hermes exposes it as a memory-provider surface
+rather than a general platform session-prompt API. Such a block should contain
+only stable explanatory text, never agent behavior, profiles, sender facts, or
+other data that can change within a session.
 
 Session-level ClawChat context is valid only when the Hermes session is strictly
 bound to the intended conversation. Direct messages are bound by the direct

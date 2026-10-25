@@ -924,6 +924,7 @@ _MESSAGE_ID_ECHO_LIMIT = 64
 # swallows a non-cancellation BaseException) would otherwise keep its chat
 # "busy" forever and switch the react default off there for good.
 TURN_TRIGGER_TTL_SECONDS = 30 * 60
+ORCHESTRATE_RETRY_IDLE_POLL_SECONDS = 0.2
 
 
 def is_plausible_message_id(value: Any) -> bool:
@@ -1226,6 +1227,12 @@ class ClawChatAdapter(BasePlatformAdapter):
         except Exception:  # noqa: BLE001
             self._store = None
             logger.warning("clawchat adapter database unavailable")
+        from clawchat_gateway.widget_send import WidgetSendThrottle
+        self._widget_throttle = WidgetSendThrottle()
+        self._widget_target_cache: dict[tuple, str] = {}
+        self._widget_target_lock = asyncio.Lock()
+        self._widget_identity = None
+        self._widget_epoch = 0
         set_clawchat_mention_sender(self)
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
@@ -1305,6 +1312,10 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
 
     async def disconnect(self) -> None:
+        self._widget_throttle.cancel_all()
+        self._widget_target_cache.clear()
+        self._widget_identity = None
+        self._widget_epoch += 1
         for task in list(self._request_wake_tasks):
             task.cancel()
         if self._request_wake_tasks:
@@ -1550,6 +1561,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._auth_failed = True
         if state == ConnectionState.READY:
             self._clawchat_config = self._connection.config
+            self._widget_target_cache.clear()
             self._auth_failed = False
             # Re-pull group settings on every (re)connect — best-effort. Gate group
             # dispatch on this first refresh so replayed/live group messages are not
@@ -4813,7 +4825,27 @@ class ClawChatAdapter(BasePlatformAdapter):
                 task.add_done_callback(self._request_wake_tasks.discard)
         return True
 
-    async def _handle_inbound(self, inbound: InboundMessage) -> None:
+    async def _dispatch_orchestrate_retry_when_idle(self, inbound: InboundMessage) -> None:
+        key = self._grant_session_key(inbound)
+        deadline = time.monotonic() + TURN_TRIGGER_TTL_SECONDS
+        busy = True
+        while time.monotonic() < deadline and (busy := self._grant_session_busy(key)):
+            await asyncio.sleep(ORCHESTRATE_RETRY_IDLE_POLL_SECONDS)
+        # Past the deadline the receipt still goes in, as before this wait existed:
+        # the model then reports the retry as unavailable instead of never hearing of it.
+        logger.info("clawchat orchestration retry dispatched chat_id=%s request_id=%s after=%s",
+                    inbound.chat_id, inbound.raw_message.get("request_id"), "timeout" if busy else "idle")
+        await self._handle_inbound(inbound, retry_deferred=True)
+
+    async def _handle_inbound(self, inbound: InboundMessage, *, retry_deferred: bool = False) -> None:
+        if inbound.orchestrate_retry and not retry_deferred and self._grant_session_busy(self._grant_session_key(inbound)):
+            # The host runs input that lands mid-turn as a follow-up under the
+            # running turn's nonce, which this receipt itself revokes. The retry
+            # authority lives on the receipt's own nonce, so it waits for idle.
+            task = asyncio.create_task(self._dispatch_orchestrate_retry_when_idle(inbound))
+            self._request_wake_tasks.add(task)
+            task.add_done_callback(self._request_wake_tasks.discard)
+            return
         try:
             self._check_request_wake(inbound)
         except Exception:
@@ -4934,6 +4966,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 speaker_names=self._grant_speaker_names(inbound, speakers),
                 owner_verified=self._verified_owner_inbound(inbound),
                 owner_side=getattr(grants, "owner_only", False),
+                orchestrate_retry=inbound.orchestrate_retry,
                 legacy_owner_tools=(inbound.is_owner_action
                                     and inbound.sender_id == self._owner_user_id()
                                     and inbound.chat_type == "direct"
@@ -6393,6 +6426,78 @@ class ClawChatAdapter(BasePlatformAdapter):
             [item.mime for item in downloaded],
         )
         return downloaded
+
+    def _widget_target_identity(self):
+        import hashlib
+
+        row = (self._store.get_activation_widget_target(platform="hermes", account_id="default")
+               if self._store is not None else None)
+        owner = self._owner_user_id()
+        if not owner:
+            self._widget_target_cache.clear()
+            self._widget_identity = None
+            raise RuntimeError("no owner chat")
+        generation = (row[2] if row else "", hashlib.sha256(
+            self._clawchat_config.token.encode("utf-8")).hexdigest(), self._widget_epoch)
+        identity = (owner, generation)
+        if self._widget_identity != identity:
+            self._widget_target_cache.clear()
+            self._widget_identity = identity
+        cached_chat = row[1] if row and row[0] == owner else ""
+        return identity, cached_chat
+
+    async def _resolve_widget_target(self, expected=None):
+        async with self._widget_target_lock:
+            identity, cached_chat = self._widget_target_identity()
+            if expected is not None and identity != expected:
+                raise RuntimeError("Widget owner or activation changed")
+            chat_id = cached_chat or self._widget_target_cache.get(identity)
+            if not chat_id:
+                result = await self._new_api_client().get_direct_conversation(identity[0])
+                chat_id = (result.get("conversation") or {}).get("id")
+            if self._widget_target_identity()[0] != identity:
+                raise RuntimeError("Widget owner or activation changed")
+            if not isinstance(chat_id, str) or not chat_id:
+                raise RuntimeError("no owner chat")
+            self._widget_target_cache[identity] = chat_id
+            return identity, chat_id
+
+    async def send_widget_message(self, doc: str, widget_id: str) -> dict[str, Any]:
+        from clawchat_gateway.widget_send import NOT_CONNECTED
+
+        owner_loop = self._connection._owner_loop
+        if owner_loop is None or owner_loop.is_closed() or not owner_loop.is_running():
+            raise RuntimeError(NOT_CONNECTED)
+        if owner_loop is asyncio.get_running_loop():
+            return await self._send_widget_message_here(doc, widget_id)
+        coroutine = self._send_widget_message_here(doc, widget_id)
+        try:
+            future = asyncio.run_coroutine_threadsafe(coroutine, owner_loop)
+        except RuntimeError:
+            coroutine.close()
+            raise RuntimeError(NOT_CONNECTED) from None
+        return await asyncio.wrap_future(future)
+
+    async def _send_widget_message_here(self, doc: str, widget_id: str) -> dict[str, Any]:
+        from clawchat_gateway.widget_send import NOT_CONNECTED
+
+        if not self._connection.is_ready:
+            raise RuntimeError(NOT_CONNECTED)
+        identity, _ = await self._resolve_widget_target()
+
+        async def send():
+            _, chat_id = await self._resolve_widget_target(identity)
+            if not self._connection.is_ready:
+                raise RuntimeError(NOT_CONNECTED)
+            frame = build_message_send_event(
+                chat_id=chat_id, chat_type="direct", message_id=new_message_id(),
+                fragments=[{"kind": "widget", "text": doc}],
+                include_message_id=True, message_mode="widget",
+            )
+            if not await self._connection.send_frame(frame, wait_for_ack=True, queue_when_unready=False):
+                raise RuntimeError(NOT_CONNECTED)
+
+        return await self._widget_throttle.submit(self._account_id(), widget_id, doc, send)
 
     async def send_mention_message(
         self,

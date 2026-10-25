@@ -118,6 +118,7 @@ def handle_permission_result(frame: dict[str, Any]) -> InboundMessage | None:
     )
     now_ms = int(time.time() * 1000)
     return InboundMessage.internal_synthetic(
+        orchestrate_retry=operation.startswith("orchestrate.") and outcome == "approved_retry",
         chat_id=chat_id,
         chat_type=chat_type,
         sender_id="clawchat-permission-result",

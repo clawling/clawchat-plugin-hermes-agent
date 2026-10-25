@@ -12,7 +12,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from clawchat_gateway.tool_capabilities import (
-    AUTHORIZATION_TOOLS, TOOL_CAPABILITIES, parse_grant_selector,
+    AUTHORIZATION_TOOLS, OWNER_ONLY_TOOLS, TOOL_CAPABILITIES, parse_grant_selector,
     normalize_grant_selectors, selector_display, selector_is_sensitive,
     is_sensitive_tool, is_cross_chat_call, plan_deny_removal,
     canonical_tool_name, SELF_RUNNING_CAPABILITIES,
@@ -140,7 +140,7 @@ class CompiledGrants(Mapping):
     owner_only: bool = False
 
     def resolve(self, tool, args=None, context=None, now=None):
-        if tool in AUTHORIZATION_TOOLS:
+        if tool in AUTHORIZATION_TOOLS + OWNER_ONLY_TOOLS:
             return None
         if self.owner_only:
             return "direct"
@@ -224,7 +224,7 @@ def resolve_turn_grants(speakers, owner_user_id, rows, now, *, public_tools=(), 
                     continue
             if mode not in _RANK or not isinstance(what, str) or not what:
                 raise ValueError("Invalid grant")
-            if kind == "tool" and what in AUTHORIZATION_TOOLS:
+            if kind == "tool" and what in AUTHORIZATION_TOOLS + OWNER_ONLY_TOOLS:
                 continue
             if (kind not in ("tool", "capability", "all") or
                     kind == "capability" and what not in TOOL_CAPABILITIES or kind == "all" and what != "all"):
@@ -243,7 +243,7 @@ def resolve_turn_grants(speakers, owner_user_id, rows, now, *, public_tools=(), 
 def freeze_turn_grants(grants):
     if isinstance(grants, CompiledGrants):
         return grants
-    rows = tuple(("tool", tool, mode, None) for tool, mode in grants.items() if tool not in AUTHORIZATION_TOOLS)
+    rows = tuple(("tool", tool, mode, None) for tool, mode in grants.items() if tool not in AUTHORIZATION_TOOLS + OWNER_ONLY_TOOLS)
     if any(mode not in _RANK for _, _, mode, _ in rows):
         raise ValueError("Invalid grant mode")
     return CompiledGrants((_SpeakerPlan(rows, frozenset(), "none"),), frozenset(grants))
@@ -340,7 +340,7 @@ def _format_expiry(expires_at: float, time_zone: str | None) -> str:
 def valid_grant_tools(value: Any) -> bool:
     return isinstance(value, list) and bool(value) and all(
         isinstance(tool, str) and bool(tool) and not re.search(r"[\s*?]", tool)
-        and tool not in AUTHORIZATION_TOOLS for tool in value
+        and tool not in AUTHORIZATION_TOOLS + OWNER_ONLY_TOOLS for tool in value
     )
 
 

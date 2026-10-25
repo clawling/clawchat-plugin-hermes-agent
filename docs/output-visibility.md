@@ -176,3 +176,22 @@ upserts the inbox row per (recipient, `message_id`) and clients dedupe by
 never arrived is delivered. Not found, it goes out as a new message, still without
 the prefix. A ledger row that was never attempted is resent by Hermes without a
 prefix; it never reached the chat, so it is delivered like any reply.
+
+## Individual display effects
+
+These examples complement the presets above. Global display settings are shared with other platforms; platform overrides apply to ClawChat. See [configuration keys and locations](configuration.md#hermes-display-settings-for-clawchat).
+
+| Setting | Example input | Result with the configuration reference's setting |
+|---|---|---|
+| `busy_input_mode` | The agent is running tests; the user sends "also check README". | `queue` keeps the current run alive and handles the new message as the next turn. |
+| `busy_ack_enabled` | The agent is busy; the user sends "continue checking logs". | `false` suppresses the busy acknowledgment. The message still follows `busy_input_mode`. |
+| `background_process_notifications` | The user starts `/background run the deploy check`. | `off` sends no watcher updates for background process output or completion. |
+| `tool_progress_command` | The user sends `/verbose` in ClawChat. | `false` prevents `/verbose` from enabling or changing tool progress display. |
+| `tool_preview_length` | Tool progress displays a long shell command. | `0` means no preview length limit; it does not hide previews. |
+| `tool_progress` | The agent runs `rg`, reads files, or executes commands. | `off` hides ClawChat tool progress messages; interim assistant messages follow their separate setting. |
+| `show_reasoning` | The model produces reasoning for a complex question. | `false` hides reasoning in ClawChat replies. |
+| `streaming` | The agent writes a long reply. | `false` sends every reply whole. ClawChat only streams with `extra.stream_replies: true` as well; see [Reply streaming (experimental)](configuration.md#reply-streaming-experimental). |
+| `interim_assistant_messages` | The model says "I will inspect the config first" during a turn. | `true` allows that separate interim ClawChat message in the `normal` and `full` presets. |
+| `long_running_notifications` | A task runs for several minutes. | `agent.gateway_notify_interval: 0` disables gateway heartbeat messages such as "Still working...". |
+| `busy_ack_detail` | The agent is busy and receives another message. | `false` keeps busy/heartbeat messages terse when those messages are enabled. |
+| `cleanup_progress` | Tool progress or heartbeat messages were sent earlier in the turn. | `false` leaves those messages in place instead of auto-deleting them. |

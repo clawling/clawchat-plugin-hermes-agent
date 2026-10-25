@@ -34,3 +34,54 @@ override surface for these files; the plugin loads them once at import.
 | `platform_prompt()`                   | `__init__._register_platform → register_platform(platform_hint=...)` |
 | `default_owner_behavior_prompt()`     | `clawchat_gateway.clawchat_metadata` (owner-metadata defaults) |
 | `default_group_bio_prompt()`          | `clawchat_gateway.clawchat_metadata` (group-metadata defaults) |
+
+## Greeting flows and language
+
+Owner activation uses `greeting.md`; new-friend turns use `friend-greeting.md`. These
+per-agent files are independent of the shipped `prompts/` files above.
+
+`friend_greeting` controls whether the agent **speaks first** to a newly added friend
+who is not its owner. On a `friend.added` signal whose `entity_id` is not the owner, the
+adapter resolves the new direct conversation through `POST /v1/conversations/direct`
+(the signal only carries the counterparty `usr_…` id; the server created the
+conversation inside the accept transaction) and runs one synthetic turn in it with the
+prompt from `$HERMES_HOME/clawchat/friend-greeting.md`, falling back to the built-in
+`greeting.FRIEND_GREETING_PROMPT`.
+
+Before that turn the adapter refreshes the friend's profile (`_refresh_user_profile`,
+bounded by `FRIEND_GREETING_PROFILE_TIMEOUT_SECONDS` = 5 s) and puts their nickname in
+the turn's `sender_name`: a brand-new friend has never written, so nothing has cached
+their profile yet and the turn would otherwise name their `usr_…` id. A slow or failed
+lookup greets without the name. Both directions count — someone adding the agent
+(auto-accepted by the `friend.accept` policy) and the agent's own request being
+accepted.
+
+The owner's `friend.added` is skipped (the activation bootstrap greets the owner).
+Dedupe is persisted in the message ledger keyed on the signal's `event_id` (fallback
+`message_id`), so a reconnect replay never greets twice; a failed conversation lookup is
+logged and dropped. The default is `true`; set `false` to keep `friend.added` a pure
+awareness event (`adapter._schedule_friend_greeting` /
+`adapter._dispatch_friend_greeting`). This flag is independent of `awareness_note`.
+
+Both `greeting.md` and `friend-greeting.md` (see [the agent's own
+files](../configuration.md#the-agents-own-files) for where they live) are **partial**
+overrides, not full replacements: whichever body they supply (or the built-in fallback,
+if the file is absent/empty/unreadable) gets a trailing `Reply in <Language>.`
+instruction appended — the override says what to say, not which language to say it in.
+
+That line is **conditional**. The language is resolved from the owner's reported app
+locale, read off disk via `adapter._owner_locale()` through
+`owner_language.resolve_owner_language_if_known` — which returns `None`, not `en`, when
+no locale has been reported or the owner metadata has not landed yet. A `None` language
+appends **no line at all**.
+
+Neither greeting dispatch path may grow an await to chase the locale, and hard-asserting
+"Reply in English." at an owner who may not speak English is worse than asserting
+nothing: with no line the model infers the language from context. (The Liveware Sample
+intro lookup is the opposite case and keeps its English fallback — there a copy has to
+be chosen and `en` is the documented default.)
+
+The friend-greeting turn uses the **owner's** resolved language even though its
+recipient is the new friend, not the owner: friends are usually in the same language
+circle, and the backend only exposes `locale` on the owner profile endpoint, so no
+third-party locale is obtainable.

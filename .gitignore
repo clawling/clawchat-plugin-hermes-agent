@@ -232,8 +232,12 @@ tmp
 #     websockets asyncio dependency floor.
 #   * runtime_status_notices — Pins runtime notice suppression without removing
 #     ordinary reply text.
+#   * source_doc_links — Pins every docs/*.md path cited in source to a file in
+#     this repository.
 #   * token_refresh_grace — Pins refresh deadlines and retry spacing within the
 #     grace window.
+#   * version_consistency — Pins plugin.yaml's manifest version to
+#     clawchat_gateway.__version__.
 #   * home_isolation — Pins conftest's autouse isolation: every test runs
 #     with HERMES_HOME, the OS home and CLAWCHAT_* env pointed away from the
 #     developer's real Hermes install (.env credentials, SQLite).
@@ -247,9 +251,13 @@ tests/*
 !tests/test_device_id_scope.py
 !tests/test_activate_device_id.py
 !tests/test_activate_precheck.py
+!tests/test_activate_import_error.py
 !tests/test_orchestration_api_client.py
 !tests/test_orchestration_tools.py
 !tests/test_orchestration_registration.py
+# Orchestration stays owner-only across catalog, dispatch and host worker threads.
+!tests/test_orchestrate_owner_only.py
+!tests/test_orchestrate_real_host_context.py
 !tests/test_restart_outcome.py
 !tests/test_pre_dispatch_self_echo.py
 !tests/test_command_gating.py
@@ -345,8 +353,12 @@ tests/*
 !tests/test_runtime_defaults_encoding.py
 !tests/test_runtime_status_notices.py
 !tests/test_token_refresh_grace.py
+!tests/test_widget_send.py
+!tests/test_widget_send_owner_only.py
+!tests/test_inbound_widget_action.py
+!tests/test_version_consistency.py
+!tests/test_source_doc_links.py
 deploy/
 scripts/
 docs/superpowers/
-AGENTS.md
 CLAUDE.md

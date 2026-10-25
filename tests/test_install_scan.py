@@ -17,6 +17,10 @@ So the scan also runs with the scanner as it was at each tag in
 separated), read out of the same checkout with ``git show``; a tag the checkout
 does not have is skipped.
 
+The newer scanners in :data:`HIGH_CLEAN_SCANNER_TAGS` (override with
+``HERMES_HIGH_CLEAN_SCAN_TAGS``, comma separated) and the checkout's HEAD
+scanner must report zero high findings as well as zero critical findings.
+
 This check runs the real scanner, so it needs a Hermes Agent source checkout:
 ``$HERMES_SOURCE_DIR``, or the ignored ``tmp/hermes`` / ``tmp/hermes-agent``
 (see ``docs/hermes-source-lookup.md``). Without one it skips. The scanner runs
@@ -41,14 +45,17 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #: v2026.8.31 is Hermes v0.21.0, the e2e image and the oldest scanner that
 #: reads tests/ at full severity.
 PINNED_SCANNER_TAGS = ("v2026.8.31",)
-_SCANNER_FILES = ("tools/plugin_guard.py", "tools/skills_guard.py")
+HIGH_CLEAN_SCANNER_TAGS = ("v0.22.5",)
 
 
-def _scanner_tags() -> list[str]:
-    raw = os.environ.get("HERMES_SCAN_TAGS")
+def _scanner_tags(
+    env_var: str = "HERMES_SCAN_TAGS",
+    defaults: tuple[str, ...] = PINNED_SCANNER_TAGS,
+) -> list[str]:
+    raw = os.environ.get(env_var)
     if raw is not None:
         return [t.strip() for t in raw.split(",") if t.strip()]
-    return list(PINNED_SCANNER_TAGS)
+    return list(defaults)
 
 
 def _hermes_source() -> Path | None:
@@ -86,6 +93,10 @@ print(json.dumps({
         f"{f.file}:{f.line} {f.pattern_id} {f.match!r}"
         for f in r.findings if f.severity == "critical"
     ],
+    "high": [
+        (f.file, f.pattern_id)
+        for f in r.findings if f.severity == "high"
+    ],
 }))
 """
 
@@ -93,15 +104,27 @@ print(json.dumps({
 def _pinned_scanner(hermes: Path, tag: str, dest: Path) -> Path | None:
     """The scanner modules as of ``tag``, alone in a fresh package dir.
 
-    Only the two guard modules are taken; ``tools/__init__.py`` is left empty
+    All guard modules under ``tools/`` are taken; ``tools/__init__.py`` is left empty
     so nothing else of that Hermes version is imported.
     """
     if shutil.which("git") is None:
         return None
+    listing = subprocess.run(
+        ["git", "ls-tree", "--name-only", tag, "tools/"],
+        cwd=hermes, capture_output=True, text=True, check=False,
+    )
+    if listing.returncode != 0:
+        return None
+    modules = [
+        rel for rel in listing.stdout.splitlines()
+        if "guard" in Path(rel).name and rel.endswith(".py")
+    ]
+    if not {"tools/plugin_guard.py", "tools/skills_guard.py"}.issubset(modules):
+        return None
     root = dest / tag
     (root / "tools").mkdir(parents=True, exist_ok=True)
     (root / "tools" / "__init__.py").write_text("")
-    for rel in _SCANNER_FILES:
+    for rel in modules:
         proc = subprocess.run(
             ["git", "show", f"{tag}:{rel}"], cwd=hermes, capture_output=True, check=False
         )
@@ -156,6 +179,29 @@ def test_tracked_tree_passes_the_install_scanner_of_older_hermes(tmp_path, tag):
     assert result["verdict"] != "dangerous", (tag, result["reason"])
 
 
+@pytest.mark.parametrize(
+    "tag",
+    _scanner_tags("HERMES_HIGH_CLEAN_SCAN_TAGS", HIGH_CLEAN_SCANNER_TAGS)
+    or [pytest.param("", marks=pytest.mark.skip(reason="no high-clean pinned tags"))],
+)
+def test_tracked_tree_has_no_high_findings(tmp_path, tag):
+    hermes = _hermes_source()
+    if hermes is None:
+        pytest.skip("no Hermes source checkout (set HERMES_SOURCE_DIR or use tmp/hermes)")
+    scanner = _pinned_scanner(hermes, tag, tmp_path / "scanners")
+    if scanner is None:
+        pytest.skip(f"Hermes checkout has no {tag} scanner (not a git checkout, or tag missing)")
+    tree = _copy_tracked_tree(tmp_path)
+    if tree is None:
+        pytest.skip("not a git checkout")
+    result = _run_scan(scanner, tree)
+    assert result is not None, f"{tag} scanner not importable here"
+
+    assert result["critical"] == [], (tag, result["critical"])
+    assert result["verdict"] != "dangerous", (tag, result["reason"])
+    assert result["high"] == [], (tag, result["high"])
+
+
 def test_tracked_tree_is_not_blocked_by_the_hermes_install_scanner(tmp_path):
     hermes = _hermes_source()
     if hermes is None:
@@ -183,4 +229,5 @@ def test_tracked_tree_is_not_blocked_by_the_hermes_install_scanner(tmp_path):
     result = json.loads(proc.stdout.strip().splitlines()[-1])
 
     assert result["critical"] == [], result["critical"]
+    assert result["high"] == [], result["high"]
     assert result["verdict"] != "dangerous", result["reason"]

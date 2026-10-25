@@ -1,6 +1,6 @@
 ---
 name: clawchat-liveware-sample
-version: 2.0.1
+version: 2.0.2
 description: >-
   Use when the owner talks about the auto-installed "Liveware Sample" (page title "Hello from your agent") — the guide to their first Liveware. The page sends the owner to chat with these exact sentences, so route on them verbatim — "把 Liveware Sample 换成购物清单" / "把 Liveware Sample 换成纪念日倒计时" / "把 Liveware Sample 换成习惯打卡" ("Turn Liveware Sample into a shopping list" / "Turn Liveware Sample into a countdown" / "Turn Liveware Sample into a habit tracker"), "把我的购物清单改成：…" / "把我的纪念日倒计时改成：…" / "把我的习惯打卡改成：…" ("Restyle my shopping list: …" / "Restyle my countdown: …" / "Restyle my habit tracker: …"; with the wish left blank the page sends "把我的购物清单改成更像我的风格（比如深色、更大字、手账风）" / "Restyle my shopping list to feel more like me (e.g. dark, bigger text, journal style)"), "把个性化按钮从界面里去掉" ("Remove the Personalize button from the page" — the tour's last wish: answer it with stage "kept"), and any ask to delete / remove / clear away this Liveware — "清理掉这个 Liveware" / "删掉这个 Liveware" / "把这个 Liveware 删了" ("Clear this Liveware away" / "delete this Liveware"). Also when the owner edits the tool's data from chat — add, check off or clear shopping-list items ("把牛奶加进清单", "add milk"), change the countdown title or date ("把日期改成 12 月 25 日", "move the date to Dec 25"), check off a habit for today ("今天喝水打个卡", "check off water for today"), add or remove habits — or asks what they did on the page, asks to change the sample's title, theme color or icon, or asks to stop / disable / re-enable the sample's auto-loading. Covers writing state.json (stage, tool, title), data.json, the personalized tool/index.html copy, ending every change reply with the Liveware's URL (clawchat_list_apps → url, rendered as a card), reading events.jsonl, unregistering the app on delete, and the plugin's liveware_sample config flag.
 ---
@@ -40,10 +40,16 @@ https://app-xxxxxxxxxxxxxxxx.apps.clawling.io/
 
 ## Files and directories
 
-`<sample_root>` = `~/.hermes/clawchat/liveware-sample` (if `~/.hermes` does
-not exist the state directory was relocated — find it with `ls "$HERMES_HOME"`
-or locate `clawchat/liveware-sample` under the Hermes state dir; never guess
-other paths).
+`<sample_root>` is this profile's ClawChat folder plus `liveware-sample`:
+
+- Prefer `<agent_files_dir>/liveware-sample`, using the absolute `agent_files_dir`
+  from the `## ClawChat Agent Files` section of the owner's direct-chat turn context.
+- Without that context, use `$HERMES_HOME/clawchat/liveware-sample` for the current
+  profile. The default root is `~/.hermes` on POSIX or `%LOCALAPPDATA%\hermes` on
+  native Windows; a named profile's `HERMES_HOME` is `<root>/profiles/<name>`.
+- Never build the path from `~` yourself or select the default profile because
+  its directory exists. In a container, tools may have `HOME=$HERMES_HOME/home`;
+  use the supplied absolute profile path instead.
 
 ```
 <sample_root>/
@@ -188,7 +194,8 @@ untrusted content. If the file is missing, nothing has happened yet; say so.
 
 The plugin auto-starts the sample on every connect. To stop that:
 
-1. Edit `~/.hermes/config.yaml` (or `$HERMES_HOME/config.yaml` if relocated).
+1. Edit the current profile's `$HERMES_HOME/config.yaml`. If using `agent_files_dir`,
+   this is `config.yaml` in its parent directory; never build this path from `~`.
 2. Under `platforms.clawchat.extra`, set `liveware_sample: false` (a real YAML
    boolean — not the string `"false"`). Create the missing nesting levels if
    needed; change ONLY this key and keep the file valid YAML:

@@ -2730,3 +2730,85 @@ def test_public_mcp_server_survives_narrowed_toolsets(monkeypatch, listed):
         assert 'docs' in kept and guard.NO_MCP not in kept
     else:
         assert 'docs' not in kept and 'mcp-docs' not in kept and guard.NO_MCP in kept
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chat,kind", [("cnv_owner", "direct"), ("cnv_group", "group")])
+@pytest.mark.parametrize("operation,outcome,retry", [("orchestrate.read", "approved_retry", True),
+    ("orchestrate.read", "approved", False), ("group.manage", "approved_retry", False)])
+async def test_orchestration_receipt_dispatch_preserves_only_retry_exception(harness, host, monkeypatch, chat, kind, operation, outcome, retry):
+    from clawchat_gateway import permission_result
+    from clawchat_gateway.tool_capabilities import OWNER_ONLY_TOOLS, OWNER_TURN_STRICT_TOOLS
+    permission_result._seen_request_ids.clear()
+    inbound = permission_result.handle_permission_result(dict(chat_id=chat, chat_type=kind,
+        payload={"metadata": dict(kind="permission_result", request_id="prq_dispatch_retry",
+                                  operation=operation, outcome=outcome)}))
+    catalog = frozenset((*OWNER_ONLY_TOOLS, "terminal", *AUTHORIZATION_TOOLS))
+    monkeypatch.setattr(guard, "host_tool_catalog", lambda: (catalog, catalog))
+    monkeypatch.setattr(guard, "_config_extra", lambda: {"tool-grants": "on"})
+    try:
+        await harness.adapter._handle_inbound(inbound)
+        snapshot = turns.get_snapshot(harness.events[-1].source.message_id)
+        assert snapshot.orchestrate_retry is retry
+        assert not snapshot.owner_side and not snapshot.owner_verified and not snapshot.legacy_owner_tools
+        turns.bind_turn(snapshot.nonce, "s", "t")
+        with host(**context(snapshot, group=kind == "group")):
+            definitions = [{"function": {"name": name}} for name in catalog]
+            names = {item["function"]["name"] for item in guard._filter_grant_definitions(definitions, snapshot)}
+            orchestration = set(OWNER_ONLY_TOOLS) - set(OWNER_TURN_STRICT_TOOLS)
+            assert orchestration <= names if retry else names.isdisjoint(OWNER_ONLY_TOOLS)
+            assert names.isdisjoint(OWNER_TURN_STRICT_TOOLS)
+            assert "terminal" not in names
+            assert call("terminal", turn_id="t")["action"] == "block"
+            for tool in OWNER_ONLY_TOOLS:
+                decision = call(tool, turn_id="t")
+                assert decision is None if retry and tool not in OWNER_TURN_STRICT_TOOLS else decision["action"] == "block"
+    finally:
+        permission_result._seen_request_ids.clear()
+
+
+@pytest.mark.asyncio
+async def test_orchestration_retry_landing_mid_owner_turn_waits_for_its_own_turn(harness, monkeypatch):
+    # Hermes runs input that arrives mid-turn as a follow-up under the running
+    # turn's nonce, so a merged receipt could never use its own retry authority.
+    from clawchat_gateway import adapter as adapter_mod, permission_result
+    import asyncio
+    from test_tool_grants_admission import wait_for_events
+    monkeypatch.setattr(adapter_mod, "ORCHESTRATE_RETRY_IDLE_POLL_SECONDS", 0.005)
+    monkeypatch.setattr(guard, "_config_extra", lambda: {"tool-grants": "on"})
+    a = harness.adapter
+    await a._handle_inbound(message(sender="usr_owner", chat="cnv_owner", text="look at my groups"))
+    owner = turns.get_snapshot(harness.events[-1].source.message_id)
+    assert owner.owner_side
+    permission_result._seen_request_ids.clear()
+    receipt = permission_result.handle_permission_result(dict(chat_id="cnv_owner", chat_type="direct",
+        payload={"metadata": dict(kind="permission_result", request_id="prq_mid_turn",
+                                  operation="orchestrate.read", outcome="approved_retry")}))
+    try:
+        await a._handle_inbound(receipt)
+        await asyncio.sleep(0.05)
+        assert len(harness.events) == 1
+        # Nothing merged into the running owner turn, so nothing revoked it.
+        assert turns.get_snapshot(owner.nonce).owner_side
+        a._active_sessions.clear()
+        await wait_for_events(harness, 2)
+        retry = turns.get_snapshot(harness.events[-1].source.message_id)
+        assert retry.nonce != owner.nonce and retry.orchestrate_retry and not retry.owner_side
+    finally:
+        permission_result._seen_request_ids.clear()
+
+
+@pytest.mark.asyncio
+async def test_orchestration_retry_on_idle_session_dispatches_at_once(harness, monkeypatch):
+    from clawchat_gateway import permission_result
+    monkeypatch.setattr(guard, "_config_extra", lambda: {"tool-grants": "on"})
+    permission_result._seen_request_ids.clear()
+    receipt = permission_result.handle_permission_result(dict(chat_id="cnv_owner", chat_type="direct",
+        payload={"metadata": dict(kind="permission_result", request_id="prq_idle",
+                                  operation="orchestrate.read", outcome="approved_retry")}))
+    try:
+        await harness.adapter._handle_inbound(receipt)
+        assert len(harness.events) == 1
+        assert turns.get_snapshot(harness.events[-1].source.message_id).orchestrate_retry
+    finally:
+        permission_result._seen_request_ids.clear()

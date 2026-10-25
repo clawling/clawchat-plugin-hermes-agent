@@ -116,21 +116,34 @@ class FileIdentity:
 
 def _from_stat(path: str, info) -> FileIdentity:
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-        raise ValueError("attachment is not a single regular file")
+        raise ValueError("attachment is not a single regular file") from None
     return FileIdentity(path, info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
                         info.st_nlink)
 
 
 def _source_path(source: str) -> str:
     from clawchat_gateway.media_runtime import ensure_allowed_local_path
-    path = Path(source).expanduser()
+    # Check before Path can erase empty components or dot segments.
+    expanded = os.path.expanduser(source)
+    if sys.platform != "win32":
+        if not expanded.startswith("/"):
+            raise ValueError("attachment requires an absolute path") from None
+        if "\0" in expanded or any(part in {"", ".", ".."} for part in expanded[1:].split("/")):
+            raise ValueError("attachment path is unavailable") from None
+    path = Path(expanded)
     if not path.is_absolute():
-        raise ValueError("attachment requires an absolute path")
-    # Reject symlinks in directories too; resolve() alone would erase evidence.
-    for component in (path, *path.parents):
-        if component.is_symlink():
-            raise ValueError("attachment symlink is not allowed")
-    return str(ensure_allowed_local_path(str(path)))
+        raise ValueError("attachment requires an absolute path") from None
+    try:
+        # This precheck is diagnostic; the POSIX walk enforces no-follow.
+        for component in (path, *path.parents):
+            if component.is_symlink():
+                raise ValueError("attachment symlink is not allowed") from None
+        allowed = str(ensure_allowed_local_path(str(path)))
+    except (OSError, RuntimeError):
+        raise ValueError("attachment path is unavailable") from None
+    if sys.platform != "win32" and allowed != expanded:
+        raise ValueError("attachment path changed before open") from None
+    return allowed
 
 
 def _without_windows_prefix(path: str) -> str:
@@ -140,27 +153,15 @@ def _without_windows_prefix(path: str) -> str:
 
 
 def _normalized_path(path: str) -> str:
-    """Compare resolved paths, including native short-name and /private aliases."""
-    if sys.platform == "win32":
-        path = _without_windows_prefix(path)
-    resolved = str(Path(path).resolve())
-    if sys.platform == "win32":
-        return os.path.normcase(_without_windows_prefix(resolved))
-    return resolved
+    """Normalize Windows handle paths, including prefixes, case and short names."""
+    resolved = str(Path(_without_windows_prefix(path)).resolve())
+    return os.path.normcase(_without_windows_prefix(resolved))
 
 
 def _descriptor_path(fd: int) -> str:
-    """Ask the kernel which file is open; never substitute the requested path."""
+    """Query a Windows handle's path; never substitute the requested path."""
     try:
-        if sys.platform.startswith("linux"):
-            path = os.readlink(f"/proc/self/fd/{fd}")
-            if path.endswith(" (deleted)"):
-                raise ValueError("attachment was removed")
-        elif sys.platform == "darwin":
-            import fcntl
-            # F_GETPATH is a Darwin ABI constant, absent from some Python builds.
-            path = os.fsdecode(fcntl.fcntl(fd, 50, bytes(1024)).split(b"\0", 1)[0])
-        elif sys.platform == "win32":
+        if sys.platform == "win32":
             import ctypes
             from ctypes import wintypes
             import msvcrt
@@ -188,6 +189,7 @@ def _descriptor_path(fd: int) -> str:
 
 
 def _descriptor_identity(fd: int) -> FileIdentity:
+    """Validate a Windows handle's target against policy and fstat identity."""
     from clawchat_gateway.media_runtime import ensure_allowed_local_path
 
     path = _descriptor_path(fd)
@@ -204,16 +206,127 @@ def _descriptor_identity(fd: int) -> FileIdentity:
     return before
 
 
+def _recheck_macos_path(fd: int, expected_path: str) -> None:
+    """Reject case aliases using the actual name returned by the macOS kernel."""
+    from clawchat_gateway.media_runtime import ensure_allowed_local_path
+
+    try:
+        import fcntl
+        # F_GETPATH is a Darwin ABI constant, absent from some Python builds.
+        path = os.fsdecode(fcntl.fcntl(fd, 50, bytes(1024)).split(b"\0", 1)[0])
+        # On case-insensitive volumes, string policy alone can miss case aliases;
+        # the kernel path supplies the actual spelling, which must match exactly.
+        if path != expected_path or str(ensure_allowed_local_path(path)) != expected_path:
+            raise ValueError("attachment descriptor path was redirected") from None
+    except Exception:  # noqa: BLE001 - failed kernel queries or policy grant nothing
+        raise ValueError("attachment descriptor path is unavailable") from None
+
+
+def _open_posix_nofollow(path: str) -> int:
+    """Walk from the root without following links; transfer the final fd."""
+    required = ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC")
+    if (os.name != "posix" or os.open not in os.supports_dir_fd
+            or any(getattr(os, flag, None) is None for flag in required)):
+        raise ValueError("attachment path is unavailable") from None
+    path_flags = getattr(os, "O_PATH", None)
+    directory_flags = ((path_flags if path_flags is not None else os.O_RDONLY)
+                       | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    fd = None
+    try:
+        parent = os.open("/", directory_flags)
+        try:
+            parts = path[1:].split("/")
+            for name in parts[:-1]:
+                child = os.open(name, directory_flags, dir_fd=parent)
+                old, parent = parent, child
+                os.close(old)
+            fd = os.open(parts[-1], file_flags, dir_fd=parent)
+        finally:
+            os.close(parent)
+    except (OSError, ValueError, NotImplementedError):
+        try:
+            if fd is not None:
+                os.close(fd)
+        finally:
+            raise ValueError("attachment path is unavailable") from None
+    # Ownership transfers only after closing the parent has succeeded.
+    return fd
+
+
+def _strict_lstat_chain(path: str, expected: FileIdentity) -> None:
+    """Require every ancestor to exist as a real directory and match the leaf."""
+    try:
+        prefix = "/"
+        if not stat.S_ISDIR(os.lstat(prefix).st_mode):
+            raise ValueError("attachment changed during read") from None
+        for name in path[1:].split("/")[:-1]:
+            prefix = os.path.join(prefix, name)
+            if not stat.S_ISDIR(os.lstat(prefix).st_mode):
+                raise ValueError("attachment changed during read") from None
+        if _from_stat(path, os.lstat(path)) != expected:
+            raise ValueError("attachment changed during read") from None
+    except (OSError, ValueError):
+        raise ValueError("attachment changed during read") from None
+
+
+def _recheck_open_file(source: str, fd: int, expected: FileIdentity) -> None:
+    """Reapply policy and compare complete identities without reading new fds."""
+    try:
+        if sys.platform == "win32":
+            if (_descriptor_identity(fd) != expected
+                    or _normalized_path(_source_path(source)) != expected.realpath
+                    or _descriptor_identity(fd) != expected):
+                raise ValueError("attachment changed during read") from None
+            return
+        path = _source_path(source)
+        if path != expected.realpath or _from_stat(path, os.fstat(fd)) != expected:
+            raise ValueError("attachment changed during read") from None
+        check_fd = _open_posix_nofollow(path)
+        try:
+            if _from_stat(path, os.fstat(check_fd)) != expected:
+                raise ValueError("attachment changed during read") from None
+        finally:
+            os.close(check_fd)
+        if sys.platform == "darwin":
+            _recheck_macos_path(fd, path)
+        if (_from_stat(path, os.stat(path, follow_symlinks=False)) != expected
+                or _source_path(source) != expected.realpath):
+            raise ValueError("attachment changed during read") from None
+        # The last path sample lstats every prefix, requiring real directories
+        # and the expected leaf; persistent moves or links are refused there.
+        # Changes during this final walk can escape observation: user-space
+        # path queries are not atomic.
+        _strict_lstat_chain(path, expected)
+        if _from_stat(path, os.fstat(fd)) != expected:
+            raise ValueError("attachment changed during read") from None
+    except (OSError, RuntimeError):
+        raise ValueError("attachment path is unavailable") from None
+
+
 @contextmanager
 def _open_checked_file(source: str):
-    expected = _normalized_path(_source_path(source))
-    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(str(Path(source).expanduser()), flags)
+    path = _source_path(source)
     try:
-        identity = _descriptor_identity(fd)
-        if identity.realpath != expected:
-            raise ValueError("attachment path changed before open")
+        if sys.platform == "win32":
+            expected_path = _normalized_path(path)
+            flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(str(Path(source).expanduser()), flags)
+        else:
+            fd = _open_posix_nofollow(path)
+    except (OSError, RuntimeError):
+        raise ValueError("attachment path is unavailable") from None
+    try:
+        identity = (_descriptor_identity(fd) if sys.platform == "win32"
+                    else _from_stat(path, os.fstat(fd)))
+        if sys.platform == "win32" and identity.realpath != expected_path:
+            raise ValueError("attachment path changed before open") from None
+        if sys.platform == "darwin":
+            _recheck_macos_path(fd, path)
+        _recheck_open_file(source, fd, identity)
         yield fd, identity
+    except OSError:
+        raise ValueError("attachment path is unavailable") from None
     finally:
         os.close(fd)
 
@@ -248,8 +361,8 @@ def artifact_identity(source: str, chat_id: str | None = None) -> FileIdentity |
 
 
 def attachment_allowed(source: str | None, chat_id: str | None) -> bool:
-    # This is a scope/permit check; the sole upload descriptor verifies the
-    # actual file. Do not reopen the pathname to authorize a different fd.
+    # This is a scope/permit check. The reader verifies the original fd;
+    # additional fds only compare identity and never supply upload bytes.
     return files_direct(chat_id) or bool(source and _recorded_artifact(source, chat_id))
 
 
@@ -378,9 +491,8 @@ def read_local_attachment(source: str, chat_id: str | None, *, require_turn_perm
                 raise ValueError("attachment changed during read")
             chunks.append(chunk)
             remaining -= len(chunk)
-        if (_descriptor_identity(fd) != opened
-                or _normalized_path(_source_path(source)) != opened.realpath
-                or _descriptor_identity(fd) != opened
-                or not attachment_allowed(source, chat_id)):
-            raise ValueError("attachment changed during read")
+        _recheck_open_file(source, fd, opened)
+        _recheck_open_file(source, fd, opened)
+        if not attachment_allowed(source, chat_id):
+            raise ValueError("attachment changed during read") from None
         return b"".join(chunks)

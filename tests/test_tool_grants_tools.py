@@ -468,7 +468,10 @@ def test_management_tools_registration_respects_setting(monkeypatch, setting):
 def test_configuration_documents_grant_precedence_and_visibility_limits():
     from pathlib import Path
 
-    text = " ".join(Path("docs/configuration.md").read_text().split())
+    documents = [Path(path).read_text() for path in (
+        "docs/configuration.md", "docs/tool-grants.md", "docs/non-owner-boundaries.md",
+    )]
+    text = " ".join(" ".join(documents).split())
     assert "Effective per-person rules take precedence over `non-owner-host-tools`" in text
     assert "direct executes without this gate" in text
     assert "ask routes each call to the owner's direct chat" in text
@@ -476,5 +479,7 @@ def test_configuration_documents_grant_precedence_and_visibility_limits():
     assert "0.19.1 – 0.20.0 | no — the tools stay visible" in text
     assert "management tools can remain visible to non-owner turns" in text
     assert "Per-person grants and the `non-owner-host-tools: approve` opt-in apply here too" in text
-    assert "every call goes to the human gate" not in text
-    assert "visible and every call in such a turn" not in text
+    for document in documents:
+        document_text = " ".join(document.split())
+        assert "every call goes to the human gate" not in document_text
+        assert "visible and every call in such a turn" not in document_text

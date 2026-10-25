@@ -14,6 +14,9 @@ def _client() -> ClawChatApiClient:
     return ClawChatApiClient(base_url="https://example.invalid", token="t", user_id="usr_x", device_id="dev_x")
 
 
+ORIGIN = dict(conversation_id="cnv_owner", initiator_id="usr_owner", purpose="test")
+
+
 class _FakeResponse(io.BytesIO):
     status = 200
 
@@ -34,51 +37,51 @@ class OrchestrationRoutesTest(unittest.IsolatedAsyncioTestCase):
         return spy.await_args
 
     async def test_list_agents_is_a_bare_get(self):
-        args = await self._capture(lambda c: c.orch_list_agents())
+        args = await self._capture(lambda c: c.orch_list_agents(origin=ORIGIN))
         self.assertEqual(args.args, ("GET", f"{BASE}/agents"))
 
     async def test_get_agent_puts_the_id_in_the_path(self):
-        args = await self._capture(lambda c: c.orch_get_agent("agt_x"))
+        args = await self._capture(lambda c: c.orch_get_agent("agt_x", origin=ORIGIN))
         self.assertEqual(args.args, ("GET", f"{BASE}/agents/agt_x"))
 
     async def test_set_agent_behavior_sends_only_behavior(self):
-        args = await self._capture(lambda c: c.orch_set_agent_behavior("agt_x", "be terse"))
+        args = await self._capture(lambda c: c.orch_set_agent_behavior("agt_x", "be terse", origin=ORIGIN))
         self.assertEqual(args.args, ("PATCH", f"{BASE}/agents/agt_x"))
         self.assertEqual(json.loads(args.kwargs["body"]), {"behavior": "be terse"})
 
     async def test_set_group_prompt_sends_only_description(self):
-        args = await self._capture(lambda c: c.orch_set_group_prompt("cnv_x", "stay in character"))
+        args = await self._capture(lambda c: c.orch_set_group_prompt("cnv_x", "stay in character", origin=ORIGIN))
         self.assertEqual(args.args, ("PATCH", f"{BASE}/groups/cnv_x"))
         self.assertEqual(json.loads(args.kwargs["body"]), {"description": "stay in character"})
 
     async def test_create_group_sends_title_and_agent_ids(self):
-        args = await self._capture(lambda c: c.orch_create_group("Crew", ["agt_a", "agt_b"]))
+        args = await self._capture(lambda c: c.orch_create_group("Crew", ["agt_a", "agt_b"], origin=ORIGIN))
         self.assertEqual(args.args, ("POST", f"{BASE}/groups"))
         self.assertEqual(json.loads(args.kwargs["body"]), {"title": "Crew", "agent_ids": ["agt_a", "agt_b"]})
 
     async def test_remove_group_member_is_a_delete_with_no_body(self):
-        args = await self._capture(lambda c: c.orch_remove_group_member("cnv_x", "agt_a"))
+        args = await self._capture(lambda c: c.orch_remove_group_member("cnv_x", "agt_a", origin=ORIGIN))
         self.assertEqual(args.args, ("DELETE", f"{BASE}/groups/cnv_x/members/agt_a"))
         self.assertIsNone(args.kwargs.get("body"))
 
     async def test_group_agent_settings_omits_unset_fields(self):
-        args = await self._capture(lambda c: c.orch_set_group_agent_settings("cnv_x", "agt_a", muted=True))
+        args = await self._capture(lambda c: c.orch_set_group_agent_settings("cnv_x", "agt_a", muted=True, origin=ORIGIN))
         self.assertEqual(args.args, ("PATCH", f"{BASE}/groups/cnv_x/agents/agt_a"))
         self.assertEqual(json.loads(args.kwargs["body"]), {"muted": True})
 
     async def test_group_agent_settings_keeps_explicit_false(self):
         args = await self._capture(
-            lambda c: c.orch_set_group_agent_settings("cnv_x", "agt_a", muted=False, batch_delay_seconds=30)
+            lambda c: c.orch_set_group_agent_settings("cnv_x", "agt_a", muted=False, batch_delay_seconds=30, origin=ORIGIN)
         )
         self.assertEqual(json.loads(args.kwargs["body"]), {"muted": False, "batch_delay_seconds": 30})
 
     async def test_create_connect_code_sends_no_body(self):
-        args = await self._capture(lambda c: c.orch_create_connect_code())
+        args = await self._capture(lambda c: c.orch_create_connect_code(origin=ORIGIN))
         self.assertEqual(args.args, ("POST", f"{BASE}/connect-codes"))
         self.assertIsNone(args.kwargs.get("body"))
 
     async def test_get_connect_code_url_encodes_the_code(self):
-        args = await self._capture(lambda c: c.orch_get_connect_code("a/b"))
+        args = await self._capture(lambda c: c.orch_get_connect_code("a/b", origin=ORIGIN))
         self.assertEqual(args.args, ("GET", f"{BASE}/connect-codes/a%2Fb"))
 
 
@@ -94,10 +97,26 @@ class OrchestrationEnvelopeReachesTheModelTest(unittest.IsolatedAsyncioTestCase)
         self.client = _client()
         self.patcher = patch.object(tools, "_build_client", return_value=(self.client, None))
         self.patcher.start()
+        origin = patch("clawchat_gateway.host_tools_guard.orchestrate_handler_origin",
+                       return_value={key: value for key, value in ORIGIN.items() if key != "purpose"})
+        origin.start()
+        self.addCleanup(origin.stop)
         self.addCleanup(self.patcher.stop)
+
+    async def asyncSetUp(self):
+        # Keep the real envelope parser and stubbed urlopen; executor scheduling
+        # is covered separately by the real-host worker-context regression.
+        async def inline(func, *args, **kwargs):
+            return func(*args, **kwargs)
+        bridge = patch.object(api_client.asyncio, "to_thread", inline)
+        bridge.start()
+        self.addCleanup(bridge.stop)
 
     async def test_a_non_zero_business_code_reaches_the_model_at_top_level(self):
         def fake_urlopen(request, timeout=None):
+            self.assertEqual(request.get_header("X-clawchat-origin-conversation"), ORIGIN["conversation_id"])
+            self.assertEqual(request.get_header("X-clawchat-origin-initiator"), ORIGIN["initiator_id"])
+            self.assertEqual(request.get_header("X-clawchat-purpose"), ORIGIN["purpose"])
             return _FakeResponse(
                 json.dumps(
                     {"code": 21003, "msg": "operation forbidden by owner", "data": None}
@@ -105,7 +124,7 @@ class OrchestrationEnvelopeReachesTheModelTest(unittest.IsolatedAsyncioTestCase)
             )
 
         with patch.object(api_client, "urlopen", fake_urlopen):
-            result = await tools.orchestrate_list_agents()
+            result = await tools.orchestrate_list_agents(purpose="test")
 
         self.assertEqual(result.get("code"), 21003)
 
@@ -118,7 +137,7 @@ class OrchestrationEnvelopeReachesTheModelTest(unittest.IsolatedAsyncioTestCase)
             )
 
         with patch.object(api_client, "urlopen", fake_urlopen):
-            result = await tools.orchestrate_create_connect_code()
+            result = await tools.orchestrate_create_connect_code(purpose="test")
 
         self.assertEqual(result.get("code"), 0)
         self.assertEqual(result["data"]["code"], "AAAAAA")
@@ -129,4 +148,4 @@ class OrchestrationEnvelopeReachesTheModelTest(unittest.IsolatedAsyncioTestCase)
 
         with patch.object(api_client, "urlopen", boom):
             with self.assertRaises(ClawChatApiError):
-                await self.client.orch_list_agents()
+                await self.client.orch_list_agents(origin=ORIGIN)

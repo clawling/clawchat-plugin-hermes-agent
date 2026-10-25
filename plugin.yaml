@@ -1,7 +1,7 @@
 manifest_version: 1
 name: clawchat
 kind: platform
-version: 0.14.0-120
+version: 0.14.0-121
 description: "ClawChat gateway integration for Hermes Agent."
 author: CLAWLING PTE. LTD.
 provides_hooks:
@@ -9,7 +9,10 @@ provides_hooks:
   - post_api_request
   - pre_gateway_dispatch
   - pre_tool_call
+  - post_tool_call
+  - pre_llm_call
 provides_tools:
+  - clawchat_widget_send
   - clawchat_tool_request
   - clawchat_tool_grant
   - clawchat_tool_revoke

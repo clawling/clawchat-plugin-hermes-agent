@@ -1,6 +1,6 @@
 """Offline regression checks. Only temporary profiles; no network or real credentials.
 
-Needs a Hermes Agent checkout on PYTHONPATH (validated with 0.21.x). The
+Needs a Hermes Agent checkout on PYTHONPATH (validated with 0.22.0). The
 plugin's declared ``test`` extra does NOT install Hermes and ``testpaths`` is
 ``tests``, so on a plugin-only checkout this module skips itself — importing
 ``hermes_constants`` unconditionally would abort collection for the whole suite.
@@ -113,12 +113,26 @@ class Isolation(unittest.IsolatedAsyncioTestCase):
         (self.a/'.env').write_text('')
         with home_only(self.a): self.assertEqual(_get_env('CLAWCHAT_TOKEN'),'ambient-A')
 
-    async def test_scope_without_multiplex_keeps_env_fallback(self):
-        """A scope outside multiplexing is a `.env` overlay, not a blindfold —
-        Hermes' own get_secret falls through here, and so must we (cron 401s)."""
+    async def test_own_home_scope_without_multiplex_keeps_env_fallback(self):
+        """A single-profile deployment's scope belongs to the process's own home:
+        its `.env` overlay must keep env-injected credentials (cron 401 regression)."""
+        set_multiplex_active(False)
+        (self.a/'.env').write_text('')
+        with scope(self.a): self.assertEqual(_get_env('CLAWCHAT_TOKEN'),'ambient-A')
+
+    async def test_foreign_home_scope_without_multiplex_follows_host(self):
+        """A desktop backend / per-profile cron can serve a sibling profile even
+        without multiplexing: os.environ belongs to the launch profile. Hermes
+        0.21.6+ fails closed here; the plugin follows the host's fallback policy."""
+        import inspect
+        from agent import secret_scope
         set_multiplex_active(False)
         (self.b/'.env').write_text('')
-        with scope(self.b): self.assertEqual(_get_env('CLAWCHAT_TOKEN'),'ambient-A')
+        with scope(self.b):
+            value = _get_env('CLAWCHAT_TOKEN')
+            self.assertEqual(value,secret_scope.get_secret('CLAWCHAT_TOKEN','') or '')
+            # Gate on get_secret itself: some 0.21.4 canaries define the predicate but don't consult it yet.
+            if 'serves_routed_profile' in inspect.getsource(secret_scope.get_secret): self.assertEqual(value,'')
 
     async def test_logout_tombstone_beats_the_stale_scope_snapshot(self):
         """The secret scope is frozen at gateway start. Deleting the .env line

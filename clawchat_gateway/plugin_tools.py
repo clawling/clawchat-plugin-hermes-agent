@@ -375,6 +375,17 @@ async def handle_clawchat_mention_message(args, **kw):
     return _tool_result(result)
 
 
+async def handle_clawchat_widget_send(args, **kw):
+    from clawchat_gateway import tools
+    from clawchat_gateway.widget_send import check_widget_for_send
+
+    widget = args.get("widget")
+    doc = widget if isinstance(widget, str) else ""
+    checked = check_widget_for_send(doc) if doc.strip() else {}
+    logger.info("clawchat_widget_send id=%r bytes=%d", checked.get("id"), len(doc.encode("utf-8")))
+    return _tool_result(await tools.widget_send(widget))
+
+
 async def handle_clawchat_send_file(args, **kw):
     task_id = kw.get("task_id") or "default"
     logger.info(
@@ -804,24 +815,24 @@ def _s(args, key: str) -> str:
 
 
 _ORCHESTRATION_HANDLERS = {
-    "clawchat_orchestrate_list_agents": lambda t, a: t.orchestrate_list_agents(),
-    "clawchat_orchestrate_get_agent": lambda t, a: t.orchestrate_get_agent(_s(a, "agentId")),
+    "clawchat_orchestrate_list_agents": lambda t, a: t.orchestrate_list_agents(purpose=a.get("purpose")),
+    "clawchat_orchestrate_get_agent": lambda t, a: t.orchestrate_get_agent(_s(a, "agentId"), purpose=a.get("purpose")),
     "clawchat_orchestrate_set_agent_behavior": lambda t, a: t.orchestrate_set_agent_behavior(
-        _s(a, "agentId"), _s(a, "behavior")
+        _s(a, "agentId"), _s(a, "behavior"), purpose=a.get("purpose")
     ),
-    "clawchat_orchestrate_list_groups": lambda t, a: t.orchestrate_list_groups(),
-    "clawchat_orchestrate_get_group": lambda t, a: t.orchestrate_get_group(_s(a, "conversationId")),
+    "clawchat_orchestrate_list_groups": lambda t, a: t.orchestrate_list_groups(purpose=a.get("purpose")),
+    "clawchat_orchestrate_get_group": lambda t, a: t.orchestrate_get_group(_s(a, "conversationId"), purpose=a.get("purpose")),
     "clawchat_orchestrate_set_group_prompt": lambda t, a: t.orchestrate_set_group_prompt(
-        _s(a, "conversationId"), _s(a, "description")
+        _s(a, "conversationId"), _s(a, "description"), purpose=a.get("purpose")
     ),
     "clawchat_orchestrate_create_group": lambda t, a: t.orchestrate_create_group(
-        _s(a, "title"), a.get("agentIds") if isinstance(a.get("agentIds"), list) else []
+        _s(a, "title"), a.get("agentIds") if isinstance(a.get("agentIds"), list) else [], purpose=a.get("purpose")
     ),
     "clawchat_orchestrate_add_group_member": lambda t, a: t.orchestrate_add_group_member(
-        _s(a, "conversationId"), _s(a, "agentId")
+        _s(a, "conversationId"), _s(a, "agentId"), purpose=a.get("purpose")
     ),
     "clawchat_orchestrate_remove_group_member": lambda t, a: t.orchestrate_remove_group_member(
-        _s(a, "conversationId"), _s(a, "agentId")
+        _s(a, "conversationId"), _s(a, "agentId"), purpose=a.get("purpose")
     ),
     "clawchat_orchestrate_set_group_agent_settings": lambda t, a: t.orchestrate_set_group_agent_settings(
         _s(a, "conversationId"),
@@ -829,9 +840,10 @@ _ORCHESTRATION_HANDLERS = {
         muted=a.get("muted") if isinstance(a.get("muted"), bool) else None,
         reply_mode=a.get("replyMode") if isinstance(a.get("replyMode"), str) else None,
         batch_delay_seconds=_optional_int_arg(a.get("batchDelaySeconds")),
+        purpose=a.get("purpose"),
     ),
-    "clawchat_orchestrate_create_connect_code": lambda t, a: t.orchestrate_create_connect_code(),
-    "clawchat_orchestrate_get_connect_code": lambda t, a: t.orchestrate_get_connect_code(_s(a, "code")),
+    "clawchat_orchestrate_create_connect_code": lambda t, a: t.orchestrate_create_connect_code(purpose=a.get("purpose")),
+    "clawchat_orchestrate_get_connect_code": lambda t, a: t.orchestrate_get_connect_code(_s(a, "code"), purpose=a.get("purpose")),
 }
 
 
@@ -859,6 +871,15 @@ async def handle_clawchat_tool_grants_list(args, **kw):
     return _tool_result(await manage_tool_grants("list", args, session_id=kw.get("session_id", "")))
 
 def register_tools(ctx) -> None:
+    from clawchat_gateway.widget_send import WIDGET_DESCRIPTION
+    ctx.register_tool(
+        "clawchat_widget_send", "clawchat",
+        {"name": "clawchat_widget_send", "description": _direct_tool_description(WIDGET_DESCRIPTION),
+         "parameters": {"type": "object", "properties": {
+             "widget": {"type": "string", "description": "the widget/v1 document as a JSON string; omit to get the format"}}}},
+        handle_clawchat_widget_send, is_async=True,
+        description="Update An Owner Home-Screen Widget", emoji="📱",
+    )
     from clawchat_gateway.host_tools_guard import GRANT_MANAGEMENT_TOOLSET, _tool_grants_enabled
 
     try:
@@ -1552,14 +1573,15 @@ def register_tools(ctx) -> None:
         {
             "name": "clawchat_send_file",
             "description": _direct_tool_description(
-                "Send a local file (image, document, archive, any type) into a ClawChat conversation: "
+                "Send a local file (image, video, audio, document, archive, any type) into a ClawChat conversation: "
                 "the current one or ANY other chat this agent is in, e.g. when the owner says in a direct chat "
                 "\"send this file to group X\". "
                 "Pass that conversation's id as chat_id (from ClawChat metadata or memory notes, or "
                 "clawchat_get_direct_conversation for a friend's direct chat) and the file's absolute local path as path. "
-                "Images go out inline; set as_document=true to send any file, images included, as a downloadable file. "
+                "Images go out inline, videos as playable videos, audio as playable voice messages; "
+                "set as_document=true to send any file as a downloadable file. "
                 "caption is optional text sent with the file. "
-                "Files under credential or system locations (~/.ssh, ~/.aws, /etc, the Hermes .env …) are refused. "
+                "Files in credential or system locations (the .ssh and .aws directories in your home directory, /etc, the Hermes .env …) are refused. "
                 "After this tool succeeds the file has already been delivered; do not send it again with MEDIA:. "
                 "It is delivered even right after clawchat_mention_message into the same chat."
             ),
@@ -1576,7 +1598,7 @@ def register_tools(ctx) -> None:
                     },
                     "as_document": {
                         "type": "boolean",
-                        "description": "Send as a downloadable file even when it is an image. Defaults to false.",
+                        "description": "Send as a downloadable file even when it is an image, video, or audio file. Defaults to false.",
                     },
                     "caption": {
                         "type": "string",
@@ -2072,6 +2094,13 @@ def register_tools(ctx) -> None:
          {"code": {"type": "string", "minLength": 1, "description": "The connect code to look up."}}, ["code"]),
     ]
     for tool_name, label, description, properties, required in orchestration_specs:
+        description = ("OWNER-ONLY. Raises an approval card on the owner's phone. "
+                       "Never call it in a group or for someone else. " + description)
+        properties = dict(properties, purpose={
+            "type": "string", "minLength": 1, "maxLength": 60,
+            "description": "Why the owner wants this, in a few words (shown on the owner's approval card).",
+        })
+        required = [*required, "purpose"]
         ctx.register_tool(
             tool_name,
             "clawchat",

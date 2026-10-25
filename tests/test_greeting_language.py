@@ -9,7 +9,7 @@ from clawchat_gateway.greeting import (
 def test_appends_language_line(tmp_path):
     text = load_activation_bootstrap_prompt(tmp_path, "ja")
     assert text.endswith("Reply in Japanese.")
-    assert "You are now connected to a ClawChat direct conversation" in text
+    assert "This is a ClawChat direct conversation between you and your user." in text
 
 
 def test_appends_after_user_override(tmp_path):

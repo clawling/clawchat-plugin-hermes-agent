@@ -30,6 +30,10 @@ id list anywhere in the code. This is what let `clawchat-set-greeting` ship
 simply by adding a new `skills/clawchat-set-greeting/SKILL.md` directory: no
 constant needed updating.
 
+The current snapshot contains six skills: `clawchat-core`, `clawchat-liveware`,
+`clawchat-liveware-dev`, `clawchat-liveware-sample`, `clawchat-orchestration`,
+and `clawchat-set-greeting`. The `skills/*/SKILL.md` scan is authoritative.
+
 `__init__.py::_register_skill` uses the same scan (`(_plugin_dir() /
 "skills").glob("*/SKILL.md")`) to drive registration, with **per-skill
 failure isolation**: each bundled skill is registered inside its own
@@ -43,7 +47,7 @@ that follows — from succeeding.
 | Step | Actor | Code |
 |------|-------|------|
 | 1. Publish: bump the frontmatter `version` of a `SKILL.md` under the install-cli repo's `skills/` tree (or retire one — move its id from `LAYOUT` to the per-target `REMOVED` list), regenerate `skills/manifest.json` (`schema: 1`, entries carry `version`/`path`/`sha256`/`bytes`; top-level `removed: {target: [skillId, ...]}` is optional and lists tombstoned ids), tag `skills-vX.Y.Z`, then move `DEFAULT_SKILLS_REF` here and ship a plugin release — this adapter reads a **pinned tag**, so pushing to `main` alone reaches no agent | Publisher (install-cli repo) + this repo | consumed contract: `skill_update.py` `parse_skills_manifest`, `OFFICIAL_SKILLS_BASE`, `DEFAULT_SKILLS_REF` |
-| 2. Trigger: server sends a content-free `notify.signal` with `payload.type == "clawchat.skill.update.check"` (msghub `POST /internal/v1/notify-signals`) | ClawChat server | `adapter.py::_on_notify_signal` → `_spawn_skill_update_check` |
+| 2. Trigger: server sends a content-free `notify.signal` with `payload.type == "clawchat.skill.update.check"` | ClawChat server | `adapter.py::_on_notify_signal` → `_spawn_skill_update_check` |
 | 3. Check: fetch the official manifest (hardcoded base — the signal never carries a URL); for every manifest entry, hash the *local* managed `SKILL.md` bytes and compare to the entry's `sha256` — any mismatch (including a missing local file) is reported as an update to converge; separately, walk `removed[hermes]` and report a removal for every tombstoned id that is locally installed and not bundled | Plugin (background task) | `skill_update.check_skill_update` |
 | 4. Consent: message the owner's direct chat (`_owner_direct_chat_id`, the activation conversation) with one combined prompt covering both updates and removals, and persist one pending record (30 min TTL) | Plugin | `adapter.py::build_skill_update_prompt`; `skill_update.write_pending` |
 | 5. Apply: on an unambiguous owner "更新"-style reply, apply updates and removals in the same try — updates: download each `SKILL.md`, verify size + sha256 + frontmatter (`name == skill id`, `version == manifest version`), then atomically overwrite the managed copy and update the local manifest (skill already converged on disk → skipped); removals: delete the managed `SKILL.md` and drop its local manifest entry — then send one combined ack | Plugin (consent gate runs before the LLM) | `adapter.py::_maybe_consume_skill_update_consent`; `skill_update.apply_skill_update`, `skill_update.apply_skill_removal` |
@@ -86,9 +90,8 @@ once the owner consents it is overwritten back to the official content. This
 is expected, not a bug: the managed tree is meant to always converge to
 whatever the official manifest says, never to preserve local edits.
 
-Publish-side constraint: the official manifest's version for a bundled skill
-(`clawchat-core`, `clawchat-liveware`, `clawchat-liveware-dev`,
-`clawchat-liveware-sample`) must never be **lower** than the version already
+Publish-side constraint: the official manifest's version for any auto-discovered
+bundled skill must never be **lower** than the version already
 shipped in the plugin's own bundled snapshot. `seed_managed_skill` reseeds the
 managed copy from the bundled snapshot whenever the managed version is older
 than the bundled one — a manifest that regresses a bundled skill's version
@@ -188,6 +191,9 @@ never break plugin load.
 
 ## Registration: bundled, managed extras, and hot registration
 
+If the host does not implement `ctx.register_skill`, `_register_skill` silently
+returns without running these registration or host-discovery steps.
+
 `__init__.py::_register_skill(ctx)` does five things at plugin load, in this
 order:
 
@@ -227,7 +233,8 @@ order:
    managed copy and `ctx.register_skill(id, managed_path, description=...)`,
    each in its own `try`/`except` — one bad or missing skill directory logs a
    warning and is skipped without affecting any other bundled skill.
-5. **Managed extras**: any id present in the managed manifest but not bundled —
+5. **Managed extras**: any id present in the managed manifest
+   (`$HERMES_HOME/clawchat-skills/manifest.json`) but not bundled —
    i.e. delivered earlier by a dynamic update — is registered too, with its
    description read from the SKILL.md frontmatter. Without this, a dynamically
    delivered skill would vanish from the host on every restart. A tombstoned

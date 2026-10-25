@@ -1,5 +1,6 @@
 # How the plugin plugs into Hermes
 
+For plugin developers: a map of registration, host patches and adapter integration.
 The plugin is a Python module loaded at runtime by a Hermes Agent
 v0.12.0+ process. Its single public entrypoint is the `register(ctx)`
 function in the repo-root `__init__.py` (the Hermes entrypoint module —
@@ -24,48 +25,40 @@ These names refer to different layers and are not interchangeable:
 | Call                                                         | Provided by              | Effect                                                                                       |
 |--------------------------------------------------------------|--------------------------|----------------------------------------------------------------------------------------------|
 | `ctx.register_platform(name="clawchat", ...)`                | `__init__._register_platform` | Registers the gateway platform. Requires Hermes v0.12.0+; raises otherwise.            |
-| `ctx.register_tool(name, "clawchat", schema, handler, ...)`  | `clawchat_gateway.plugin_tools.register_tools` | Registers all 51 `clawchat_*` tools. List is also in `plugin.yaml`. |
-| `ctx.register_skill("clawchat-core", path, description=...)` | `__init__._register_skill` | Registers the bundled Plugin Bundle skill `clawchat:clawchat-core` (path `skills/clawchat-core/SKILL.md`), then any extra skills present in the managed manifest (`$HERMES_HOME/clawchat-skills/manifest.json`) that were delivered by a dynamic skill update, so they survive restarts. Also captures the registrar (`skill_update.set_skill_registrar`) so a brand-new skill applied after owner consent is hot-registered immediately (`skill_update.hot_register_new_skills`) without a restart. Skipped silently if the host does not implement `register_skill`. Load also runs `skill_update.ensure_external_skills_dir()`, which idempotently adds `clawchat-skills` to the host config's `skills.external_dirs` so all managed skills additionally appear in the `<available_skills>` index / `skills_list` under their bare names. |
+| `ctx.register_tool(name, toolset, schema, handler, ...)` | `clawchat_gateway.plugin_tools.register_tools` | Registers the `clawchat_*` tools in `plugin.yaml`'s `provides_tools`; grant management/request tools are conditional on `tool-grants`. |
+| `ctx.register_skill(skill_id, path, description=...)` | `__init__._register_skill` | Registers bundled and managed skills; see [skill registration](./skill-updates.md#registration-bundled-managed-extras-and-hot-registration). |
 | `ctx.register_cli_command("clawchat", ...)`                  | `__init__._register_cli_commands` | Adds `hermes clawchat activate <CODE>`, `reclaim`, and `status` on Hermes builds that expose `register_cli_command`. |
 | `ctx.register_command("clawchat-activate", ...)`             | `__init__._register_commands` | Adds the `/clawchat-activate <CODE>` slash command for in-session activation.        |
 | `ctx.register_command("clawchat-reclaim", ...)` | `__init__._register_commands` | Clears superseded state and immediately wakes local waiting connections. |
 | `ctx.register_command("clawchat-output", ...)`               | `__init__._register_commands` | Adds the `/clawchat-output minimal\|normal\|full` slash command ([`./output-visibility.md`](./output-visibility.md)). |
 | `ctx.register_hook("pre_api_request", ...)`                  | `__init__._register_llm_context_debug_hooks` | Installs the LLM-context debug observer (inert unless `CLAWCHAT_LLM_CONTEXT_DEBUG` is set). |
 | `ctx.register_hook("post_api_request", ...)`                 | `__init__._register_session_usage_hook` | Records the prompt size of each ClawChat conversation's latest model request (`clawchat_gateway.sediment`), which times the sediment turn before compression. |
+| `ctx.register_hook("pre_api_request", ...)` | `__init__._register_session_usage_hook` | Records the output-token reservation for sediment timing. |
+| `ctx.register_hook("pre_tool_call", ...)` | `__init__._register_host_tools_guard` | Enforces host-tool permissions and routing limits before execution. |
+| `ctx.register_hook("post_tool_call", ...)` | `__init__._register_host_tools_guard` | Registers `turn_attachments.post_tool_call` when supported by the host, capturing tool artifacts and background-process origins. |
+| `ctx.register_hook("pre_llm_call", ...)` | `__init__._register_host_tools_guard` | Binds per-turn permissions on hosts that support the hook. |
 | `ctx.register_hook("pre_gateway_dispatch", ...)`             | `__init__._clawchat_pre_gateway_dispatch` | Drops frames whose sender matches the bot's own ClawChat `user_id` (self-echo). |
 
-`adapter_factory`, `setup_fn`, `check_fn`, `validate_config`, and
-`is_connected` are passed through `register_platform`. `setup_fn` runs
-the interactive `hermes gateway setup` prompts (`clawchat_gateway.setup`);
-`validate_config` returns true when a `websocket_url` is available. Tokens are
-not required at validation time. When Hermes has already loaded the plugin and
-started the ClawChat adapter, a missing token/user credential bundle puts the
-adapter in the waiting-for-activation state; the background connection
-supervisor can then connect after activation writes SQLite credentials. If the
-plugin was only installed and the gateway has not loaded it yet, a normal Hermes
-reload or restart is still required before that waiting state exists. If
-activation cannot persist SQLite credentials, the default activation restart
-lets the next gateway process load credentials from `.env` and `config.yaml`.
+`register_platform` passes `adapter_factory`, `setup_fn` (interactive
+`hermes gateway setup`), `check_fn`, `validate_config`, and `is_connected`.
+It also supplies the label, emoji, platform prompt, install hint, empty
+`required_env`, `allowed_users_env`, `allow_all_env`, `env_enablement_fn`, and
+`max_message_length=0`; standalone/cron fields are described below.
+Validation requires a WebSocket URL, not credentials.
 
-The canonical connection holds a host-local profile lock before activation
-loading and an identity lock before refresh or WebSocket connection. Contention
-enters `ConnectionState.STANDBY` (`"standby"`), which the adapter reports as
-started (so Hermes does not rebuild it in a loop). It performs neither connect
-nor refresh while waiting, retries every 30 seconds, and takes over after the
-holder exits. Refresh entry points and retry callbacks check ownership; the
-HTTP worker retains references through cancellation until the request ends.
-Activation polling acquires the newly loaded identity's lock before its startup
-refresh and rechecks credentials after waiting. Supersession retains references
-before stopping the old supervisor, and shutdown releases owned handles after
-the supervisor task ends. Sibling-device standalone connections are exempt. See
-[host-local locks](configuration.md#host-local-single-instance-locks) for paths,
-diagnostics and unsupported-filesystem behaviour.
+A loaded adapter without credentials waits for [activation](./activation.md).
+An unloaded plugin still needs a Hermes reload/restart; failed SQLite credential
+persistence uses activation's default restart to load `.env`/`config.yaml`.
+Profile/identity lock contention enters `STANDBY`, reported as started;
+it neither connects nor refreshes, and retries every 30 seconds.
+See [host-local locks](./instance-locks-and-install-conflicts.md#host-local-single-instance-locks) for ownership and recovery.
 
 ## Self-echo hook (`pre_gateway_dispatch`)
 
 `__init__._clawchat_pre_gateway_dispatch` re-resolves the bot's own
-`user_id` from the loaded gateway config on every call (never cached —
-activation rewrites the value live) and returns
+`user_id` from the source profile's live adapter on every call, falling back to
+gateway config only for the launch profile (never cached — activation rewrites
+the value live), and returns
 `{"action": "skip", "reason": "clawchat-self-echo"}` when the inbound
 frame's `source.user_id` matches the bot. Without this, the
 interrupt-on-new-message logic in Hermes treats the WebSocket echo of
@@ -101,23 +94,9 @@ owner in a direct chat: `send_message(target="clawchat:cnv_<group>",
 message="caption MEDIA:/abs/path")`. `clawchat_mention_message` stays text
 only: a mention plus a file is two sends (the mention, then `send_message`),
 which keeps one media path, with the host's own `MEDIA:` path checks and the
-plugin's credential denylist, for every chat. In non-owner turns, plugin tools
-refuse local paths and local attachments are not sent, except through the two
-per-person grant paths (every Files tool granted as direct, or a declared output
-of a tool call allowed in this turn; see
-[Local attachments](configuration.md#local-attachments)). Hermes delivers a reply after the turn's session
-context is cleared; a trusted live nonce preserves the guest's attachment
-permission for that turn and conversation. Without that nonce, local delivery
-is allowed only into the owner's direct chat because only the owner receives
-it. In non-owner turns, HTTP(S) attachments are fetched only
-from globally routable unicast addresses. Connections use the checked IP
-directly, without proxies, and each redirect is resolved and checked again.
-In non-owner ClawChat turns, `send_message` to other platforms cannot carry
-attachments; ClawChat targets retain the local-file and remote-address policy.
-A ClawChat gateway process is never treated as a local
-operator surface. The denylist
-also covers the plugin data directory, `.env`, `config.yaml`, `auth.json` and
-plugin databases under resolved Hermes homes and named profiles.
+plugin's credential denylist, for every chat.
+Non-owner local/remote attachments, reply nonces and cross-platform sends follow
+the [Local attachments boundary](./non-owner-boundaries.md#local-attachments).
 
 Hermes' `[[as_document]]` arrives as `force_document`; it is passed to the
 adapter (`_clawchat_force_document`) and the standalone sender, and
@@ -133,15 +112,13 @@ explicit send is delivered and leaves the marker in place: a media send
 (detected on the call stack, and by the `terminal_send.explicit_tool_send()`
 context the patch sets around every ClawChat send — a context variable,
 because the host may run the adapter call on the gateway loop, where the
-stack no longer shows the tool). Before this, "mention the group, then send it
-the file" returned success and dropped the file.
+stack no longer shows the tool).
 
 ## `clawchat_send_file`
 
-Hermes v0.21 stopped handing the agent its built-in `send_message` tool
-(host-side outbound delivery goes through the `hermes send` CLI), so the patch
-above no longer gives the agent a way to put a file into another
-conversation. The plugin's own `clawchat_send_file(chat_id, path,
+Hermes v0.21+ exposes host-side outbound delivery through the `hermes send`
+CLI rather than a built-in `send_message` agent tool. The plugin's own
+`clawchat_send_file(chat_id, path,
 as_document=false, caption="")` (`tools.send_file`) does it on the same path:
 the live adapter's `send` as an immediate media send
 (`_clawchat_immediate_media_send`, `_clawchat_media_files_validated`,
@@ -155,210 +132,14 @@ for hosts that still expose `send_message`.
 
 ## Non-owner turn authority
 
-The boundary is the trusted dispatch batch, not simply direct versus group.
-A nonempty batch containing only the owner's real messages is owner-side and
-keeps ordinary host tools, including in groups. Owner messages are neutral in
-mixed batches: resolve each non-owner's rules, then intersect. Missing trusted
-speakers or grant-store failures use defaults, never owner authority or an
-approve fallback that might miss deny. Plugin synthetic input does not establish
-an owner-side batch, apart from the activation greeting's ordinary tool access.
-Trusted host-internal turns follow the origin rules below.
-Grant management additionally requires a verified real owner
-in the activation direct chat; owner-only group batches cannot manage grants.
-
-`tool_capabilities.py` defines 12 capabilities and exact/capability/all
-selectors. `tool_grants.py` resolves exact tool > capability > all, with
-same-level deny > ask > direct. An explicit ask or deny overrides ordinary
-public access. Group `non-owner-host-tools: approve` fills only a particular
-tool's unmatched restricted permission with ask before intersection; friend
-direct chats and cross-chat delivery do not get this fallback. Unattributed
-turns (host-started, or plugin synthetic turns with no speaker) do not get it
-either, on any host and including with `tool-grants: off`. Old hosts without
-execution binding keep approve only for plugin turns that name their speakers.
-Ask never becomes direct when per-call
-approval is unavailable. See [rule and card details](./configuration.md#per-person-tool-grants).
-
-`platforms.clawchat.extra.public-tools` adds validated exact names to the same
-non-owner default row used by dispatch, execution, short hints, missing-snapshot
-turns and `tool-grants: off`. Any invalid item rejects the whole list with one
-warning naming only the first problem item and reason; omitted/empty lists are
-silent. Sensitive tools and authorization tools cannot be public. Explicit
-matching deny still wins when grants are enabled, and per-call skill, media and
-output-path restrictions remain. The list is configuration only, absent from
-grant listings and unchangeable in chat; see [Public tools](configuration.md#public-tools).
-
-The adapter freezes speaker rules into a nonce in the source message id.
-`pre_llm_call` binds it to the exact host session and turn; the tool hook checks
-nonce, chat, session and turn without a latest-session fallback. Overlapping
-snapshots intersect. Plugin synthetic/unidentified input in the owner's direct
-chat removes verification until idle. Grant/revoke writes affect subsequent
-snapshots; expiry is checked again at execution. Inner calls without execution
-IDs use the already bound `HERMES_SESSION_MESSAGE_ID` snapshot, preserving deny
-on default tools; failure to recover that binding on a capable host means
-defaults without approve.
-Local attachment policy is shared by replies and file tools: every Files member must be direct, or a successful `post_tool_call` must consume that call's permit and declare a structured artifact bound to the live account/session/turn/callers/target; guest uploads use one checked file descriptor and all artifact authority expires at turn completion.
-The plugin's one-time activation greeting, constructed from the stored owner
-pairing, retains ordinary owner tools. Its permission receipts, contact/comment
-notifications, memory migration hints and sediment turns use defaults.
-Authorization-card wakeups and registered process completions use current
-requester grants as described below. Host `internal=True` turns in the owner's
-direct chat without an existing plugin snapshot use ordinary owner tools for
-the owner's own jobs, heartbeats, process completions and sub-agent reports,
-but never the four authorization tools (`owner_verified=False`). This relies on
-cross-session checks keeping guests out of that chat; a newly introduced host
-route can break the premise unless the plugin's routing inventory is updated.
-No synthetic turn can manage grants.
-Speaker authority comes from parsed sender IDs and the coalescer's internal
-speaker tuple; envelope `messages` fields never establish authority.
-Exact-name resolution canonicalizes verified host aliases without rewriting storage.
-
-Host tool discovery starts from the effective ClawChat catalog before
-per-source narrowing, applying host global disablement, dependencies and
-credentials. `all` remains a rule and includes later-installed tools, excluding
-the four authorization tools; it cannot restore globally disabled tools.
-The source override restores needed toolsets; the catalog filter narrows
-concrete schemas after host caching and before search assembly. The execution
-hook rechecks the same rules and current availability, including inner tools
-reached through search/dispatch. A restored toolset grants no implicit access
-to its other members. In a bound non-owner turn, `tool_search` and `tool_describe`
-can read the filtered catalog only when the grants filter is installed and its
-context snapshot matches the bound grants and non-owner speakers. A mismatch
-keeps the unavailable refusal. In guest turns the plugin neutralizes the host's
-remote connector search/describe, registry fallback and list of declared but
-unavailable sources, so the bridges only see
-the filtered catalog, even when grants expire between checks and dispatch.
-Bridges stay `not-available` when that guard cannot be installed or verified.
-Without a complete guard, guest schemas also skip search assembly, so no
-catalog listing or source summary reaches the model.
-`tool_describe` returns the same refusal as a direct call for registered names
-hidden in this turn or unavailable on the host. Owner turns and other platforms
-keep the host's original search behavior. `tool_call` still checks the real inner tool.
-Non-owner channel prompts list only installed, available capabilities with no
-available member authorized for this batch, with English display names and IDs;
-refusals expose reason codes without disclosing other speakers' permissions.
-Cross-chat schemas remain visible when a current-chat action is permitted;
-the execution check still resolves the actual target against cross-chat rules.
+Trusted dispatch batches determine owner authority; non-owner speakers' permissions intersect.
+The adapter, catalog filter and execution hook enforce the same turn snapshot.
+Grant management requires a real owner message in the activation direct chat.
+See [tool grants](tool-grants.md) for owner policy and cards, and [non-owner boundaries](non-owner-boundaries.md) for enforcement, attachments, origins and wake notices.
 
 ### Cross-session execution routes
 
-No grant, including `all`, opens these routes from a non-owner turn:
-
-- `delegate_task` spawn/steer (omitted action means spawn); only list/stop pass
-  the routing check.
-- `message_agent`, which starts work in another agent's session.
-- `process` / `process_manage` calls with `session_id` unless the trusted process
-  registry records the current host session as `parent_session_id` and its
-  `session_key` still matches the trusted current approval-session key. Transfers
-  update the latter. Unavailable ownership fails closed. Target-free list calls
-  use ordinary authorization.
-- `cronjob` / `cronjob_manage` create/run/enable and any action except
-  list/pause/remove, even if delivery is origin/local.
-- Worker/subscriber Kanban mutations: `kanban_create`, `kanban_complete`,
-  `kanban_block`, `kanban_schedule`, `kanban_request_review`,
-  `kanban_request_changes`, `kanban_unblock`, `kanban_link`, `kanban_comment`.
-
-These routes cannot preserve the initiating turn's bound authority. Hermes
-`subagent` / `schedule` grants therefore currently open only read or management
-actions and remaining non-routing Kanban actions, subject to other checks.
-New host tools/actions that start workers or wake subscribers must be added to
-the audited inventory in `host_tool_targets_current_session`; parent grants
-are not inherited into children or sessions created after compression.
-
-Cross-chat sending is separate from starting execution sessions.
-`CROSS_CHAT_GATE_POLICY = "grant"`: non-owner mention, reaction and file sends
-(`clawchat_mention_message`, `clawchat_react_message`, `clawchat_send_file`, plus
-`send_message` where a host registers it) to another chat require an explicit
-matching grant. Missing or unresolvable targets count as cross-chat. Direct
-allows, ask requires per-call approval (`ask-unavailable` if unsupported), and
-missing/deny/intersection failures return `not-granted`, `denied` or
-`batch-intersection`. Default tools, `public-tools` and group approve cover only
-the current chat. Grants off or hosts without execution binding cannot open
-non-owner cross-chat delivery. Owner-side turns are exempt. Target, resource
-and local attachment checks remain. A cross-chat grant cannot bypass
-`cross-session` refusal of tools that start or continue another session.
-
-`ORIGIN_INHERITANCE_POLICY = "receipt-and-process-completion"` recognizes only
-authorization-card wakeups and registered background process completions for
-requester inheritance. `turn_attachments.post_tool_call` calls
-`process_origins.record_process_origin` after a successful non-owner `terminal`
-call with `background: true` and `notify: true` (older hosts:
-`notify_on_complete: true`), recording process ID, plugin turn nonce, speakers,
-account, chat and session route. Explicit non-`None` `notify` takes precedence
-over the old flag; missing or `None` `notify` falls back to the old flag. The
-adapter matches only host `internal=True` events whose metadata has
-`notification_origin=process_registry_synthetic`,
-`original_trigger_message_id` equal to that starting turn's plugin nonce, and
-a matching recorded `gateway_session_key`, in the same source chat. The first
-line's process ID narrows the match to a registered process; text cannot supply
-speaker authority. The adapter consumes that process registration, re-reads
-the starters' current grants (intersecting multiple starters), and registers a
-fresh non-owner, unverified turn snapshot with no group approve fallback.
-Revocation and expiry therefore apply to the completion turn.
-
-Registrations are in memory (512 origins, seven-day expiry); restart, expiry
-or eviction loses inheritance. Watches, heartbeats, batched completions and
-mismatches use defaults, as do scheduled tasks, sub-agent reports and Kanban
-work without requester inheritance, subject to the separate owner-direct-chat
-rule above. Process inheritance is off with `tool-grants: off`. Unattributed
-spontaneous turns get defaults without group approve on every host, including
-with grants off.
-
-Migration 14 rebuilds `tool_grants` around `what_kind + what` and preserves old
-exact-tool rows and modes. **After upgrading, do not downgrade; old and new
-plugin processes must not share a database.** See
-[storage upgrade details](./configuration.md#storage-upgrade).
-
-`tool_requests.py` owns fixed card/continuation/notice copy, sanitation and the
-Agent-wide quota of 20 request cards in any rolling 24 hours, including failed
-sends (`REQUEST_DAILY_WINDOW_POLICY = "rolling-24h"`, window `(now − 24h, now]`).
-Removing deny is immediate without a card (`plan_deny_removal` returns `immediate`).
-Proactive direct/ask cards for schedule/subagent, their exact members or `all`,
-and guest request cards for schedule/subagent, append the self-running
-consequence line (R) alongside the Hermes routing limitation copy.
-Migration 15 adds durable requests,
-shared pending-code references, rate indexes and one-time wake notice storage.
-Migration 16 adds durable notice claim tokens and timestamps; pending requests
-and decisions survive the upgrade.
-The new schema cannot be downgraded; never share the DB with an old process.
-Quota checks, code insertion and request creation use one `BEGIN IMMEDIATE`;
-confirmation consumes the code, upserts the rule and queues the wake in another
-atomic transaction. Send failures retain rate quota and never report pending.
-
-`clawchat_tool_request` has its own `clawchat-requests` toolset, independently
-visible in non-owner turns even under `all:deny`. Its handler uses the exact
-nonce/session/turn binding and immutable `RequestOrigin`, while overlapping
-snapshots continue to restrict access. It accepts only capability and reason.
-An owner plus one trusted non-owner binds the non-owner regardless of order;
-multiple non-owners create no request context. Quota exhaustion returns
-`blocked/rate-limited`, while an existing pending card or any non-failed request
-within the six-hour person × capability cooldown returns `waiting`, even after
-a decision. Both waiting cases send no new card and write no grant.
-All three confirmation commands are intercepted before model dispatch; only
-real owner-direct input can decide, including a `sending` card after a crash.
-Proactive cards still accept only `/clawchat-allow` for the frozen mode.
-
-Wake dispatch atomically claims a unique `wake_key`, resolves the original
-conversation and builds `InboundMessage.internal_synthetic(grant_origin=…)`.
-The process-local origin contains requester ID, request ID and card expiry;
-the parser ignores all wire origin/synthetic/requester fields. Grant speakers
-contain only the requester, never an owner identity, and current grants are
-loaded again. Wakeups wait for the original session to be idle before `_handle_inbound`;
-later real input retains the existing busy admission queues;
-expiry is checked again immediately before `handle_message`. This avoids
-newer host-only imports such as `admit_internal_event`, absent from the full
-v0.12.0+ compatibility contract.
-
-Startup recovers unexpired pending wakes. Dispatch failures and claims stuck
-for ten minutes become failed with a one-time, original-route-only notice on
-the requester's next real turn. Notice retrieval also recovers stale claims.
-Notice claims expire after ten minutes; the adapter acknowledges consumption
-only after host acceptance and releases claims on rejection or exceptions.
-Tokens prevent stale acknowledgements from consuming replacement claims.
-Notices expire with the card. Ambiguous dispatches are never retried; the host
-does not provide guaranteed idempotent delivery. Unknown spontaneous producers
-retain default permissions without group approve on hosts with execution
-binding, subject to the separate trusted host-internal owner-direct-chat rule
-and old-host compatibility path above.
+See the [audited execution routes](non-owner-boundaries.md#cross-session-execution-routes) and [cross-chat boundary](non-owner-boundaries.md#cross-session-routing-and-known-limits).
 
 ## Outbound chat_id validity gate
 
@@ -377,17 +158,14 @@ contract**, pinned by the tracked fixture
 `clawchat_gateway/fixtures/permission_events/invalid-chat-id-outbound.json`
 — a byte-identical copy of the openclaw plugin's fixture. The fixture is the
 shared artefact; the parity assertions over it live in each plugin's own test
-suite, which is **not** part of this published checkout (`.gitignore: tests/`).
+suite. Named tests are tracked through `.gitignore` exceptions; other tests
+stay local (see [development](./development.md#running-tests)).
 The openclaw side enforces the same rule at
 its own structured boundaries (`sendRawEnvelope`, `sendAlignedAckableEnvelope`,
 `sendOpenclawClawlingReaction`).
 
-Every ClawChat conversation id is minted by member-backend with the `cnv_`
-prefix and msghub resolves a chat_id only through member-backend, so anything
-else is refused upstream with `code=400: invalid conversation id` — a wasted
-round trip and an ERROR line in msghub for a frame that never had a recipient.
-Production (2026-07-30) saw agents address peers by their `usr_…` idcode and by
-a host-composed `direct:{self}:{peer}` key.
+Conversation ids use `cnv_`; a peer's `usr_…` idcode or a host-composed
+`direct:{self}:{peer}` key cannot address a conversation on the server.
 
 The gate lives at the connection boundary rather than at any single caller
 because the plugin forwards a chat_id chosen upstream — by the host's target
@@ -425,23 +203,13 @@ not the cron field keeps the sender.
 ClawChat has no REST send endpoint, so the standalone path opens an
 **ephemeral** `ClawChatConnection` (reusing credential loading, the challenge
 handshake, token refresh, and ack tracking), sends one `message.send` frame
-with `wait_for_ack=True`, and closes. Main connections advertise a stable
-installation hash and the terminal-conflict capability. A `4010` (including a
-pre-hello refusal) persists `install_superseded.json`, stops reconnect/refresh,
-and keeps the supervisor and instance locks alive in `SUPERSEDED`. The adapter
-returns success for this settled state so Hermes does not rebuild it repeatedly.
-`install_identity.py` owns identity generation and durable state; explicit local
-CLI/slash reclaim or successful activation resumes connection. See
-[configuration](./configuration.md#installation-conflicts-and-recovery).
-
-Ordinary standalone delivery is blocked while superseded. The one owner notice
-per live event uses an internal exception, a sibling connection with a separate
-supervisor slot, no install metadata, and no refresh. Its bounded background task
-is cancelled on stop; persisted pending/failed results are never retried on restart.
+with `wait_for_ack=True`, and closes.
+A terminal `4010` suspends the installation and blocks ordinary standalone sends;
+see [installation conflicts and recovery](./instance-locks-and-install-conflicts.md#installation-conflicts-and-recovery) for the owner-notice exception and reclaim.
 
 Two invariants:
 
-- **Sibling device id.** msghub enforces single-session per
+- **Sibling device id.** The server enforces single-session per
   `(user_id, device_id)` with takeover semantics — connecting with the
   canonical device id would kick a gateway daemon running in another process
   off its socket. The ephemeral session therefore presents
@@ -541,7 +309,7 @@ finalizing edit `message.done` followed by the acked `message.reply` under the
 same `message_id` — so the conversation keeps one message. Group replies are
 buffered and sent whole either way. The holds, the `message.failed` cases and
 the post-turn sweep of unfinished replies (opt-in only) are described in
-[`./client-integration.md`](./client-integration.md) §8.0.
+this plugin's [Protocol v2 subset](./client-integration.md) §8.0.
 
 ### Sediment turns before reset and compression
 
@@ -565,12 +333,9 @@ not the guard, ends the suppression). See
 When a dangerous command needs approval inside a **group**, Hermes calls
 `send_exec_approval(chat_id=<group>, command=…, session_key=…,
 description=…, metadata=…, allow_permanent=…, allow_session=…,
-smart_denied=…)`. The three scope flags exist on hosts since v2026.7.20;
-older hosts omit them and the defaults reproduce the previous behaviour.
-The signature also takes `**kwargs`: a host flag the adapter does not
-accept raises `TypeError`, which the host swallows and answers with a
-plain-text fallback that carries no route, so the owner's reply would
-resolve nothing. The prompt offers only the scopes the host allows (no
+smart_denied=…)`. Optional scope flags have defaults, and `**kwargs` accepts
+additional host flags so a signature mismatch cannot force a plain-text
+fallback without a reply route. The prompt offers only the scopes the host allows (no
 session/always choice for a Smart-DENY override, no always choice when
 nothing can be permanently allowlisted), mirroring Hermes' own text
 fallback.
@@ -591,13 +356,13 @@ codes are case-insensitive and may appear before or after the scope word):
 | Reply | Pending group approvals | Result |
 |---|---|---|
 | `/approve <code>` / `/deny <code>` (also `/always`, `/cancel`, `session` / `always` scope words, `all`) | any | Resolves that code's session only. |
-| bare `/approve` / `/deny` | exactly one | Resolves it (the single-approval UX is unchanged). |
+| bare `/approve` / `/deny` | exactly one | Resolves it. |
 | bare `/approve` / `/deny` | two or more | Nothing is resolved; the reply lists the pending codes and their groups. |
 | code that is unknown, resolved, or expired | any (including none) | Nothing is resolved; the reply lists the pending codes. A code-shaped reply is never handed to the host, which would otherwise apply it to the direct chat's own session. |
 | bare `/approve` / `/deny` | none | Not intercepted; the host's own `/approve` handler runs for the direct chat's session. |
 
 While any group route is pending, a bare `/approve` in the owner's direct
-chat is taken as a group decision, as before. Several approvals from the
+chat is taken as a group decision. Several approvals from the
 **same** group session get distinct codes, but the host resolves a
 session's queue oldest-first (it does not hand the adapter its
 `request_id`), so the code selects the session, not the individual
@@ -625,14 +390,15 @@ Routes are bounded by:
 ## Wire protocol
 
 This plugin and the sibling `openclaw-clawchat` plugin are **peer
-Protocol-v2 clients**. The wire contract is documented in
-[`./client-integration.md`](./client-integration.md) — the authoritative
-Protocol v2 reference for this plugin (envelope, events, routing, replay,
-streaming, and canonical wire examples).
+Protocol-v2 clients**. [`./client-integration.md`](./client-integration.md)
+covers the Protocol v2 subset used by this plugin (envelope, events, routing,
+replay and streaming). The server owns the wire contract and its implementation
+takes precedence if they disagree.
 
 When the wire shape changes:
 
-1. Update [`./client-integration.md`](./client-integration.md) first.
+1. Update the server's Protocol v2 contract first, then this plugin's subset in
+   [`./client-integration.md`](./client-integration.md).
 2. Update `clawchat_gateway/protocol.py` (frame builders) and
    `clawchat_gateway/inbound.py` (frame parsing) here.
 3. Mirror the same change in `clawchat-plugin-openclaw/src/`.
@@ -640,7 +406,7 @@ When the wire shape changes:
 ## Configuration loading
 
 `clawchat_gateway.config.ClawChatConfig.from_platform_config` resolves
-configuration in this priority order:
+configuration in this five-level priority order for unscoped reads:
 
 1. `hermes_cli.config.get_env_value_prefer_dotenv(...)` (if importable) — the
    profile's `.env`, then a scope-checked process-env fallback.
@@ -650,6 +416,10 @@ configuration in this priority order:
    [`./configuration.md`](./configuration.md).
 4. `platforms.clawchat.extra` from `config.yaml`.
 5. Hard-coded defaults from the dataclass.
+
+Credential tombstones override env fallback. In a scoped or multiplexed host,
+`_get_env` reads the profile's `.env`, then Hermes' `get_scoped_secret`, and
+does not add a raw process-env fallback after a scoped miss.
 
 `$HERMES_HOME` resolution itself lives in `clawchat_gateway.hermes_home` —
 exported value, else the platform-native default (`~/.hermes` on POSIX,
@@ -665,28 +435,7 @@ table.
 
 ## Host `MessageEvent` verification (message-recall open item)
 
-Verified 2026-08-20 against Hermes Agent 0.20.0 (a local Hermes source
-checkout at `tmp/hermes`, git commit `3aeff239bfc49a5e025eb05fb6fd3a724104a1d6`;
-no `hermes` binary is installed on this machine, so the version was read from that checkout's
-`pyproject.toml` — `[project] name = "hermes-agent"` / `version = "0.20.0"`
-— rather than from `hermes --version`). The live SQLite state at
-`$HOME/.hermes/clawchat.sqlite` and `$HOME/.hermes/clawchat/clawchat.sqlite`
-was also inspected (`sqlite3 <db> ".tables"`); neither contains the host's
-own `messages` table — both only hold this plugin's own `clawchat_messages`
-ledger (`activations`, `connections`, `owner_profile`, `tool_calls`,
-`liveware_sample`, `schema_migrations`, `clawchat_messages`) — so the
-`messages` schema below is taken from the source checkout, not a live DB.
-
-| Question | Answer |
-|---|---|
-| Does `gateway.platforms.base.MessageEvent` accept `message_id=`? | yes — it is a `@dataclass` (`gateway/platforms/base.py:2054`) whose fields include `text: str`, `message_type: MessageType = MessageType.TEXT`, `source: SessionSource = None`, `raw_message: Any = None`, `message_id: Optional[str] = None`, `platform_update_id: Optional[int] = None`, `media_urls: List[str] = field(default_factory=list)`, `media_types: List[str] = field(default_factory=list)`, `reply_to_message_id: Optional[str] = None`, `reply_to_text: Optional[str] = None`, plus further reply/prompt/skill/channel fields not relevant here. |
-| Does `messages.platform_message_id` exist? | yes — `hermes_state_common.py`'s `CREATE TABLE IF NOT EXISTS messages (... platform_message_id TEXT, ...)` (verbatim column declaration, no inline `UNIQUE`). |
-| Is it uniquely indexed? | **no.** The only index over it, created in `hermes_state_schema.py`'s `_init_schema`, is:<br>`CREATE INDEX IF NOT EXISTS idx_messages_platform_msg_id ON messages(session_id, platform_message_id) WHERE platform_message_id IS NOT NULL`<br>This is `CREATE INDEX`, not `CREATE UNIQUE INDEX` — it does not enforce uniqueness at all, let alone give a unique lookup keyed on `platform_message_id`. Separately (and this would matter even if it *were* unique): `platform_message_id` is not the leading column — `session_id` is — so a unique index here would still require supplying the host's internal `session_id` alongside `platform_message_id` to get the guarantee, and the adapter's `MessageEvent(...)` construction site (`clawchat_gateway/adapter.py`, method `_handle_inbound`) has no host `session_id` in scope at that point — it builds a ClawChat `source` (`chat_id`, `user_id`, `chat_name`, `chat_type`) via `self.build_source(...)`, not a Hermes-internal session id. Both gaps are independently sufficient to fail the criterion; the non-`UNIQUE` declaration alone already does. |
-
-**Decision:** do not populate `message_id=`. Outcome B: `MessageEvent` accepts `message_id=`, but `messages.platform_message_id` exists without a unique index (`CREATE INDEX`, not `CREATE UNIQUE INDEX`) — a non-unique column cannot be the basis of a host-side soft delete, and passing a kwarg nothing consumes as a reliable key would invite the next reader to assume a linkage that does not exist.
-
-This matters because it is the precondition for any future **host-side** soft
-delete of a recalled message. Today the `message.recall` purge reaches only this
-plugin's own `clawchat_messages` ledger; the host's conversation history is
-explicitly out of scope (spec §9.8, "What is **not** attempted"). Nothing
-about the column's schema may be asserted without re-running this verification.
+Recorded verification: 2026-10-23, Hermes Agent `v0.22.0-2-gd97007c32d` (git describe; commit `d97007c32d6340f7ba79ac1dfb5773cc00846448`).
+`MessageEvent` accepts `message_id`; `messages.platform_message_id` has only the non-unique index `(session_id, platform_message_id)` (`idx_messages_platform_msg_id`, filtered to non-NULL values).
+The adapter leaves `message_id` unset; recall purges only the plugin ledger, with host-history soft deletion out of scope (Protocol v2 subset §9.8).
+Recheck against real Hermes source when the event fields, host schema/indexes or recall integration change.

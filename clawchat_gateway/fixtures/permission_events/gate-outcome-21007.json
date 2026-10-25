@@ -1,0 +1,20 @@
+{
+  "name": "gate outcome 21007 maps to owner_turn_only",
+  "behavior": "gate_outcome",
+  "wire": {
+    "code": 21007,
+    "data": {
+      "allowed": false,
+      "reason": "owner_turn_only",
+      "operation": "orchestrate.read"
+    }
+  },
+  "expected": {
+    "result": {
+      "status": "owner_turn_only",
+      "reason": "owner_turn_only",
+      "operation": "orchestrate.read",
+      "instruction": "Owner-only: only your owner can ask for this. Tell the person how to do it themselves (group settings → Agent management)."
+    }
+  }
+}

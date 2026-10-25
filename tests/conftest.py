@@ -26,13 +26,15 @@ this repository's own state — ``_handle_message_recall`` touches only
 of which ``ClawChatAdapter.__init__`` creates itself. It is **not** good for
 anything that depends on host behaviour: base-class dispatch, the real
 ``MessageEvent`` shape the host constructs, or whether the host calls us at all.
-Do not use it to claim host-side facts — use ``docs/architecture.md``'s recorded
-verification, which was taken against real Hermes source.
+Do not use it to claim host-side facts — use the recorded verification in
+``docs/architecture.md``'s "Host MessageEvent verification (message-recall open
+item)" section, including its source version, date and recheck conditions.
 """
 
 from __future__ import annotations
 
 import atexit
+from contextlib import contextmanager
 import os
 import shutil
 import sys
@@ -78,6 +80,37 @@ def _real_host_available() -> bool:
 
 
 _USING_DOUBLE = not _real_host_available()
+
+
+@contextmanager
+def _temporary_clawchat_platform():
+    if _USING_DOUBLE:
+        yield
+        return
+    from gateway.config import Platform
+    from gateway.platform_registry import PlatformEntry, platform_registry
+
+    previous = platform_registry.snapshot_registration("clawchat")
+    with pytest.MonkeyPatch.context() as patch:
+        # Platform(value) caches pseudo-members separately from the registry.
+        for name in ("_value2member_map_", "_member_map_"):
+            patch.setattr(Platform, name, dict(getattr(Platform, name)))
+        platform_registry.register(PlatformEntry(
+            name="clawchat", label="ClawChat", adapter_factory=lambda config: None,
+            check_fn=lambda: True,
+        ))
+        current = platform_registry.snapshot_registration("clawchat")
+        try:
+            yield
+        finally:
+            platform_registry.restore_registration("clawchat", current, previous)
+
+
+@pytest.fixture
+def clawchat_test_platform():
+    """Register the test platform only while a test constructs real-host adapters."""
+    with _temporary_clawchat_platform():
+        yield
 
 
 def _install_double() -> None:
