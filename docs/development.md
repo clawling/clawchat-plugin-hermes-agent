@@ -165,8 +165,13 @@ a root path), reading a secrets file, a reverse shell, and similar. Use a
 harmless placeholder such as `run-cleanup --everything` instead.
 `tests/test_install_scan.py` runs the real scanner over a copy of the
 tracked files and fails on any critical finding; it needs a Hermes source
-checkout (`$HERMES_SOURCE_DIR`, `tmp/hermes` or `tmp/hermes-agent`) and
-skips without one, so run it with one present before a release.
+checkout (`$HERMES_SOURCE_DIR`, or `tmp/hermes` / `tmp/hermes-agent` in this
+checkout or, from a linked worktree, the main checkout) and skips without
+one, so run it with one present before a release. It also runs the scanner of
+each pinned older Hermes release, so the checkout needs those tags
+(`git fetch --tags`). Prose counts too: older scanners rate `host` followed
+later on the same line by a `$` as DNS exfiltration, so keep "host" and a
+`$VARIABLE` off the same line.
 
 ## Excluded from this checkout
 

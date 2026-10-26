@@ -123,7 +123,7 @@ A later `/clawchat-output` writes `streaming: false` again.
 
 ## Hermes display settings for ClawChat
 
-These host keys live in `$HERMES_HOME/config.yaml`, outside `platforms.clawchat.extra`. Activation overwrites the four global display values and both agent values below; it only fills missing keys in `display.platforms.clawchat`, preserving operator overrides. It never writes top-level `streaming.*`. Unknown host keys stay visible for future compatibility.
+These Hermes-owned keys live in `$HERMES_HOME/config.yaml`, outside `platforms.clawchat.extra`. Activation overwrites the four global display values and both agent values below; it only fills missing keys in `display.platforms.clawchat`, preserving operator overrides. It never writes top-level `streaming.*`. Unknown host keys stay visible for future compatibility.
 
 ```yaml
 display:
