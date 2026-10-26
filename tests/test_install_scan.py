@@ -23,7 +23,8 @@ scanner must report zero high findings as well as zero critical findings.
 
 This check runs the real scanner, so it needs a Hermes Agent source checkout:
 ``$HERMES_SOURCE_DIR``, or the ignored ``tmp/hermes`` / ``tmp/hermes-agent``
-(see ``docs/hermes-source-lookup.md``). Without one it skips. The scanner runs
+of this checkout or, from a linked worktree, of the main checkout (see
+``docs/hermes-source-lookup.md``). Without one it skips. The scanner runs
 in a subprocess so its ``tools`` package never shadows anything in this test
 session, and over a copy of exactly the tracked files — what a clone contains.
 """
@@ -43,8 +44,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 #: Hermes release tags whose install scanner the tracked tree must also pass.
 #: v2026.8.31 is Hermes v0.21.0, the e2e image and the oldest scanner that
-#: reads tests/ at full severity.
-PINNED_SCANNER_TAGS = ("v2026.8.31",)
+#: reads tests/ at full severity. v2026.9.11 is Hermes v0.21.2, the last whose
+#: ``dns_exfil`` rule fires on the prose word "host" followed by any ``$`` on
+#: the line (fixed upstream in v0.21.3).
+PINNED_SCANNER_TAGS = ("v2026.8.31", "v2026.9.11")
+#: v0.22.5 is the newest Hermes release.
 HIGH_CLEAN_SCANNER_TAGS = ("v0.22.5",)
 
 
@@ -58,11 +62,43 @@ def _scanner_tags(
     return list(defaults)
 
 
+def _main_checkout() -> Path | None:
+    """The main working tree when this one is a linked ``git worktree``.
+
+    ``tmp/`` is ignored, so a linked worktree has none; without this the scan
+    silently skipped in every worktree.
+    """
+    if shutil.which("git") is None:
+        return None
+    proc = subprocess.run(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        cwd=REPO_ROOT, capture_output=True, text=True, check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    common = Path(proc.stdout.strip())
+    if common.name == ".git":
+        return common.parent
+    # A submodule keeps its git dir under the superproject's .git/modules/.
+    proc = subprocess.run(
+        ["git", "config", "--file", str(common / "config"), "core.worktree"],
+        capture_output=True, text=True, check=False,
+    )
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    return (common / proc.stdout.strip()).resolve()
+
+
 def _hermes_source() -> Path | None:
     candidates = []
     if os.environ.get("HERMES_SOURCE_DIR"):
         candidates.append(Path(os.environ["HERMES_SOURCE_DIR"]))
-    candidates += [REPO_ROOT / "tmp" / "hermes", REPO_ROOT / "tmp" / "hermes-agent"]
+    roots = [REPO_ROOT]
+    main = _main_checkout()
+    if main is not None and main != REPO_ROOT:
+        roots.append(main)
+    for root in roots:
+        candidates += [root / "tmp" / "hermes", root / "tmp" / "hermes-agent"]
     for path in candidates:
         if (path / "tools" / "plugin_guard.py").is_file():
             return path
