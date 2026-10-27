@@ -1281,7 +1281,7 @@ before depending on them — an unmodelled field never survives the relay.
 
 Treat media URLs as opaque, using the supplied URL without rewriting it.
 They may be public capability URLs bounded by storage retention (default
-**15 days**) or presigned GET URLs valid for up to **7 days**. There is no
+**about 14 days**) or presigned GET URLs valid for up to **7 days**. There is no
 re-signing endpoint; expired content must come from its original source.
 
 **Receivers must tolerate absent or empty `url`** on image/video/audio/file
@@ -1733,7 +1733,7 @@ Inferred from the final stored MIME prefix:
 |------------|---------|
 | Max single-file size | **100 MiB** (`media.max_size_bytes`; `413` if exceeded) |
 | Allowed MIME prefixes | Empty allowlist accepts all types; configured restrictions may return `415`. See Content-Disposition below. |
-| Object retention | 15 days (server-side bucket lifecycle deletion) |
+| Object retention | about 14 days (server-side bucket lifecycle deletion) |
 
 **Content-Disposition prevents stored active content from executing.** Objects
 are stored `inline` only for raster image types (`image/jpeg`, `image/png`,

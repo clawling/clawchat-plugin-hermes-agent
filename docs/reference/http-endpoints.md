@@ -125,10 +125,14 @@ return the business envelope intact (`code` / `msg` / `data`).
 ### Media / files
 | Method | Path | Method (Python) | Source |
 |--------|------|-----------------|--------|
-| POST | `/media/upload` | `upload_media` / `_upload_media_sync` | `api_client.py`, `media_runtime.py` |
-| POST | `/v1/files/upload-url` | `upload_avatar` | `api_client.py` |
+| POST | `/media/upload` | `upload_media` / `_upload_media_sync` (chat message attachments) | `api_client.py`, `media_runtime.py` |
+| POST | `/v1/files/upload-url` | `upload_avatar` (avatars and local moment images) | `api_client.py` |
 | GET | `{remote_url}` (URL from message content, not a fixed endpoint) | `_load_remote_media` | `media_runtime.py` |
 | GET | `{remote_url}` (inbound media download) | `_download_inbound_media_sync` | `media_runtime.py` |
+
+Chat attachment URLs from `/media/upload` are deleted after about 14 days.
+Avatars and moment images use long-lived uploads via `/v1/files/upload-url`;
+see the [image URL rule](tools.md#avatar-and-moment-image-urls).
 
 ## Distribution downloads outside the ClawChat APIs
 
