@@ -458,6 +458,12 @@ Failures return the matching `too_large`, `not_json`, `bad_version` or `bad_id`
 refusal and guide hint, and never touch the throttle. The guide and refusal
 sentences describe the phone's stricter widget/v1 format.
 
+Removal is a snapshot like any other: `{"v": 1, "id": "todo", "removed": true}`
+passes the same checks and throttle, and a later snapshot with that `id` brings
+the widget back. The plugin keeps no removed state; an owner deletion arrives as
+an ordinary `[widget <id>] removed` text line, and the guide (`WIDGET_V1_GUIDE`
+in `clawchat_gateway/widget_send.py`) tells the model to stop sending that widget until the owner asks again.
+
 Per account and widget `id`, sends coalesce over 60 seconds measured from send
 start. The first snapshot is sent immediately and waits for its ACK. A call
 while that send is pending, or within the minute, replaces the one pending
