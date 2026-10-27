@@ -202,23 +202,6 @@ def media_reference_allowed(value: str, chat_id: str | None) -> bool:
     return local_attachment_allowed(chat_id, normalized)
 
 
-def _is_uploaded_media_url(value: str) -> bool:
-    parsed = urlparse(value)
-    return parsed.scheme in {"http", "https"} and parsed.path.startswith("/media/")
-
-
-def _uploaded_media_fragment(url: str) -> dict[str, object]:
-    name = Path(urlparse(url).path).name or "media"
-    mime = _guess_mime(name)
-    return {
-        "kind": infer_media_kind_from_mime(mime),
-        "url": url,
-        "mime": mime,
-        "size": 0,
-        "name": name,
-    }
-
-
 def _resolve_inbound_media_url(
     url: str,
     *,
@@ -826,19 +809,11 @@ async def upload_outbound_media(
         except Exception as exc:  # noqa: BLE001
             # Do not drop media silently — surface the failure so an operator
             # can see why a referenced attachment never made it onto the wire.
-            if _is_uploaded_media_url(url):
-                logger.warning(
-                    "clawchat outbound media upload failed; reusing existing url=%s error=%s",
-                    urlunparse(urlparse(url)._replace(query="", fragment="")),
-                    type(exc).__name__,
-                )
-                fragments.append(_uploaded_media_fragment(url))
-            else:
-                logger.warning(
-                    "clawchat outbound media dropped name=%s error=%s",
-                    _media_log_name(url),
-                    type(exc).__name__,
-                )
+            logger.warning(
+                "clawchat outbound media dropped name=%s error=%s",
+                _media_log_name(url),
+                type(exc).__name__,
+            )
             continue
     return fragments
 

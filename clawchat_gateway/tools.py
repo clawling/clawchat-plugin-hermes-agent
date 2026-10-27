@@ -1042,8 +1042,9 @@ def _classify_moment_images(
 ) -> tuple[list[tuple[str, Path | None]] | None, dict[str, Any] | None]:
     """Each entry as ``(url, None)`` or ``("", local_path)``, or a validation error.
 
-    A moment image must be an http(s) URL. An existing absolute local image
-    file is accepted too and uploaded by the caller; anything else (a relative
+    A remote moment image must already have a long-lived http(s) URL. An
+    existing absolute local image file is accepted too and uploaded to
+    long-lived storage by the caller; anything else (a relative
     or ``~`` path, ``file://``, a missing file, a non-image) is refused before
     anything is uploaded or created, so a bad entry never yields a moment with
     a broken image.
@@ -1101,11 +1102,13 @@ async def create_moment(
                 if path is None:
                     resolved.append(url)
                     continue
-                uploaded = await client.upload_media(
+                uploaded = await client.upload_avatar(
                     buffer=path.read_bytes(),
                     filename=path.name,
                     mime=_infer_mime(path),
                 )
+                if not uploaded.mime.startswith("image/"):
+                    return _validation_error("uploaded moment image must have an image/ MIME type")
                 resolved.append(uploaded.url)
         return await client.create_moment(text=text, images=resolved)
     except ClawChatApiError as exc:

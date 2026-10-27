@@ -8,6 +8,17 @@ from clawchat_gateway.storage import get_clawchat_store
 
 logger = logging.getLogger(__name__)
 
+_LONG_LIVED_IMAGE_URL_RULE = (
+    "Avatar and moment image URLs must be long-lived: use a URL returned by "
+    "`clawchat_upload_avatar_image` (or a local path this tool uploads itself). "
+    "Never use a chat attachment URL (a `/media/…` link from a chat message or from "
+    "`upload_media_file`) — chat attachments are deleted after about 14 days."
+)
+_AVATAR_URL_DESCRIPTION = (
+    "Long-lived avatar URL returned by clawchat_upload_avatar_image. Never use a chat "
+    "attachment /media/ URL; chat attachments are deleted after about 14 days."
+)
+
 
 def _mention_user_ids_from_args(mentions) -> list[str]:
     if not isinstance(mentions, list):
@@ -943,7 +954,7 @@ def register_tools(ctx) -> None:
         "additionalProperties": False,
         "properties": {
             "nickname": {"type": "string"},
-            "avatar_url": {"type": "string"},
+            "avatar_url": {"type": "string", "description": _AVATAR_URL_DESCRIPTION},
             "bio": {"type": "string"},
             "agent_behavior": {"type": "string"},
             "group_title": {"type": "string"},
@@ -1078,7 +1089,8 @@ def register_tools(ctx) -> None:
         {
             "name": "clawchat_metadata_sync",
             "description": _direct_tool_description(
-                "Synchronize the ClawChat metadata block for an explicit owner, user, or group target. Use direction=pull when the user asks to refresh, sync, or update local ClawChat current agent profile/behavior, agent-owner profile information, user information, or group information from the server; this fetches the authoritative server record and rewrites only the metadata block. Use direction=push only to push selected existing local metadata fields to the server, then refresh the metadata block from the server response. For direction=push, pass non-empty fields containing only pushable metadata field names: owner supports agent_behavior only; user supports nickname/avatar_url/bio for the connected account only; group supports group_title/group_description. This does not modify the agent-authored body. This synchronizes only the metadata block. It does not search or read agent-authored long-term memory body. For remembered aliases or local notes, use clawchat_memory_search or clawchat_memory_read. Do not combine clawchat_get_user_profile with clawchat_memory_write to update local profile metadata."
+                "Synchronize the ClawChat metadata block for an explicit owner, user, or group target. Use direction=pull when the user asks to refresh, sync, or update local ClawChat current agent profile/behavior, agent-owner profile information, user information, or group information from the server; this fetches the authoritative server record and rewrites only the metadata block. Use direction=push only to push selected existing local metadata fields to the server, then refresh the metadata block from the server response. For direction=push, pass non-empty fields containing only pushable metadata field names: owner supports agent_behavior only; user supports nickname/avatar_url/bio for the connected account only; group supports group_title/group_description. This does not modify the agent-authored body. This synchronizes only the metadata block. It does not search or read agent-authored long-term memory body. For remembered aliases or local notes, use clawchat_memory_search or clawchat_memory_read. Do not combine clawchat_get_user_profile with clawchat_memory_write to update local profile metadata. "
+                "When pushing avatar_url: " + _AVATAR_URL_DESCRIPTION
             ),
             "parameters": {
                 "type": "object",
@@ -1107,7 +1119,8 @@ def register_tools(ctx) -> None:
         {
             "name": "clawchat_metadata_update",
             "description": _direct_tool_description(
-                "Update ClawChat server metadata for an explicit owner, connected user account, or group target, then refresh the local metadata block from the server response. Use this only when the user wants to change server-side metadata fields: current agent behavior via owner target agent_behavior, connected-user nickname/avatar_url/bio, or group group_title/group_description. To refresh local metadata from the server without changing the server, use clawchat_metadata_sync with direction=pull. This always pushes to the server first and does not modify the agent-authored body."
+                "Update ClawChat server metadata for an explicit owner, connected user account, or group target, then refresh the local metadata block from the server response. Use this only when the user wants to change server-side metadata fields: current agent behavior via owner target agent_behavior, connected-user nickname/avatar_url/bio, or group group_title/group_description. To refresh local metadata from the server without changing the server, use clawchat_metadata_sync with direction=pull. This always pushes to the server first and does not modify the agent-authored body. "
+                + _AVATAR_URL_DESCRIPTION
             ),
             "parameters": {
                 "type": "object",
@@ -1652,8 +1665,11 @@ def register_tools(ctx) -> None:
             "description": _direct_tool_description(
                 "Create a new ClawChat moment/dynamic for the configured ClawChat account. "
                 "TRIGGER - invoke when the user asks to publish, post, or send a ClawChat moment/dynamic, such as \"post a ClawChat moment saying ...\" or \"share this as a ClawChat moment\". "
-                "At least one of text or images must be present. Each image is an http(s) URL or the absolute path of a local image file; "
-                "the plugin uploads local files itself and publishes their URLs. Any other value (relative or ~ path, file://, missing file) is rejected and no moment is created."
+                "At least one of text or images must be present. Prefer the absolute path of a local image file; "
+                "the plugin uploads it via /v1/files/upload-url and publishes the long-lived URL. "
+                "An http(s) URL must already be long-lived, such as one returned by clawchat_upload_avatar_image. "
+                "Any other value (relative or ~ path, file://, missing file) or a non-image upload response is rejected and no moment is created. "
+                + _LONG_LIVED_IMAGE_URL_RULE
             ),
             "parameters": {
                 "type": "object",
@@ -1662,7 +1678,7 @@ def register_tools(ctx) -> None:
                     "images": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Moment images: http(s) URLs, or absolute local image file paths (uploaded automatically).",
+                        "description": "Prefer absolute local image file paths (uploaded automatically to long-lived URLs), or already long-lived http(s) URLs from clawchat_upload_avatar_image. Never use chat attachment /media/ links: they are deleted after about 14 days.",
                     },
                 },
             },
@@ -1811,19 +1827,20 @@ def register_tools(ctx) -> None:
                 "→ call with `nickname = X`; "
                 "(2) ClawChat account avatar/profile-picture change: 'change the ClawChat account avatar', "
                 "'use this image as the assistant profile picture', or 'set this as the ClawChat avatar' "
-                "→ first obtain the avatar URL (upload via `clawchat_upload_avatar_image`, OR use a provided URL directly), "
+                "→ obtain the avatar URL from `clawchat_upload_avatar_image`; for a remote image or chat attachment, first download it to an absolute local path, then upload that path with `clawchat_upload_avatar_image`, "
                 "then call this tool with `avatar_url = <url>`; "
                 "(3) ClawChat account bio/self-introduction change: 'update the ClawChat bio', "
                 "'set the assistant self-introduction to X', or 'change the ClawChat bio to X' "
                 "→ call with `bio = X`. "
                 "You can pass `nickname`, `avatar_url`, and `bio` together in one call, or just one of them. "
-                "At least one of the three must be present. Do not frame this as updating a human user's personal account."
+                "At least one of the three must be present. Do not frame this as updating a human user's personal account. "
+                + _AVATAR_URL_DESCRIPTION
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "nickname": {"type": "string", "description": "New nickname/display name for the agent's connected ClawChat account, mirroring the local assistant identity"},
-                    "avatar_url": {"type": "string", "description": "Avatar URL for the agent's connected ClawChat account profile (use clawchat_upload_avatar_image first to obtain one from a local image)"},
+                    "avatar_url": {"type": "string", "description": _AVATAR_URL_DESCRIPTION + " For a remote image or chat attachment, download it to an absolute local path and upload it with clawchat_upload_avatar_image."},
                     "bio": {"type": "string", "description": "New self-introduction / bio text for the agent's connected ClawChat account, mirroring the local assistant identity"},
                 },
             },
@@ -1840,8 +1857,9 @@ def register_tools(ctx) -> None:
         {
             "name": "clawchat_upload_avatar_image",
             "description": _direct_tool_description(
-                "Upload an absolute local image path for use as the agent's connected ClawChat account avatar (max 20MB), returning a hosted avatar URL. "
-                "TRIGGER — invoke when the user provides an absolute local image path and asks to upload it for the ClawChat account avatar/profile picture. "
+                "Upload an absolute local image path for use as the agent's connected ClawChat account avatar (max 20MB), returning a long-lived URL that does not expire; it can also be used for moment images. "
+                "TRIGGER — invoke when the user provides an image and asks to use it as the ClawChat account avatar/profile picture. "
+                "For a remote image or chat attachment, download it to an absolute local path before calling this tool; chat attachment URLs are deleted after about 14 days. "
                 "This tool does not update or set the account avatar by itself; when the user asked to set or sync the avatar, call `clawchat_update_account_profile` with `avatar_url` after this tool returns a URL."
             ),
             "parameters": {
