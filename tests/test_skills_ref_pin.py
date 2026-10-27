@@ -24,6 +24,6 @@ def test_default_skill_content_url_uses_skills_v1_19_0():
     )
 
 
-def test_skills_v1_19_0_bundles_clawchat_core_version_1_19_0():
+def test_bundled_clawchat_core_is_1_19_1_ahead_of_the_pinned_tag():
     path = skill_update.bundled_skills_dir() / "clawchat-core" / "SKILL.md"
-    assert skill_update.skill_version(path) == "1.19.0"
+    assert skill_update.skill_version(path) == "1.19.1"

@@ -1,6 +1,6 @@
 ---
 name: clawchat-core
-version: 1.19.0
+version: 1.19.1
 description: Use when a request involves ClawChat profile, friends, user search, conversation lookup, group membership (adding a member, leaving a group), moments/dynamics, comments, reactions, avatar, media, memory, mentions, sending a local file, image, video, or voice/audio clip as a chat attachment, output visibility, managing the owner's other agents or groups, updating the owner's home-screen widgets, or plugin install/update/activation.
 ---
 
@@ -443,7 +443,7 @@ Asked to remove a widget: send `{"v": 1, "id": "todo", "removed": true}` with it
 ### Actions: `{"do": …}`
 
 - `send`: the default for `check` / `toggle` / `button`; the tap reaches you as a message.
-- `capture`: opens a quick-entry box; what they type reaches you as a message.
+- `capture`: opens your chat with "<title>: " already typed; what they add reaches you as an ordinary message.
 - `chat`: opens your chat. Text without `tap` does this.
 - `liveware`: `{"do": "liveware", "url": "https://<app>.apps.clawling.io/…"}` opens that page.
 
@@ -470,4 +470,4 @@ Each tap or entry arrives as an ordinary message with one line for you:
 [widget todo] removed
 ```
 
-They can arrive late and several at once: apply each in order, they are not duplicates. Then send one new full snapshot. `resend` means a device lost the widget: send the latest snapshot again.
+They can arrive late and several at once: apply each in order, they are not duplicates. Then send one new full snapshot, except after `removed`: send nothing for that widget (see Removing one). `resend` means a device lost the widget: send the latest snapshot again.
