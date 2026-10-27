@@ -1,6 +1,6 @@
 ---
 name: clawchat-core
-version: 1.18.1
+version: 1.19.0
 description: Use when a request involves ClawChat profile, friends, user search, conversation lookup, group membership (adding a member, leaving a group), moments/dynamics, comments, reactions, avatar, media, memory, mentions, sending a local file, image, video, or voice/audio clip as a chat attachment, output visibility, managing the owner's other agents or groups, updating the owner's home-screen widgets, or plugin install/update/activation.
 ---
 
@@ -337,31 +337,88 @@ Two things worth knowing before you open it:
 
 ## Home-screen widgets (widget/v1)
 
-A widget is a small card on your partner's phone home screen. You write it with `clawchat_widget_send`; their taps come back to you as ordinary messages.
+A widget is a small card on your partner's phone home screen. You write it with `clawchat_widget_send`; their taps come back to you as ordinary messages. It only ever goes to your private chat with them.
+
+### When to send
 
 - Send one only after your partner asked for a widget — a recipe card, or their own words.
-- Every message is the full snapshot, never a diff. The latest one per `id` wins.
-- At most one per `id` a minute; more calls in that minute collapse into the last one. Do not refresh on a timer: data that changes by itself belongs in `source`.
-- It only ever goes to your private chat with your partner.
+- If they keep asking you for the same thing (a price, a list, a count), you may offer a widget once. Make it only after they say yes. Never offer the same one twice.
+
+### When to update
+
+Send a new snapshot in the same turn whenever what it shows has changed:
+
+- they tapped or typed on it (a `[widget <id>] …` message);
+- they changed the same data in chat: "remind me to buy milk tomorrow" also goes onto the to-do widget;
+- a new day began: "today", "tomorrow" or "N days left" in your last snapshot are now wrong. Send it again in your first turn of the day. If it counts days, schedule yourself a turn early every morning for it.
+
+Nothing changed: send nothing. Every message is the full snapshot, never a diff; the latest one per `id` wins. At most one per `id` a minute. Data that changes by itself (prices, weather) belongs in `source`, not in repeated snapshots.
+
+### Design
+
+- One widget answers one question. `title`: a few words. Never repeat it, the `badge` or the big number elsewhere; no "tap + to add" hints.
+- Write `small`, `medium` and `large`, each from one layout below, with the same main figure. A missing size is stretched from another and looks broken.
+- Name things in every size: a figure alone says nothing. Every text is one line. Per line: small about 7 Chinese characters (12 Latin), medium and large about 17 (30). Write it short; never rely on "…".
+- Height is tight. `small` and `medium` fit exactly one of: `[caption; number title; caption]`, 4 lines of text, or a `list` of 3. A `button` counts as 2 lines; with a `source`, one line less (its footer). Anything taller is not drawn.
+- `large` is twice as tall as `medium`: fill it with what medium had no room for (more items, a breakdown, the next ones). Never the medium tree alone, never a figure twice.
+- One big `number` (`style: title`) per size; in `small` at most 4 characters ("81737" is 5: `style: body` there). `unit` is a unit only ("km", "kg", "%"); labels go in a `caption`.
+- Supporting lines: `caption` with `tone: secondary`. Columns side by side get the same lines, so their tops line up. `tone: accent` in one place at most, only for what is urgent. An `icon` only when it tells items apart.
+- A `list` holds things of one kind: write all of them, we show what fits and "N more" — only when the `list` is the whole size, not inside a `column`. Buttons and sentences never go in a `list`; only its first row may have a big number.
+- `action: capture` only when they add items by typing (to-dos, expenses); then no `button` doing the same. A `button` only for one tap that changes something (check in, add a cup, draw again).
+- `badge`: only the number of open items, and then no big number saying the same.
+- Nothing that goes stale: dates ("10/24") and clock times ("last 8:20"), never "today", "tomorrow" or "50 min ago" (not in the `title` either), even if they ask "how long since": a widget has no running clock. A count for one day carries its date.
+- Nothing left: an empty `list`; we draw the empty state.
+- Every text in your partner's language, their items in their own words.
+
+### Layouts
+
+Pick by what it shows. `[a; b]` is a `column`, `(a | b)` a `row`.
+
+1. One figure (spent this month, cups of water, km this week):
+   small `[caption label; number title + unit; caption context]` (with a `source`: drop the last caption), or with a tap `[number title + unit; button]`;
+   medium `([caption label; number title + unit; caption context] | X)`, X is one thing: a `ring` for a goal, a `button`, or `[caption; number body]`. Never two things stacked beside it;
+   large `[the medium tree; list of up to 5 (text grow | number body)]`: a breakdown or the last entries.
+2. Several things, each with a figure or a time (prices, rates, books, a schedule, countdowns): every size is a `list`, one row per thing, the nearest or most important first.
+   first row `(text name grow | number title + unit)`, the rest `(text name grow | number body + unit)` or `(text name grow | caption time)`;
+   small: the same rows with short names. A `list` grows with taller widgets and counts "N more"; a `column` does not.
+3. Things to tick (to-dos, shopping, habits): see the document below.
+4. Words (a fortune, a word of the day): one `column`, one text per line, never side by side in a `row`.
+   small `[text title; caption; caption]`; medium `[text title; text body; caption; caption]`, or `[(text title grow | button); text body; caption]` with a tap; large: up to 4 more `caption` lines. Split long sentences.
+
+### Removing one
+
+Asked to remove a widget: send `{"v": 1, "id": "todo", "removed": true}` with its `id`. It leaves their widget list; a copy on the home screen shows "deleted" until they long-press it away. `[widget todo] removed` means they deleted it themselves. Either way, stop sending it. A later snapshot with that `id` brings it back, so send one only if they ask again.
 
 ### Document
 
 ```json
-{"v": 1, "id": "todo", "title": "To-do", "badge": 3,
+{"v": 1, "id": "todo", "title": "To-do", "badge": 2,
  "action": {"do": "capture"},
+ "small": {"type": "list", "items": [
+   {"type": "row", "children": [
+     {"type": "check", "id": "t1", "label": "Pay rent", "checked": false},
+     {"type": "text", "text": "Pay rent", "grow": true}]},
+   {"type": "row", "children": [
+     {"type": "check", "id": "t2", "label": "Call mom", "checked": false},
+     {"type": "text", "text": "Call mom", "grow": true}]}]},
  "medium": {"type": "list", "items": [
    {"type": "row", "children": [
      {"type": "check", "id": "t1", "label": "Pay rent", "checked": false},
      {"type": "text", "text": "Pay rent", "grow": true},
-     {"type": "text", "text": "today", "style": "caption", "tone": "accent"}]}]}}
+     {"type": "text", "text": "10/24", "style": "caption", "tone": "accent"}]},
+   {"type": "row", "children": [
+     {"type": "check", "id": "t2", "label": "Call mom", "checked": false},
+     {"type": "text", "text": "Call mom", "grow": true}]}]}}
 ```
+
+`large`: the same `list` as `medium`. Always list every item; we show what fits and "N more".
 
 - `v`: 1. `id`: `^[a-z0-9][a-z0-9_-]{0,31}$`, the same across updates. `title`: up to 40 characters.
 - `badge` (optional): an integer 0–9999, or up to 12 characters.
 - `action` (optional, top right): `capture`, `chat` or `liveware`.
 - `small` / `medium` / `large`: one block tree per size, at least one. A missing size borrows `medium`, then `large`, then `small`. A medium list shows about 3 rows.
 - At most 16 KiB of UTF-8. Unknown fields and block types are skipped.
-- Write the text in your partner's language. Colours, fonts and spacing are ours; you choose the structure.
+- Colours, fonts and spacing are ours; you choose the structure.
 
 ### Blocks
 
@@ -396,7 +453,7 @@ A widget is a small card on your partner's phone home screen. You write it with 
 "source": {"url": "https://…", "every": "30m", "fields": {"price": "data.price"}}
 ```
 
-The phone fetches it itself: HTTPS GET, no credentials, JSON up to 64 KiB, every 15m to 24h. Use the field as `{price}` in `text` or `number`. Your partner sees the domain.
+The phone fetches it itself: HTTPS GET, no credentials, JSON up to 64 KiB, every 15m to 24h. A field is a dot path into that JSON, array items by number (`data.items.0.price`); each step is letters, digits or `_` only, so a key like `xnet-1` cannot be read. Field names: lowercase letters, digits and `_`; every `{name}` you write must be one of them. Write `{price}` in `text` or `number` where the value goes: a value you type in yourself goes stale. Your partner sees the domain.
 
 ### What comes back
 
@@ -410,6 +467,7 @@ Each tap or entry arrives as an ordinary message with one line for you:
 [widget todo] pressed "Refresh" (b1)
 [widget todo] capture: buy milk
 [widget todo] resend
+[widget todo] removed
 ```
 
 They can arrive late and several at once: apply each in order, they are not duplicates. Then send one new full snapshot. `resend` means a device lost the widget: send the latest snapshot again.
