@@ -26,6 +26,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from gateway.config import Platform
+from gateway.platforms import base as _host_base
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -186,6 +187,16 @@ def _resolve_host_agent_version() -> str:
 _HOST_AGENT_VERSION = _resolve_host_agent_version()
 
 logger = logging.getLogger("clawchat_gateway.adapter")
+
+# Older Hermes hosts only extract known extensions. Keep the compatibility
+# scan local to ClawChat; every additional path still needs host validation.
+_LEGACY_MEDIA_TAG_RE = re.compile(
+    r'''[`"']?MEDIA:\s*'''
+    r'''(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|'''
+    r'''(?:~/|/|[A-Za-z]:[/\\])\S+(?:[^\S\n]+\S+)*?\.[A-Za-z0-9]+)'''
+    r'''(?=[\s`"',;:)\]}]|$)[`"']?''',
+    re.IGNORECASE,
+)
 inbound_trace = logging.getLogger("clawchat_gateway.inbound_trace")
 
 CLAWCHAT_PLUGIN_PLATFORM = "hermes"
@@ -1057,6 +1068,52 @@ class ClawChatAdapter(BasePlatformAdapter):
     # when every character costs 6 bytes on the hub's side (a JSON escape), so
     # a long answer arrives as one message instead of a run of 4000-char ones.
     MAX_MESSAGE_LENGTH = 32000
+
+    @staticmethod
+    def extract_media(content: str) -> tuple[list[tuple[str, bool]], str]:
+        """Use native extraction, adding validated extensions on older hosts only."""
+        result = BasePlatformAdapter.extract_media(content)
+        if hasattr(_host_base, "MEDIA_EXTENSIONLESS_TAG_RE"):
+            return result
+
+        validate = getattr(_host_base, "validate_media_delivery_path", None)
+        if not callable(validate):
+            validate = getattr(BasePlatformAdapter, "validate_media_delivery_path", None)
+        if not callable(validate):
+            return result
+
+        media, cleaned = result
+        scan_content = cleaned
+        for name in ("_mask_protected_spans", "_mask_json_string_media"):
+            mask = getattr(BasePlatformAdapter, name, None)
+            if callable(mask):
+                scan_content = mask(scan_content)
+
+        seen = {path for path, _ in media}
+        spans = []
+        is_voice = "[[audio_as_voice]]" in content
+        for match in _LEGACY_MEDIA_TAG_RE.finditer(scan_content):
+            path = match.group("path").strip()
+            if len(path) >= 2 and path[0] == path[-1] and path[0] in "`\"'":
+                path = path[1:-1].strip()
+            path = path.lstrip("`\"'").rstrip("`\"',.;:)}]")
+            try:
+                safe_path = validate(os.path.expanduser(path)) if path else None
+            except Exception:
+                logger.debug("ClawChat MEDIA path validation failed", exc_info=True)
+                continue
+            if not safe_path:
+                continue
+            if safe_path not in seen:
+                seen.add(safe_path)
+                media.append((safe_path, is_voice))
+            spans.append(match.span())
+
+        if spans:
+            for start, end in reversed(spans):
+                cleaned = cleaned[:start] + cleaned[end:]
+            cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).rstrip()
+        return media, cleaned
 
     def __init__(self, platform_config: Any) -> None:
         super().__init__(platform_config, _clawchat_platform())
