@@ -262,6 +262,7 @@ tests/*
 !tests/test_pre_dispatch_self_echo.py
 !tests/test_command_gating.py
 !tests/test_register_platform_cron.py
+!tests/test_media_any_extension.py
 !tests/test_install_scan.py
 !tests/test_inbound_dispatch_lanes.py
 # Socket, queue, ACK futures and timers stay on the connection's owner loop.

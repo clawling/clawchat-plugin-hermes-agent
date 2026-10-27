@@ -319,6 +319,22 @@ def _patch_send_message_media_delivery() -> None:
         from clawchat_gateway import host_tools_guard, local_paths
 
         platform_name = getattr(platform, "value", str(platform))
+        if platform_name == "clawchat":
+            from gateway.platforms import base
+
+            if not hasattr(base, "MEDIA_EXTENSIONLESS_TAG_RE"):
+                from clawchat_gateway.adapter import _legacy_extra_media
+
+                # Old send_message calls the base extractor directly. Validate
+                # residual tags before the turn's attachment checks below.
+                extras, message = _legacy_extra_media(message, is_voice=False)
+                if extras:
+                    media_files = list(media_files or [])
+                    seen = {
+                        item[0] if isinstance(item, (tuple, list)) else item
+                        for item in media_files
+                    }
+                    media_files.extend(item for item in extras if item[0] not in seen)
         if (
             media_files and platform_name != "clawchat"
             and host_tools_guard._session_turn() == "other"
@@ -378,44 +394,6 @@ def _patch_send_message_media_delivery() -> None:
     _send_to_platform_with_clawchat_media._clawchat_media_patch = True
     _send_to_platform_with_clawchat_media._clawchat_original = original
     send_message_tool._send_to_platform = _send_to_platform_with_clawchat_media
-
-
-def _patch_media_delivery_accept_all_exts() -> None:
-    """Deliver a ``MEDIA:<path>`` attachment of ANY file type, not just the
-    built-in extension allowlist.
-
-    Hermes only recognizes a ``MEDIA:`` tag whose path ends in one of
-    ``MEDIA_DELIVERY_EXTS`` (documents / media / data / archives). Source-code
-    and other types (``.py``, ``.sh``, ``.ts``, ``.go`` …) are silently left as
-    text and never delivered. ClawChat wants any file the user asks for to
-    arrive as a native attachment, so widen the anchored ``MEDIA:`` cleanup
-    regex to accept any ``.<ext>``.
-
-    This changes only which file *types* are deliverable — not access. Security
-    is unchanged: ``validate_media_delivery_path`` still requires the file to
-    exist and still blocks the credential / system-path denylist (``/etc``,
-    ``~/.ssh``, ``~/.aws``, ``~/.hermes/.env`` …), so secrets stay unreachable.
-    """
-    try:
-        import re
-        from gateway.platforms import base
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.debug("ClawChat could not patch media delivery extensions: %s", exc)
-        return
-    if getattr(base, "_clawchat_all_exts_patch", False):
-        return
-    try:
-        base.MEDIA_TAG_CLEANUP_RE = re.compile(
-            r'''[`"']?MEDIA:\s*'''
-            r'''(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|'''
-            r'''(?:~/|/|[A-Za-z]:[/\\])\S+(?:[^\S\n]+\S+)*?\.[A-Za-z0-9]+)'''
-            r'''(?=[\s`"',;:)\]}]|$)[`"']?''',
-            re.IGNORECASE,
-        )
-        base._clawchat_all_exts_patch = True
-        logger.info("ClawChat: MEDIA: attachment delivery widened to all file types")
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.debug("ClawChat could not install all-exts media regex: %s", exc)
 
 
 def _migrate_legacy_config_tokens() -> None:
@@ -533,7 +511,6 @@ def _register_platform(ctx) -> bool:
                 )
     _patch_send_message_target_parser()
     _patch_send_message_media_delivery()
-    _patch_media_delivery_accept_all_exts()
     logger.info("ClawChat registered Hermes platform via plugin registry")
     return True
 
