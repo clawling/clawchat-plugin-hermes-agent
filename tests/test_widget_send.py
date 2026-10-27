@@ -76,6 +76,17 @@ def test_guide_matches_bundled_core_skill_section():
     assert skill[start:].rstrip('\n') == WIDGET_V1_GUIDE.rstrip('\n')
 
 
+def test_guide_keeps_behaviour_sections_ahead_of_format():
+    headings = re.findall(r'^### (.+)$', WIDGET_V1_GUIDE, re.M)
+    assert headings[:6] == ['When to send', 'When to update', 'Design', 'Layouts', 'Removing one', 'Document']
+
+
+def test_guide_removal_snapshot_passes_validation():
+    removal = '{"v": 1, "id": "todo", "removed": true}'
+    assert removal in WIDGET_V1_GUIDE
+    assert check_widget_for_send(removal) == {'id': 'todo'}
+
+
 @pytest.mark.parametrize('doc,code', [
     ('broken', 'not_json'), ('[]', 'not_json'), ('"hi"', 'not_json'),
     ('1', 'not_json'), ('null', 'not_json'), ('{"v":NaN}', 'not_json'),
