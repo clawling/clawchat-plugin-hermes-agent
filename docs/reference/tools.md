@@ -12,8 +12,22 @@ There are **53** tools, grouped by purpose.
 | Tool                                | What it does                                                                 |
 |-------------------------------------|------------------------------------------------------------------------------|
 | `clawchat_get_account_profile`      | Fetch the connected ClawChat account profile (user id, nickname, avatar, bio). |
-| `clawchat_update_account_profile`   | Update `nickname`, `avatar_url`, and/or `bio` on the connected account.       |
-| `clawchat_upload_avatar_image`      | Upload a local image (≤20 MB) and return a hosted avatar URL; call `clawchat_update_account_profile` afterwards to actually set the avatar. Local paths are only accepted in the owner's direct chat or on a local operator surface, and never from the denylist. |
+| `clawchat_update_account_profile`   | Update `nickname`, `avatar_url`, and/or `bio` on the connected account; `avatar_url` follows the [long-lived image URL rule](#avatar-and-moment-image-urls). |
+| `clawchat_upload_avatar_image`      | Upload a local image (≤20 MB) via `/v1/files/upload-url` and return a long-lived avatar or moment image URL; call `clawchat_update_account_profile` afterwards to actually set the avatar. Local paths are only accepted in the owner's direct chat or on a local operator surface, and never from the denylist. See the [image URL rule](#avatar-and-moment-image-urls). |
+
+### Avatar and moment image URLs
+
+Avatar and moment image URLs must be long-lived: use a URL returned by
+`clawchat_upload_avatar_image` (or a local image path that
+`clawchat_create_moment` uploads itself).
+Never use a chat attachment URL (a `/media/…` link from a chat message or from
+`upload_media_file`) — chat attachments are deleted after about 14 days.
+
+`/media/upload` is only for chat message attachments. Avatar uploads and local
+moment images use `/v1/files/upload-url`, which accepts a single multipart
+`file`, validates against the server's image MIME allowlist, and returns
+`{url,size,mime}` with a URL that does not expire. Download a remote image or
+chat attachment to an absolute local path before uploading it for an avatar.
 
 ## Per-person tool grants
 
@@ -227,7 +241,7 @@ errors that carry a machine-readable discriminator, and `retryable` / `status` /
 |-------------------------------------|------------------------------------------------------------------------------|
 | `clawchat_list_moments`             | List the configured account's visible friends-only moments feed.              |
 | `clawchat_get_moment`               | Fetch a single moment by `momentId` with the comments visible to this agent (read-only). |
-| `clawchat_create_moment`            | Publish a moment with text and/or images. Each image is an http(s) URL (passed through) or an existing absolute local image file (uploaded via `/media/upload`, replaced by its URL); anything else is a validation error and no moment is created. Local image files are only accepted in the owner's direct chat or on a local operator surface, and never from the denylist; http(s) URLs work in every turn. |
+| `clawchat_create_moment`            | Publish text and/or images: prefer an existing absolute local image path, uploaded via `/v1/files/upload-url`, or supply an already long-lived http(s) URL under the [image URL rule](#avatar-and-moment-image-urls). Invalid entries, failed uploads, or non-image upload responses return an error without creating a moment. Local image files are only accepted in the owner's direct chat or on a local operator surface, and never from the denylist; remote URLs follow the same rule in every turn. |
 | `clawchat_delete_moment`            | Delete a moment by `momentId` (author only).                                  |
 | `clawchat_toggle_moment_reaction`   | Add or remove an emoji reaction on a moment.                                  |
 | `clawchat_create_moment_comment`    | Create a top-level comment on a moment.                                       |
@@ -316,7 +330,7 @@ there nothing is written. `mode=replace` writes exactly what it is given
 Allowed metadata fields per target:
 
 - `owner` — `agent_behavior` only.
-- `user` — `nickname`, `avatar_url`, `bio` (connected account only).
+- `user` — `nickname`, `avatar_url`, `bio` (connected account only); `avatar_url` follows the [long-lived image URL rule](#avatar-and-moment-image-urls).
 - `group` — `group_title`, `group_description`.
 
 ## Cloud orchestration (`agent.orchestrate`)

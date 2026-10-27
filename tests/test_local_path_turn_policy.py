@@ -903,15 +903,27 @@ def test_public_reply_resolves_reference_at_most_twice(policy, monkeypatch, repl
     assert len(policy.calls) == 1
 
 
-def test_public_uploaded_reference_keeps_reuse_on_fetch_failure(policy, monkeypatch, remote_transport):
+@pytest.mark.parametrize("failure", ("download", "upload"))
+def test_public_uploaded_reference_is_not_reused_on_failure(policy, monkeypatch, remote_transport, caplog, failure):
     set_turn(policy, "friend_direct")
-    url = "https://cdn.example/media/picture.png?signature=value"
+    url = "https://media.example/media/01ABC.png?variant=preview"
 
-    remote_transport.statuses[url] = 503
+    if failure == "download":
+        remote_transport.statuses[url] = 503
+    else:
+        async def failing_upload(**kw):
+            policy.calls.append(("outbound", kw))
+            raise OSError(url)
+
+        monkeypatch.setattr(policy, "uploader", failing_upload)
+
     fragments = asyncio.run(outbound(policy, [url], FRIEND_DM))
-    assert fragments[0]["url"] == url
+    assert fragments == []
     assert remote_transport.requests == [url]
-    assert policy.calls == []
+    assert len(policy.calls) == (1 if failure == "upload" else 0)
+    assert "clawchat outbound media dropped name=01ABC.png error=OSError" in caplog.text
+    assert url not in caplog.text
+    assert "media.example" not in caplog.text and "variant=preview" not in caplog.text
 
 
 def test_send_message_hook_leaves_other_platform_sessions_alone(policy):
@@ -1149,6 +1161,7 @@ def test_standalone_reports_a_failed_allowed_upload(policy, monkeypatch):
     monkeypatch.setattr(standalone, "upload_outbound_media", failing_upload)
     result = asyncio.run(standalone.standalone_send({}, OWNER_DM, "hello", media_files=[str(policy.home / "notes.txt")]))
     assert "error" in result and frames == []
+    assert "0/1 attachment(s) uploaded; message not sent" in result["error"]
     assert str(policy.home) not in result["error"]
 
 

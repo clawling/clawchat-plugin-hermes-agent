@@ -1,13 +1,7 @@
-"""``clawchat_create_moment`` never publishes a moment with a broken image.
+"""Moments upload local images to long-lived storage before publishing.
 
-``images`` used to be forwarded verbatim, and the tool description told the
-model to "upload first" with a tool that is not registered. Models passed
-local paths, and the moment went out with images no client can load.
-
-Now: an http(s) URL passes through; an existing absolute local image file is
-uploaded with the plugin's own media upload and replaced by its URL; anything
-else is a validation error and NO moment is created. A failed upload also
-creates nothing.
+Remote URLs pass through; invalid entries, failed uploads, and non-image
+upload responses create no moment.
 """
 
 from __future__ import annotations
@@ -22,18 +16,23 @@ from clawchat_gateway.api_client import ClawChatApiError
 
 
 class FakeClient:
-    def __init__(self, fail_upload: bool = False):
+    def __init__(self, fail_upload: bool = False, uploaded_mime: str | None = None):
         self.uploads: list[tuple[str, str, int]] = []
         self.created: list[dict] = []
         self.fail_upload = fail_upload
+        self.uploaded_mime = uploaded_mime
 
     async def upload_media(self, *, buffer, filename, mime):
+        pytest.fail("moment images must use the long-lived upload_avatar endpoint")
+
+    async def upload_avatar(self, *, buffer, filename, mime):
         if self.fail_upload:
             raise ClawChatApiError(kind="http", message="upload failed", status=500)
         self.uploads.append((filename, mime, len(buffer)))
         return SimpleNamespace(
-            kind="image", url=f"https://media.example.com/{filename}",
-            name=filename, mime=mime, size=len(buffer),
+            url=f"https://cdn.example.com/files/{filename}",
+            mime=self.uploaded_mime if self.uploaded_mime is not None else mime,
+            size=len(buffer),
         )
 
     async def create_moment(self, *, text, images):
@@ -69,7 +68,7 @@ def test_local_absolute_image_is_uploaded_and_replaced(client, tmp_path):
     assert client.uploads == [("pic.png", "image/png", p.stat().st_size)]
     assert client.created == [{
         "text": "hi",
-        "images": ["https://cdn.example.com/a.jpg", "https://media.example.com/pic.png"],
+        "images": ["https://cdn.example.com/a.jpg", "https://cdn.example.com/files/pic.png"],
     }]
     assert "error" not in result
 
@@ -113,6 +112,20 @@ def test_failed_upload_creates_nothing(monkeypatch, tmp_path):
     assert c.created == []
 
 
+@pytest.mark.parametrize("mime", ["text/plain", "application/octet-stream", ""])
+def test_non_image_upload_response_creates_nothing(monkeypatch, tmp_path, mime):
+    c = FakeClient(uploaded_mime=mime)
+    monkeypatch.setattr(tools, "_build_client", lambda: (c, None))
+    p = _png(tmp_path)
+    result = asyncio.run(tools.create_moment(text="hi", images=[str(p)]))
+    assert result == {
+        "error": "validation",
+        "message": "uploaded moment image must have an image/ MIME type",
+    }
+    assert c.uploads == [("pic.png", "image/png", p.stat().st_size)]
+    assert c.created == []
+
+
 def test_tool_description_no_longer_says_upload_first():
     from clawchat_gateway import plugin_tools
 
@@ -127,3 +140,21 @@ def test_tool_description_no_longer_says_upload_first():
     text = schema["description"] + schema["parameters"]["properties"]["images"]["description"]
     assert "upload first" not in text.lower()
     assert "absolute" in text.lower()
+    assert "about 14 days" in text
+    assert "clawchat_upload_avatar_image" in text
+    assert "long-lived" in text
+    assert "/v1/files/upload-url" in text
+    for name in (
+        "clawchat_create_moment", "clawchat_update_account_profile",
+        "clawchat_upload_avatar_image", "clawchat_metadata_sync", "clawchat_metadata_update",
+    ):
+        description = captured[name]["description"]
+        assert "about 14 days" in description
+        if name != "clawchat_upload_avatar_image":
+            assert "clawchat_upload_avatar_image" in description
+        assert "use a provided URL directly" not in description
+    avatar = captured["clawchat_update_account_profile"]["parameters"]["properties"]["avatar_url"]
+    metadata_avatar = captured["clawchat_metadata_update"]["parameters"]["properties"]["patch"]["properties"]["avatar_url"]
+    for field in (avatar, metadata_avatar):
+        assert "clawchat_upload_avatar_image" in field["description"]
+        assert "about 14 days" in field["description"]
