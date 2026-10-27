@@ -7,8 +7,8 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-from types import SimpleNamespace
-from unittest.mock import Mock
+from types import ModuleType, SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -169,6 +169,147 @@ def test_new_host_result_is_returned_unchanged(old_host, monkeypatch):
     assert expected == ([], content)
     extract.assert_called_once_with(content)
     old_host.validate.assert_not_called()
+
+
+@pytest.fixture
+def media_tool(old_host, monkeypatch):
+    """Model the host's class-level extraction and module-global sender lookup."""
+    from clawchat_gateway import host_tools_guard
+
+    monkeypatch.setattr(host_tools_guard, "_session_turn", lambda: "owner")
+    spec = importlib.util.spec_from_file_location("clawchat_media_tool_entry_test", REPO_ROOT / "__init__.py")
+    plugin = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, plugin)
+    spec.loader.exec_module(plugin)
+    original_calls = AsyncMock(return_value={"success": True})
+    media_calls = AsyncMock(return_value={"success": True})
+
+    async def original(*args, **kwargs):
+        return await original_calls(*args, **kwargs)
+
+    def filter_media_delivery_paths(media):
+        return [(safe_path, voice) for path, voice in media
+                if (safe_path := old_host.validate(path))]
+
+    module = ModuleType("tools.send_message_tool")
+    module._send_to_platform = original
+    module.BasePlatformAdapter = base.BasePlatformAdapter
+    module.filter_media_delivery_paths = filter_media_delivery_paths
+    # Defining the entry in the module's namespace makes installation replace
+    # the name it actually calls, just as in the real host tool.
+    exec("""
+async def send_message(platform, pconfig, chat_id, message, thread_id=None):
+    force_document = "[[as_document]]" in message
+    media_files, cleaned_message = BasePlatformAdapter.extract_media(message)
+    media_files = filter_media_delivery_paths(media_files)
+    return await _send_to_platform(
+        platform, pconfig, chat_id, cleaned_message, thread_id=thread_id,
+        media_files=media_files, force_document=force_document,
+    )
+""", module.__dict__)  # noqa: S102 -- isolated host tool double
+    package = ModuleType("tools")
+    package.send_message_tool = module
+    monkeypatch.setitem(sys.modules, "tools", package)
+    monkeypatch.setitem(sys.modules, "tools.send_message_tool", module)
+    monkeypatch.setattr(plugin, "_send_clawchat_media_via_live_adapter", media_calls)
+    return SimpleNamespace(tool=module, install=plugin._patch_send_message_media_delivery,
+                           original=original_calls, media=media_calls)
+
+
+@pytest.mark.parametrize("known_media", [False, True])
+async def test_tool_entry_delivers_legacy_extra_media(old_host, media_tool, known_media):
+    path = old_host.paths["payload.py"]
+    pdf = old_host.paths["report.pdf"]
+    content = "[[audio_as_voice]][[as_document]]Caption\n"
+    if known_media:
+        content += f"MEDIA:{pdf}\n"
+    content += f"MEDIA:{path}\nMEDIA:{path}"
+    media_tool.install()
+
+    result = await media_tool.tool.send_message("clawchat", None, "test-chat", content, thread_id="test-thread")
+
+    assert result == {"success": True}
+    media_tool.original.assert_not_awaited()
+    media_tool.media.assert_awaited_once_with(
+        "clawchat", None, "test-chat", "Caption", thread_id="test-thread",
+        media_files=([(pdf, True)] if known_media else []) + [(path, False)], force_document=True,
+    )
+
+
+async def test_tool_entry_deduplicates_against_host_validated_paths(old_host, media_tool, tmp_path):
+    path = old_host.paths["payload.py"]
+    alias = tmp_path / "alias.pdf"
+    alias.symlink_to(path)
+    media_tool.install()
+
+    await media_tool.tool.send_message("clawchat", None, "test-chat", f"MEDIA:{alias}\nMEDIA:{path}")
+
+    assert media_tool.media.await_args.args[3] == ""
+    assert media_tool.media.await_args.kwargs["media_files"] == [(path, False)]
+
+
+@pytest.mark.parametrize("allowed", [False, True])
+async def test_tool_entry_checks_extra_media_before_sending(old_host, media_tool, monkeypatch, allowed):
+    from clawchat_gateway import host_tools_guard, local_paths
+
+    monkeypatch.setattr(host_tools_guard, "_session_turn", lambda: "other")
+    monkeypatch.setattr(local_paths, "turn_allows_local_paths", lambda: allowed)
+    path = old_host.paths["payload.py"]
+    media_tool.install()
+
+    result = await media_tool.tool.send_message("clawchat", None, "test-chat", f"MEDIA:{path}")
+
+    assert result == ({"success": True} if allowed else {"error": local_paths.LOCAL_PATH_REFUSAL})
+    assert media_tool.media.await_count == int(allowed)
+    media_tool.original.assert_not_awaited()
+
+
+@pytest.mark.parametrize("failure", ["denied", "missing", "exception", "no-validator"])
+async def test_tool_entry_keeps_unvalidated_tags(old_host, media_tool, monkeypatch, tmp_path, failure):
+    path = str(tmp_path / "missing.py") if failure == "missing" else old_host.paths["denied.py"]
+    if failure == "exception":
+        old_host.validate.side_effect = ValueError("validation unavailable")
+    elif failure == "no-validator":
+        monkeypatch.delattr(base, "validate_media_delivery_path")
+    content = f"Caption\nMEDIA:{path}"
+    media_tool.install()
+
+    assert await media_tool.tool.send_message("clawchat", None, "test-chat", content) == {"success": True}
+
+    media_tool.media.assert_not_awaited()
+    media_tool.original.assert_awaited_once_with(
+        "clawchat", None, "test-chat", content, thread_id=None, media_files=[], force_document=False,
+    )
+
+
+@pytest.mark.parametrize("known_media", [False, True])
+@pytest.mark.parametrize("platform_name", ["telegram", "clawchat"])
+async def test_tool_entry_preserves_other_platforms_and_new_hosts(
+    old_host, media_tool, monkeypatch, platform_name, known_media,
+):
+    from clawchat_gateway import adapter
+
+    if platform_name == "clawchat":
+        monkeypatch.setattr(base, "MEDIA_EXTENSIONLESS_TAG_RE", object(), raising=False)
+    extra = Mock(side_effect=AssertionError("legacy extraction must not run"))
+    monkeypatch.setattr(adapter, "_legacy_extra_media", extra)
+    platform = SimpleNamespace(value=platform_name)
+    path = old_host.paths["payload.py"]
+    content = f"Caption\nMEDIA:{path}"
+    if known_media:
+        content += f"\nMEDIA:{old_host.paths['report.pdf']}"
+    await media_tool.tool.send_message(platform, None, "test-chat", content)
+    before = media_tool.original.await_args
+    media_tool.original.reset_mock()
+    media_tool.install()
+
+    await media_tool.tool.send_message(platform, None, "test-chat", content)
+
+    sender = media_tool.media if platform_name == "clawchat" and known_media else media_tool.original
+    assert sender.await_count == 1
+    assert sender.await_args == before
+    assert f"MEDIA:{path}" in sender.await_args.args[3]
+    extra.assert_not_called()
 
 
 @pytest.mark.parametrize("entrypoint", ["_register_platform", "register"])

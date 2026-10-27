@@ -319,6 +319,22 @@ def _patch_send_message_media_delivery() -> None:
         from clawchat_gateway import host_tools_guard, local_paths
 
         platform_name = getattr(platform, "value", str(platform))
+        if platform_name == "clawchat":
+            from gateway.platforms import base
+
+            if not hasattr(base, "MEDIA_EXTENSIONLESS_TAG_RE"):
+                from clawchat_gateway.adapter import _legacy_extra_media
+
+                # Old send_message calls the base extractor directly. Validate
+                # residual tags before the turn's attachment checks below.
+                extras, message = _legacy_extra_media(message, is_voice=False)
+                if extras:
+                    media_files = list(media_files or [])
+                    seen = {
+                        item[0] if isinstance(item, (tuple, list)) else item
+                        for item in media_files
+                    }
+                    media_files.extend(item for item in extras if item[0] not in seen)
         if (
             media_files and platform_name != "clawchat"
             and host_tools_guard._session_turn() == "other"
