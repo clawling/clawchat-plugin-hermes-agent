@@ -34,7 +34,6 @@ def plugin(monkeypatch):
         "_warn_on_shared_identity",
         "_patch_send_message_target_parser",
         "_patch_send_message_media_delivery",
-        "_patch_media_delivery_accept_all_exts",
     ):
         monkeypatch.setattr(module, name, lambda: None)
     return module
