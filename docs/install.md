@@ -172,14 +172,31 @@ For protocol-level checks (WebSocket handshake, ack flow), see
   install stops and reports instead. A *dangerous* verdict is refused and
   `--force` does not override it.
 - <a id="duplicate-workspace-member"></a>**Two workspace members are both named `clawchat-gateway`**
-  — Hermes 0.22+ builds one uv workspace from plugins enabled across every
-  profile. This error occurs when the plugin is enabled in multiple profiles
-  and at least two still have an older plugin copy with a build backend.
-  Run `hermes -p <profile> plugins update clawchat` for every profile that has
-  the plugin (including `-p default`), then retry the install or enable.
-  Each updated copy gets a unique workspace member name; two remaining old
-  copies still collide. Follow [Confirm the target profile](#confirm-the-target-profile-before-every-install--activate)
+  — Hermes 0.22+ combines enabled plugins across all profiles into one uv
+  workspace, where two older copies with a build backend share this name.
+  Use `-p default` for the default profile and follow
+  [Confirm the target profile](#confirm-the-target-profile-before-every-install--activate)
   for each command.
+  - **Two older copies:** run `hermes -p <profile> plugins update clawchat`
+    once for either profile; the updated copy gets a unique member name.
+  - **Three or more older copies:** updating one still leaves at least two
+    old names colliding, so use this recovery sequence:
+    1. Pick one profile to keep. In **every other profile with the plugin**,
+       run `hermes -p <profile> plugins remove clawchat`. Removal does not
+       solve the workspace and preserves `.env`, `platforms.clawchat` in
+       `config.yaml`, and `$HERMES_HOME/clawchat/` (credentials and data).
+    2. Run `hermes -p <kept> plugins update clawchat`.
+    3. In each removed profile, run
+       `hermes -p <profile> plugins install clawling/clawchat-plugin-hermes-agent`,
+       then `hermes -p <profile> plugins enable clawchat`. The same
+       [security-scan and consent prompts](#hermes-security-scan) apply as
+       on first install; retained credentials mean no new activation code
+       is needed.
+    4. Restart the gateway as described under
+       [Multiple agents on one host](#multiple-agents-on-one-host-hermes-profiles).
+
+  `disable` does not help: like `update` and `enable`, it re-solves the
+  workspace before publishing changes; a failed solve changes nothing.
 - **Activation exits non-zero with `validation` / `auth`** — the
   activation code is single-use; request a fresh one. Surface stderr
   verbatim.
@@ -248,7 +265,8 @@ For protocol-level checks (WebSocket handshake, ack flow), see
 ## Multiple agents on one host (Hermes profiles)
 
 The plugin can be enabled in several profiles on one host. If Hermes reports
-a duplicate workspace member, [update every profile's plugin copy](#duplicate-workspace-member).
+a duplicate workspace member, follow the
+[recovery steps for the number of older copies](#duplicate-workspace-member).
 
 Each Hermes profile is an independent `HERMES_HOME`, so each profile is a
 separate ClawChat agent with its own account and its own database file under

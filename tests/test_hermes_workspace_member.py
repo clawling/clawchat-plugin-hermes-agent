@@ -3,6 +3,9 @@
 import hashlib
 from pathlib import Path
 import re
+import shutil
+import subprocess
+import sys
 import tomllib
 
 
@@ -12,6 +15,37 @@ OLD_BUILD_SYSTEM = """\
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
+"""
+HOST_IMPORT_SCRIPT = """\
+import importlib.metadata
+import importlib.util
+from pathlib import Path
+import sys
+import types
+
+plugin_dir = Path(sys.argv[1]).resolve()
+namespace = types.ModuleType("hermes_plugins")
+namespace.__path__ = [str(plugin_dir.parent)]
+sys.modules["hermes_plugins"] = namespace
+spec = importlib.util.spec_from_file_location(
+    "hermes_plugins.clawchat",
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+import clawchat_gateway
+
+print(Path(clawchat_gateway.__file__).resolve())
+try:
+    importlib.metadata.distribution("clawchat-gateway")
+except importlib.metadata.PackageNotFoundError:
+    print("distribution found: False")
+else:
+    print("distribution found: True")
 """
 
 
@@ -70,7 +104,7 @@ def test_single_profile_upgrade_changes_name_and_preserves_dependencies(tmp_path
     assert old_doc["project"]["dependencies"] == new_doc["project"]["dependencies"]
 
 
-def test_existing_duplicates_require_updating_each_profile(tmp_path):
+def test_existing_duplicates_require_fewer_than_two_old_copies(tmp_path):
     default = tmp_path / "home" / "plugins" / "clawchat"
     coder = tmp_path / "home" / "profiles" / "coder" / "plugins" / "clawchat"
     writer = tmp_path / "home" / "profiles" / "writer" / "plugins" / "clawchat"
@@ -82,6 +116,68 @@ def test_existing_duplicates_require_updating_each_profile(tmp_path):
     default_new = _member_name(_copy_pyproject(default), default)
     assert len({default_new, coder_old}) == 2
     assert len({default_new, coder_old, writer_old}) == 2  # Three profiles still collide.
+
+
+def test_collision_recovery_removes_old_copies_before_updating(tmp_path):
+    def _collides(copies):
+        names = []
+        for profile, version in copies.items():
+            home = tmp_path / "home"
+            if profile != "default":
+                home = home / "profiles" / profile
+            plugin_dir = home / "plugins" / "clawchat"
+            doc = _copy_pyproject(plugin_dir, old=version == "old")
+            names.append(_member_name(doc, plugin_dir))
+        return len(names) != len(set(names))
+
+    copies = {"default": "old", "coder": "old", "writer": "old"}
+    assert _collides(copies)
+    copies["default"] = "new"
+    assert _collides(copies)  # Updating one of three cannot pass the solve.
+
+    two_copies = {"default": "old", "coder": "old"}
+    assert _collides(two_copies)
+    two_copies["default"] = "new"
+    assert not _collides(two_copies)
+
+    copies = {"default": "old", "coder": "old", "writer": "old"}
+    del copies["coder"]
+    assert _collides(copies)  # Remove can proceed without solving the workspace.
+    del copies["writer"]
+    assert not _collides(copies)
+    copies["default"] = "new"
+    assert not _collides(copies)
+    for profile in ("coder", "writer"):
+        copies[profile] = "new"
+        assert not _collides(copies)
+
+
+def test_host_import_from_copied_tree_without_installing_distribution(tmp_path):
+    plugin_dir = tmp_path / "plugins" / "clawchat"
+    plugin_dir.mkdir(parents=True)
+    for name in ("__init__.py", "plugin.yaml"):
+        shutil.copy2(ROOT / name, plugin_dir / name)
+    for name in ("clawchat_gateway", "prompts", "skills"):
+        source = ROOT / name
+        if source.exists():
+            shutil.copytree(
+                source,
+                plugin_dir / name,
+                ignore=shutil.ignore_patterns("tests", ".git", ".venv", "__pycache__"),
+            )
+
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", HOST_IMPORT_SCRIPT, str(plugin_dir)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    imported_path = Path(result.stdout.splitlines()[0])
+    assert imported_path.is_relative_to(plugin_dir.resolve())
+    assert imported_path == plugin_dir.resolve() / "clawchat_gateway" / "__init__.py"
 
 
 def test_runtime_does_not_read_own_distribution_metadata():
