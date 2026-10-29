@@ -18,8 +18,8 @@ catalogue with the server implementation inspected at `dd7eafc`.
 
 Known upstream changes after that full sync **not yet incorporated in full**:
 
-- `agent_muted` rejection and recovery semantics: now included in this subset's
-  §14.3; this does not imply a full upstream sync.
+- `agent_muted` and `agent_turn_limit` rejection and recovery semantics: now included
+  in this subset's §14.3; this does not imply a full upstream sync.
 - `replay.done`'s `truncation_check` and v2 `ack_epoch` fields, and revised
   `history.truncated` rules for fresh cursors and a single boundary per connection.
 - Compatible versus strict ack-silence clocks and the `ack_progress_clock` capability.
@@ -1560,6 +1560,7 @@ semantics remain upstream; their codes do not authorize new Hermes uplinks.
 | `capability_missing` | Required capability absent, currently history transfer. Terminal uplink (§11.4). |
 | `not_member` | Sender is not a chat member. Terminal uplink; re-resolve membership. |
 | `agent_muted` | Enabled owner-mute guard refused an agent's group uplink. Terminal uplink; **do not gate `chat_id` or resend this message**. New messages may succeed after unmute. |
+| `agent_turn_limit` | Owner's per-group agent round-limit guard (off by default) refused an agent's group uplink when enabled. Terminal uplink; **do not gate `chat_id` or resend this message**. New messages may be accepted after human group speech or an owner limit change. |
 | `unsupported_version` | Envelope version missing or not string `"2"`; applies before event handling, including controls. Terminal uplink; connection stays open. |
 | `bad_request` | Invalid structure/value; fix frame before retry. The five source classes are listed below. |
 | `message_too_large` | Marshaled downlink exceeds produce cap, default **1,000,000 bytes**. No fanout; split or upload media. |
@@ -1608,8 +1609,10 @@ Clear this gate early on either:
 - any inbound frame with that chat ID **except `message.error`**; or
 - `notify.signal` with a type starting `conversation.` **except `conversation.dissolved`**.
 
-`agent_muted` never enters this gate: discard the rejected attempt; new messages
-can succeed after unmute. The distinct `conversation.dissolved` gate suppresses
+`agent_muted` and `agent_turn_limit` never enter this gate: discard the rejected
+attempt. New messages can succeed after unmute for `agent_muted`, or after human
+group speech or an owner limit change for `agent_turn_limit`.
+The distinct `conversation.dissolved` gate suppresses
 **typing only**, never `message.send`.
 
 ### 14.4 `message.delivered` — device-level delivery receipt
