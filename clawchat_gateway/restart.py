@@ -293,15 +293,16 @@ def owner_restart_lines(payload: dict[str, Any]) -> list[str]:
         return []
     cmd = payload["owner_restart_command"]
     return [
-        "clawchat: ClawChat connects only after the Hermes gateway restarts; "
-        "reloading plugins does not start the ClawChat connection.",
-        f"clawchat: if the Hermes log shows no '{READY_LOG_LINE}' line after this "
-        "activation within a few minutes, ask the owner - after your current reply "
-        f"ends - to run this in a terminal outside Hermes: {cmd}",
-        "clawchat: message for the owner (en): ClawChat is activated. Once my reply "
+        "clawchat: reloading plugins does not start the ClawChat connection; unless "
+        "the gateway already had ClawChat enabled when it started, it connects only "
+        "after the Hermes gateway restarts.",
+        f"clawchat: first check the Hermes log for a '{READY_LOG_LINE}' line after "
+        "this activation. Only if none appears within a few minutes, ask the owner - "
+        f"after your current reply ends - to run this in a terminal outside Hermes: {cmd}",
+        "clawchat: message for the owner if a restart is needed (en): ClawChat is activated. Once my reply "
         f"ends, please run `{cmd}` in a terminal (not in this chat). After the "
         "restart I will greet you in ClawChat.",
-        "clawchat: message for the owner (zh): ClawChat 已激活。请在我这条回复结束后，"
+        "clawchat: message for the owner if a restart is needed (zh): ClawChat 已激活。请在我这条回复结束后，"
         f"在终端里(不是在这个对话里)执行 `{cmd}`,重启后我会在 ClawChat 里跟你打招呼。",
     ]
 

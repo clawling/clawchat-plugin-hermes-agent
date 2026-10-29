@@ -349,8 +349,11 @@ CLI activation and in-session slash activation request a detached Hermes
 gateway restart by default. Use `--no-restart` to skip that restart.
 
 Reloading plugins only reconnects handlers for existing platform adapters; it
-does not create a ClawChat adapter or start its connection. After activation,
-ClawChat connects only after the Hermes gateway starts or restarts.
+does not create a ClawChat adapter or start its connection. If the gateway
+already had ClawChat enabled when it started, its adapter is waiting for
+credentials and connects right after activation. Otherwise (the plugin was
+installed or enabled while the gateway ran) ClawChat connects only after the
+gateway restarts.
 
 Successful CLI and slash activation payloads include `gateway_restart_required`, even
 with `--no-restart`. It is `true` only for the `schedule` plan. `owner_restart_command`
@@ -363,11 +366,10 @@ multiplexer rescans served profiles every 30 seconds and builds adapters for one
 whose `config.yaml` or `.env` changed, which activation does. Its command is only
 the fallback for older hosts or a multiplexer that was just turned on.
 
-When a restart is required, both activation entry points explain the connection
-requirement and print English and Chinese messages for the agent to relay.
-If no new `clawchat state -> ready` line appears within a few minutes, ask the
-owner to run the printed command after the current reply ends, in a terminal
-outside Hermes. Hermes refuses a restart command executed inside the gateway
+When a restart may be required, both activation entry points explain this and
+print English and Chinese messages for the agent to relay only if no new
+`clawchat state -> ready` line appears within a few minutes: the owner runs the
+printed command after the current reply ends, in a terminal outside Hermes. Hermes refuses a restart command executed inside the gateway
 process and waits for ongoing sessions, including the agent's current turn.
 
 For the default profile, the printed owner messages are:
