@@ -48,7 +48,7 @@ See [installation conflicts](docs/configuration.md#installation-conflicts-and-re
 
 ## Project facts
 
-- Package: `clawchat-gateway` (`pyproject.toml`).
+- Project name: `clawchat-gateway` in `pyproject.toml` (metadata only, not built as a wheel).
 - Hermes plugin id: `clawchat` (`plugin.yaml`).
 - Source spec: `clawling/clawchat-plugin-hermes-agent`.
 - Install path: `$HERMES_HOME/plugins/clawchat/`; `HERMES_HOME`

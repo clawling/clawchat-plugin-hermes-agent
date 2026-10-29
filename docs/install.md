@@ -171,6 +171,15 @@ For protocol-level checks (WebSocket handshake, ack flow), see
   answers the prompt or adds `--force` on its own, and an unattended
   install stops and reports instead. A *dangerous* verdict is refused and
   `--force` does not override it.
+- <a id="duplicate-workspace-member"></a>**Two workspace members are both named `clawchat-gateway`**
+  — Hermes 0.22+ builds one uv workspace from plugins enabled across every
+  profile. This error occurs when the plugin is enabled in multiple profiles
+  and at least two still have an older plugin copy with a build backend.
+  Run `hermes -p <profile> plugins update clawchat` for every profile that has
+  the plugin (including `-p default`), then retry the install or enable.
+  Each updated copy gets a unique workspace member name; two remaining old
+  copies still collide. Follow [Confirm the target profile](#confirm-the-target-profile-before-every-install--activate)
+  for each command.
 - **Activation exits non-zero with `validation` / `auth`** — the
   activation code is single-use; request a fresh one. Surface stderr
   verbatim.
@@ -237,6 +246,9 @@ For protocol-level checks (WebSocket handshake, ack flow), see
   Hermes log).
 
 ## Multiple agents on one host (Hermes profiles)
+
+The plugin can be enabled in several profiles on one host. If Hermes reports
+a duplicate workspace member, [update every profile's plugin copy](#duplicate-workspace-member).
 
 Each Hermes profile is an independent `HERMES_HOME`, so each profile is a
 separate ClawChat agent with its own account and its own database file under
