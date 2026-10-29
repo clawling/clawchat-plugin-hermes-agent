@@ -179,6 +179,8 @@ For protocol-level checks (WebSocket handshake, ack flow), see
   for each command.
   - **Two older copies:** run `hermes -p <profile> plugins update clawchat`
     once for either profile; the updated copy gets a unique member name.
+    If the other profile's copy was left disabled by the collision, run
+    `hermes -p <other> plugins enable clawchat` afterwards.
   - **Three or more older copies:** updating one still leaves at least two
     old names colliding, so use this recovery sequence:
     1. Pick one profile to keep. In **every other profile with the plugin**,

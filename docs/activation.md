@@ -415,6 +415,12 @@ Use `hermes gateway restart` to restart, with the profile selector printed by
 activation when applicable. Leave the decision to remove extra launchd
 definitions to the owner.
 
+Without a service manager (a container or a foreground `hermes gateway run`),
+`hermes gateway restart` stops the running gateway and then runs the new one in
+the foreground of the shell that issued it, so that command does not return;
+run it in a terminal that can stay open, or stop and start the gateway the way
+it was originally launched.
+
 `hermes gateway setup` leaves service lifecycle to Hermes. `--restart` remains
 a compatibility flag; CLI and slash activation restart by default.
 
