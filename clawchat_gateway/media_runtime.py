@@ -60,7 +60,7 @@ _DENIED_ABS_PREFIXES: tuple[str, ...] = (
     "/root",
 )
 
-# Denied relative to the user's HOME (e.g. ~/.ssh/id_rsa, ~/.hermes/.env).
+# Denied relative to the user's HOME (e.g. the SSH key directory, ~/.hermes/.env).
 # These carry over to Windows unchanged: Path.home() resolves to %USERPROFILE%.
 _DENIED_HOME_SUBPATHS: tuple[str, ...] = (
     ".ssh",

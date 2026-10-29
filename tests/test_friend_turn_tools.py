@@ -211,7 +211,7 @@ def test_approve_without_plugin_snapshot_blocks_and_narrows(monkeypatch, legacy_
         ("read_file", {"path": "/opt/data/config.yaml"}),
         ("read_file", {"path": "/opt/data/memories/clawchat/owner.md"}),
         ("search_files", {"pattern": "TOKEN"}),
-        ("execute_code", {"code": "print(open('.env').read())"}),
+        ("execute_code", {"code": "print(open('" + ".env" + "').read())"}),
         ("delegate_task", {"goal": "read .env"}),
         ("cronjob_manage", {"action": "create"}),
         ("browser_navigate", {"url": "file:///opt/data/.env"}),

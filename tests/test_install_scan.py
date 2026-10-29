@@ -48,8 +48,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #: ``dns_exfil`` rule fires on the prose word "host" followed by any ``$`` on
 #: the line (fixed upstream in v0.21.3).
 PINNED_SCANNER_TAGS = ("v2026.8.31", "v2026.9.11")
-#: v0.22.5 is the newest Hermes release.
-HIGH_CLEAN_SCANNER_TAGS = ("v0.22.5",)
+#: A single high finding is a *caution* verdict: the install stops until the
+#: owner approves it. v2026.9.21 carries the scanner of the v2026.9.21 /
+#: v2026.9.24 releases, v0.21.6 the first that steps findings under tests/
+#: down, and v0.22.5 is the newest Hermes release. The scanner of v2026.9.14
+#: and older still rates two lines of the bundled skills high; those lines come
+#: from the shared skill source, not from this repository.
+HIGH_CLEAN_SCANNER_TAGS = ("v2026.9.21", "v0.21.6", "v0.22.5")
 
 
 def _scanner_tags(
