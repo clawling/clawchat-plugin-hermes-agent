@@ -223,7 +223,7 @@ unpacked by the host and the real inner tool still passes through the execution 
 ## Local attachments
 
 Replies and `clawchat_send_file` share the same local-file policy. A non-owner
-turn can send a local file into its current conversation when **every caller
+turn can send a local file to the chat it is answering in when **every caller
 has direct access to every Files tool** (`read_file`, `write_file`, `patch`,
 `search_files`). The ordinary selector priority and group intersection apply:
 `cap:files` with mode `ask` does not open attachments, and an exact-tool ask/deny exception

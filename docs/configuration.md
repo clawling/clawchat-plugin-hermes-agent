@@ -431,7 +431,7 @@ See [known limits of the attachment policy](non-owner-boundaries.md#known-limits
 ## Debug / diagnostics env vars
 
 These are **not** part of the profile-first resolution chain above: they are
-read straight from the process environment (`os.environ` / `os.getenv`), because
+read straight from the process environment (`os.getenv`), because
 they are per-process debugging switches rather than per-profile settings. All
 of them default to off and none of them are written by activation.
 
@@ -458,7 +458,7 @@ and passes two variables to it in the child environment:
 | `CLAWCHAT_GATEWAY_RESTART_DELAY` | Seconds the launcher sleeps before restarting the gateway (from the caller's `delay_seconds`, default `2`). |
 
 Both are **set** by the plugin, not read from the operator's environment — the
-child env is built as `{**os.environ, …}` with these keys overwritten last, so
+child env is a copy of the parent's environment with these keys overwritten last, so
 exporting them yourself has no effect.
 
 ## Database location
