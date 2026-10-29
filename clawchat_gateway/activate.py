@@ -52,6 +52,8 @@ from clawchat_gateway.output_visibility import (
     runtime_status_messages_for_visibility,
 )
 from clawchat_gateway.restart import (
+    RestartPlan,
+    _hermes_cmd,
     plan_gateway_restart,
     restart_log_path,
     restart_next_steps,
@@ -1043,8 +1045,27 @@ async def activate_and_maybe_restart(
         code.strip(), base_url=base_url, new_account=new_account, repair=repair
     )
     payload["ok"] = True
-    if restart:
+    try:
         plan = plan_gateway_restart()
+    except Exception:  # noqa: BLE001 - the code is already spent; never hide success
+        if restart:
+            raise
+        logger.warning("clawchat restart plan detection failed", exc_info=True)
+        try:
+            profile = _active_profile_name()
+        except Exception:  # noqa: BLE001
+            profile = "default"
+        plan = RestartPlan("schedule", profile, hermes_home())
+    # A running multiplexer (Hermes 0.21.6+) builds a served profile's adapters
+    # once its config/.env change, so only the fallback command is reported.
+    payload["gateway_restart_required"] = plan.action == "schedule"
+    if plan.action != "no_gateway":
+        payload["owner_restart_command"] = (
+            "hermes -p default gateway restart"
+            if plan.action == "multiplexed"
+            else f"{_hermes_cmd(plan.profile)} gateway restart"
+        )
+    if restart:
         if plan.action != "schedule":
             # Scheduling would fail silently (multiplexer refuses a per-profile
             # restart) or start an unmanaged gateway (none installed); tell the

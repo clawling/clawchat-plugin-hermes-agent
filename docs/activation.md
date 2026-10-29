@@ -348,6 +348,34 @@ for source checks, logs, suspension, conditional writes and cross-process races.
 CLI activation and in-session slash activation request a detached Hermes
 gateway restart by default. Use `--no-restart` to skip that restart.
 
+Reloading plugins only reconnects handlers for existing platform adapters; it
+does not create a ClawChat adapter or start its connection. After activation,
+ClawChat connects only after the Hermes gateway starts or restarts.
+
+Successful CLI and slash activation payloads include `gateway_restart_required`, even
+with `--no-restart`. It is `true` only for the `schedule` plan. `owner_restart_command`
+is `hermes gateway restart` for the default profile, `hermes -p <name> gateway restart`
+for a separate named profile, or `hermes -p default gateway restart` for a
+multiplexed named profile; it is absent for `no_gateway` (install and start first).
+
+A multiplexed named profile needs no restart on Hermes 0.21.6 and newer: the running
+multiplexer rescans served profiles every 30 seconds and builds adapters for one
+whose `config.yaml` or `.env` changed, which activation does. Its command is only
+the fallback for older hosts or a multiplexer that was just turned on.
+
+When a restart is required, both activation entry points explain the connection
+requirement and print English and Chinese messages for the agent to relay.
+If no new `clawchat state -> ready` line appears within a few minutes, ask the
+owner to run the printed command after the current reply ends, in a terminal
+outside Hermes. Hermes refuses a restart command executed inside the gateway
+process and waits for ongoing sessions, including the agent's current turn.
+
+For the default profile, the printed owner messages are:
+
+> ClawChat is activated. Once my reply ends, please run `hermes gateway restart` in a terminal (not in this chat). After the restart I will greet you in ClawChat.
+
+> ClawChat 已激活。请在我这条回复结束后，在终端里(不是在这个对话里)执行 `hermes gateway restart`,重启后我会在 ClawChat 里跟你打招呼。
+
 Before requesting it, activation checks the active profile
 (`clawchat_gateway/restart.py`, `plan_gateway_restart`) and does **not** spawn a
 restart that cannot work; it prints the next step instead:
@@ -356,7 +384,7 @@ restart that cannot work; it prints the next step instead:
 |---|---|
 | Default profile: neither `gateway.pid` nor `gateway_state.json` in `$HERMES_HOME` | Prints `hermes gateway install` then `hermes gateway start`; a bare restart without an installed service would start an unmanaged foreground gateway. |
 | Named profile: no gateway runtime files and no serving multiplexer | Recommends enabling `gateway.multiplex_profiles` in the default config, adding this profile to `gateway.multiplex_profile_allowlist` if set, then `hermes -p default gateway restart`. Fallback: `hermes -p <name> gateway install` then `hermes -p <name> gateway start`. |
-| Named profile served by the default multiplexer (`gateway.multiplex_profiles` or `GATEWAY_MULTIPLEX_PROFILES`, narrowed by the allowlist) | Prints `hermes -p default gateway restart`; all served profiles restart. Hermes refuses per-profile restart here. |
+| Named profile served by the default multiplexer (`gateway.multiplex_profiles` or `GATEWAY_MULTIPLEX_PROFILES`, narrowed by the allowlist) | Says Hermes 0.21.6+ picks the profile up within about 30 s; otherwise prints `hermes -p default gateway restart`, which restarts all served profiles. Hermes refuses per-profile restart here. |
 | Otherwise | Requests restart; warns when the default gateway serves multiple profiles. |
 
 A requested restart is not a confirmed one. The detached process runs from
@@ -373,6 +401,17 @@ No `exit_code` after a few minutes means the restart may still be waiting for
 sessions or the launcher stopped with the old gateway; confirm with the ready
 line. This check cannot detect a separately installed gateway holding the
 profile, service-manager errors or drain waits; inspect the restart log.
+
+On macOS, launchd may contain two gateway definitions with labels such as
+`ai.hermes.gateway` and `ai.hermes.gateway-<profile>`; older and newer
+installations can resolve different labels. Directly running
+`launchctl kickstart` on a label may start an additional gateway.
+
+First use `hermes gateway status` to find the running PID, then
+`launchctl list | grep ai.hermes.gateway` to find the label matching that PID.
+Use `hermes gateway restart` to restart, with the profile selector printed by
+activation when applicable. Leave the decision to remove extra launchd
+definitions to the owner.
 
 `hermes gateway setup` leaves service lifecycle to Hermes. `--restart` remains
 a compatibility flag; CLI and slash activation restart by default.

@@ -205,7 +205,11 @@ def restart_next_steps(plan: RestartPlan) -> list[str]:
         return [
             f"profile '{plan.profile}' is served by the shared multiplexed gateway "
             "owned by the default profile (gateway.multiplex_profiles), which refuses "
-            "a per-profile restart. Restart the shared gateway from the default profile:",
+            "a per-profile restart. On Hermes 0.21.6 and newer a running multiplexer "
+            "picks up this profile's new credentials within about 30 seconds - no "
+            f"restart; wait for '{READY_LOG_LINE}'. If it does not appear (older Hermes, "
+            "or multiplexing was just turned on), restart the shared gateway from the "
+            "default profile:",
             "  hermes -p default gateway restart",
             "This restarts every profile that gateway serves, not only this one.",
         ]
@@ -283,6 +287,25 @@ def schedule_gateway_restart(delay_seconds: int = 2) -> str:
     )
 
 
+def owner_restart_lines(payload: dict[str, Any]) -> list[str]:
+    """Explain the required restart and give the agent messages for the owner."""
+    if not payload.get("gateway_restart_required"):
+        return []
+    cmd = payload["owner_restart_command"]
+    return [
+        "clawchat: ClawChat connects only after the Hermes gateway restarts; "
+        "reloading plugins does not start the ClawChat connection.",
+        f"clawchat: if the Hermes log shows no '{READY_LOG_LINE}' line after this "
+        "activation within a few minutes, ask the owner - after your current reply "
+        f"ends - to run this in a terminal outside Hermes: {cmd}",
+        "clawchat: message for the owner (en): ClawChat is activated. Once my reply "
+        f"ends, please run `{cmd}` in a terminal (not in this chat). After the "
+        "restart I will greet you in ClawChat.",
+        "clawchat: message for the owner (zh): ClawChat 已激活。请在我这条回复结束后，"
+        f"在终端里(不是在这个对话里)执行 `{cmd}`,重启后我会在 ClawChat 里跟你打招呼。",
+    ]
+
+
 def format_restart_lines(payload: dict[str, Any]) -> list[str]:
     """Operator-facing lines about the restart, shared by the CLI and slash command."""
     lines: list[str] = []
@@ -308,4 +331,5 @@ def format_restart_lines(payload: dict[str, Any]) -> list[str]:
         )
     for step in payload.get("restart_next_steps") or []:
         lines.append(f"clawchat: {step}" if not step.startswith("  ") else step)
+    lines.extend(owner_restart_lines(payload))
     return lines
