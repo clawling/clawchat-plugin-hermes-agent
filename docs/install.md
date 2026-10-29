@@ -179,6 +179,8 @@ For protocol-level checks (WebSocket handshake, ack flow), see
   for each command.
   - **Two older copies:** run `hermes -p <profile> plugins update clawchat`
     once for either profile; the updated copy gets a unique member name.
+    If the other profile's copy was left disabled by the collision, run
+    `hermes -p <other> plugins enable clawchat` afterwards.
   - **Three or more older copies:** updating one still leaves at least two
     old names colliding, so use this recovery sequence:
     1. Pick one profile to keep. In **every other profile with the plugin**,
@@ -241,11 +243,14 @@ For protocol-level checks (WebSocket handshake, ack flow), see
 - **Activation said the restart was requested, but the agent never came
   online** — read `$HERMES_HOME/clawchat/gateway-restart.log`: it holds the
   output of `hermes gateway restart` and a final `exit_code=<n>`. A non-zero
-  exit names the reason (for example another gateway already running on
-  Windows). No `exit_code` line yet usually means the restart is waiting for
-  open sessions to finish; ask the owner before restarting the service directly,
-  since that ends those sessions. Success is a `clawchat state -> ready` line
-  in the Hermes log from after the activation.
+  exit names the reason. No `exit_code` yet can mean it is waiting for open
+  sessions, including the agent's current turn. If no new `clawchat state -> ready`
+  line appears within a few minutes, relay the printed owner message: run the
+  printed restart command after the reply ends, in a terminal outside Hermes.
+- **macOS shows multiple launchd gateway definitions** — match the running PID
+  to its label before restarting; `launchctl kickstart` on another label may
+  start an extra gateway. See [Restart Or Reload](./activation.md#restart-or-reload)
+  for the status/list checks and owner-controlled cleanup.
 - **Activation printed `gateway install` / `gateway start` instead of
   restarting** — this profile has never run a gateway. For a named profile the
   output leads with the preferred fix: serve it from the default profile's
@@ -254,8 +259,9 @@ For protocol-level checks (WebSocket handshake, ack flow), see
   hosts that don't multiplex. For the default profile, run the two commands.
 - **Activation printed `hermes -p default gateway restart`** — the profile is
   served by the default profile's multiplexing gateway, which refuses a
-  per-profile restart. Restarting it restarts every profile it serves, so check
-  with the owner first.
+  per-profile restart. On Hermes 0.21.6+ the running multiplexer picks the
+  profile up within about 30 seconds; restart only if no ready line appears.
+  Restarting restarts every profile it serves, so check with the owner first.
 - **The bot replies to its own messages in a loop** — the
   `pre_gateway_dispatch` hook drops self-echo frames; if you are seeing
   loops, confirm the plugin was registered (look for
@@ -281,7 +287,8 @@ hermes profile create coder
 # install + activate, scoped to the profile:
 npx -y @clawling/clawchat-plugin-install-cli@latest install \
   --target hermes --profile coder --activate <CONNECT_CODE>
-# the multiplexer enumerates profiles only at start - restart it (all profiles restart):
+# Hermes 0.21.6+: a running multiplexer serves the profile within ~30 s, no restart.
+# Older Hermes, or multiplexing just turned on - restart it (all profiles restart):
 hermes -p default gateway restart
 ```
 

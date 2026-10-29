@@ -4,9 +4,13 @@ import hashlib
 from pathlib import Path
 import re
 import shutil
+import site
 import subprocess
 import sys
+import sysconfig
 import tomllib
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -23,6 +27,7 @@ from pathlib import Path
 import sys
 import types
 
+sys.path.append(str(Path(sys.argv[2]).resolve()))
 plugin_dir = Path(sys.argv[1]).resolve()
 namespace = types.ModuleType("hermes_plugins")
 namespace.__path__ = [str(plugin_dir.parent)]
@@ -153,6 +158,34 @@ def test_collision_recovery_removes_old_copies_before_updating(tmp_path):
 
 
 def test_host_import_from_copied_tree_without_installing_distribution(tmp_path):
+    mirror_site = tmp_path / "mirror-site"
+    mirror_site.mkdir()
+    site_dirs = dict.fromkeys(
+        Path(path).resolve()
+        for path in (
+            *site.getsitepackages(),
+            sysconfig.get_path("purelib"),
+            sysconfig.get_path("platlib"),
+        )
+        if path
+    )
+    for site_dir in site_dirs:
+        if not site_dir.is_dir():
+            continue
+        for entry in sorted(site_dir.iterdir()):
+            normalized = entry.name.lower().replace("-", "_")
+            if normalized.startswith(("clawchat_gateway", "__editable__")) or normalized.endswith(
+                ".pth"
+            ):
+                continue
+            target = mirror_site / entry.name
+            if target.exists() or target.is_symlink():
+                continue
+            try:
+                target.symlink_to(entry, target_is_directory=entry.is_dir())
+            except (OSError, NotImplementedError) as exc:
+                pytest.skip(f"site mirror requires symlinks, unavailable here: {exc}")
+
     plugin_dir = tmp_path / "plugins" / "clawchat"
     plugin_dir.mkdir(parents=True)
     for name in ("__init__.py", "plugin.yaml"):
@@ -167,7 +200,10 @@ def test_host_import_from_copied_tree_without_installing_distribution(tmp_path):
             )
 
     result = subprocess.run(
-        [sys.executable, "-I", "-c", HOST_IMPORT_SCRIPT, str(plugin_dir)],
+        [
+            sys.executable, "-I", "-S", "-c", HOST_IMPORT_SCRIPT,
+            str(plugin_dir), str(mirror_site),
+        ],
         cwd=tmp_path,
         capture_output=True,
         text=True,
@@ -176,6 +212,7 @@ def test_host_import_from_copied_tree_without_installing_distribution(tmp_path):
 
     assert result.returncode == 0, result.stdout + result.stderr
     imported_path = Path(result.stdout.splitlines()[0])
+    assert result.stdout.splitlines()[1] == "distribution found: False"
     assert imported_path.is_relative_to(plugin_dir.resolve())
     assert imported_path == plugin_dir.resolve() / "clawchat_gateway" / "__init__.py"
 

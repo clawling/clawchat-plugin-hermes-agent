@@ -63,6 +63,119 @@ def _run_cli(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     return capsys.readouterr().out
 
 
+@pytest.mark.parametrize("restart", [True, False], ids=["restart", "no-restart"])
+@pytest.mark.parametrize(
+    ("action", "profile", "owner_command"),
+    [
+        ("schedule", "default", "hermes gateway restart"),
+        ("schedule", "coder", "hermes -p coder gateway restart"),
+        ("multiplexed", "coder", "hermes -p default gateway restart"),
+        ("no_gateway", "default", None),
+        ("no_gateway", "coder", None),
+    ],
+)
+async def test_activation_restart_payload_and_owner_lines(
+    profile_home: Path,
+    fake_activate: None,
+    forbid_spawn: None,
+    monkeypatch: pytest.MonkeyPatch,
+    restart: bool,
+    action: str,
+    profile: str,
+    owner_command: str | None,
+) -> None:
+    plan = restart_mod.RestartPlan(action, profile, profile_home)
+    planned: list[bool] = []
+    scheduled: list[int] = []
+    log_path = profile_home / "clawchat" / restart_mod.RESTART_LOG_FILENAME
+
+    def _plan() -> restart_mod.RestartPlan:
+        planned.append(True)
+        return plan
+
+    def _schedule(*, delay_seconds: int) -> str:
+        scheduled.append(delay_seconds)
+        return "fake detached restart"
+
+    monkeypatch.setattr(activate_mod, "plan_gateway_restart", _plan)
+    monkeypatch.setattr(activate_mod, "schedule_gateway_restart", _schedule)
+    monkeypatch.setattr(activate_mod, "restart_log_path", lambda: log_path)
+
+    payload = await activate_mod.activate_and_maybe_restart(
+        " CODE ", base_url="https://example.com", restart=restart, restart_delay_seconds=5
+    )
+
+    assert planned == [True]
+    assert payload["ok"] is True
+    assert payload["user_id"] == "usr_test"
+    assert payload["restart_required"] is True
+    assert payload["gateway_restart_required"] is (action == "schedule")
+    if owner_command is None:
+        assert "owner_restart_command" not in payload
+    else:
+        assert payload["owner_restart_command"] == owner_command
+    assert scheduled == ([5] if restart and action == "schedule" else [])
+    if not restart:
+        assert "restart_scheduled" not in payload
+        assert "restart_next_steps" not in payload
+        assert "restart_message" not in payload
+    elif action == "schedule":
+        assert payload["restart_scheduled"] is True
+        assert payload["restart_delay_seconds"] == 5
+        assert payload["restart_command"] == "fake detached restart"
+        assert payload["restart_log"] == str(log_path)
+        assert payload["restart_multiplex_owner"] is False
+    else:
+        assert payload["restart_scheduled"] is False
+        assert payload["restart_skipped_reason"] == action
+        assert payload["restart_next_steps"] == restart_mod.restart_next_steps(plan)
+
+    lines = restart_mod.format_restart_lines(payload)
+    if action != "schedule":
+        assert restart_mod.owner_restart_lines(payload) == []
+        assert not any("message for the owner" in line for line in lines)
+        assert not any("reloading plugins does not start" in line for line in lines)
+        assert not any("after your current reply ends" in line for line in lines)
+        return
+    expected = [
+        "clawchat: reloading plugins does not start the ClawChat connection; unless "
+        "the gateway already had ClawChat enabled when it started, it connects only "
+        "after the Hermes gateway restarts.",
+        f"clawchat: first check the Hermes log for a '{restart_mod.READY_LOG_LINE}' "
+        "line after this activation. Only if none appears within a few minutes, ask "
+        "the owner - after your current reply ends - to run this in a terminal "
+        f"outside Hermes: {owner_command}",
+        "clawchat: message for the owner if a restart is needed (en): ClawChat is activated. Once my reply "
+        f"ends, please run `{owner_command}` in a terminal (not in this chat). "
+        "After the restart I will greet you in ClawChat.",
+        "clawchat: message for the owner if a restart is needed (zh): ClawChat 已激活。请在我这条回复结束后，"
+        f"在终端里(不是在这个对话里)执行 `{owner_command}`,重启后我会在 ClawChat 里跟你打招呼。",
+    ]
+    assert restart_mod.owner_restart_lines(payload) == expected
+    assert lines[-4:] == expected
+
+
+async def test_no_restart_plan_failure_still_reports_activation(
+    profile_home: Path,
+    fake_activate: None,
+    forbid_spawn: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom() -> restart_mod.RestartPlan:
+        raise RuntimeError("profile detection broke")
+
+    monkeypatch.setattr(activate_mod, "plan_gateway_restart", _boom)
+
+    payload = await activate_mod.activate_and_maybe_restart(
+        "CODE", base_url="https://example.com", restart=False
+    )
+
+    assert payload["ok"] is True
+    assert payload["gateway_restart_required"] is True
+    assert payload["owner_restart_command"].endswith("gateway restart")
+    assert "restart_scheduled" not in payload
+
+
 def test_no_gateway_named_profile_points_at_multiplexing_not_own_gateway(
     profile_home: Path,
     fake_activate: None,
