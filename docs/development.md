@@ -13,8 +13,8 @@ same modules Hermes loads.
 ├── __init__.py                  # Hermes entrypoint; only defines register(ctx) and helpers
 ├── clawchat_cli.py              # v0.12.0 compatibility CLI
 ├── plugin.yaml                  # Plugin manifest — canonical for provides_tools
-├── pyproject.toml               # Python distribution (name: clawchat-gateway)
-├── MANIFEST.in                  # Bundles prompts/*.md when building a wheel
+├── pyproject.toml               # Project metadata only (name: clawchat-gateway)
+├── MANIFEST.in                  # Setuptools prompt inclusion rules
 ├── clawchat_gateway/            # All runtime modules — adapter, connection, protocol, tools, …
 ├── prompts/                     # Required platform.md + optional defaults
 ├── skills/                      # All bundled */SKILL.md skills (currently six) + manifest.json
@@ -25,15 +25,14 @@ same modules Hermes loads.
 
 ## Setting up a local environment
 
-The package metadata supports plain `pip` and `uv`. The tracked `uv.lock`
+The project is metadata-only and supports plain `pip` and `uv`. The tracked `uv.lock`
 locks the development and test environment. Hermes installs the source tree
 without using this lockfile; runtime requirements are in `pyproject.toml`.
 
 ### With `uv`
 
 ```bash
-uv venv
-uv pip install -e ".[test]"
+uv sync --extra test
 ```
 
 ### With `pip`
@@ -44,7 +43,9 @@ python -m venv .venv
 pip install -e ".[test]"
 ```
 
-`-e` mirrors how Hermes imports the source tree.
+Without a `[build-system]` table, pip uses its setuptools PEP 517 fallback;
+`-e` mirrors how Hermes imports the source tree. `uv` keeps the project
+non-package via `tool.uv.package = false` and installs its dependencies.
 
 ## Running tests
 
@@ -194,23 +195,20 @@ not plugin runtime dependencies. The plugin does not write YAML itself:
 config writes go through `hermes_cli.config.save_config`, so Hermes owns
 formatting and comments.
 
-`MANIFEST.in` only ships `prompts/*.md`, and `[tool.setuptools.packages.find]`
-in `pyproject.toml` only includes the `clawchat_gateway*` package. The
-top-level `skills/` tree — all bundled `skills/*/SKILL.md` directories
-(currently six; see [skill updates](./skill-updates.md#bundled-ids-are-auto-discovered-not-hardcoded)) **and**
-`skills/manifest.json` — lives outside that package and is not referenced by
-`MANIFEST.in` either, so none of it is included in a built wheel. A
-wheel-only install therefore has an empty `bundled_skill_ids()` result (the
-glob over `skills/*/SKILL.md` matches nothing) and a no-op load-time
-tombstone sweep (`apply_bundled_tombstones()` finds no `skills/manifest.json`
-and returns `[]`) — no bundled skills register, and no stale managed ids get
-purged. This is acceptable today because Hermes installs from the source
-tree, not from a wheel — every file in the tracked tree, `skills/` included,
-is copied into `$HERMES_HOME/plugins/clawchat/` on install — but if you ever
-publish to PyPI, packaging must be reworked first (extend `MANIFEST.in` and
-the packaging config to carry `skills/` alongside the package, and adjust
-`bundled_skills_dir()`'s path resolution if the layout changes) or a
-wheel-based install will silently ship with zero bundled skills.
+No wheel is built or published; Hermes copies every tracked file, including
+`skills/`, into the plugin directory and imports from there. The project has
+no build backend because Hermes 0.22+ merges every profile's plugins into one
+uv workspace and only gives metadata-only members unique names; a backend
+would make multiple copies collide on `clawchat-gateway` (see
+[workspace-name troubleshooting](./install.md#duplicate-workspace-member)).
+
+The retained setuptools configuration only includes `clawchat_gateway*`, and
+`MANIFEST.in` only includes `prompts/*.md`. The top-level `skills/` tree — all
+bundled `skills/*/SKILL.md` directories (currently six; see
+[skill updates](./skill-updates.md#bundled-ids-are-auto-discovered-not-hardcoded))
+and `skills/manifest.json` — lives outside the package. A future wheel would
+need packaging rework to include that tree and, if its layout changes, adjust
+`bundled_skills_dir()` so skill discovery and the tombstone sweep still work.
 
 ## Branches and releasing
 

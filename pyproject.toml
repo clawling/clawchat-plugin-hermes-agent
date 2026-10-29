@@ -1,7 +1,6 @@
-[build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
-
+# No build backend on purpose: Hermes merges every profile's plugin copy into
+# one uv workspace and only renames metadata-only members. A build backend
+# would make two profiles collide on the project name "clawchat-gateway".
 [project]
 name = "clawchat-gateway"
 dynamic = ["version"]
@@ -26,13 +25,15 @@ Homepage = "https://github.com/clawling/clawchat-plugin-hermes-agent"
 Repository = "https://github.com/clawling/clawchat-plugin-hermes-agent"
 Issues = "https://github.com/clawling/clawchat-plugin-hermes-agent/issues"
 
+[tool.uv]
+package = false
+
 [tool.setuptools]
 include-package-data = true
 
 # Single source of truth for the package version: clawchat_gateway.__version__.
-# The plugin reports this same attribute to the ClawChat backend (adapter.py imports it
-# as _PLUGIN_VERSION), so deriving the build version from it keeps the reported
-# version, the wheel version, and the runtime constant from ever drifting apart.
+# The plugin reports this same attribute to the ClawChat backend (adapter.py imports
+# it as _PLUGIN_VERSION); pip's setuptools fallback also derives its version here.
 [tool.setuptools.dynamic]
 version = { attr = "clawchat_gateway.__version__" }
 

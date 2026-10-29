@@ -205,6 +205,7 @@ tmp
 #     flush.
 #   * hello_fail_classification — Pins exact terminal authentication matching
 #     and transient unknown reasons.
+#   * hermes_workspace_member — Pins unique per-profile virtual names and source-only imports.
 #   * inbound_claim_fail_closed — Pins fail-closed inbound dispatch when ledger
 #     claims are unavailable.
 #   * liveware_agent_status — Pins positive-only Liveware status detection from stdout.
@@ -359,6 +360,7 @@ tests/*
 !tests/test_widget_send_owner_only.py
 !tests/test_inbound_widget_action.py
 !tests/test_version_consistency.py
+!tests/test_hermes_workspace_member.py
 !tests/test_source_doc_links.py
 deploy/
 scripts/
