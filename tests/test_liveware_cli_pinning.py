@@ -338,3 +338,19 @@ def test_access_time_change_during_hash_does_not_invalidate(cache, monkeypatch):
 
     monkeypatch.setattr(cli.Path, 'stat', bumping_stat)
     assert cli._verified_local(cache, ASSET, cached=False)
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX rename semantics')
+def test_external_same_size_same_mtime_replacement_is_rehashed(cache):
+    cache.write_bytes(BODY)
+    cache.chmod(0o755)
+    assert cli.resolve_liveware_path() == str(cache)
+    original = cache.stat()
+    other = cache.with_name('swap')
+    other.write_bytes(b'X' * len(BODY))  # same length, wrong bytes
+    other.chmod(0o755)
+    os.utime(other, ns=(original.st_atime_ns, original.st_mtime_ns))
+    os.replace(other, cache)
+    assert cache.stat().st_size == original.st_size
+    assert cache.stat().st_mtime_ns == original.st_mtime_ns
+    assert cli.resolve_liveware_path() is None

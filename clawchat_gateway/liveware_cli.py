@@ -137,7 +137,9 @@ def _verified_local(dest: Path, asset: str | None, *, cached: bool = True) -> bo
         info = dest.stat()
         if not dest.is_file() or (os.name != "nt" and not os.access(dest, os.X_OK)):
             return False
-        key = (str(dest), info.st_size, info.st_mtime_ns, digest)
+        # Inode / device / ctime too: an external same-size, same-mtime atomic
+        # replacement must not hit the memoized verification.
+        key = (str(dest), *_file_identity(info), digest)
         if cached and key == _verified:
             return True
         with dest.open("rb") as binary:
