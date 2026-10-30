@@ -317,3 +317,24 @@ async def test_background_api_starts_once_and_signals_completion(monkeypatch):
     await cli.wait_liveware_cli_ready()
     assert installs == [True] and len(threads) == 1
     assert threads[0]['daemon'] is True and cli._done_event.is_set()
+
+
+def test_access_time_change_during_hash_does_not_invalidate(cache, monkeypatch):
+    cache.write_bytes(BODY)
+    cache.chmod(0o755)
+    real_stat = cli.Path.stat
+    calls = {'n': 0}
+
+    def bumping_stat(self, *args, **kwargs):
+        info = real_stat(self, *args, **kwargs)
+        if self == cache:
+            calls['n'] += 1
+            values = list(info)
+            values[7] += calls['n']  # st_atime moves on every read, as with atime updates
+            return os.stat_result(values, {
+                name: getattr(info, name) for name in ('st_atime_ns', 'st_mtime_ns', 'st_ctime_ns')
+            })
+        return info
+
+    monkeypatch.setattr(cli.Path, 'stat', bumping_stat)
+    assert cli._verified_local(cache, ASSET, cached=False)

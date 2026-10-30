@@ -124,6 +124,10 @@ def platform_assets(
     return f"liveware-{os_name}-{arch}"
 
 
+def _file_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
 def _verified_local(dest: Path, asset: str | None, *, cached: bool = True) -> bool:
     global _verified
     digest = LIVEWARE_CLI_SHA256.get(asset or "")
@@ -138,7 +142,8 @@ def _verified_local(dest: Path, asset: str | None, *, cached: bool = True) -> bo
             return True
         with dest.open("rb") as binary:
             actual = hashlib.file_digest(binary, "sha256").hexdigest()
-        if actual != digest or dest.stat() != info:
+        # Identity and content fields only: hashing itself may bump st_atime.
+        if actual != digest or _file_identity(dest.stat()) != _file_identity(info):
             return False
         _verified = key
         return True
