@@ -429,7 +429,9 @@ descriptions match the OpenClaw plugin's tool exactly.
 
 `clawchat_widget_send` takes an optional `widget` JSON string. Only after the
 owner asks for a widget, send a complete snapshot to their private chat,
-including when they ask from a group. Omit `widget` to read the widget/v1 format.
+including when they ask from a group. When what a widget shows changes (a tap
+on it, or the same data changed in chat), send it again in that turn. Omit
+`widget` to read the widget/v1 format.
 Catalog filtering, the pre-tool hook and the handler each enforce a trusted
 owner turn in the same ClawChat chat. Owner-only speaker batches, trusted owner
 DM actions and host internal turns attributed to the owner DM qualify. An
@@ -473,7 +475,8 @@ refusal and guide hint, and never touch the throttle. The guide and refusal
 sentences describe the phone's stricter widget/v1 format.
 
 Removal is a snapshot like any other: `{"v": 1, "id": "todo", "removed": true}`
-passes the same checks and throttle, and a later snapshot with that `id` brings
+passes the same checks and throttle. The widget leaves the owner's widget list
+and any home-screen slot holding it goes empty; a later snapshot with that `id` brings
 the widget back. The plugin keeps no removed state; an owner deletion arrives as
 an ordinary `[widget <id>] removed` text line, and the guide (`WIDGET_V1_GUIDE`
 in `clawchat_gateway/widget_send.py`) tells the model to stop sending that widget until the owner asks again.
@@ -507,7 +510,9 @@ fallback.
 The outbound frame is `message.send` with `message_mode: "widget"`, empty
 mentions, `reply: null`, a fresh message id and exactly one fragment:
 `{"kind":"widget","text":<the original JSON document>}`. The phone
-hides it from chat and draws the widget. Inbound behavior stays unchanged:
+hides it from chat and keeps the widget in ClawChat. A new widget reaches the
+home screen only once the owner puts it in one of the home-screen slots; later
+snapshots with the same `id` redraw that slot. Inbound behavior stays unchanged:
 `widget_action` plus `text` reaches the host as that text; only `widget_action`
 reaches the host as an empty-text event. Non-normal mode messages are dropped
 whole, including any accompanying text.
