@@ -51,6 +51,17 @@ attempt is logged at warning level, so a flapping template CDN (e.g. a
 rate-limited egress IP) no longer strands a fresh agent without its sample
 until someone restarts it.
 
+### CLI verification
+
+The plugin download pins the CLI version and per-platform SHA-256 digests
+shipped in the plugin (`LIVEWARE_CLI_VERSION` / `LIVEWARE_CLI_SHA256` in
+`clawchat_gateway/liveware_cli.py`). Only verified binaries become executable. A
+cached binary must match this process's pinned digest; otherwise it is
+re-downloaded. A `.install.lock` file serializes cache verification and
+installation across processes. PATH `liveware` takes precedence and is not
+verified or modified. Downloads have a 64 MiB cap, a 240s total deadline and
+one retry; failures are recorded in the gateway log.
+
 ### Retryable blockers vs. real opt-outs
 
 The three conditions above that are **transient** — the CLI not being
@@ -227,7 +238,7 @@ target (`livewares.hermes.liveware-sample` in `manifest.json`). Each file
 entry carries a `sha256` that is verified byte-for-byte before it is written;
 a mismatch aborts the whole download without touching the previous install.
 The git `ref` used is the same one skill hot-updates use
-(`DEFAULT_SKILLS_REF`, an immutable tag, currently `skills-v1.19.1`);
+(`DEFAULT_SKILLS_REF`, an immutable tag, currently `skills-v1.19.2`);
 pushing to `main` alone does not update it. User-owned files (`state.json`,
 `events.jsonl`) are preserved across a sample-version upgrade. The per-file
 fetches run concurrently (a small thread pool inside the already-off-loop
@@ -324,7 +335,8 @@ unchanged).
 After a successful bootstrap, the supervisor tries to notify the owner in
 their direct chat. `notify_owner` returns `False` when the owner's direct
 chat id isn't resolvable yet (activation still in flight) — the supervisor
-retries every 30s, up to 20 tries (~10 minutes), until it succeeds or gives
+retries after 2s, 5s, 10s, then every 30s, up to 20 total tries within the
+existing ~10 minute budget, until it succeeds or gives
 up silently.
 
 ## Configuration

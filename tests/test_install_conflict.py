@@ -220,7 +220,7 @@ async def test_restart_blocks_before_connect_or_startup_refresh(monkeypatch, tmp
     refresh = AsyncMock()
     monkeypatch.setattr(connection, "_ws_connect", dial)
     # Would force a startup refresh if the superseded gate were too late.
-    monkeypatch.setattr(connection, "is_token_near_expiry", lambda *_a: True)
+    monkeypatch.setattr(connection, "is_token_near_expiry", lambda *_a, **_kw: True)
     monkeypatch.setattr(RefreshManager, "refresh", refresh)
     conn = make_conn()
     if state == "unknown-user":
@@ -228,7 +228,7 @@ async def test_restart_blocks_before_connect_or_startup_refresh(monkeypatch, tmp
         conn._cfg = replace(conn._cfg, user_id="")
     if state == "other":
         # This case proves the disk record does not block a newly bound agent.
-        monkeypatch.setattr(connection, "is_token_near_expiry", lambda *_a: False)
+        monkeypatch.setattr(connection, "is_token_near_expiry", lambda *_a, **_kw: False)
     await conn.start()
     try:
         if state == "other":
@@ -349,7 +349,7 @@ async def test_notice_real_sibling_connection_never_refreshes(monkeypatch, tmp_p
         try:
             await until(lambda: conn.is_superseded)
             # Force a near-expiry token only after the main connection is displaced.
-            monkeypatch.setattr(connection, "is_token_near_expiry", lambda *_a: True)
+            monkeypatch.setattr(connection, "is_token_near_expiry", lambda *_a, **_kw: True)
             await conn._owner_notice_task
             result = identity.read_superseded(tmp_path)["owner_notice"]
             assert result["status"] == "sent"

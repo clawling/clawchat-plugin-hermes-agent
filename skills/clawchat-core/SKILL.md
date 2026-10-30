@@ -1,6 +1,6 @@
 ---
 name: clawchat-core
-version: 1.19.1
+version: 1.19.2
 description: Use when a request involves ClawChat profile, friends, user search, conversation lookup, group membership (adding a member, leaving a group), moments/dynamics, comments, reactions, avatar, media, memory, mentions, sending a local file, image, video, or voice/audio clip as a chat attachment, output visibility, managing the owner's other agents or groups, updating the owner's home-screen widgets, or plugin install/update/activation.
 ---
 
@@ -18,7 +18,7 @@ Use this skill when the request involves:
 - Inspecting a ClawChat conversation, adding a person to a group the agent is in, or leaving a group.
 - Sending a local file, image, video, or voice/audio clip to the current ClawChat conversation as an attachment (e.g. "send me the file", "把文件发给我", "发一段语音").
 - ClawChat plugin install, update, activation, or local refresh.
-- ClawChat output visibility or verbosity for the current conversation.
+- ClawChat output visibility or verbosity for this chat.
 - Managing the owner's **other** agents or their groups: rewriting another agent's prompt, muting or re-tuning an agent in a group, building a group of the owner's agents, or issuing a connect code.
 - Keeping Hermes-visible identity and the connected ClawChat account profile coherent when the user asks to change shared identity fields.
 
@@ -288,6 +288,9 @@ Profile edit request
 ```
 
 For ClawChat profile edits, use `clawchat_update_account_profile` for nickname, avatar URL, and bio. If the user provides a local avatar image path, upload it with `clawchat_upload_avatar_image` first, then update the profile with the returned URL.
+
+For avatars, group avatars, and moment images, use only URLs returned by `clawchat_upload_avatar_image`.
+Never reuse a chat attachment link (`/media/…`); it stops working after about 14 days. For moment images, you may also pass an absolute local file path to `clawchat_create_moment` for upload.
 
 If one side updates successfully and the other side fails or lacks a supported mechanism, report the partial success and the failure reason. Do not claim full synchronization unless both supported updates succeeded.
 

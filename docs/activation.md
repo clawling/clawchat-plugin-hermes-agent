@@ -295,6 +295,16 @@ the explicit `CLAWCHAT_WEBSOCKET_URL` (or `CLAWCHAT_WS_URL`) when set — the
 installer writes it next to `CLAWCHAT_BASE_URL`, and the runtime prefers it too —
 otherwise one derived from `base_url` (`activate._derive_websocket_url`).
 
+### Credential storage
+
+Tokens are stored in plaintext in the plugin SQLite DB and the Hermes `.env`.
+On POSIX the plugin sets its data directory to 0700 and DB, WAL and SHM files
+to 0600; a permission failure warns once per process without disabling storage.
+Activation also warns once if `.env` is open to group/others, suggesting
+`chmod 600`, but leaves its mode to Hermes. Windows ACLs are not managed.
+If a token leaks, re-pair the agent with a fresh activation code
+(`hermes clawchat activate CODE --repair`), which replaces the stored credentials.
+
 ## Automatic Token Refresh & Auto-Logout
 
 Token lifetime is server-controlled. The plugin refreshes before JWT `exp` using

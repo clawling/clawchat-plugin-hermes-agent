@@ -1540,7 +1540,10 @@ async def liveware_login() -> dict[str, Any]:
 
     liveware_path = resolve_liveware_path()
     if liveware_path is None:
-        return _validation_error("liveware CLI not found in PATH")
+        return _validation_error(
+            "liveware CLI was not found on PATH or in the plugin download directory "
+            "(<HERMES_HOME>/clawchat/liveware). The automatic download may still be "
+            "running or may have failed verification; see the gateway log.")
 
     proc = await asyncio.create_subprocess_exec(
         liveware_path,

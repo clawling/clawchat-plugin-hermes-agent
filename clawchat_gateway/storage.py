@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 import sqlite3
 import stat
@@ -22,6 +23,23 @@ from clawchat_gateway.tool_capabilities import (
 )
 
 logger = logging.getLogger(__name__)
+
+_mode_warning_emitted = False
+_mode_warning_lock = threading.Lock()
+
+
+def _private_mode(path: Path, mode: int) -> None:
+    global _mode_warning_emitted
+    if os.name == "nt":
+        return
+    try:
+        path.chmod(mode)
+    except OSError:
+        with _mode_warning_lock:
+            if not _mode_warning_emitted:
+                _mode_warning_emitted = True
+                logger.warning("clawchat credential storage chmod failed: %s", path)
+
 
 DB_FILENAME = "clawchat.sqlite"
 CLAWCHAT_DIRNAME = "clawchat"
@@ -535,7 +553,8 @@ class ClawChatStore:
                 return
             try:
                 self._relocate_legacy_db()
-                self.db_path.parent.mkdir(parents=True, exist_ok=True)
+                self.db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                _private_mode(self.db_path.parent, 0o700)
                 conn = sqlite3.connect(self.db_path)
                 try:
                     conn.execute("PRAGMA journal_mode=WAL")
@@ -2339,7 +2358,8 @@ class ClawChatStore:
         if legacy == target or not legacy.exists():
             return
         try:
-            target.parent.mkdir(parents=True, exist_ok=True)
+            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            _private_mode(target.parent, 0o700)
             for suffix in ("", "-wal", "-shm"):
                 src = legacy.with_name(legacy.name + suffix)
                 if src.exists():
@@ -2353,10 +2373,10 @@ class ClawChatStore:
                 self.db_path = legacy
 
     def _chmod_private(self) -> None:
-        try:
-            self.db_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
-        except OSError:
-            logger.debug("clawchat database chmod failed", exc_info=True)
+        for suffix in ("", "-wal", "-shm"):
+            path = self.db_path.with_name(self.db_path.name + suffix)
+            if path.exists():
+                _private_mode(path, stat.S_IRUSR | stat.S_IWUSR)
 
     def _write(
         self,

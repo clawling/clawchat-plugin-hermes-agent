@@ -12,6 +12,8 @@ At startup, the runtime adopts the latest complete SQLite activation row as the 
 
 ## Credentials (written by activation)
 
+See [credential storage and permissions](activation.md#credential-storage).
+
 | Env var | `extra.*` key | Default | Notes |
 | --- | --- | --- | --- |
 | `CLAWCHAT_TOKEN` | — | — | Required to connect to ClawChat. If absent, the adapter waits for activation without blocking gateway startup. Written to `$HERMES_HOME/.env` by activation. |
