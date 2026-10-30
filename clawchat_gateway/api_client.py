@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import random
+import re
 import socket
 import time
 import uuid
@@ -97,6 +99,24 @@ class RefreshResult:
 
     access_token: str
     refresh_token: str
+
+
+def redact_refresh_message(value: object, *secrets: str) -> str:
+    """Sanitize refresh diagnostics at their first display-text boundary."""
+    text = str(value or "")
+    for secret in sorted((s for s in secrets if s), key=len, reverse=True):
+        text = text.replace(secret, "***")
+    text = re.sub(r"eyJ[A-Za-z0-9_=-]*\.[A-Za-z0-9_=-]+\.[A-Za-z0-9_=-]+", "***", text)
+    text = re.sub(r"[A-Za-z0-9_\-\.=+/]{32,}", "***", text)
+    return " ".join(text.split())[:200]
+
+
+def normalize_refresh_code(value: object) -> int | None:
+    if type(value) is int:
+        return value
+    if type(value) is float and math.isfinite(value) and value.is_integer():
+        return int(value)
+    return None
 
 
 @dataclass(frozen=True)
@@ -944,6 +964,7 @@ class ClawChatApiClient:
                 path="/v1/auth/refresh",
                 code=REFRESH_CODE_BAD_REQUEST,
             )
+        secret_values = (refresh_token, refresh_token.strip(), self._token)
         body = json.dumps({"refresh_token": refresh_token.strip()}).encode("utf-8")
         # NO authorization header — the refresh token in the body is the credential.
         request = Request(
@@ -973,34 +994,37 @@ class ClawChatApiClient:
             connect_failed = isinstance(reason, (ConnectionRefusedError, socket.gaierror))
             raise ClawChatApiError(
                 "transport",
-                str(reason or exc),
+                redact_refresh_message(reason or exc, *secret_values),
                 path="/v1/auth/refresh",
                 connect_failed=connect_failed,
-            ) from exc
+            ) from None
         except TimeoutError as exc:
             raise ClawChatApiError(
                 "transport",
-                str(exc) or "refresh request timed out",
+                redact_refresh_message(exc, *secret_values) or "refresh request timed out",
                 path="/v1/auth/refresh",
-            ) from exc
+            ) from None
         except Exception as exc:  # noqa: BLE001
-            raise ClawChatApiError("transport", str(exc), path="/v1/auth/refresh") from exc
+            raise ClawChatApiError(
+                "transport", redact_refresh_message(exc, *secret_values),
+                path="/v1/auth/refresh",
+            ) from None
 
         try:
             payload = json.loads(raw)
-        except Exception as exc:
+        except Exception:
             raise ClawChatApiError(
                 "transport",
                 "refresh non-JSON response",
                 status=status,
                 path="/v1/auth/refresh",
-            ) from exc
+            ) from None
         code = payload.get("code") if isinstance(payload, dict) else None
-        if type(code) is not int:
-            code = None
+        code = normalize_refresh_code(code)
         msg = ""
         if isinstance(payload, dict):
-            msg = str(payload.get("msg") or payload.get("message") or "")
+            msg = redact_refresh_message(
+                payload.get("msg") or payload.get("message"), *secret_values)
         if status != 200 and code != REFRESH_CODE_INVALID_REFRESH:
             raise ClawChatApiError(
                 "transport",
@@ -1018,8 +1042,10 @@ class ClawChatApiClient:
                     path="/v1/auth/refresh",
                     code=code,
                 )
-            access_token = str(data.get("access_token") or "").strip()
-            new_refresh_token = str(data.get("refresh_token") or "").strip()
+            access = data.get("access_token")
+            rotated = data.get("refresh_token")
+            access_token = access.strip() if isinstance(access, str) else ""
+            new_refresh_token = rotated.strip() if isinstance(rotated, str) else ""
             if not access_token or not new_refresh_token:
                 raise ClawChatApiError(
                     "transport",
@@ -1324,9 +1350,10 @@ def is_permanent_refresh_error(exc: ClawChatApiError) -> bool:
     again. A ``10003`` after such a timeout is still permanent: it means the
     window has passed or the token was revoked (spec §B escalation).
     """
-    return type(exc.code) is int and (
-        exc.code == REFRESH_CODE_INVALID_REFRESH
-        or (exc.code == REFRESH_CODE_BAD_REQUEST and exc.status in (None, 200))
+    code = normalize_refresh_code(exc.code)
+    return code is not None and (
+        code == REFRESH_CODE_INVALID_REFRESH
+        or (code == REFRESH_CODE_BAD_REQUEST and exc.status in (None, 200))
     )
 
 
@@ -1340,7 +1367,7 @@ def _refresh_outcome_unknown(exc: ClawChatApiError) -> bool:
     """
     if exc.connect_failed:
         return False
-    return exc.code != REFRESH_CODE_INTERNAL
+    return normalize_refresh_code(exc.code) != REFRESH_CODE_INTERNAL
 
 
 def _refresh_backoff_delay(attempt: int) -> float:
@@ -1418,7 +1445,7 @@ async def auth_refresh_with_retry(
                 "clawchat token refresh transient failure (attempt %d), retrying in %.1fs: %s",
                 attempt,
                 delay,
-                exc,
+                redact_refresh_message(exc.message, refresh_token, getattr(client, "_token", "")),
             )
             if not await can_continue():
                 raise

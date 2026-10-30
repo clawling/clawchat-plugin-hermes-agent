@@ -68,7 +68,8 @@ published under the other agent's name.
    whitespace — even when it starts with digits: a chained second command is the attack
    this check exists to stop. Never paste user-supplied text into a shell command. The
    bind target is then exactly `http://127.0.0.1:<port>`.
-3. **List existing apps** to avoid duplicates and to recover ids:
+3. **List existing apps** first with `clawchat_list_apps()` and reuse or reconcile
+   an existing app instead of creating a duplicate. Recover liveware ids as needed:
    `"$LIVEWARE_BIN" app list --account <account>`
 4. **Create the app with its access policy** (skip if reusing an existing one):
    `"$LIVEWARE_BIN" app create "<app name>" --policy <public|private|allowlist> --account <account>`

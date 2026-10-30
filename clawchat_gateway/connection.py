@@ -7,6 +7,7 @@ import contextvars
 import enum
 import json
 import logging
+import math
 import os
 import random
 import socket
@@ -31,6 +32,7 @@ from clawchat_gateway.profile_collision import hermes_root
 from clawchat_gateway.token_refresh import (
     RefreshManager,
     RefreshOutcome,
+    PROACTIVE_JITTER_SECONDS,
     is_token_near_expiry,
 )
 from clawchat_gateway.protocol import (
@@ -282,8 +284,11 @@ def refusal_retry_after_seconds(reason: str | None) -> float:
             value = json.loads(reason).get("retry_after_ms")
         except (ValueError, TypeError, AttributeError):
             value = None
-        if isinstance(value, (int, float)) and value > 0:
-            seconds = float(value) / 1000.0
+        try:
+            if type(value) in (int, float) and math.isfinite(value) and value > 0:
+                seconds = float(value) / 1000.0
+        except OverflowError:
+            pass
     return min(max(seconds, 0.0), TAKEOVER_BACKOFF_MAX_SECONDS)
 
 
@@ -366,6 +371,7 @@ class ClawChatConnection:
         connect_device_id: str | None = None,
         owner_locale: Callable[[], str | None] | None = None,
         _allow_superseded_notice: bool = False,
+        proactive_jitter: Callable[[], float] | None = None,
     ) -> None:
         # ``connect_device_id`` overrides the device id presented in the WS
         # connect payload ONLY. REST refresh keeps the canonical resolved id
@@ -408,6 +414,10 @@ class ClawChatConnection:
         self._ws: Any = None
         self._stopping = False
         self._auth_failed = False
+        self._proactive_token: str | None = None
+        self._proactive_jitter_offset = 0.0
+        self._proactive_jitter = proactive_jitter or (
+            lambda: random.uniform(-PROACTIVE_JITTER_SECONDS, PROACTIVE_JITTER_SECONDS))
         self._credential_generation = 0
         self._connection_credential_generation: int | None = None
         self._connection_token: str | None = None
@@ -2318,7 +2328,11 @@ class ClawChatConnection:
         """§A.1: when the live token nears expiry, refresh + reconnect."""
         if self._activation_source_suspended or self._refresh_manager is None or not self._cfg.refresh_token:
             return
-        if not is_token_near_expiry(self._cfg.token, self._activated_at_ms):
+        if self._proactive_token != self._cfg.token:
+            self._proactive_jitter_offset = self._proactive_jitter()
+            self._proactive_token = self._cfg.token
+        if not is_token_near_expiry(self._cfg.token, self._activated_at_ms,
+                                    jitter=self._proactive_jitter_offset):
             return
         await self._attempt_refresh(close_ws_on_success=True)
 

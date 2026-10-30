@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -62,6 +64,27 @@ from clawchat_gateway.restart import (
 from clawchat_gateway.storage import _active_profile_name, get_clawchat_store
 
 logger = logging.getLogger(__name__)
+
+_env_mode_warned = False
+_env_mode_lock = threading.Lock()
+
+
+def _warn_open_credentials(path: Path | str) -> None:
+    global _env_mode_warned
+    if os.name == "nt":
+        return
+    path = Path(path)
+    try:
+        if not path.stat().st_mode & 0o077:
+            return
+    except OSError:
+        return
+    with _env_mode_lock:
+        if not _env_mode_warned:
+            _env_mode_warned = True
+            logger.warning("clawchat credentials file is readable by group/others: %s; "
+                           "restrict access with chmod 600 %s", path, path)
+
 
 CLAWCHAT_GLOBAL_DISPLAY_DEFAULTS = {
     "busy_input_mode": "queue",
@@ -582,6 +605,7 @@ def persist_activation(
             }
         )
     env_path = _write_env_values(env_values)
+    _warn_open_credentials(env_path)
     _write_config(config_path, config)
     return {
         "config_path": str(config_path),

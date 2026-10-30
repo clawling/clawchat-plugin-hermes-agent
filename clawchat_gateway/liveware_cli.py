@@ -8,18 +8,39 @@ not on PATH and not already downloaded, it fetches the OS/arch-matched
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import platform
 import shutil
+import tempfile
 import threading
+import time
 import urllib.request
+from collections.abc import Callable
+from concurrent.futures import Future, TimeoutError as FutureTimeout
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 LIVEWARE_BASE_URL = "https://media.clawling.chat/liveware/"
-_DOWNLOAD_TIMEOUT = 60  # seconds
+LIVEWARE_CLI_VERSION = "0.0.47-20260921"
+# These shipped digests are the trust anchor, never fetched from the download
+# server. Updating the CLI requires both constants to change in a plugin release.
+LIVEWARE_CLI_SHA256: dict[str, str] = {
+    "liveware-darwin-amd64": "28c63d371115889cd8ebeed916af0d5ede62e10016ae34a8984de31ec49d00fe",
+    "liveware-darwin-arm64": "eebc9f9a881f9a4da3eb81559290581f0054d15b94eb8c0d2dd21e9472169765",
+    "liveware-linux-amd64": "bbbf7c0b74e5633cf869ea3af78997d5ec0f57f3253f1fb3c3cdd75ead5cebba",
+    "liveware-linux-arm64": "691b79a8f346e10780e8270d9b759bd749d1df5a3d08bf033c66765c470d6a15",
+    "liveware-windows-amd64.exe": "b5fe6fa02cf23d0101af20cc3f8c936ac5d6f32a13896bc1c14622089e3504a1",
+    "liveware-windows-arm64.exe": "9400709b2cdd0d2282e478fd8ef6f9953e3190f48653e2cf775817b44f0c34ce",
+}
+_DOWNLOAD_TIMEOUT = 60
+_DOWNLOAD_DEADLINE = 240.0
+_DOWNLOAD_MAX_BYTES = 64 * 1024 * 1024
+_DOWNLOAD_RETRY_DELAY = 2.0
+_verified: tuple[object, ...] | None = None
+_install_lock = threading.Lock()
 # A non-default User-Agent is required: the CDN (Cloudflare) returns 403 for the
 # stdlib default "Python-urllib/x.y" UA, so requests must identify themselves.
 _USER_AGENT = "clawchat-liveware-installer"
@@ -96,63 +117,175 @@ def platform_assets(
     )
     if not os_name or not arch:
         return None
-    # Windows only ships an amd64 build, published with a .exe suffix.
     if os_name == "windows":
-        if arch != "amd64":
-            return None
-        return "liveware-windows-amd64.exe"
+        return f"liveware-windows-{arch}.exe"
     return f"liveware-{os_name}-{arch}"
 
 
+def _marker(dest: Path) -> Path:
+    return dest.with_name("liveware.version")
+
+
+def _verified_local(dest: Path, asset: str | None, *, cached: bool = True) -> bool:
+    global _verified
+    digest = LIVEWARE_CLI_SHA256.get(asset or "")
+    if not digest:
+        return False
+    try:
+        if _marker(dest).read_text().strip() != f"{LIVEWARE_CLI_VERSION} {digest}":
+            return False
+        info = dest.stat()
+        if not dest.is_file() or not os.access(dest, os.X_OK):
+            return False
+        key = (str(dest), info.st_size, info.st_mtime_ns, LIVEWARE_CLI_VERSION, digest)
+        if cached and key == _verified:
+            return True
+        with dest.open("rb") as binary:
+            actual = hashlib.file_digest(binary, "sha256").hexdigest()
+        if actual != digest or dest.stat() != info:
+            return False
+        _verified = key
+        return True
+    except (OSError, UnicodeError):
+        return False
+
+
 def resolve_liveware_path() -> str | None:
-    """Resolve the liveware executable: PATH first, then the downloaded copy."""
+    """Resolve PATH first; accept the downloaded copy only after verification."""
     if shutil.which("liveware") is not None:
         return "liveware"
     local = liveware_dir() / liveware_binary_name()
-    if local.exists() and os.access(local, os.X_OK):
-        return str(local)
-    return None
+    return str(local) if _verified_local(local, platform_assets()) else None
 
 
-def _download(url: str, dest: Path) -> None:
-    req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
-    with urllib.request.urlopen(req, timeout=_DOWNLOAD_TIMEOUT) as resp:  # noqa: S310
-        status = getattr(resp, "status", 200)
-        if status != 200:
-            raise RuntimeError(f"download {url} failed: HTTP {status}")
-        data = resp.read()
-    if not data:
-        raise RuntimeError(f"download {url} returned empty body")
-    tmp = Path(str(dest) + ".tmp")
-    tmp.write_bytes(data)
-    os.chmod(tmp, 0o755)
-    os.replace(tmp, dest)
+def _write_marker(dest: Path, digest: str) -> None:
+    fd, name = tempfile.mkstemp(dir=dest.parent)
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            stream.write(f"{LIVEWARE_CLI_VERSION} {digest}\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, _marker(dest))
+        if os.name != "nt":
+            directory = os.open(dest.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _stream_download(fd: int, url: str, expected: str, deadline: float,
+                     timeout: float, cancelled: threading.Event,
+                     monotonic: Callable[[], float], result: Future[None]) -> None:
+    try:
+        digest = hashlib.sha256()
+        size = 0
+        with os.fdopen(fd, "wb") as stream:
+            req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if getattr(resp, "status", 200) != 200:
+                    raise RuntimeError("liveware download non-200 response")
+                while True:
+                    if cancelled.is_set() or monotonic() >= deadline:
+                        raise TimeoutError("liveware download deadline exceeded")
+                    chunk = resp.read(64 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > _DOWNLOAD_MAX_BYTES:
+                        raise RuntimeError("liveware download exceeds size cap")
+                    digest.update(chunk)
+                    stream.write(chunk)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if not size:
+            raise RuntimeError("liveware download empty body")
+        actual = digest.hexdigest()
+        if actual != expected:
+            logger.warning("ClawChat: liveware digest mismatch asset=%s expected=%s actual=%s",
+                           url.rsplit("/", 1)[-1], expected, actual)
+            raise RuntimeError("liveware download digest mismatch")
+        if cancelled.is_set() or monotonic() >= deadline:
+            raise TimeoutError("liveware download deadline exceeded")
+        result.set_result(None)
+    except Exception as exc:
+        result.set_exception(exc)
+
+
+def _download(url: str, dest: Path, *, sleep: Callable[[float], None] = time.sleep,
+              monotonic: Callable[[], float] = time.monotonic) -> None:
+    asset = url.rsplit("/", 1)[-1]
+    expected = LIVEWARE_CLI_SHA256.get(asset)
+    if not expected:
+        logger.warning("ClawChat: no pinned liveware digest for %s", asset)
+        return
+    deadline = monotonic() + _DOWNLOAD_DEADLINE
+    for attempt in range(2):
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise TimeoutError("liveware download deadline exceeded")
+        fd, name = tempfile.mkstemp(dir=dest.parent)
+        tmp = Path(name)
+        # Only this caller installs. A worker blocked in DNS/read can outlive
+        # the deadline, but its late completion never publishes a binary.
+        result: Future[None] = Future()
+        cancelled = threading.Event()
+        worker = threading.Thread(
+            target=_stream_download,
+            args=(fd, url, expected, deadline, min(_DOWNLOAD_TIMEOUT, remaining),
+                  cancelled, monotonic, result),
+            daemon=True, name="clawchat-liveware-download")
+        try:
+            try:
+                worker.start()
+            except Exception:
+                os.close(fd)
+                raise
+            result.result(timeout=max(0.0, deadline - monotonic()))
+            if monotonic() >= deadline:
+                raise TimeoutError("liveware download deadline exceeded")
+            if os.name != "nt":
+                os.chmod(tmp, 0o755)
+            os.replace(tmp, dest)
+            _write_marker(dest, expected)
+            return
+        except Exception as exc:
+            if isinstance(exc, FutureTimeout) and (not result.done() or result.exception() is not exc):
+                cancelled.set()
+                raise TimeoutError("liveware download deadline exceeded") from None
+            if attempt or monotonic() + _DOWNLOAD_RETRY_DELAY >= deadline:
+                raise
+            sleep(_DOWNLOAD_RETRY_DELAY)
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except PermissionError:
+                # Windows cannot unlink an open file: clean it as soon as the
+                # cancelled worker closes its handle. It still cannot install.
+                result.add_done_callback(lambda _future, path=tmp: path.unlink(missing_ok=True))
 
 
 def ensure_liveware_cli() -> None:
-    """Ensure the liveware CLI is present, downloading it when absent.
-
-    Synchronous and blocking — intended to run on a background thread. Never
-    raises: any failure is logged and swallowed.
-    """
+    """Ensure a verified CLI on a background thread; never raise."""
     try:
-        if shutil.which("liveware") is not None:
-            return  # PATH wins
-        d = liveware_dir()
-        binary_name = liveware_binary_name()
-        if (d / binary_name).exists():
-            return
-        liveware_asset = platform_assets()
-        if liveware_asset is None:
-            logger.warning(
-                "ClawChat: unsupported platform %s/%s; skipping liveware download",
-                platform.system(),
-                platform.machine(),
-            )
-            return
-        d.mkdir(parents=True, exist_ok=True)
-        _download(LIVEWARE_BASE_URL + liveware_asset, d / binary_name)
-        logger.info("ClawChat: liveware CLI downloaded to %s", d)
+        with _install_lock:
+            if shutil.which("liveware") is not None:
+                return
+            d = liveware_dir()
+            asset = platform_assets()
+            if asset is None or asset not in LIVEWARE_CLI_SHA256:
+                logger.warning("ClawChat: no pinned liveware asset for %s/%s",
+                               platform.system(), platform.machine())
+                return
+            dest = d / liveware_binary_name()
+            if _verified_local(dest, asset, cached=False):
+                return
+            d.mkdir(parents=True, exist_ok=True)
+            _download(LIVEWARE_BASE_URL + asset, dest)
+            logger.info("ClawChat: verified liveware CLI downloaded to %s", d)
     except Exception as exc:  # noqa: BLE001
         logger.warning("ClawChat: liveware CLI download skipped: %s", exc)
 

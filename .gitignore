@@ -366,3 +366,13 @@ deploy/
 scripts/
 docs/superpowers/
 CLAUDE.md
+# Only pinned CLI downloads and verified cached binaries may be executed.
+!tests/test_liveware_cli_pinning.py
+# POSIX credential modes warn once on failure without disabling persistence.
+!tests/test_credential_file_modes.py
+# Refresh diagnostics redact credentials at exception and log boundaries.
+!tests/test_refresh_redaction.py
+# Refresh envelopes, JWT claims, refusal delays and jitter preserve strict typing.
+!tests/test_token_refresh_s_fixes.py
+# Owner intro retries promptly within the existing attempt budget.
+!tests/test_liveware_intro_retry.py
