@@ -56,8 +56,9 @@ until someone restarts it.
 The plugin download pins the CLI version and per-platform SHA-256 digests
 shipped in the plugin (`LIVEWARE_CLI_VERSION` / `LIVEWARE_CLI_SHA256` in
 `clawchat_gateway/liveware_cli.py`). Only verified binaries become executable. A
-cached binary must match both its version/digest marker and its file hash;
-otherwise it is re-downloaded. PATH `liveware` takes precedence and is not
+cached binary must match this process's pinned digest; otherwise it is
+re-downloaded. A `.install.lock` file serializes cache verification and
+installation across processes. PATH `liveware` takes precedence and is not
 verified or modified. Downloads have a 64 MiB cap, a 240s total deadline and
 one retry; failures are recorded in the gateway log.
 

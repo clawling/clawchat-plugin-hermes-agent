@@ -47,10 +47,10 @@
         "bytes": 38243
       },
       "clawchat-liveware": {
-        "version": "1.3.1",
+        "version": "1.3.2",
         "path": "hermes/clawchat-liveware/SKILL.md",
-        "sha256": "5cd44c4822c8f1701e18712692a68b900e231a828a8709cfb0d423afd02b95c3",
-        "bytes": 15504
+        "sha256": "b4b3304f44b1c2b211c852b4efc2420d468dc633baefe4652605a77a11693112",
+        "bytes": 15605
       },
       "clawchat-liveware-dev": {
         "version": "1.0.0",

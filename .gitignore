@@ -368,6 +368,8 @@ docs/superpowers/
 CLAUDE.md
 # Only pinned CLI downloads and verified cached binaries may be executed.
 !tests/test_liveware_cli_pinning.py
+# Older managed Liveware skills reseed with the bundled procedure and manifest.
+!tests/test_liveware_skill_reseed.py
 # POSIX credential modes warn once on failure without disabling persistence.
 !tests/test_credential_file_modes.py
 # Refresh diagnostics redact credentials at exception and log boundaries.

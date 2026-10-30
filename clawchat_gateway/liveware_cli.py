@@ -8,6 +8,7 @@ not on PATH and not already downloaded, it fetches the OS/arch-matched
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import logging
 import os
@@ -39,6 +40,7 @@ _DOWNLOAD_TIMEOUT = 60
 _DOWNLOAD_DEADLINE = 240.0
 _DOWNLOAD_MAX_BYTES = 64 * 1024 * 1024
 _DOWNLOAD_RETRY_DELAY = 2.0
+_INSTALL_LOCK_TIMEOUT = _DOWNLOAD_DEADLINE + 30.0
 _verified: tuple[object, ...] | None = None
 _install_lock = threading.Lock()
 # A non-default User-Agent is required: the CDN (Cloudflare) returns 403 for the
@@ -122,22 +124,16 @@ def platform_assets(
     return f"liveware-{os_name}-{arch}"
 
 
-def _marker(dest: Path) -> Path:
-    return dest.with_name("liveware.version")
-
-
 def _verified_local(dest: Path, asset: str | None, *, cached: bool = True) -> bool:
     global _verified
     digest = LIVEWARE_CLI_SHA256.get(asset or "")
     if not digest:
         return False
     try:
-        if _marker(dest).read_text().strip() != f"{LIVEWARE_CLI_VERSION} {digest}":
-            return False
         info = dest.stat()
-        if not dest.is_file() or not os.access(dest, os.X_OK):
+        if not dest.is_file() or (os.name != "nt" and not os.access(dest, os.X_OK)):
             return False
-        key = (str(dest), info.st_size, info.st_mtime_ns, LIVEWARE_CLI_VERSION, digest)
+        key = (str(dest), info.st_size, info.st_mtime_ns, digest)
         if cached and key == _verified:
             return True
         with dest.open("rb") as binary:
@@ -158,23 +154,38 @@ def resolve_liveware_path() -> str | None:
     return str(local) if _verified_local(local, platform_assets()) else None
 
 
-def _write_marker(dest: Path, digest: str) -> None:
-    fd, name = tempfile.mkstemp(dir=dest.parent)
-    tmp = Path(name)
-    try:
-        with os.fdopen(fd, "w") as stream:
-            stream.write(f"{LIVEWARE_CLI_VERSION} {digest}\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(tmp, _marker(dest))
-        if os.name != "nt":
-            directory = os.open(dest.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-    finally:
-        tmp.unlink(missing_ok=True)
+def _lock_install_file(fd: int, *, release: bool = False) -> None:
+    """Lock the shared cache with bounded, nonblocking OS lock attempts."""
+    if os.name == "nt":
+        import msvcrt
+    else:
+        import fcntl
+    if release:
+        if os.name == "nt":
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        return
+    deadline = time.monotonic() + _INSTALL_LOCK_TIMEOUT
+    while True:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("liveware install lock timed out")
+        try:
+            if os.name == "nt":
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except OSError as exc:
+            if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK,
+                                 errno.EDEADLK}:
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("liveware install lock timed out") from exc
+            time.sleep(min(0.05, remaining))
 
 
 def _stream_download(fd: int, url: str, expected: str, deadline: float,
@@ -249,8 +260,15 @@ def _download(url: str, dest: Path, *, sleep: Callable[[float], None] = time.sle
                 raise TimeoutError("liveware download deadline exceeded")
             if os.name != "nt":
                 os.chmod(tmp, 0o755)
+            # Every writer publishes verified bytes. Another pin can replace
+            # them later; this process's resolver then fails closed by digest.
             os.replace(tmp, dest)
-            _write_marker(dest, expected)
+            if os.name != "nt":
+                directory = os.open(dest.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
             return
         except Exception as exc:
             if isinstance(exc, FutureTimeout) and (not result.done() or result.exception() is not exc):
@@ -281,11 +299,23 @@ def ensure_liveware_cli() -> None:
                                platform.system(), platform.machine())
                 return
             dest = d / liveware_binary_name()
-            if _verified_local(dest, asset, cached=False):
-                return
-            d.mkdir(parents=True, exist_ok=True)
-            _download(LIVEWARE_BASE_URL + asset, dest)
-            logger.info("ClawChat: verified liveware CLI downloaded to %s", d)
+            d.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd = os.open(d / ".install.lock", os.O_RDWR | os.O_CREAT, 0o600)
+            locked = False
+            try:
+                _lock_install_file(fd)
+                locked = True
+                if _verified_local(dest, asset, cached=False):
+                    return
+                _download(LIVEWARE_BASE_URL + asset, dest)
+                logger.info("ClawChat: verified liveware CLI downloaded to %s", d)
+            finally:
+                try:
+                    if locked:
+                        _lock_install_file(fd, release=True)
+                finally:
+                    os.close(fd)
+                # Keep the lock file: waiters must continue using the same inode.
     except Exception as exc:  # noqa: BLE001
         logger.warning("ClawChat: liveware CLI download skipped: %s", exc)
 

@@ -48,7 +48,7 @@ def test_shipped_pins_and_windows_arm64():
     assert cli.platform_assets('unsupported', 'arm64') is None
 
 
-def test_stream_verified_install_and_marker(cache, monkeypatch):
+def test_stream_verified_install(cache, monkeypatch):
     seen_modes = []
     class Checked(Response):
         def read(self, size):
@@ -62,7 +62,6 @@ def test_stream_verified_install_and_marker(cache, monkeypatch):
     if os.name != 'nt':
         assert seen_modes and set(seen_modes) == {0o600}
         assert cache.stat().st_mode & 0o777 == 0o755
-    assert cli._marker(cache).read_text().strip() == f'{cli.LIVEWARE_CLI_VERSION} {hashlib.sha256(BODY).hexdigest()}'
     assert cli.resolve_liveware_path() == str(cache)
     cli.ensure_liveware_cli()
     assert len(calls) == 1 and calls[0][1] == 60
@@ -79,7 +78,7 @@ def test_retry_once_then_install(cache, monkeypatch, caplog, failure):
     cli._download(cli.LIVEWARE_BASE_URL + ASSET, cache, sleep=sleeps.append)
     assert len(calls) == 2 and sleeps == [2.0]
     assert cache.read_bytes() == BODY
-    assert sorted(p.name for p in cache.parent.iterdir()) == ['liveware', 'liveware.version']
+    assert list(cache.parent.iterdir()) == [cache]
     if failure == 'digest':
         assert ASSET in caplog.text and 'expected=' in caplog.text and 'actual=' in caplog.text
 
@@ -94,23 +93,115 @@ def test_bad_download_never_executes_or_overwrites(cache, monkeypatch):
     assert cli.resolve_liveware_path() is None
 
 
-@pytest.mark.parametrize('damage', ['missing-marker', 'version', 'digest', 'binary', 'invalid-marker'])
+@pytest.mark.parametrize('damage', ['missing', 'binary', 'not-executable'])
 def test_invalid_cache_is_replaced(cache, monkeypatch, damage):
+    if damage == 'not-executable' and os.name == 'nt':
+        pytest.skip('POSIX executable mode required')
     fetch(monkeypatch, [Response(BODY), Response(BODY)])
     cli.ensure_liveware_cli()
-    if damage == 'missing-marker':
-        cli._marker(cache).unlink()
-    elif damage == 'version':
-        cli._marker(cache).write_text('outdated ' + hashlib.sha256(BODY).hexdigest())
-    elif damage == 'digest':
-        cli._marker(cache).write_text(cli.LIVEWARE_CLI_VERSION + ' wrong')
-    elif damage == 'invalid-marker':
-        cli._marker(cache).write_bytes(b'\xff')
+    if damage == 'missing':
+        cache.unlink()
+    elif damage == 'not-executable':
+        cache.chmod(0o600)
     else:
         cache.write_bytes(b'tampered-placeholder-binary')
     assert cli.resolve_liveware_path() is None
     cli.ensure_liveware_cli()
     assert cache.read_bytes() == BODY and cli.resolve_liveware_path() == str(cache)
+
+
+def test_different_pins_reject_and_replace_each_others_binary(cache, monkeypatch):
+    other_body = b'obvious-placeholder-other-cli-pin'
+    pin_a = hashlib.sha256(BODY).hexdigest()
+    pin_b = hashlib.sha256(other_body).hexdigest()
+    calls = fetch(monkeypatch, [Response(other_body), Response(BODY), Response(other_body)])
+    monkeypatch.setattr(cli, 'LIVEWARE_CLI_SHA256', {ASSET: pin_b})
+    cli.ensure_liveware_cli()
+    assert cli.resolve_liveware_path() == str(cache)
+    monkeypatch.setattr(cli, 'LIVEWARE_CLI_SHA256', {ASSET: pin_a})
+    assert cli.resolve_liveware_path() is None
+    cli.ensure_liveware_cli()
+    assert cache.read_bytes() == BODY
+    assert cli.resolve_liveware_path() == str(cache)
+    monkeypatch.setattr(cli, 'LIVEWARE_CLI_SHA256', {ASSET: pin_b})
+    assert cli.resolve_liveware_path() is None
+    cli.ensure_liveware_cli()
+    assert cache.read_bytes() == other_body
+    assert cli.resolve_liveware_path() == str(cache)
+    monkeypatch.setattr(cli, 'LIVEWARE_CLI_SHA256', {ASSET: pin_a})
+    assert cli.resolve_liveware_path() is None
+    assert len(calls) == 3
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='independent POSIX lock descriptions required')
+def test_install_lock_is_held_during_download(cache, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    class Blocked(Response):
+        def read(self, size):
+            entered.set()
+            assert release.wait(2)
+            return super().read(size)
+    fetch(monkeypatch, [Blocked(BODY)])
+    monkeypatch.setattr(cli, '_INSTALL_LOCK_TIMEOUT', 0.03)
+    installer = threading.Thread(target=cli.ensure_liveware_cli)
+    installer.start()
+    try:
+        assert entered.wait(2)
+        assert cli.resolve_liveware_path() is None
+        fd = os.open(cache.parent / '.install.lock', os.O_RDWR)
+        try:
+            assert os.fstat(fd).st_mode & 0o777 == 0o600
+            with pytest.raises(TimeoutError, match='install lock timed out'):
+                cli._lock_install_file(fd)
+        finally:
+            os.close(fd)
+    finally:
+        release.set()
+        installer.join(2)
+    assert not installer.is_alive()
+    assert cache.read_bytes() == BODY
+    assert cli.resolve_liveware_path() == str(cache)
+    fd = os.open(cache.parent / '.install.lock', os.O_RDWR)
+    try:
+        cli._lock_install_file(fd)
+        cli._lock_install_file(fd, release=True)
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='independent POSIX lock descriptions required')
+def test_install_lock_timeout_skips_download(cache, monkeypatch, caplog):
+    cache.write_bytes(b'previous-placeholder')
+    calls = fetch(monkeypatch, [])
+    monkeypatch.setattr(cli, '_INSTALL_LOCK_TIMEOUT', 0.03)
+    fd = os.open(cache.parent / '.install.lock', os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        cli._lock_install_file(fd)
+        cli.ensure_liveware_cli()
+    finally:
+        cli._lock_install_file(fd, release=True)
+        os.close(fd)
+    assert not calls
+    assert cache.read_bytes() == b'previous-placeholder'
+    assert cli.resolve_liveware_path() is None
+    assert 'WARNING' in caplog.text and 'install lock timed out' in caplog.text
+
+
+def test_cache_is_rechecked_after_acquiring_install_lock(cache, monkeypatch):
+    cache.write_bytes(b'previous-placeholder')
+    calls = fetch(monkeypatch, [])
+    lock = cli._lock_install_file
+    acquired = []
+    def lock_after_other_install(fd, *, release=False):
+        lock(fd, release=release)
+        if not release:
+            acquired.append(True)
+            cache.write_bytes(BODY)
+            cache.chmod(0o755)
+    monkeypatch.setattr(cli, '_lock_install_file', lock_after_other_install)
+    cli.ensure_liveware_cli()
+    assert acquired == [True] and not calls
+    assert cli.resolve_liveware_path() == str(cache)
 
 
 def test_resolve_memoizes_by_metadata(cache, monkeypatch):
@@ -201,7 +292,7 @@ def test_new_payload_passes_install_scanner(tmp_path, tag):
     # Include allowlisted new tests even before the author stages them.
     for name in ('test_liveware_cli_pinning.py', 'test_credential_file_modes.py',
                  'test_refresh_redaction.py', 'test_token_refresh_s_fixes.py',
-                 'test_liveware_intro_retry.py'):
+                 'test_liveware_intro_retry.py', 'test_liveware_skill_reseed.py'):
         shutil.copy2(Path(__file__).with_name(name), tree / 'tests' / name)
     result = scan._run_scan(scanner, tree)
     assert result is not None and not result['critical']
