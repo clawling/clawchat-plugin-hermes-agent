@@ -3,10 +3,10 @@
   "skills": {
     "openclaw": {
       "clawchat-core": {
-        "version": "1.13.2",
+        "version": "1.13.3",
         "path": "openclaw/clawchat-core/SKILL.md",
-        "sha256": "53426cf70e8c0e2c51bd74fb4c039ddea4d2ac3a22093bd4bf5751f4b6cb23dc",
-        "bytes": 27790
+        "sha256": "02612f49a2b9f3269612d4d9b13a9ceac65acec96b436e3fafdcbe5e958adc8e",
+        "bytes": 27882
       },
       "clawchat-liveware": {
         "version": "1.2.5",
@@ -41,10 +41,10 @@
     },
     "hermes": {
       "clawchat-core": {
-        "version": "1.19.2",
+        "version": "1.19.3",
         "path": "hermes/clawchat-core/SKILL.md",
-        "sha256": "c9d38ca5c7647b5f984e40dc47a36630e095e85b87f85ea2bdf263e6ef19ff19",
-        "bytes": 38528
+        "sha256": "718ccdbf2515311d6c1f4856acd9ee58f13c028bbd60cafcff15ec075d2c26e0",
+        "bytes": 38620
       },
       "clawchat-liveware": {
         "version": "1.3.2",

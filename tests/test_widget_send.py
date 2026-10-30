@@ -409,6 +409,12 @@ def test_registration_and_manifest_match():
         'type': 'string', 'description': 'the widget/v1 document as a JSON string; omit to get the format'}}}
 
 
+def test_description_asks_for_a_same_turn_resend_when_data_changes():
+    assert ('Only after they asked for one. When what one shows changes (a tap on it, '
+            'or the same data changed in chat), send it again in that turn. Each call is '
+            'the whole widget') in WIDGET_DESCRIPTION
+
+
 async def test_handler_logs_only_id_and_byte_length(adapter, caplog, monkeypatch):
     await live(adapter)
     monkeypatch.setattr(plugin_tools, '_record_tool_call', Mock(side_effect=AssertionError('must not persist content')))

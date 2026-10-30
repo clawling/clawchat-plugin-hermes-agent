@@ -15,7 +15,9 @@ WIDGET_SENT = "Sent. It shows on their home screen once their phone has it."
 WIDGET_OWNER_ONLY_MESSAGE = "Owner-only: only your owner can update their widgets."
 WIDGET_DESCRIPTION = (
     "Update a widget on your partner's phone home screen (ClawChat widget/v1). "
-    "Only after they asked for one. Each call is the whole widget, not a change, "
+    "Only after they asked for one. When what one shows changes (a tap on it, or "
+    "the same data changed in chat), send it again in that turn. Each call is the "
+    "whole widget, not a change, "
     "and goes to your private chat with them. Call it once with no widget to read "
     "the format before your first one. It needs ClawChat app 1.0.29 or later on "
     "their phone; older apps show it as unsupported content."
@@ -30,6 +32,7 @@ A widget is a small card on your partner's phone home screen. You write it with 
 
 - Send one only after your partner asked for a widget — a recipe card, or their own words.
 - If they keep asking you for the same thing (a price, a list, a count), you may offer a widget once. Make it only after they say yes. Never offer the same one twice.
+- A new one waits in ClawChat until they put it in a home-screen slot. Never say it is already on their home screen.
 
 ### When to update
 
@@ -74,7 +77,7 @@ Pick by what it shows. `[a; b]` is a `column`, `(a | b)` a `row`.
 
 ### Removing one
 
-Asked to remove a widget: send `{"v": 1, "id": "todo", "removed": true}` with its `id`. It leaves their widget list; a copy on the home screen shows "deleted" until they long-press it away. `[widget todo] removed` means they deleted it themselves. Either way, stop sending it. A later snapshot with that `id` brings it back, so send one only if they ask again.
+Asked to remove a widget: send `{"v": 1, "id": "todo", "removed": true}` with its `id`. It leaves their widget list, and any home-screen slot holding it goes empty. `[widget todo] removed` means they deleted it themselves. Either way, stop sending it. A later snapshot with that `id` brings it back, so send one only if they ask again.
 
 ### Document
 
