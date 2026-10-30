@@ -84,7 +84,7 @@ def test_skill_lists_registered_apps_before_create():
     text = (Path(__file__).resolve().parents[1] / 'skills/clawchat-liveware/SKILL.md').read_text()
     procedure = text.split('## Procedure', 1)[1]
     assert procedure.index('clawchat_list_apps()') < procedure.index('app create')
-    assert 'reuse or reconcile' in procedure
+    assert 'Reuse an app' in procedure and 'instead of creating' in procedure
 
 
 async def test_scheduled_intro_retry_keeps_its_original_generation(supervisor):
