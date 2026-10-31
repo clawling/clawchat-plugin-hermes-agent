@@ -1615,8 +1615,8 @@ async def _orchestrate(call, *, purpose, operation):
     from clawchat_gateway.gate_outcome import map_gate_outcome
     origin = orchestrate_handler_origin()
     if origin is None:
-        from clawchat_gateway.turn_grants import get_snapshot, session_context_value
-        snapshot = get_snapshot(session_context_value("HERMES_SESSION_MESSAGE_ID"))
+        from clawchat_gateway.turn_grants import effective_snapshot, session_context_value
+        snapshot = effective_snapshot(session_context_value("HERMES_SESSION_MESSAGE_ID"))
         return orchestrate_owner_only(operation, snapshot)
     purpose = purpose.strip()[:60].strip() if isinstance(purpose, str) else ""
     if not purpose:

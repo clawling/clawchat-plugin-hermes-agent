@@ -14,6 +14,7 @@ from test_tool_grants_admission import harness, message, OWNER_CHAT, CHAT
 from test_tool_grants_hook import host, context, TOOL
 from test_tool_grants_ask import approval
 from test_tool_grants_tools import management, PARAMS
+from test_tool_grants_v2 import search_catalog
 
 
 def latest(h):
@@ -405,3 +406,83 @@ async def test_followup_with_only_notification_candidate_uses_its_default_tools(
         assert bound.nonce == notification.nonce and not bound.owner_side
         assert guard._clawchat_pre_tool_decision(tool_name="terminal", args={},
             session_id="only-note-session", turn_id="notification")["action"] == "block"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("candidate", ["owner", "foreign"])
+@pytest.mark.parametrize("release", ["target", "context", "session"])
+async def test_queued_context_uses_one_effective_snapshot_at_every_boundary(
+        harness, host, search_catalog, candidate, release):
+    from clawchat_gateway import local_paths, turn_attachments
+
+    a = harness.adapter
+    assert guard._install_grant_catalog_filter()
+
+    def visible():
+        return {item["function"]["name"] for item in
+                search_catalog.get_tool_definitions(skip_tool_search_assembly=True)}
+
+    await a._handle_inbound(notice(a, "awareness"))
+    notification = latest(harness)
+    with host(**context(notification)):
+        guard.clawchat_pre_llm_call(session_id="effective-session", turn_id="notice")
+        assert turns.effective_snapshot(notification.nonce).nonce == notification.nonce
+        assert "terminal" not in visible()
+        speaker = a._owner_user_id() if candidate == "owner" else PARAMS["userIds"][0]
+        await a._handle_inbound(message(speaker, "Next message", chat=OWNER_CHAT))
+        target = latest(harness)
+        guard.clawchat_pre_llm_call(session_id="effective-session", turn_id="follow-up")
+        current = turns.effective_snapshot(notification.nonce)
+        allowed = candidate == "owner"
+        assert current.nonce == target.nonce and current.owner_side is allowed
+        assert turns.bound_snapshot(notification.nonce).nonce == target.nonce
+        assert turns.get_snapshot(notification.nonce).nonce == notification.nonce
+        assert ("terminal" in visible()) is allowed
+        assert guard._guest_catalog_turn() is (not allowed)
+        assert local_paths.turn_allows_local_paths() is allowed
+        assert turn_attachments.current_snapshot(OWNER_CHAT).nonce == target.nonce
+        assert bool(guard.orchestrate_handler_origin(strict=True)) is allowed
+        for ids in ({}, {"session_id": "effective-session", "turn_id": "follow-up"}):
+            decision = guard._clawchat_pre_tool_decision(tool_name="terminal", args={}, **ids)
+            assert decision is None if allowed else decision["action"] == "block"
+
+        if release == "target":
+            turns.release_turn(target.nonce)
+            assert turns.effective_snapshot(notification.nonce).nonce == notification.nonce
+            assert turns.bound_snapshot(notification.nonce).nonce == notification.nonce
+        elif release == "context":
+            turns.release_turn(notification.nonce)
+            assert turns.effective_snapshot(notification.nonce) is None
+            assert turns.bound_snapshot(notification.nonce) is None
+            assert turns.get_snapshot(target.nonce) is not None
+        else:
+            turns.release_session(a._account_id(), a._grant_session_key(notice(a, "awareness")))
+            assert turns.effective_snapshot(notification.nonce) is None
+            assert turns.bound_snapshot(notification.nonce) is None
+        assert notification.nonce not in turns._context_execution
+        assert "terminal" not in visible()
+        # A live notification fallback stays restricted. Removing the context
+        # entirely retains the existing legacy policy for calls without IDs.
+        if release == "target":
+            assert not local_paths.turn_allows_local_paths()
+            assert guard._clawchat_pre_tool_decision(tool_name="terminal", args={})["action"] == "block"
+        assert guard._clawchat_pre_tool_decision(tool_name="terminal", args={},
+            session_id="effective-session", turn_id="follow-up")["action"] == "block"
+
+
+@pytest.mark.asyncio
+async def test_effective_snapshot_falls_back_when_execution_is_unbound(harness, host, monkeypatch):
+    a = harness.adapter
+    await a._handle_inbound(notice(a, "awareness"))
+    notification = latest(harness)
+    with host(**context(notification)):
+        guard.clawchat_pre_llm_call(session_id="unbound-session", turn_id="notice")
+        await a._handle_inbound(message(a._owner_user_id(), chat=OWNER_CHAT))
+        owner = latest(harness)
+        guard.clawchat_pre_llm_call(session_id="unbound-session", turn_id="owner")
+        with monkeypatch.context() as patch:
+            patch.setattr(turns, "_bindings", {key: value for key, value in turns._bindings.items()
+                                              if key != owner.nonce})
+            assert turns.effective_snapshot(notification.nonce).nonce == notification.nonce
+            assert turns.bound_snapshot(notification.nonce).nonce == notification.nonce
+            assert guard._clawchat_pre_tool_decision(tool_name="terminal", args={})["action"] == "block"

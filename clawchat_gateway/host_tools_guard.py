@@ -520,7 +520,7 @@ def take_orchestrate_origin(tool_call_id):
 
 
 def orchestrate_handler_origin(*, strict=False):
-    from clawchat_gateway.turn_grants import get_snapshot, session_context_value
+    from clawchat_gateway.turn_grants import effective_snapshot, get_snapshot, session_context_value
     try:
         from tools.approval_context import _approval_tool_call_id
         record = take_orchestrate_origin(_approval_tool_call_id.get())
@@ -530,7 +530,7 @@ def orchestrate_handler_origin(*, strict=False):
             return origin if current == origin else None
     except ImportError:
         pass
-    return orchestrate_owner_turn(get_snapshot(session_context_value("HERMES_SESSION_MESSAGE_ID")), strict=strict)
+    return orchestrate_owner_turn(effective_snapshot(session_context_value("HERMES_SESSION_MESSAGE_ID")), strict=strict)
 
 
 def orchestrate_owner_only(operation, snapshot=None):
@@ -578,11 +578,11 @@ def _filter_grant_definitions(definitions, snapshot, *, owner_fork=False):
 def _guest_catalog_turn():
     """Only a matching owner snapshot can bypass ClawChat catalog isolation."""
     try:
-        from clawchat_gateway.turn_grants import get_snapshot, session_context_value
+        from clawchat_gateway.turn_grants import effective_snapshot, session_context_value
 
         if session_context_value("HERMES_SESSION_PLATFORM") != "clawchat":
             return False
-        snapshot = get_snapshot(session_context_value("HERMES_SESSION_MESSAGE_ID"))
+        snapshot = effective_snapshot(session_context_value("HERMES_SESSION_MESSAGE_ID"))
         return not (snapshot and snapshot.chat_id == session_context_value("HERMES_SESSION_CHAT_ID")
                     and (snapshot.owner_side or snapshot.legacy_owner_tools))
     except Exception:  # noqa: BLE001 - uncertain authority must not expose extra catalog entries
@@ -664,14 +664,14 @@ def _grant_search_bridge_allowed(tool_name, snapshot):
     try:
         import model_tools
         import tools.tool_search as ts
-        from clawchat_gateway.turn_grants import get_snapshot, session_context_value
+        from clawchat_gateway.turn_grants import effective_snapshot, session_context_value
 
         if (tool_name == "tool_call" or tool_name not in ts.BRIDGE_TOOL_NAMES
                 or not getattr(model_tools.get_tool_definitions, "_clawchat_grants", False)):
             return False
         if not _guest_search_guard_complete():
             return False
-        current = get_snapshot(session_context_value("HERMES_SESSION_MESSAGE_ID"))
+        current = effective_snapshot(session_context_value("HERMES_SESSION_MESSAGE_ID"))
         if current is None or current.chat_id != session_context_value("HERMES_SESSION_CHAT_ID"):
             return False
         # Compare complete compiled rules: Mapping equality sees only finite
@@ -722,7 +722,7 @@ def _install_grant_catalog_filter() -> bool:
     try:
         import inspect
         import model_tools
-        from clawchat_gateway.turn_grants import get_snapshot, session_context_value
+        from clawchat_gateway.turn_grants import effective_snapshot, session_context_value
 
         with _GRANT_CATALOG_LOCK:
             original = model_tools.get_tool_definitions
@@ -738,7 +738,7 @@ def _install_grant_catalog_filter() -> bool:
                     return original(*args, **kwargs)
                 nonce = session_context_value("HERMES_SESSION_MESSAGE_ID")
                 chat_id = session_context_value("HERMES_SESSION_CHAT_ID")
-                snapshot = get_snapshot(nonce)
+                snapshot = effective_snapshot(nonce)
                 if snapshot and snapshot.chat_id != chat_id:
                     snapshot = None
                 bound = signature.bind(*args, **kwargs)
@@ -1286,9 +1286,9 @@ def _owner_fork_parent(nonce: str, chat_id: str) -> bool:
     """Prove an owner-chat fork's live or recently released owner-side parent."""
     if _session_turn() != "owner" or not nonce:
         return False
-    from clawchat_gateway.turn_grants import get_snapshot, get_released_turn_origin
+    from clawchat_gateway.turn_grants import effective_snapshot, get_released_turn_origin
 
-    pending = get_snapshot(nonce)
+    pending = effective_snapshot(nonce)
     origin = ((pending.chat_id, pending.owner_side) if pending is not None
               else get_released_turn_origin(nonce))
     return bool(origin and origin[0] == chat_id and origin[1])
@@ -1600,14 +1600,14 @@ def _clawchat_pre_tool_decision_raw(*, tool_name: str = "", args: Any = None, **
                 return None
             message = GRANT_BLOCK_MESSAGE
             # Upgrade hints are only disclosed on a verified owner turn.
-            from clawchat_gateway.turn_grants import get_snapshot, session_context_value
-            snapshot = get_snapshot(session_context_value("HERMES_SESSION_MESSAGE_ID"))
+            from clawchat_gateway.turn_grants import effective_snapshot, session_context_value
+            snapshot = effective_snapshot(session_context_value("HERMES_SESSION_MESSAGE_ID"))
             if (_tool_grants_enabled() and not kwargs.get("turn_id") and snapshot and snapshot.owner_side and snapshot.owner_verified
                     and snapshot.chat_id == session_context_value("HERMES_SESSION_CHAT_ID")
                     and session_context_value("HERMES_SESSION_PLATFORM") == "clawchat"):
                 message = MANAGEMENT_UPGRADE_MESSAGE
             return {"action": "block", "message": message}
-        from clawchat_gateway.turn_grants import get_snapshot, lookup_snapshot_for_call, session_context_value
+        from clawchat_gateway.turn_grants import effective_snapshot, lookup_snapshot_for_call, session_context_value
         from clawchat_gateway.tool_grants import (
             evaluate_tool_grant, grant_failure_code,
         )
@@ -1635,7 +1635,7 @@ def _clawchat_pre_tool_decision_raw(*, tool_name: str = "", args: Any = None, **
         if snapshot and (snapshot.owner_side or snapshot.legacy_owner_tools):
             return None
         if not _host_supports_pre_llm_call():
-            legacy = get_snapshot(nonce)
+            legacy = effective_snapshot(nonce)
             if (legacy and legacy.legacy_owner_tools and legacy.chat_id == chat_id
                     and session_context_value("HERMES_SESSION_PLATFORM") == "clawchat"):
                 # Some old hosts pass empty execution IDs despite lacking the
@@ -1645,7 +1645,7 @@ def _clawchat_pre_tool_decision_raw(*, tool_name: str = "", args: Any = None, **
         # the owner's chat, override the host's session-level owner inference.
         # An old host with no execution IDs keeps approve only for attributed plugin turns.
         session_turn = _session_turn()
-        pending_snapshot = get_snapshot(nonce)
+        pending_snapshot = effective_snapshot(nonce)
         # Old hosts cannot bind a call, but a plugin turn still names its
         # speakers. Host-started turns carry no plugin nonce: no approve.
         legacy_attributed = bool(not _host_supports_pre_llm_call() and pending_snapshot

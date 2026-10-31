@@ -151,7 +151,7 @@ async def test_host_internal_turn_uses_existing_owner_dm_attribution(host, monke
         message_id: str = ''
 
     # Overlapping turns left registered by other tests would merge into this one.
-    for name in ('_snapshots', '_bindings', '_execution_nonces', '_active', '_session_nonces',
+    for name in ('_snapshots', '_bindings', '_execution_nonces', '_context_execution', '_active', '_session_nonces',
                  '_released_turns', '_unverified_inputs'):
         monkeypatch.setattr(turns, name, {})
     monkeypatch.setattr(turns, '_consumed_batches', set())

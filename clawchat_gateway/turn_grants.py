@@ -69,6 +69,7 @@ _session_nonces: dict[tuple[str, str], set[str]] = {}
 # another input's marker with the wrong nonce. None means not registered yet.
 _unverified_inputs: dict[tuple[str, str], dict[str, tuple[str | None, str]]] = {}
 _execution_nonces: dict[tuple[str, str], str] = {}
+_context_execution: dict[str, str] = {}
 # A consumed third-party batch retains its frozen restrictions, but cannot
 # contaminate registrations for the next batch.
 _consumed_batches: set[str] = set()
@@ -176,6 +177,19 @@ def get_snapshot(nonce: str) -> TurnSnapshot | None:
         return _snapshots.get(nonce)
 
 
+def _effective_snapshot_locked(context_nonce: str) -> TurnSnapshot | None:
+    target = _snapshots.get(_context_execution.get(context_nonce, ""))
+    if target is not None and target.nonce in _bindings:
+        return target
+    return _snapshots.get(context_nonce)
+
+
+def effective_snapshot(context_nonce: str) -> TurnSnapshot | None:
+    """Resolve a host context's current execution, retaining the raw fallback."""
+    with _lock:
+        return _effective_snapshot_locked(context_nonce)
+
+
 def get_released_turn_origin(nonce: str) -> tuple[str, bool, float] | None:
     """Read recent attribution only; never restore grants or owner verification."""
     with _lock:
@@ -253,6 +267,9 @@ def _consume_unverified_locked(nonce: str) -> None:
 
 
 def _unbind_locked(nonce: str) -> None:
+    for context, target in list(_context_execution.items()):
+        if context == nonce or target == nonce:
+            del _context_execution[context]
     execution = _bindings.pop(nonce, None)
     if execution is not None:
         _execution_nonces.pop(execution, None)
@@ -303,11 +320,13 @@ def release_session(account_id: str, session_key: str) -> None:
 def bound_snapshot(nonce: str) -> TurnSnapshot | None:
     """Attachment delivery requires a live execution binding, even after context reset."""
     with _lock:
-        return _snapshots.get(nonce) if nonce in _bindings else None
+        snapshot = _effective_snapshot_locked(nonce)
+        return snapshot if snapshot is not None and snapshot.nonce in _bindings else None
 
 
 def bind_turn(nonce: str, session_id: str, turn_id: str) -> None:
     with _lock:
+        context_nonce = nonce
         context = _snapshots.get(nonce)
         execution = (session_id, turn_id)
         if context is None or not session_id or not turn_id or execution in _execution_nonces:
@@ -333,6 +352,7 @@ def bind_turn(nonce: str, session_id: str, turn_id: str) -> None:
             nonce = max(inputs or candidates, key=lambda item: item.created_at).nonce
         _bindings[nonce] = execution
         _execution_nonces[execution] = nonce
+        _context_execution[context_nonce] = nonce
         _consume_unverified_locked(nonce)
 
 

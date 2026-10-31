@@ -618,12 +618,12 @@ def test_guest_search_guard_neutralizes_only_unverified_clawchat_turns(host, sea
         values["HERMES_SESSION_MESSAGE_ID"] = "missing"
     if turn == "wrong-chat":
         # An owner snapshot in another chat must not bypass the guard.
-        monkeypatch.setattr(turns, "get_snapshot", lambda _: replace(snapshot, owner_side=True))
+        monkeypatch.setattr(turns, "effective_snapshot", lambda _: replace(snapshot, owner_side=True))
         values["HERMES_SESSION_CHAT_ID"] = "cnv_other"
     if turn == "error":
         def broken_snapshot(_):
             raise RuntimeError("snapshot unavailable")
-        monkeypatch.setattr(turns, "get_snapshot", broken_snapshot)
+        monkeypatch.setattr(turns, "effective_snapshot", broken_snapshot)
     if turn == "other-platform":
         values["HERMES_SESSION_PLATFORM"] = "telegram"
     try:
@@ -672,11 +672,11 @@ def test_search_bridges_fail_closed_without_matching_filtered_catalog(host, sear
             # The finite Mapping view is identical, but future-tool access differs.
             broader = resolve([row("terminal", kind="tool"), row()])
             assert dict(broader) == dict(snapshot.grants)
-            monkeypatch.setattr(turns, "get_snapshot", lambda _: replace(snapshot, grants=broader))
+            monkeypatch.setattr(turns, "effective_snapshot", lambda _: replace(snapshot, grants=broader))
         elif failure in {"chat", "grants", "speakers"}:
             changes = {"chat_id": "cnv_other"} if failure == "chat" else (
                 {"grants": resolve([row()])} if failure == "grants" else {"non_owner_speakers": frozenset({"usr_bob"})})
-            monkeypatch.setattr(turns, "get_snapshot", lambda _: replace(snapshot, **changes))
+            monkeypatch.setattr(turns, "effective_snapshot", lambda _: replace(snapshot, **changes))
         if failure == "overlap":
             overlap = turns.register_turn(account_id="usr_agent", chat_id=snapshot.chat_id,
                 speakers=("usr_bob",), grants=resolve([], ("usr_bob",)), session_key="rules")
@@ -700,7 +700,7 @@ def test_search_bridges_accept_equivalent_catalog_snapshot(host, search_catalog,
     with bound_rules([row("terminal", kind="tool")]) as snapshot, host(**context(snapshot)):
         equivalent = replace(snapshot, grants=resolve([row("terminal", kind="tool")]))
         assert equivalent is not snapshot and equivalent.grants is not snapshot.grants
-        monkeypatch.setattr(turns, "get_snapshot", lambda _: equivalent)
+        monkeypatch.setattr(turns, "effective_snapshot", lambda _: equivalent)
         assert call(bridge, turn_id="t") is None
 
 
