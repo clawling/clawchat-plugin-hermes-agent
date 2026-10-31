@@ -3620,7 +3620,8 @@ class ClawChatConnection:
     def _sanitize_secret_text(self, text: str | None) -> str | None:
         if text is None:
             return None
-        text = redact_configured_secrets(text, self._cfg.base_url, self._cfg.websocket_url)
+        text = redact_configured_secrets(
+            text, self._cfg.base_url, self._cfg.websocket_url, secrets=(self._cfg.token,))
         token = self._cfg.token
         if token:
             text = text.replace(token, "***")

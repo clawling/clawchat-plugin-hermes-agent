@@ -259,29 +259,32 @@ def configured_secret_forms(url: str | None) -> tuple[str, ...]:
     return tuple(sorted((form for form in forms if len(form) >= _SECRET_MIN), key=len, reverse=True))
 
 
-def redact_configured_secrets(text: str, *urls: str | None) -> str:
-    """Replace every form of the configured URLs' credentials with `***`,
-    anywhere in the text (see `configured_secret_forms`)."""
-    for url in urls:
-        for form in configured_secret_forms(url):
-            spans = _secret_spans(text, form)
-            if not spans:
-                continue
-            merged: list[list[int]] = []
-            for start, end in sorted(spans):
-                if merged and start <= merged[-1][1]:
-                    merged[-1][1] = max(merged[-1][1], end)
-                else:
-                    merged.append([start, end])
-            parts: list[str] = []
-            copied = 0
-            for start, end in merged:
-                parts.append(text[copied:start])
-                parts.append(_SECRET_PLACEHOLDER)
-                copied = end
-            parts.append(text[copied:])
-            text = "".join(parts)
-    return text
+def redact_configured_secrets(text: str, *urls: str | None, secrets: tuple[str | None, ...] = ()) -> str:
+    """Replace every form of the configured URLs' credentials, and every exact
+    in-scope secret, with `***`, anywhere in the text (see
+    `configured_secret_forms`). All matches are found on the same text and
+    overlapping ones merged, so a credential inside a token cannot break the
+    token's match; a match ending in `@` keeps that `@`, so another URL's
+    userinfo delimiter survives for the URL scan."""
+    patterns = [form for url in urls for form in configured_secret_forms(url)]
+    patterns += [secret for secret in secrets if secret and len(secret) >= _SECRET_MIN]
+    spans = [span for pattern in patterns for span in _secret_spans(text, pattern)]
+    if not spans:
+        return text
+    merged: list[list[int]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    parts: list[str] = []
+    copied = 0
+    for start, end in merged:
+        parts.append(text[copied:start])
+        parts.append(_SECRET_PLACEHOLDER + ("@" if text[end - 1] == "@" else ""))
+        copied = end
+    parts.append(text[copied:])
+    return "".join(parts)
 
 
 def redact_refresh_message(value: object, *secrets: str) -> str:
@@ -1177,19 +1180,19 @@ class ClawChatApiClient:
             connect_failed = isinstance(reason, (ConnectionRefusedError, socket.gaierror))
             raise ClawChatApiError(
                 "transport",
-                redact_refresh_message(redact_configured_secrets(str(reason or exc), self._base_url), *secret_values),
+                redact_refresh_message(redact_configured_secrets(str(reason or exc), self._base_url, secrets=secret_values), *secret_values),
                 path="/v1/auth/refresh",
                 connect_failed=connect_failed,
             ) from None
         except TimeoutError as exc:
             raise ClawChatApiError(
                 "transport",
-                redact_refresh_message(redact_configured_secrets(str(exc), self._base_url), *secret_values) or "refresh request timed out",
+                redact_refresh_message(redact_configured_secrets(str(exc), self._base_url, secrets=secret_values), *secret_values) or "refresh request timed out",
                 path="/v1/auth/refresh",
             ) from None
         except Exception as exc:  # noqa: BLE001
             raise ClawChatApiError(
-                "transport", redact_refresh_message(redact_configured_secrets(str(exc), self._base_url), *secret_values),
+                "transport", redact_refresh_message(redact_configured_secrets(str(exc), self._base_url, secrets=secret_values), *secret_values),
                 path="/v1/auth/refresh",
             ) from None
 
@@ -1207,7 +1210,8 @@ class ClawChatApiClient:
         msg = ""
         if isinstance(payload, dict):
             msg = redact_refresh_message(
-                redact_configured_secrets(str(payload.get("msg") or payload.get("message") or ""), self._base_url),
+                redact_configured_secrets(
+                    str(payload.get("msg") or payload.get("message") or ""), self._base_url, secrets=secret_values),
                 *secret_values)
         if status != 200 and code != REFRESH_CODE_INVALID_REFRESH:
             raise ClawChatApiError(

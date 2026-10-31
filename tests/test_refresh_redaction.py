@@ -173,7 +173,7 @@ def test_configured_secrets_are_removed_anywhere(text, expected):
     # urllib decodes %20 before echoing the host.
     ('placeholder%20pass', "nonnumeric port: 'placeholder pass@example.com'"),  # redact-allow:email
     ('placeholder%20pass', 'opening https://u:placeholder%20pass@example.com/'),  # redact-allow:email
-    # A password with colons: only the part after the last colon is echoed.
+    # A password with colons: only the part after some colon is echoed.
     ('place:holder:pass', "nonnumeric port: 'holder:pass@example.com'"),  # redact-allow:email
     ('place:holder-pass', "nonnumeric port: 'holder-pass@example.com'"),  # redact-allow:email
     # Backslashes and quotes, raw, JSON-escaped and repr-escaped.
@@ -350,3 +350,27 @@ async def test_activation_stale_user_warning_strips_url_userinfo(monkeypatch, ca
     assert error.value is stop and connect.await_count == 2
     assert 'no longer exists on https://example.com' in caplog.text
     assert 'placeholder-user' not in caplog.text and password not in caplog.text
+
+
+def test_decoded_secret_keeps_another_urls_userinfo_delimiter():
+    base_url = 'https://u:placeholder-pass%40@example.com'  # redact-allow:email
+    text = 'failed https://other-user:other-secret-placeholder-pass@example.org/v1'  # redact-allow:email
+    redacted = api.redact_configured_secrets(text, base_url)
+    assert api.strip_url_userinfo(redacted) == 'failed https://example.org/v1'
+    assert 'other-' not in api.redact_refresh_message(redacted)
+
+
+def test_configured_secret_inside_an_in_scope_token_does_not_split_it(monkeypatch):
+    overlapping = 'placeholder-refresh-prefix-' + 'access-placeholder-private-tail'
+    http = api.ClawChatApiClient(
+        base_url='https://u:access-placeholder@example.com',  # redact-allow:email
+        token=ACCESS, device_id='placeholder-device',
+    )
+
+    def fail(_request, **_kwargs):
+        raise URLError(f'rejected {overlapping} here')
+
+    monkeypatch.setattr(api, 'urlopen', fail)
+    with pytest.raises(api.ClawChatApiError) as error:
+        http._auth_refresh_sync(overlapping, 'placeholder-device')
+    assert error.value.message == 'rejected *** here'
