@@ -265,12 +265,11 @@ while time.monotonic() < deadline:
     print(f'[{now()}] attempt={attempt} running: {argv}', flush=True)
     rc = 127
     try:
-        rc = subprocess.call(argv, env=os.environ, stdin=subprocess.DEVNULL,
-                             timeout=max(0.001, deadline - time.monotonic()))
+        # No timeout: without a service manager the restart runs the new
+        # gateway in the foreground, so a successful attempt never returns.
+        rc = subprocess.call(argv, env=os.environ, stdin=subprocess.DEVNULL)
     except OSError as exc:
         print(f'[{now()}] could not start: {exc}', flush=True)
-    except subprocess.TimeoutExpired:
-        rc = 124
     print(f'[{now()}] attempt={attempt} exit_code={rc}', flush=True)
     if rc == 0:
         break

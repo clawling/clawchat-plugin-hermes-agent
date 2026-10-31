@@ -4822,14 +4822,17 @@ class ClawChatAdapter(BasePlatformAdapter):
             pending = self._owner_input_pending[key]
             while pending and self._owner_input_tasks.get(key) is task:
                 inbound, deadline = pending[0]
-                while has_non_owner_turn(self._account_id(), key) and time.monotonic() < deadline:
+                # The busy check also expires snapshots the idle host left behind.
+                while (time.monotonic() < deadline and self._grant_session_busy(key)
+                       and has_non_owner_turn(self._account_id(), key)):
                     await asyncio.sleep(self._owner_input_poll_seconds)
                     if self._owner_input_tasks.get(key) is not task:
                         return
                 pending.pop(0)
-                await self._route_inbound(inbound)
-        except Exception:
-            logger.warning('clawchat held owner input dispatch failed', exc_info=True)
+                try:
+                    await self._route_inbound(inbound)
+                except Exception:  # noqa: BLE001 - keep later held inputs
+                    logger.warning('clawchat held owner input dispatch failed', exc_info=True)
         finally:
             if self._owner_input_tasks.get(key) is task:
                 self._owner_input_tasks.pop(key, None)

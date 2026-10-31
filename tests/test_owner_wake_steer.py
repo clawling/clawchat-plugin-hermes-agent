@@ -263,6 +263,7 @@ def test_restart_retries_log_attempts_and_stop_at_deadline(monkeypatch, capsys, 
         sleeps.append(seconds)
         elapsed[0] += seconds
     def call(argv, **kw):
+        assert 'timeout' not in kw  # a foreground replacement gateway never returns
         calls.append(argv)
         return 0 if len(calls) == success_on else 1
     monkeypatch.setattr(time, 'monotonic', lambda: elapsed[0])
@@ -370,3 +371,38 @@ async def test_proactive_request_wakes_even_if_owner_receipt_fails(request_env, 
     await asyncio.gather(*h.adapter._request_wake_tasks)
     assert latest_request(h)['wake_state'] == 'delivered'
     assert not turns.get_snapshot(h.harness.events[-1].source.message_id).owner_side
+
+
+async def test_idle_host_releases_a_lingering_notice_snapshot_before_the_deadline(harness, monkeypatch):
+    a = harness.adapter
+    monkeypatch.setenv('HERMES_GATEWAY_BUSY_INPUT_MODE', 'steer')
+    a._owner_input_poll_seconds = 0.005
+    await a._handle_inbound(notice(a, 'awareness'))
+    await a._on_message(message('usr_owner', 'after idle', chat=OWNER_CHAT).raw_message)
+    await asyncio.sleep(0.01)
+    assert len(harness.events) == 1
+    # The host went idle without a release callback; the snapshot lingers.
+    a._active_sessions.clear()
+    await wait_for_events(harness, 2)
+    assert harness.events[1].text == 'after idle'
+    await asyncio.gather(*a._owner_input_tasks.values())
+
+
+async def test_a_failed_held_dispatch_keeps_later_held_inputs(harness, monkeypatch):
+    a = harness.adapter
+    monkeypatch.setenv('HERMES_GATEWAY_BUSY_INPUT_MODE', 'steer')
+    a._owner_input_poll_seconds = 0.005
+    await a._handle_inbound(notice(a, 'awareness'))
+    original = harness.events[0]
+    route = a._route_inbound
+    async def flaky(inbound):
+        if inbound.text == 'first held':
+            raise RuntimeError('dispatch failed')
+        await route(inbound)
+    monkeypatch.setattr(a, '_route_inbound', flaky)
+    for text in ('first held', 'second held'):
+        await a._on_message(message('usr_owner', text, chat=OWNER_CHAT).raw_message)
+    await finish(harness, original)
+    await wait_for_events(harness, 2)
+    assert harness.events[1].text == 'second held'
+    await asyncio.gather(*a._owner_input_tasks.values())
