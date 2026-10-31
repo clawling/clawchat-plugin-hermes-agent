@@ -80,7 +80,7 @@ or recorded server.
 
 The supported development loop is:
 
-1. Activate a fresh Hermes Agent v0.12.0+ instance.
+1. Activate a fresh Hermes Agent instance in the [supported range](install.md#compatibility).
 2. `hermes plugins install` this repo (or symlink the source tree into
    `$HERMES_HOME/plugins/clawchat/`).
 3. Run `hermes gateway setup` or `hermes clawchat activate <CODE>` to
@@ -108,7 +108,7 @@ reached the agent.
 When a question crosses into Hermes host behavior — plugin SDK contract,
 `ctx.register_platform`/`ctx.register_skill`, gateway dispatch, the
 `send_message` tool, or activation lifecycle — point `tmp/hermes/` at a
-matching Hermes Agent v0.12.0+ checkout and follow
+matching Hermes Agent checkout in the [supported range](install.md#compatibility) and follow
 [`./hermes-source-lookup.md`](./hermes-source-lookup.md). The path is
 already in `.gitignore`; nothing committed depends on it.
 
@@ -165,12 +165,21 @@ file, even as test data — a destructive shell command (recursive delete of
 a root path), reading a secrets file, a reverse shell, and similar. Use a
 harmless placeholder such as `run-cleanup --everything` instead.
 `tests/test_install_scan.py` runs the real scanner over a copy of the
-tracked files and fails on any critical finding; it needs a Hermes source
-checkout (`$HERMES_SOURCE_DIR`, or `tmp/hermes` / `tmp/hermes-agent` in this
-checkout or, from a linked worktree, the main checkout) and skips without
-one, so run it with one present before a release. It also runs the scanner of
-each pinned older Hermes release, so the checkout needs those tags
-(`git fetch --tags`). Prose counts too: older scanners rate `host` followed
+tracked files and fails on any critical finding. The shared
+`tests/hermes_source.py` helper checks `HERMES_SOURCE_DIR` first, then
+`tmp/hermes` or `tmp/hermes-agent` here and in the main checkout from a linked
+worktree. Without the required source marker, the skip reason lists every
+searched path; `HERMES_SOURCE_REQUIRED=1` turns these skips into failures.
+The pytest header shows the source found (or searched paths) and whether the
+session uses real Hermes or the double; the session stays on the double unless
+`HERMES_REAL_HOST=1` (most tests are written against it).
+`tests/test_multiplex_isolation.py` is the exception: it needs a Hermes
+checkout on `PYTHONPATH` and runs on its own
+([multiplex-profile-isolation.md](multiplex-profile-isolation.md)).
+Run with a source present before a release. The scan also runs each pinned older Hermes scanner, so the checkout
+needs those tags (`git fetch --tags`). Hermes v0.20.3–v0.20.6 are an
+[unsupported range](install.md#compatibility), so their scanners are not pinned
+by these tests. Prose counts too: older scanners rate `host` followed
 later on the same line by a `$` as DNS exfiltration, so keep "host" and a
 `$VARIABLE` off the same line.
 

@@ -244,6 +244,8 @@ tmp
 #     developer's real Hermes install (.env credentials, SQLite).
 tests/*
 !tests/conftest.py
+!tests/hermes_source.py
+!tests/test_host_version.py
 !tests/test_instance_lock.py
 !tests/test_install_conflict.py
 !tests/test_takeover_close_backoff.py

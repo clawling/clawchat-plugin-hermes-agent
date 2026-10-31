@@ -1,10 +1,15 @@
 # Hermes ClawChat
 
-ClawChat gateway plugin for Hermes Agent v0.12.0+. Registers the
+ClawChat gateway plugin for Hermes Agent v0.12.0 or newer, except
+v0.20.3–v0.20.6. Registers the
 `clawchat` gateway platform via `ctx.register_platform(...)`, ships
 all bundled `skills/*/SKILL.md` skills (currently six), and exposes fifty-three `clawchat_*`
 tools to the agent. No Hermes source patch or Node install shim is
 required.
+
+Those four releases block this plugin in their install-time security scan;
+upgrade with `hermes update` to v0.21.6 or newer, as described
+in [Compatibility](docs/install.md#compatibility).
 
 ```bash
 hermes plugins install clawling/clawchat-plugin-hermes-agent

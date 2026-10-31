@@ -426,6 +426,18 @@ def _warn_on_shared_identity() -> None:
         logger.debug("ClawChat identity-collision check skipped: %s", exc)
 
 
+def _warn_on_unsupported_host() -> None:
+    """Best-effort version hint; never breaks platform registration."""
+    try:
+        from clawchat_gateway.host_version import unsupported_host_message
+
+        message = unsupported_host_message()
+        if message is not None:
+            logger.warning("%s", message)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("ClawChat Hermes version check skipped: %s", exc)
+
+
 def _ensure_host_defaults() -> None:
     """Fill missing ClawChat host defaults (memory routing) in config.yaml.
 
@@ -447,6 +459,7 @@ def _register_platform(ctx) -> bool:
     _migrate_legacy_config_tokens()
     _ensure_host_defaults()
     _warn_on_shared_identity()
+    _warn_on_unsupported_host()
 
     register_platform = getattr(ctx, "register_platform", None)
     if not callable(register_platform):

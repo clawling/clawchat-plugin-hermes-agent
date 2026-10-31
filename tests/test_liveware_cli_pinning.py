@@ -281,9 +281,8 @@ def test_ensure_never_raises_on_install_failure(cache, monkeypatch, caplog):
 def test_new_payload_passes_install_scanner(tmp_path, tag):
     import shutil
     import test_install_scan as scan
-    source = scan._hermes_source()
-    if source is None:
-        pytest.skip('no local Hermes scanner checkout')
+    from hermes_source import require_hermes_source
+    source = require_hermes_source('tools/plugin_guard.py')
     scanner = source if tag is None else scan._pinned_scanner(source, tag, tmp_path / 'scanners')
     if scanner is None:
         pytest.skip('pinned scanner tag unavailable locally')

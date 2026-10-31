@@ -97,6 +97,11 @@ def handle_clawchat_cli(args: argparse.Namespace) -> int:
 
         home = hermes_home()
         if command == "status":
+            from clawchat_gateway.host_version import unsupported_host_message
+
+            message = unsupported_host_message()
+            if message is not None:
+                print(message, file=sys.stderr)
             print(json.dumps(install_status(home, _status_user_id()), indent=2, ensure_ascii=False))
             return 0
         try:

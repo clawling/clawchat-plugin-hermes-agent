@@ -6,9 +6,17 @@ This is the install and activation guide for Hermes operators.
 
 | Component       | Requirement                                  |
 |-----------------|----------------------------------------------|
-| Hermes Agent    | `v0.12.0` or newer (uses `ctx.register_platform`) |
+| Hermes Agent    | `v0.12.0` or newer, except `v0.20.3`–`v0.20.6` |
 | Python runtime  | `>=3.11` (per `pyproject.toml`)              |
 | Dependencies    | `websockets>=13,<16`                        |
+
+Hermes v0.20.3–v0.20.6 are unsupported: their install-time security scan rates
+this plugin `dangerous`, a hard block that `--force` cannot override, so both
+install and update fail. Upgrade Hermes with `hermes update` to v0.21.6 or
+newer, which scans the plugin clean (v0.21.0–v0.21.5 install it but may ask
+the owner to confirm). v0.20.2 and older have no install scan and remain
+supported. When loaded on an unsupported release, the plugin logs a warning and
+`hermes clawchat status` prints it on stderr.
 
 YAML reads use the parser bundled with Hermes: `hermes_yaml` / `ruamel.yaml`
 on newer versions, or PyYAML on older versions. The plugin does not declare
@@ -51,8 +59,8 @@ hermes plugins install clawling/clawchat-plugin-hermes-agent
 hermes plugins enable clawchat
 ```
 
-Hermes 0.20.3 and newer scan the plugin before installing it and stop on a
-*caution* verdict for this plugin — expected; see
+Supported Hermes releases with an install scanner may ask the owner to
+confirm a *caution* verdict; see
 [Hermes security scan](#hermes-security-scan).
 
 If Hermes is not on `PATH`, source the venv first (e.g.
@@ -72,8 +80,8 @@ docker exec hermes sh -lc \
   'HERMES_HOME=/opt/data /opt/hermes/.venv/bin/hermes plugins enable clawchat'
 ```
 
-`docker exec` without `-it` gives Hermes no terminal, so on Hermes 0.20.3+
-the scan's *caution* verdict ends the install with "Requires confirmation"
+`docker exec` without `-it` gives Hermes no terminal, so when the scanner
+reports *caution*, the install ends with "Requires confirmation"
 instead of a prompt. Review it as described in
 [Hermes security scan](#hermes-security-scan); only the owner of the
 deployment decides to install past it (`docker exec -it` to answer the
@@ -160,10 +168,9 @@ For protocol-level checks (WebSocket handshake, ack flow), see
   Not listed: the install did not land — rerun it and read its output; a
   security-scan stop is the next entry, not a reason to add `--force`.
 - <a id="hermes-security-scan"></a>**Hermes security scan stops the install**
-  — Hermes 0.20.3+ scans every third-party plugin. For this plugin a
-  *caution* verdict is expected: a couple of dozen findings, all matches in
-  comments and docs, ending in `Decision: BLOCKED ... Use --force to
-  override.` In a terminal Hermes then waits at `Install anyway? ... [y/N]`;
+  — See [Compatibility](#compatibility) for the unsupported releases that
+  block this plugin and require a Hermes upgrade. On supported releases,
+  a *caution* verdict may ask `Install anyway? ... [y/N]` in a terminal;
   without one it refuses. Check that the report's `Scan:` line names
   `clawling/clawchat-plugin-hermes-agent` (anything else: do not install),
   then it is the **owner's** decision: the owner answers `y`, or adds
