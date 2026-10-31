@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import functools
 import json
 import logging
 import math
@@ -16,7 +15,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, unquote, urlencode, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from clawchat_gateway import __version__
@@ -154,147 +153,49 @@ def strip_url_userinfo(text: str) -> str:
     return "".join(parts)
 
 
-# Exact removal of configured secrets. A credentialed base URL's userinfo and
-# password are removed wherever they appear, in every form a diagnostic may
-# carry them: raw, percent-decoded, percent-encoded, JSON-escaped and
-# repr-escaped, plus a trailing truncated prefix. This does not depend on URL
-# boundaries (http.client echoes `user:pass@host` without a scheme, a JSON
-# body escapes quotes, urllib decodes `%20`); the URL scan stays as a second
-# layer. Over-removal is accepted, leaks are not. Forms shorter than
-# `_SECRET_MIN` are skipped (they would mangle ordinary words). Every form is
-# matched with KMP, so the work is linear in text and form length.
-_SECRET_MIN = 4
-_SECRET_PLACEHOLDER = "***"
+# When a configured URL carries credentials, their echoes take too many forms
+# (spaces, no scheme, escaping, percent-encoding, truncation) to remove
+# reliably, so the free text of the diagnostic is not shown at all; callers
+# keep the HTTP status, error kind and code around it.
+DIAGNOSTIC_WITHHELD = "(diagnostic text withheld: base URL contains credentials)"
+# Returned when redaction itself fails (fail closed, never the original text).
+DIAGNOSTIC_REDACTION_FAILED = "(diagnostic text withheld: redaction failed)"
 
 
-def _kmp_failure(pattern: str) -> list[int]:
-    failure = [0] * len(pattern)
-    matched = 0
-    for index in range(1, len(pattern)):
-        while matched and pattern[index] != pattern[matched]:
-            matched = failure[matched - 1]
-        if pattern[index] == pattern[matched]:
-            matched += 1
-        failure[index] = matched
-    return failure
-
-
-def _secret_spans(text: str, pattern: str) -> list[tuple[int, int]]:
-    """Every (overlapping) occurrence of `pattern`, plus a truncated prefix of
-    it (at least `_SECRET_MIN` long) that ends the text."""
-    spans: list[tuple[int, int]] = []
-    failure = _kmp_failure(pattern)
-    if pattern in text:
-        matched = 0
-        for index, char in enumerate(text):
-            while matched and char != pattern[matched]:
-                matched = failure[matched - 1]
-            if char == pattern[matched]:
-                matched += 1
-            if matched == len(pattern):
-                spans.append((index - matched + 1, index + 1))
-                matched = failure[matched - 1]
-    tail = text[max(0, len(text) - len(pattern) + 1):]
-    matched = 0
-    for char in tail:
-        while matched and char != pattern[matched]:
-            matched = failure[matched - 1]
-        if char == pattern[matched]:
-            matched += 1
-        if matched == len(pattern):
-            matched = failure[matched - 1]
-    if matched >= _SECRET_MIN:
-        spans.append((len(text) - matched, len(text)))
-    return spans
-
-
-def _configured_userinfos(url: str) -> set[str]:
-    userinfos: set[str] = set()
-    if "://" in url:
-        rest = url.split("://", 1)[1]
-        authority = re.split(r"[/?#\\]", rest, maxsplit=1)[0]
-        at = authority.rfind("@")
-        if at > 0:
-            userinfos.add(authority[:at])
-        elif (
-            ":" in authority and not authority.startswith("[")
-            and not authority.split(":", 1)[1].isdigit() and "@" in rest
-        ):
-            # An unencoded `/?#` in the password ends the parsed authority
-            # early; the configured secret still runs to the last `@`.
-            userinfos.add(rest[:rest.rfind("@")])
+def url_has_userinfo(url: str | None) -> bool:
+    """True when a URL carries userinfo: the parser reports a username or
+    password, or its authority (up to the first `/?#\\`) contains `@`. An
+    unparseable URL containing `@` anywhere counts too (fail closed)."""
+    if not url:
+        return False
     try:
         parsed = urlsplit(url)
-        username, password = parsed.username, parsed.password
+        if parsed.username is not None or parsed.password is not None:
+            return True
     except ValueError:
-        username = password = None
-    if password is not None:
-        userinfos.add(f"{username or ''}:{password}")
-    elif username:
-        userinfos.add(username)
-    return userinfos
+        return "@" in url
+    rest = url.split("://", 1)[1] if "://" in url else url
+    return "@" in re.split(r"[/?#\\]", rest, maxsplit=1)[0]
 
 
-@functools.lru_cache(maxsize=32)
-def configured_secret_forms(url: str | None) -> tuple[str, ...]:
-    """Every form of a configured URL's `user:password` and password that is
-    removed from diagnostics, longest first. A URL without userinfo has none."""
-    if not url:
-        return ()
-    secrets: set[str] = set()
-    for userinfo in _configured_userinfos(url):
-        secrets.add(userinfo)
-        # A "nonnumeric port" error shows only what follows some colon.
-        secrets.update(userinfo[index + 1:] for index, char in enumerate(userinfo) if char == ":")
-    forms: set[str] = set()
-    for secret in secrets:
-        for value in {secret, unquote(secret)}:
-            json_forms = {json.dumps(value)[1:-1], json.dumps(value, ensure_ascii=False)[1:-1]}
-            forms |= json_forms | {form.replace("/", "\\/") for form in json_forms}
-            escaped = value.replace("\\", "\\\\")
-            forms |= {
-                value, quote(value, safe=""), quote(value, safe=":!$&'()*+,;="),
-                repr(value)[1:-1], escaped, escaped.replace("'", "\\'"), escaped.replace('"', '\\"'),
-            }
-    return tuple(sorted((form for form in forms if len(form) >= _SECRET_MIN), key=len, reverse=True))
+def redact_refresh_message(value: object, *secrets: str, base_url: str | None = None) -> str:
+    """Sanitize refresh diagnostics at their first display-text boundary.
 
-
-def redact_configured_secrets(text: str, *urls: str | None, secrets: tuple[str | None, ...] = ()) -> str:
-    """Replace every form of the configured URLs' credentials, and every exact
-    in-scope secret, with `***`, anywhere in the text (see
-    `configured_secret_forms`). All matches are found on the same text and
-    overlapping ones merged, so a credential inside a token cannot break the
-    token's match; a match ending in `@` keeps that `@`, so another URL's
-    userinfo delimiter survives for the URL scan."""
-    patterns = [form for url in urls for form in configured_secret_forms(url)]
-    patterns += [secret for secret in secrets if secret and len(secret) >= _SECRET_MIN]
-    spans = [span for pattern in patterns for span in _secret_spans(text, pattern)]
-    if not spans:
-        return text
-    merged: list[list[int]] = []
-    for start, end in sorted(spans):
-        if merged and start <= merged[-1][1]:
-            merged[-1][1] = max(merged[-1][1], end)
-        else:
-            merged.append([start, end])
-    parts: list[str] = []
-    copied = 0
-    for start, end in merged:
-        parts.append(text[copied:start])
-        parts.append(_SECRET_PLACEHOLDER + ("@" if text[end - 1] == "@" else ""))
-        copied = end
-    parts.append(text[copied:])
-    return "".join(parts)
-
-
-def redact_refresh_message(value: object, *secrets: str) -> str:
-    """Sanitize refresh diagnostics at their first display-text boundary."""
-    text = strip_url_userinfo(str(value or ""))
-    for secret in sorted((s for s in secrets if s), key=len, reverse=True):
-        text = text.replace(secret, "***")
-    text = re.sub(r"eyJ[A-Za-z0-9_=-]*\.[A-Za-z0-9_=-]+\.[A-Za-z0-9_=-]+", "***", text)
-    text = re.sub(r"[A-Za-z0-9_\-\.=+/]{32,}", "***", text)
-    return " ".join(text.split())[:200]
+    With a credentialed `base_url` the whole text becomes `DIAGNOSTIC_WITHHELD`.
+    Any failure returns `DIAGNOSTIC_REDACTION_FAILED`; this never raises and
+    never falls back to the original text.
+    """
+    try:
+        if url_has_userinfo(base_url):
+            return DIAGNOSTIC_WITHHELD
+        text = strip_url_userinfo(str(value or ""))
+        for secret in sorted((s for s in secrets if s), key=len, reverse=True):
+            text = text.replace(secret, "***")
+        text = re.sub(r"eyJ[A-Za-z0-9_=-]*\.[A-Za-z0-9_=-]+\.[A-Za-z0-9_=-]+", "***", text)
+        text = re.sub(r"[A-Za-z0-9_\-\.=+/]{32,}", "***", text)
+        return " ".join(text.split())[:200]
+    except Exception:  # noqa: BLE001 - fail closed
+        return DIAGNOSTIC_REDACTION_FAILED
 
 
 def normalize_refresh_code(value: object) -> int | None:
@@ -1180,19 +1081,19 @@ class ClawChatApiClient:
             connect_failed = isinstance(reason, (ConnectionRefusedError, socket.gaierror))
             raise ClawChatApiError(
                 "transport",
-                redact_refresh_message(redact_configured_secrets(str(reason or exc), self._base_url, secrets=secret_values), *secret_values),
+                redact_refresh_message(reason or exc, *secret_values, base_url=self._base_url),
                 path="/v1/auth/refresh",
                 connect_failed=connect_failed,
             ) from None
         except TimeoutError as exc:
             raise ClawChatApiError(
                 "transport",
-                redact_refresh_message(redact_configured_secrets(str(exc), self._base_url, secrets=secret_values), *secret_values) or "refresh request timed out",
+                redact_refresh_message(exc, *secret_values, base_url=self._base_url) or "refresh request timed out",
                 path="/v1/auth/refresh",
             ) from None
         except Exception as exc:  # noqa: BLE001
             raise ClawChatApiError(
-                "transport", redact_refresh_message(redact_configured_secrets(str(exc), self._base_url, secrets=secret_values), *secret_values),
+                "transport", redact_refresh_message(exc, *secret_values, base_url=self._base_url),
                 path="/v1/auth/refresh",
             ) from None
 
@@ -1210,9 +1111,8 @@ class ClawChatApiClient:
         msg = ""
         if isinstance(payload, dict):
             msg = redact_refresh_message(
-                redact_configured_secrets(
-                    str(payload.get("msg") or payload.get("message") or ""), self._base_url, secrets=secret_values),
-                *secret_values)
+                payload.get("msg") or payload.get("message"), *secret_values,
+                base_url=self._base_url)
         if status != 200 and code != REFRESH_CODE_INVALID_REFRESH:
             raise ClawChatApiError(
                 "transport",
