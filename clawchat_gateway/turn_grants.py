@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import secrets
 import threading
 import time
@@ -10,6 +11,8 @@ from dataclasses import dataclass, replace
 from typing import Mapping
 
 from clawchat_gateway.tool_grants import CompiledGrants, freeze_turn_grants, intersect_turn_grants
+
+logger = logging.getLogger(__name__)
 
 NONCE_PREFIX = "clawchat-turn-"
 
@@ -43,6 +46,18 @@ class TurnSnapshot:
     approve_eligible: bool = True
     # Retained orchestration owner authority: approved_retry or overlapping owner turns.
     orchestrate_retry: bool = False
+    originally_owner_side: bool = False
+    downgrade_reason: str = ""
+    downgrade_trigger: str = ""
+    input_trigger: str = "unknown_sender"
+    plugin_notification: bool = False
+
+
+@dataclass(frozen=True)
+class InputRestriction:
+    trigger: str
+    grants: Mapping[str, str]
+    speakers: frozenset[str]
 
 
 _lock = threading.Lock()
@@ -50,11 +65,30 @@ _snapshots: dict[str, TurnSnapshot] = {}
 _bindings: dict[str, tuple[str, str]] = {}
 _active: dict[tuple[str, str], str] = {}
 _session_nonces: dict[tuple[str, str], set[str]] = {}
-_unverified_inputs: set[tuple[str, str]] = set()
+# Each pending input has its own token; a preparation await cannot associate
+# another input's marker with the wrong nonce. None means not registered yet.
+_unverified_inputs: dict[tuple[str, str], dict[str, tuple[str | None, str]]] = {}
+_execution_nonces: dict[tuple[str, str], str] = {}
+# A consumed third-party batch retains its frozen restrictions, but cannot
+# contaminate registrations for the next batch.
+_consumed_batches: set[str] = set()
 _approvals: dict[str, GrantApproval] = {}
 _released_turns: dict[str, tuple[str, bool, float]] = {}
 _MAX_RELEASED_TURNS = 512
 _RELEASED_TURN_TTL = 60 * 60
+
+
+def pending_input_restriction(account_id: str, session_key: str) -> InputRestriction | None:
+    """Freeze input already in flight when an owner starts asynchronous preparation."""
+    with _lock:
+        pending = _unverified_inputs.get((account_id, session_key))
+        if not pending:
+            return None
+        live = [_snapshots[nonce] for nonce in _session_nonces.get((account_id, session_key), ())
+                if nonce in _snapshots]
+        return InputRestriction(next(iter(pending.values()))[1],
+                                intersect_turn_grants([{}, *(item.grants for item in live)]),
+                                frozenset(speaker for item in live for speaker in item.non_owner_speakers))
 
 
 def register_turn(*, account_id: str, chat_id: str, speakers: tuple[str, ...],
@@ -63,21 +97,34 @@ def register_turn(*, account_id: str, chat_id: str, speakers: tuple[str, ...],
                   speaker_names: tuple[str, ...] = (), owner_verified: bool = False,
                   owner_side: bool = False, non_owner_speakers: frozenset[str] | None = None,
                   legacy_owner_tools: bool = False, request_origin: RequestOrigin | None = None,
-                  approve_eligible: bool = True, orchestrate_retry: bool = False) -> TurnSnapshot:
+                  approve_eligible: bool = True, orchestrate_retry: bool = False,
+                  trusted_notification: bool = False, trigger: str = "unknown_sender",
+                  unverified_token: str = "", arrival_restriction: InputRestriction | None = None) -> TurnSnapshot:
     with _lock:
         nonce = NONCE_PREFIX + secrets.token_urlsafe(24)
+        originally_owner_side = bool(owner_side)
         owner_side = bool(owner_side and speakers and all(isinstance(id_, str) and id_.strip() for id_ in speakers))
-        if owner_side and (account_id, session_key) in _unverified_inputs:
+        if owner_side and ((account_id, session_key) in _unverified_inputs or arrival_restriction):
             owner_side, grants = False, {}
+        notices = _unverified_inputs.get((account_id, session_key), {})
+        trusted_notification = bool(trusted_notification and not speakers and not non_owner_speakers)
         frozen = CompiledGrants(owner_only=True) if owner_side else freeze_turn_grants(grants)
         ids = (frozenset(non_owner_speakers) if non_owner_speakers is not None else
                frozen.non_owner_speakers or (frozenset() if owner_side else frozenset(speakers)))
-        overlaps = [_snapshots[value] for value in _session_nonces.get((account_id, session_key), ())
-                    if value in _snapshots]
-        # A trusted plugin turn in the owner's DM retains legacy ordinary
-        # tools without representing a speaker or gaining management powers.
+        if arrival_restriction:
+            frozen = intersect_turn_grants([frozen, arrival_restriction.grants])
+            ids |= arrival_restriction.speakers
+        all_overlaps = [_snapshots[value] for value in _session_nonces.get((account_id, session_key), ())
+                        if value in _snapshots and (value not in _consumed_batches or notices)]
+        # A local notification contributes no guest text to an owner's batch.
+        # Keep its own default grants separate; neutrality must not grant it
+        # owner tools or propagate its restricted grants into an owner turn.
+        overlaps = [item for item in all_overlaps
+                    if not (originally_owner_side and item.plugin_notification)]
+        # Only the existing owner-action path retains legacy ordinary tools.
         legacy_owner_tools = bool(legacy_owner_tools and not speakers and not owner_verified
-                                  and not ids and all(not item.non_owner_speakers for item in overlaps))
+                                  and not notices and not arrival_restriction and not ids
+                                  and all(not item.non_owner_speakers for item in overlaps))
         def orch_ok(item):
             return item.owner_side or item.legacy_owner_tools or item.orchestrate_retry
 
@@ -89,20 +136,38 @@ def register_turn(*, account_id: str, chat_id: str, speakers: tuple[str, ...],
             frozen = intersect_turn_grants([frozen, *(item.grants for item in overlaps)])
             ids |= frozenset(id_ for item in overlaps for id_ in item.non_owner_speakers)
             for item in overlaps:
-                _snapshots[item.nonce] = replace(item, grants=frozen, non_owner_speakers=ids,
+                if trusted_notification and (item.originally_owner_side or item.owner_side or item.legacy_owner_tools):
+                    _snapshots[item.nonce] = replace(item, owner_verified=False)
+                    continue
+                updated = replace(item, grants=frozen, non_owner_speakers=ids,
                                                 owner_side=item.owner_side and owner_side,
                                                 legacy_owner_tools=item.legacy_owner_tools and not ids,
                                                 orchestrate_retry=bool(orch_ok(item) and new_orch and not ids))
+                _snapshots[item.nonce] = _downgrade(updated, "overlap", trigger)
         snapshot = TurnSnapshot(
             nonce, account_id, chat_id, tuple(speakers),
             frozen, time.monotonic(), frozenset(any_granted_tools),
-            tuple(speaker_names), owner_verified is True and (account_id, session_key) not in _unverified_inputs,
+            tuple(speaker_names), owner_verified is True and not trusted_notification and not notices and not arrival_restriction
+            and not any(item.plugin_notification for item in all_overlaps),
             ids, owner_side and all(item.owner_side for item in overlaps),
             legacy_owner_tools, request_origin if not owner_side else None, bool(approve_eligible), new_orch,
+            originally_owner_side, "", "", trigger, trusted_notification,
         )
+        if originally_owner_side and not snapshot.owner_side:
+            reason = "unverified_input" if notices or arrival_restriction else "overlap"
+            cause = next((cause for _, cause in notices.values()),
+                         next((item.downgrade_trigger or item.input_trigger for item in overlaps
+                               if not (item.owner_side or item.legacy_owner_tools)), trigger))
+            snapshot = _downgrade(snapshot, reason, arrival_restriction.trigger if arrival_restriction else cause)
+        if unverified_token in notices:
+            notices[unverified_token] = (nonce, notices[unverified_token][1])
         _snapshots[nonce] = snapshot
         _active[account_id, session_key] = nonce
         _session_nonces.setdefault((account_id, session_key), set()).add(nonce)
+        if arrival_restriction and not notices:
+            # This input arrived before consumption but completed preparation
+            # afterwards. Keep it restricted without poisoning the next batch.
+            _consumed_batches.add(nonce)
         return snapshot
 
 
@@ -130,33 +195,69 @@ def active_snapshot(account_id: str, session_key: str) -> TurnSnapshot | None:
         return _snapshots.get(_active.get((account_id, session_key), ""))
 
 
-def revoke_owner_verification(account_id: str, session_key: str) -> None:
-    """Revoke every live nonce that the host could retain for this session."""
+def _downgrade(snapshot: TurnSnapshot, reason: str, trigger: str) -> TurnSnapshot:
+    if not snapshot.originally_owner_side or snapshot.owner_side or snapshot.downgrade_reason:
+        return snapshot
+    logger.info("owner_downgrade reason=%s trigger=%s", reason, trigger)
+    return replace(snapshot, downgrade_reason=reason, downgrade_trigger=trigger)
+
+
+def revoke_owner_verification(account_id: str, session_key: str, *,
+                              trigger: str = "unknown_sender", management_only: bool = False) -> None:
+    """Revoke live nonces before an input can merge under an older nonce."""
     with _lock:
-        _revoke_owner_verification_locked(account_id, session_key)
+        _revoke_owner_verification_locked(account_id, session_key, trigger=trigger,
+                                          management_only=management_only)
 
 
-def _revoke_owner_verification_locked(account_id: str, session_key: str) -> None:
+def _revoke_owner_verification_locked(account_id: str, session_key: str, *,
+                                       trigger: str, management_only: bool = False,
+                                       reason: str = "revoke") -> None:
     for nonce in _session_nonces.get((account_id, session_key), ()):
         snapshot = _snapshots.get(nonce)
         if snapshot is not None:
-            # Unattributed input may be merged under this nonce by the host.
-            # Retain denies, but intersect with the ordinary default row.
-            _snapshots[nonce] = replace(snapshot, owner_verified=False, owner_side=False, legacy_owner_tools=False,
-                                        orchestrate_retry=False, grants=intersect_turn_grants([snapshot.grants, {}]))
+            if management_only:
+                _snapshots[nonce] = replace(snapshot, owner_verified=False)
+                continue
+            updated = replace(snapshot, owner_verified=False, owner_side=False, legacy_owner_tools=False,
+                              orchestrate_retry=False, grants=intersect_turn_grants([snapshot.grants, {}]))
+            _snapshots[nonce] = _downgrade(updated, reason, trigger)
 
 
-def mark_unverified_input(account_id: str, session_key: str) -> None:
-    """Deny existing and future owner nonces until the host session is idle."""
+def mark_unverified_input(account_id: str, session_key: str, *, trigger: str = "unknown_sender") -> str:
+    """Track one unconsumed input, including preparation before registration."""
     with _lock:
-        _unverified_inputs.add((account_id, session_key))
-        _revoke_owner_verification_locked(account_id, session_key)
+        token = secrets.token_urlsafe(24)
+        _unverified_inputs.setdefault((account_id, session_key), {})[token] = (None, trigger)
+        _revoke_owner_verification_locked(account_id, session_key, trigger=trigger, reason="unverified_input")
+        return token
 
 
 def clear_unverified_input(account_id: str, session_key: str) -> None:
     """Caller must prove host idle and no plugin dispatch in progress."""
     with _lock:
-        _unverified_inputs.discard((account_id, session_key))
+        _unverified_inputs.pop((account_id, session_key), None)
+
+
+def _consume_unverified_locked(nonce: str) -> None:
+    for key, pending in list(_unverified_inputs.items()):
+        consumed = [token for token, (value, _) in pending.items() if value == nonce]
+        if consumed:
+            # Do not restore existing snapshots. Only later registrations belong
+            # to a new batch after the host consumed this input.
+            _consumed_batches.update(_session_nonces.get(key, ()))
+            for token in consumed:
+                del pending[token]
+            if not pending:
+                del _unverified_inputs[key]
+
+
+def _unbind_locked(nonce: str) -> None:
+    execution = _bindings.pop(nonce, None)
+    if execution is not None:
+        _execution_nonces.pop(execution, None)
+    _consume_unverified_locked(nonce)
+    _consumed_batches.discard(nonce)
 
 
 def _record_released_turn_locked(snapshot: TurnSnapshot | None) -> None:
@@ -175,7 +276,7 @@ def _record_released_turn_locked(snapshot: TurnSnapshot | None) -> None:
 def release_turn(nonce: str) -> None:
     with _lock:
         _record_released_turn_locked(_snapshots.pop(nonce, None))
-        _bindings.pop(nonce, None)
+        _unbind_locked(nonce)
         for key, nonces in list(_session_nonces.items()):
             nonces.discard(nonce)
             if not nonces:
@@ -193,7 +294,7 @@ def release_session(account_id: str, session_key: str) -> None:
         nonces = _session_nonces.pop(key, set())
         for nonce in nonces:
             _record_released_turn_locked(_snapshots.pop(nonce, None))
-            _bindings.pop(nonce, None)
+            _unbind_locked(nonce)
     from clawchat_gateway.turn_attachments import clear_turn
     for nonce in nonces:
         clear_turn(nonce)
@@ -207,17 +308,51 @@ def bound_snapshot(nonce: str) -> TurnSnapshot | None:
 
 def bind_turn(nonce: str, session_id: str, turn_id: str) -> None:
     with _lock:
-        if nonce in _snapshots and session_id and turn_id:
-            _bindings.setdefault(nonce, (session_id, turn_id))
+        context = _snapshots.get(nonce)
+        execution = (session_id, turn_id)
+        if context is None or not session_id or not turn_id or execution in _execution_nonces:
+            return
+        if nonce in _bindings:
+            # Queued host follow-ups retain the first input's ContextVar nonce.
+            # Never reuse a nonce for another execution, or borrow another chat.
+            keys = [key for key, values in _session_nonces.items() if nonce in values]
+            if (len(keys) != 1 or _bindings[nonce][0] != session_id
+                    or _bindings[nonce][1] == turn_id):
+                return
+            candidates = [_snapshots[value] for value in _session_nonces[keys[0]]
+                          if value in _snapshots and value not in _bindings
+                          and _snapshots[value].chat_id == context.chat_id]
+            if not candidates:
+                return
+            # Notifications contain no guest text and are neutral to owners;
+            # prefer queued message inputs so a later notice cannot replace the
+            # owner's snapshot. Third-party inputs remain in this pool: their
+            # registration already narrows same-batch owner snapshots through
+            # revocation/intersection, so this choice cannot widen that batch.
+            inputs = [item for item in candidates if not item.plugin_notification]
+            nonce = max(inputs or candidates, key=lambda item: item.created_at).nonce
+        _bindings[nonce] = execution
+        _execution_nonces[execution] = nonce
+        _consume_unverified_locked(nonce)
+
+
+def _lookup_snapshot_locked(nonce: str, chat_id: str, session_id: str, turn_id: str) -> TurnSnapshot | None:
+    context = _snapshots.get(nonce)
+    target = _snapshots.get(_execution_nonces.get((session_id, turn_id), ""))
+    if (not session_id or not turn_id or context is None or target is None
+            or context.chat_id != chat_id or target.chat_id != chat_id
+            or _bindings.get(target.nonce) != (session_id, turn_id)):
+        return None
+    # Execution IDs alone grant no authority outside the context nonce's session.
+    if not any(nonce in values and target.nonce in values for values in _session_nonces.values()):
+        return None
+    return target
 
 
 def lookup_for_tool_call(nonce: str, chat_id: str, session_id: str, turn_id: str) -> Mapping[str, str]:
     with _lock:
-        snapshot = _snapshots.get(nonce)
-        if (not turn_id or not session_id or snapshot is None or snapshot.chat_id != chat_id
-                or _bindings.get(nonce) != (session_id, turn_id)):
-            return {}
-        return snapshot.grants
+        snapshot = _lookup_snapshot_locked(nonce, chat_id, session_id, turn_id)
+        return snapshot.grants if snapshot is not None else {}
 
 
 def session_context_value(name: str) -> str:
@@ -249,11 +384,7 @@ class GrantApproval:
 
 def lookup_snapshot_for_call(nonce: str, chat_id: str, session_id: str, turn_id: str) -> TurnSnapshot | None:
     with _lock:
-        snapshot = _snapshots.get(nonce)
-        if (not session_id or not turn_id or snapshot is None or snapshot.chat_id != chat_id
-                or _bindings.get(nonce) != (session_id, turn_id)):
-            return None
-        return snapshot
+        return _lookup_snapshot_locked(nonce, chat_id, session_id, turn_id)
 
 
 def register_approval(session_key: str, chat_id: str, tool: str, description: str, ttl: float) -> GrantApproval:

@@ -1565,6 +1565,28 @@ def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: A
 
 
 def _clawchat_pre_tool_decision(*, tool_name: str = "", args: Any = None, **kwargs: Any) -> Optional[dict[str, Any]]:
+    decision = _clawchat_pre_tool_decision_raw(tool_name=tool_name, args=args, **kwargs)
+    try:
+        if decision and decision.get("action") == "block":
+            from clawchat_gateway.turn_grants import lookup_snapshot_for_call, session_context_value, bound_snapshot
+            from clawchat_gateway.tool_grants import OWNER_DOWNGRADED_MESSAGE
+            nonce = session_context_value("HERMES_SESSION_MESSAGE_ID")
+            chat_id = session_context_value("HERMES_SESSION_CHAT_ID")
+            if session_context_value("HERMES_SESSION_PLATFORM") == "clawchat":
+                if kwargs.get("session_id") and kwargs.get("turn_id"):
+                    snapshot = lookup_snapshot_for_call(nonce, chat_id, kwargs["session_id"], kwargs["turn_id"])
+                else:
+                    snapshot = bound_snapshot(nonce) if _host_supports_pre_llm_call() else None
+                if (snapshot and snapshot.chat_id == chat_id and snapshot.originally_owner_side
+                        and snapshot.downgrade_reason):
+                    decision = {**decision, "message": OWNER_DOWNGRADED_MESSAGE,
+                                "blockReason": OWNER_DOWNGRADED_MESSAGE}
+    except Exception:  # Refusal formatting must retain the original block on lookup failure.
+        pass
+    return decision
+
+
+def _clawchat_pre_tool_decision_raw(*, tool_name: str = "", args: Any = None, **kwargs: Any) -> Optional[dict[str, Any]]:
     """``pre_tool_call`` hook: host tools in a turn the owner did not start."""
     try:
         tool_name = str(tool_name or "")

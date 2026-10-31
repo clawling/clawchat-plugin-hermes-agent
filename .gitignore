@@ -321,6 +321,8 @@ tests/*
 !tests/test_home_isolation.py
 !tests/test_tool_grants.py
 !tests/test_tool_grants_storage.py
+# Owner batch provenance, queued follow-ups and grant subject boundaries.
+!tests/test_owner_turn_downgrade.py
 !tests/test_turn_grants.py
 !tests/test_tool_grants_hook.py
 !tests/test_tool_grants_admission.py

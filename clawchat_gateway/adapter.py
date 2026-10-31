@@ -1813,6 +1813,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         if not owner_user_id or not owner_chat_id:
             return
         inbound = InboundMessage.internal_synthetic(
+            plugin_notification=True,
             chat_id=owner_chat_id,
             chat_type="direct",
             sender_id="clawchat-awareness",
@@ -2977,6 +2978,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                     return  # asked on a later connection, once the owner chat is known
                 await self._handle_inbound(
                     InboundMessage.internal_synthetic(
+                        plugin_notification=True,
                         chat_id=owner_chat_id,
                         chat_type="direct",
                         sender_id="clawchat-maintenance",
@@ -3223,6 +3225,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         owner_user_id = str(getattr(claim, "owner_user_id", "") or "")
         claimed_at = getattr(claim, "claimed_at", None)
         inbound = InboundMessage.internal_synthetic(
+            plugin_notification=True,
             owner_action=True,  # One-time owner pairing, claimed from activation storage.
             chat_id=conversation_id,
             chat_type="direct",
@@ -3466,6 +3469,8 @@ class ClawChatAdapter(BasePlatformAdapter):
                 )
                 return
             if _synthetic is not None:
+                if not _synthetic.orchestrate_retry:
+                    _synthetic = _synthetic.as_plugin_notification()
                 logger.info(
                     "clawchat permission_result dispatched chat_id=%s request_id=%s operation=%s outcome=%s",
                     frame.get("chat_id"),
@@ -4553,7 +4558,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 snapshot = register_turn(account_id=self._account_id(), chat_id=origin.chat_id,
                     speakers=speakers, grants=grants, any_granted_tools=any_tools, session_key=key,
                     non_owner_speakers=origin.non_owner_speakers, owner_side=False, owner_verified=False,
-                    approve_eligible=False)
+                    approve_eligible=False, trigger="host_internal")
             elif existing is None:
                 platform = getattr(source, "platform", None)
                 chat_id = getattr(source, "chat_id", "")
@@ -4568,7 +4573,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                     key = chat_id + ":__direct__"
                     snapshot = register_turn(account_id=self._account_id(), chat_id=chat_id,
                         speakers=(owner,), grants=resolve_turn_grants([owner], owner, [], int(time.time() * 1000)),
-                        session_key=key, owner_side=True, owner_verified=False)
+                        session_key=key, owner_side=True, owner_verified=False, trigger="host_internal")
             if snapshot is not None:
                 try:
                     from gateway.session_identity import replace_source
@@ -4688,6 +4693,28 @@ class ClawChatAdapter(BasePlatformAdapter):
                 and not inbound.is_internal_synthetic
                 and not inbound.raw_message.get("synthetic"))
 
+    def _inbound_grant_trigger(self, inbound: InboundMessage) -> str:
+        if inbound.grant_origin:
+            return "grant_wake"
+        if inbound.is_internal_synthetic:
+            for kind in ("moment_comment", "awareness", "permission_result", "memory_migration_hint",
+                         "bootstrap", "clawchat_sediment"):
+                if inbound.raw_message.get(kind):
+                    return kind
+            return "host_internal"
+        if inbound.raw_message.get("synthetic"):
+            return "wire_synthetic"
+        if not inbound.sender_id:
+            return "unknown_sender"
+        if inbound.sender_id != self._owner_user_id():
+            return "foreign_sender"
+        return "owner_message"
+
+    def _trusted_owner_notification(self, inbound: InboundMessage) -> bool:
+        return (inbound.is_plugin_notification and inbound.chat_type == "direct"
+                and bool(self._owner_user_id()) and bool(self._owner_direct_chat_id())
+                and inbound.chat_id == self._owner_direct_chat_id())
+
     def _admit_owner_direct_inbound(self, inbound: InboundMessage) -> bool:
         if inbound.chat_type != "direct" or inbound.chat_id != self._owner_direct_chat_id():
             return False
@@ -4696,7 +4723,9 @@ class ClawChatAdapter(BasePlatformAdapter):
 
             # The host may merge this input using an earlier source nonce.
             # Revoke before any confirmation/command handler can consume it.
-            revoke_owner_verification(self._account_id(), self._grant_session_key(inbound))
+            revoke_owner_verification(self._account_id(), self._grant_session_key(inbound),
+                                      trigger=self._inbound_grant_trigger(inbound),
+                                      management_only=self._trusted_owner_notification(inbound))
         return True
 
     def _hold_granted_inbound(self, inbound: InboundMessage, *, from_dispatch: bool = False,
@@ -4904,6 +4933,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         if self._verified_owner_inbound(inbound):
             # Owner input stays immediate; idle only determines verification.
             self._grant_session_busy(key)
+        from clawchat_gateway.turn_grants import pending_input_restriction
+        arrival_restriction = pending_input_restriction(self._account_id(), key)
         self._admit_owner_direct_inbound(inbound)
         if await self._consume_grant_confirmation(inbound):
             return
@@ -4912,19 +4943,21 @@ class ClawChatAdapter(BasePlatformAdapter):
             return
         if not self._is_owner_turn(inbound) and self._hold_granted_inbound(inbound, from_dispatch=True):
             return
+        unverified_token = ""
         if (inbound.chat_type == "direct" and inbound.chat_id == self._owner_direct_chat_id()
-                and not self._verified_owner_inbound(inbound)):
+                and not self._verified_owner_inbound(inbound) and not self._trusted_owner_notification(inbound)):
             from clawchat_gateway.turn_grants import mark_unverified_input
 
             # The host can await before installing its guard, then merge this
             # input into another nonce without ever completing its own event.
-            mark_unverified_input(self._account_id(), key)
+            unverified_token = mark_unverified_input(self._account_id(), key, trigger=self._inbound_grant_trigger(inbound))
         self._grant_dispatching[key] = self._grant_dispatching.get(key, 0) + 1
         self._grant_dispatching_grants[key] = (
             self._grant_dispatching_grants.get(key, False) or bool(self._turn_grant_values(inbound)[1])
         )
         try:
-            await self._handle_inbound_now(inbound)
+            await self._handle_inbound_now(inbound, unverified_token=unverified_token,
+                                           arrival_restriction=arrival_restriction)
         except BaseException:
             self._finish_request_wake(inbound, 'dispatch-failed')
             raise
@@ -4936,7 +4969,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 self._grant_dispatching.pop(key, None)
                 self._grant_dispatching_grants.pop(key, None)
 
-    async def _handle_inbound_now(self, inbound: InboundMessage) -> None:
+    async def _handle_inbound_now(self, inbound: InboundMessage, *, unverified_token: str = "", arrival_restriction=None) -> None:
         try:
             self._check_request_wake(inbound)
         except Exception:
@@ -5016,6 +5049,9 @@ class ClawChatAdapter(BasePlatformAdapter):
                 owner_verified=self._verified_owner_inbound(inbound),
                 owner_side=getattr(grants, "owner_only", False),
                 orchestrate_retry=inbound.orchestrate_retry,
+                trusted_notification=self._trusted_owner_notification(inbound),
+                trigger=self._inbound_grant_trigger(inbound), unverified_token=unverified_token,
+                arrival_restriction=arrival_restriction,
                 legacy_owner_tools=(inbound.is_owner_action
                                     and inbound.sender_id == self._owner_user_id()
                                     and inbound.chat_type == "direct"
@@ -5274,6 +5310,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             if unseen:
                 text = f"{unseen}\n\n{text}"
         inbound = InboundMessage.internal_synthetic(
+            plugin_notification=(chat_type == "direct" and chat_id == self._owner_direct_chat_id()
+                                 and sender_id == self._owner_user_id()),
             chat_id=chat_id,
             chat_type=chat_type,
             # A shared group session is keyed without the sender; a direct (or

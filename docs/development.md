@@ -71,6 +71,8 @@ uv run --extra test pytest
 uv run --extra test pytest tests/test_x.py
 ```
 
+`tests/conftest.py` uses real Hermes whenever `gateway.config` and `gateway.platforms.base` import from `PYTHONPATH` / `sys.path` (including `tmp/hermes`); only failed imports select the test double.
+
 Most of the adapter, protocol, and tool wiring is testable without a
 live Hermes process; the WebSocket transport
 (`clawchat_gateway/connection.py`) is the main piece that needs a fake

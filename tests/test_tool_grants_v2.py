@@ -777,7 +777,7 @@ def test_host_catalog_uses_platform_policy_not_last_narrowed_catalog(monkeypatch
 
 
 ALL_CARDS = {('zh', 'direct'): '授权确认（码 000123）\n'
-                   '允许：Person（usr_alice）\n'
+                   '允许：Person\n'
                    '使用：all\n'
                    '方式：直接用\n'
                    '到期：不限\n'
@@ -793,7 +793,7 @@ ALL_CARDS = {('zh', 'direct'): '授权确认（码 000123）\n'
                    'Person派出去的定时任务、子 Agent 和看板任务会用主人的配置带全部工具执行。\n'
                    '确认请点：`/clawchat-allow 000123`（10 分钟内有效；不确认就不会生效）',
  ('zh', 'ask'): '授权确认（码 000123）\n'
-                '允许：Person（usr_alice）\n'
+                '允许：Person\n'
                 '使用：all\n'
                 '方式：每次问我\n'
                 '到期：不限\n'
@@ -808,7 +808,7 @@ ALL_CARDS = {('zh', 'direct'): '授权确认（码 000123）\n'
                 '这类操作每次都会先问你。\n'
                 '确认请点：`/clawchat-allow 000123`（10 分钟内有效；不确认就不会生效）',
  ('zh_Hant', 'direct'): '授權確認（碼 000123）\n'
-                        '允許：Person（usr_alice）\n'
+                        '允許：Person\n'
                         '使用：all\n'
                         '方式：直接用\n'
                         '到期：不限\n'
@@ -824,7 +824,7 @@ ALL_CARDS = {('zh', 'direct'): '授权确认（码 000123）\n'
                         'Person派出去的定時任務、子 Agent 和看板任務會用主人的設定帶全部工具執行。\n'
                         '確認請點：`/clawchat-allow 000123`（10 分鐘內有效；不確認就不會生效）',
  ('zh_Hant', 'ask'): '授權確認（碼 000123）\n'
-                     '允許：Person（usr_alice）\n'
+                     '允許：Person\n'
                      '使用：all\n'
                      '方式：每次問我\n'
                      '到期：不限\n'
@@ -839,7 +839,7 @@ ALL_CARDS = {('zh', 'direct'): '授权确认（码 000123）\n'
                      '這類操作每次都會先問你。\n'
                      '確認請點：`/clawchat-allow 000123`（10 分鐘內有效；不確認就不會生效）',
  ('en', 'direct'): 'Grant confirmation (code 000123)\n'
-                   'Allow: Person (usr_alice)\n'
+                   'Allow: Person\n'
                    'Use: all\n'
                    'Mode: Use directly\n'
                    'Expires: No limit\n'
@@ -860,7 +860,7 @@ ALL_CARDS = {('zh', 'direct'): '授权确认（码 000123）\n'
                    'Click to confirm: `/clawchat-allow 000123` (valid for 10 minutes; it will not take '
                    'effect without confirmation)',
  ('en', 'ask'): 'Grant confirmation (code 000123)\n'
-                'Allow: Person (usr_alice)\n'
+                'Allow: Person\n'
                 'Use: all\n'
                 'Mode: Ask me each time\n'
                 'Expires: No limit\n'
@@ -901,7 +901,7 @@ def test_direct_card_reports_unavailable_ask_and_never_offers_it(lang):
 def test_profile_semicolon_cannot_create_a_new_card_field():
     card = grants.build_grant_card(grantees=[dict(id="usr_alice", name="Person; Mode: injected")],
         tools=["tool:read_file"], mode="direct", lang="en", code="000123", now=NOW)
-    assert card.splitlines()[1] == "Allow: Person; Mode: injected (usr_alice)"
+    assert card.splitlines()[1] == "Allow: Person; Mode: injected"
     assert card.splitlines()[3] == "Mode: Use directly"
 
 
@@ -1801,7 +1801,11 @@ def test_owner_direct_overlap_never_borrows_session_owner_identity(host, order):
             assert not current.owner_side
             assert guard._filter_grant_definitions(definitions, current) == definitions[-1:]
             with host(**dict(context(snapshot), HERMES_SESSION_USER_ID="usr_owner")):
-                assert call("terminal", turn_id=snapshot.nonce) == guard._grant_block("denied")
+                expected = guard._grant_block("denied")
+                if current.originally_owner_side:
+                    expected.update(message=grants.OWNER_DOWNGRADED_MESSAGE,
+                                    blockReason=grants.OWNER_DOWNGRADED_MESSAGE)
+                assert call("terminal", turn_id=snapshot.nonce) == expected
                 for tool in grants.GRANT_TOOL_NAMES:
                     assert call(tool, turn_id=snapshot.nonce)["action"] == "block"
     finally:

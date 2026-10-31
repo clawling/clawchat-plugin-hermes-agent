@@ -1796,7 +1796,7 @@ def _tool_request_context(session_id):
         sender = get_clawchat_sender()
         if (snapshot and snapshot.request_origin and sender and sender._account_id() == snapshot.account_id
                 and sender._clawchat_config.tool_grants == 'on'
-                and snapshot.request_origin.requester_user_id != sender._owner_user_id()):
+                and snapshot.request_origin.requester_user_id not in {sender._owner_user_id(), sender._account_id()}):
             return snapshot, sender
     except Exception:
         pass
@@ -1964,6 +1964,10 @@ async def manage_tool_grants(operation: str, params: Any, *, session_id: str = "
         now = int(time.time() * 1000)
         try:
             values = validate_grant_params(params, now)
+            ids = values.get("user_ids", ())
+            if ids and any(identity in {sender._owner_user_id(), sender._account_id()} for identity in ids):
+                return {"error": "validation", "message": "owner-or-self",
+                        "note": "The owner already has every tool; nothing to record."}
             known, available = host_tool_catalog()
             values["tools"] = normalize_grant_selectors(values["tools"], known_tools=known, available_tools=available)
             ask_available = ask_grants_available()
