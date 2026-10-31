@@ -106,8 +106,10 @@ def test_refresh_message_strips_url_userinfo(userinfo):
 
 @pytest.mark.parametrize('userinfo', [
     "placeholder-user:place'holder", 'placeholder-user:place"holder',
+    'placeholder-user:place`holder', 'placeholder-user:place<holder',
+    'placeholder-user:place>holder', "placeholder-user:place@hold'er",
 ])
-def test_refresh_message_strips_url_userinfo_containing_quotes(userinfo):
+def test_refresh_message_strips_url_userinfo_containing_delimiters(userinfo):
     text = api.redact_refresh_message(f'failed https://{userinfo}@example.com/v1/auth/refresh')  # redact-allow:email
     assert text == 'failed https://example.com/v1/auth/refresh'
     assert 'placeholder-user' not in text and 'holder' not in text
@@ -172,16 +174,18 @@ async def test_url_transport_error_is_redacted_in_exception_outcome_and_log(monk
         assert 'placeholder-pass' not in output
 
 
+@pytest.mark.parametrize('password', ['placeholder-pass', "placeholder-pass`<x>@y'z"])
 @pytest.mark.parametrize('token', ['', ACCESS])
-def test_connection_diagnostic_strips_url_userinfo(token):
+def test_connection_diagnostic_strips_url_userinfo(token, password):
     from clawchat_gateway.connection import ClawChatConnection
 
     connection = object.__new__(ClawChatConnection)
     connection._cfg = SimpleNamespace(token=token)
     text = connection._sanitize_secret_text(
-        f'https://placeholder-user:placeholder-pass@example.com/ {ACCESS}')  # redact-allow:email
+        f'https://placeholder-user:{password}@example.com/ {ACCESS}')  # redact-allow:email
     assert 'https://example.com/' in text
     assert 'placeholder-user' not in text and 'placeholder-pass' not in text
+    assert password not in text
     assert (ACCESS not in text) == bool(token)
     assert connection._sanitize_secret_text(None) is None
 
