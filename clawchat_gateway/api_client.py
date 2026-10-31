@@ -153,6 +153,32 @@ def strip_url_userinfo(text: str) -> str:
     return "".join(parts)
 
 
+def configured_userinfo(url: str | None) -> tuple[str, ...]:
+    """Raw `userinfo@` and `password@` of a configured URL.
+
+    The authority runs to the first `/?#` (not whitespace) and userinfo ends at
+    its last `@`, so credentials the URL scan cannot delimit (for example with
+    spaces, or echoed without the scheme by http.client) can be removed exactly.
+    """
+    if not url or "://" not in url:
+        return ()
+    authority = re.split(r"[/?#]", url.split("://", 1)[1], maxsplit=1)[0]
+    at = authority.rfind("@")
+    if at <= 0:
+        return ()
+    userinfo = authority[: at + 1]
+    password = userinfo.split(":", 1)[1] if ":" in userinfo else ""
+    return tuple(value for value in (userinfo, password) if len(value) > 1)
+
+
+def strip_configured_userinfo(text: str, *urls: str | None) -> str:
+    """Remove the exact raw userinfo of the given configured URLs from text."""
+    for url in urls:
+        for value in configured_userinfo(url):
+            text = text.replace(value, "")
+    return text
+
+
 def redact_refresh_message(value: object, *secrets: str) -> str:
     """Sanitize refresh diagnostics at their first display-text boundary."""
     text = strip_url_userinfo(str(value or ""))
@@ -1046,19 +1072,19 @@ class ClawChatApiClient:
             connect_failed = isinstance(reason, (ConnectionRefusedError, socket.gaierror))
             raise ClawChatApiError(
                 "transport",
-                redact_refresh_message(reason or exc, *secret_values),
+                redact_refresh_message(strip_configured_userinfo(str(reason or exc), self._base_url), *secret_values),
                 path="/v1/auth/refresh",
                 connect_failed=connect_failed,
             ) from None
         except TimeoutError as exc:
             raise ClawChatApiError(
                 "transport",
-                redact_refresh_message(exc, *secret_values) or "refresh request timed out",
+                redact_refresh_message(strip_configured_userinfo(str(exc), self._base_url), *secret_values) or "refresh request timed out",
                 path="/v1/auth/refresh",
             ) from None
         except Exception as exc:  # noqa: BLE001
             raise ClawChatApiError(
-                "transport", redact_refresh_message(exc, *secret_values),
+                "transport", redact_refresh_message(strip_configured_userinfo(str(exc), self._base_url), *secret_values),
                 path="/v1/auth/refresh",
             ) from None
 
@@ -1076,7 +1102,8 @@ class ClawChatApiClient:
         msg = ""
         if isinstance(payload, dict):
             msg = redact_refresh_message(
-                payload.get("msg") or payload.get("message"), *secret_values)
+                strip_configured_userinfo(str(payload.get("msg") or payload.get("message") or ""), self._base_url),
+                *secret_values)
         if status != 200 and code != REFRESH_CODE_INVALID_REFRESH:
             raise ClawChatApiError(
                 "transport",

@@ -63,7 +63,7 @@ row. The failure matrix in §B and logout rule in §C describe Hermes.
 
 - The refreshed access token preserves the agent identity (`aid`/`oid`); scopes are read live server-side.
 - Rotated tokens must be non-blank strings; malformed success bodies are transient.
-- Refresh diagnostic messages redact credentials before errors or logs, normalize whitespace and cap at 200 characters. URL userinfo (`scheme://user:pass@host`) is stripped to `scheme://host`, and a credential-bearing URL that cannot be parsed becomes `[redacted-url]`; the match is conservative, so text glued to such a URL up to a later `@` may be dropped with it. The connection error text uses the same URL rule.
+- Refresh diagnostic messages redact credentials before errors or logs, normalize whitespace and cap at 200 characters. URL userinfo (`scheme://user:pass@host`) is stripped to `scheme://host`, and a credential-bearing URL that cannot be parsed becomes `[redacted-url]`; the match is conservative, so text glued to such a URL up to a later `@` may be dropped with it. The connection error text uses the same URL rule. Where the configured base URL is known (refresh errors, connection error text, the activation warning), its exact raw `userinfo@` and `password@` are removed first, so credentials the URL scan cannot delimit (for example with spaces, or echoed without the scheme by `http.client`) are removed too.
 - Token lifetimes are determined by the server; use JWT `exp` for access expiry.
 
 ### ⚠️ Rotation hazard (drives persistence ordering)
