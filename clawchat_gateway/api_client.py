@@ -153,29 +153,54 @@ def strip_url_userinfo(text: str) -> str:
     return "".join(parts)
 
 
-def configured_userinfo(url: str | None) -> tuple[str, ...]:
-    """Raw `userinfo@` and `password@` of a configured URL.
+_PASSWORD_BOUNDARY = frozenset(" \t\r\n\f\v\"'`<(")
+
+
+def configured_userinfo(url: str | None) -> tuple[str, str]:
+    """Raw `userinfo@` and `password@` of a configured URL ("" when absent).
 
     The authority runs to the first `/?#` (not whitespace) and userinfo ends at
     its last `@`, so credentials the URL scan cannot delimit (for example with
     spaces, or echoed without the scheme by http.client) can be removed exactly.
     """
     if not url or "://" not in url:
-        return ()
+        return "", ""
     authority = re.split(r"[/?#]", url.split("://", 1)[1], maxsplit=1)[0]
     at = authority.rfind("@")
     if at <= 0:
-        return ()
+        return "", ""
     userinfo = authority[: at + 1]
     password = userinfo.split(":", 1)[1] if ":" in userinfo else ""
-    return tuple(value for value in (userinfo, password) if len(value) > 1)
+    return userinfo, password if len(password) > 1 else ""
 
 
 def strip_configured_userinfo(text: str, *urls: str | None) -> str:
-    """Remove the exact raw userinfo of the given configured URLs from text."""
+    """Remove configured URLs' exact raw credentials at URL / text boundaries.
+
+    `userinfo@` is removed right after `://`; `password@` only at the start of
+    the text or after whitespace, a quote, `<` or `(`. A matching suffix inside
+    another URL's credentials is left for the URL scan, which removes that URL's
+    whole userinfo.
+    """
     for url in urls:
-        for value in configured_userinfo(url):
-            text = text.replace(value, "")
+        userinfo, password = configured_userinfo(url)
+        if userinfo:
+            text = text.replace(f"://{userinfo}", "://")
+        if not password:
+            continue
+        parts: list[str] = []
+        start = 0
+        index = text.find(password)
+        while index >= 0:
+            if index == 0 or text[index - 1] in _PASSWORD_BOUNDARY:
+                parts.append(text[start:index])
+                start = index + len(password)
+            else:
+                parts.append(text[start:index + 1])
+                start = index + 1
+            index = text.find(password, start)
+        parts.append(text[start:])
+        text = "".join(parts)
     return text
 
 

@@ -157,7 +157,20 @@ def test_url_userinfo_is_removed_from_adjacent_and_embedded_urls(text, expected)
 def test_configured_url_userinfo_is_removed_exactly(text, expected):
     base_url = 'https://placeholder-user:placeholder pass@example.com/'  # redact-allow:email
     assert api.strip_configured_userinfo(text, base_url, None) == expected
-    assert api.configured_userinfo('https://example.com/a@b') == ()
+    assert api.configured_userinfo('https://example.com/a@b') == ('', '')
+
+
+@pytest.mark.parametrize('text, expected', [
+    ('failed https://other-user:other-placeholder-pass@example.org/v1',  # redact-allow:email
+     'failed https://example.org/v1'),
+    ('failed https://placeholder-user:placeholder-pass@example.com/v1 and '  # redact-allow:email
+     'https://other-user:other-placeholder-pass@example.org/',  # redact-allow:email
+     'failed https://example.com/v1 and https://example.org/'),
+    ('metadata-placeholder-pass@x', 'metadata-placeholder-pass@x'),  # redact-allow:email
+])
+def test_configured_credentials_keep_url_boundaries(text, expected):
+    base_url = 'https://placeholder-user:placeholder-pass@example.com'  # redact-allow:email
+    assert api.strip_url_userinfo(api.strip_configured_userinfo(text, base_url)) == expected
 
 @pytest.mark.parametrize('authority', [
     'u:p@example.com:99999x', 'u:p@example.com:99999', 'u:p@[example.com',  # redact-allow:email
