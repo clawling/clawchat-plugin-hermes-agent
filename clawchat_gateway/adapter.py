@@ -1079,6 +1079,14 @@ def _legacy_extra_media(text: str, *, is_voice: bool) -> tuple[list[tuple[str, b
     return media, text
 
 
+# Fixed reason codes the server sends on permission receipts. Any other reason
+# (including a one-word error) keeps the receipt untrusted.
+_TRUSTED_RECEIPT_REASONS = frozenset({
+    "", "owner_allowed", "owner_denied", "owner_timeout", "owner_turn_only",
+    "policy_allow", "policy_deny", "policy_forbidden", "window_allow",
+})
+
+
 class ClawChatAdapter(BasePlatformAdapter):
     SUPPORTS_MESSAGE_EDITING = True
     # ClawChat renders markdown: Hermes then shows a terminal tool call as a
@@ -3471,9 +3479,9 @@ class ClawChatAdapter(BasePlatformAdapter):
             if _synthetic is not None:
                 # The rendered receipt carries operation, outcome, reason and the
                 # server-generated result. A failure reason can be a free-form
-                # error string, so only a plain reason code attests no guest text.
+                # error string, so only a known server reason code attests no guest text.
                 if (not _synthetic.orchestrate_retry
-                        and re.fullmatch(r"[a-z][a-z0-9_]*", str(_synthetic.raw_message.get("reason") or "x"))):
+                        and str(_synthetic.raw_message.get("reason") or "") in _TRUSTED_RECEIPT_REASONS):
                     _synthetic = _synthetic.as_plugin_notification()
                 logger.info(
                     "clawchat permission_result dispatched chat_id=%s request_id=%s operation=%s outcome=%s",

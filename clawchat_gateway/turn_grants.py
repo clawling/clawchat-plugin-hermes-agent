@@ -138,7 +138,7 @@ def register_turn(*, account_id: str, chat_id: str, speakers: tuple[str, ...],
             ids |= frozenset(id_ for item in overlaps for id_ in item.non_owner_speakers)
             for item in overlaps:
                 if trusted_notification and (item.originally_owner_side or item.owner_side or item.legacy_owner_tools):
-                    _snapshots[item.nonce] = replace(item, owner_verified=False)
+                    _snapshots[item.nonce] = _withdraw_management(item)
                     continue
                 updated = replace(item, grants=frozen, non_owner_speakers=ids,
                                                 owner_side=item.owner_side and owner_side,
@@ -160,6 +160,9 @@ def register_turn(*, account_id: str, chat_id: str, speakers: tuple[str, ...],
                          next((item.downgrade_trigger or item.input_trigger for item in overlaps
                                if not (item.owner_side or item.legacy_owner_tools)), trigger))
             snapshot = _downgrade(snapshot, reason, arrival_restriction.trigger if arrival_restriction else cause)
+        elif (owner_verified is True and snapshot.owner_side and not snapshot.owner_verified
+              and any(item.plugin_notification for item in all_overlaps)):
+            logger.info("owner_downgrade reason=management trigger=plugin_notice")
         if unverified_token in notices:
             notices[unverified_token] = (nonce, notices[unverified_token][1])
         _snapshots[nonce] = snapshot
@@ -209,6 +212,13 @@ def active_snapshot(account_id: str, session_key: str) -> TurnSnapshot | None:
         return _snapshots.get(_active.get((account_id, session_key), ""))
 
 
+def _withdraw_management(snapshot: TurnSnapshot) -> TurnSnapshot:
+    """A local notice keeps ordinary owner tools; only grant management is withdrawn."""
+    if snapshot.owner_verified:
+        logger.info("owner_downgrade reason=management trigger=plugin_notice")
+    return replace(snapshot, owner_verified=False)
+
+
 def _downgrade(snapshot: TurnSnapshot, reason: str, trigger: str) -> TurnSnapshot:
     if not snapshot.originally_owner_side or snapshot.owner_side or snapshot.downgrade_reason:
         return snapshot
@@ -231,7 +241,7 @@ def _revoke_owner_verification_locked(account_id: str, session_key: str, *,
         snapshot = _snapshots.get(nonce)
         if snapshot is not None:
             if management_only:
-                _snapshots[nonce] = replace(snapshot, owner_verified=False)
+                _snapshots[nonce] = _withdraw_management(snapshot)
                 continue
             updated = replace(snapshot, owner_verified=False, owner_side=False, legacy_owner_tools=False,
                               orchestrate_retry=False, grants=intersect_turn_grants([snapshot.grants, {}]))

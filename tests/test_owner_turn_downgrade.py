@@ -75,7 +75,8 @@ async def test_permission_receipt_marked_only_at_local_dispatch(harness, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_permission_receipt_with_free_text_reason_stays_untrusted(harness):
+@pytest.mark.parametrize("reason", ["accept failed for Example Person", "examplename"])
+async def test_permission_receipt_with_free_text_reason_stays_untrusted(harness, reason):
     from clawchat_gateway import permission_result
     permission_result._seen_request_ids.clear()
     a = harness.adapter
@@ -84,8 +85,8 @@ async def test_permission_receipt_with_free_text_reason_stays_untrusted(harness)
         owner = latest(harness)
         await a._on_message({"sender": {"id": "system"}, "chat_id": OWNER_CHAT,
             "chat_type": "direct", "payload": {"metadata": {"kind": "permission_result",
-            "request_id": "receipt-free-text", "operation": "friend.accept", "outcome": "failed",
-            "reason": "accept failed for Example Person"}}})
+            "request_id": "receipt-free-text-" + reason[:8], "operation": "friend.accept", "outcome": "failed",
+            "reason": reason}}})
         assert not latest(harness).plugin_notification
         assert not turns.get_snapshot(owner.nonce).owner_side
         assert turns.get_snapshot(owner.nonce).downgrade_trigger == "permission_result"

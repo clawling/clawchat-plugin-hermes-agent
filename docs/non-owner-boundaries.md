@@ -207,7 +207,8 @@ turn, so group approve is unavailable there.
 
 Owner messages retain ordinary owner tools when overlapping a locally marked
 plugin notification: awareness, memory migration hints, activation bootstrap,
-ordinary permission-result receipts, and maintenance prompts in the owner's
+permission-result receipts whose reason is a known server code (a free-form
+failure reason stays untrusted), and maintenance prompts in the owner's
 private chat. The marker exists only in this process; wire `synthetic` fields
 never establish trust. These notifications withdraw `owner_verified` from the
 batch, so grant management remains unavailable; the owner's ordinary permissions
@@ -229,8 +230,9 @@ Queued follow-ups prefer the latest live unbound non-notification nonce in the
 same plugin session and chat; only when none exists do they choose a notification.
 Missing candidates fail closed. Each execution and nonce bind once.
 
-Downgrades emit INFO `owner_downgrade reason=<unverified_input|revoke|overlap>
-trigger=<input kind>` on one line, without message text. Blocked calls in a bound
+Downgrades emit one INFO line, without message text:
+`owner_downgrade reason=<unverified_input|revoke|overlap> trigger=<input kind>`;
+a notice withdrawing grant management logs `reason=management trigger=plugin_notice`. Blocked calls in a bound
 owner-origin downgraded snapshot tell the model:
 “Your owner started this turn, but other input arrived in the same chat, so it ran
 with guest-level tools. Ask them to send it again. Do not offer an access grant.”
