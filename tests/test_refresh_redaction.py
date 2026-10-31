@@ -158,7 +158,7 @@ def test_url_userinfo_is_removed_from_adjacent_and_embedded_urls(text, expected)
 def test_configured_url_userinfo_is_removed_exactly(text, expected):
     base_url = 'https://placeholder-user:placeholder pass@example.com/'  # redact-allow:email
     assert api.strip_configured_userinfo(text, base_url, None) == expected
-    assert api.configured_userinfo('https://example.com/a@b') == ('', '')
+    assert api.configured_userinfo('https://example.com/a@b') == ((), ())
 
 
 @pytest.mark.parametrize('text, expected', [
@@ -175,6 +175,16 @@ def test_configured_url_userinfo_is_removed_exactly(text, expected):
 def test_configured_credentials_keep_url_boundaries(text, expected):
     base_url = 'https://placeholder-user:placeholder-pass@example.com'  # redact-allow:email
     assert api.strip_url_userinfo(api.strip_configured_userinfo(text, base_url)) == expected
+
+
+@pytest.mark.parametrize('text, password', [
+    ('@' * 100_000, '@' * 5_000),
+    ("'" + 'a' * 99_999, 'a' * 5_000),
+])
+def test_configured_credential_removal_is_linear(text, password):
+    started = time.perf_counter()
+    api.strip_configured_userinfo(text, f'https://u:{password}@example.com')  # redact-allow:email
+    assert time.perf_counter() - started < 2.0
 
 @pytest.mark.parametrize('authority', [
     'u:p@example.com:99999x', 'u:p@example.com:99999', 'u:p@[example.com',  # redact-allow:email
@@ -216,7 +226,7 @@ def _url_error(request):
 
 
 def _host_error(request):
-    return InvalidURL(f"nonnumeric port: '{request.host.split(':', 1)[1]}'")
+    return InvalidURL(f"nonnumeric port: '{request.host.rsplit(':', 1)[1]}'")
 
 
 @pytest.mark.parametrize('password, make_error', [
@@ -224,6 +234,8 @@ def _host_error(request):
     ('placeholder pass with spaces', _url_error),
     ('placeholder pass with spaces', _host_error),
     ('placeholder-pass', _host_error),
+    ('placeholder%20pass', _host_error),
+    ('place:holder-pass', _host_error),
 ])
 async def test_url_transport_error_is_redacted_in_exception_outcome_and_log(
         monkeypatch, caplog, password, make_error):
@@ -249,6 +261,7 @@ async def test_url_transport_error_is_redacted_in_exception_outcome_and_log(
         assert 'example.com' in output
         assert 'placeholder-user' not in output
         assert password not in output and 'pass with spaces' not in output
+        assert 'placeholder pass' not in output and 'holder-pass' not in output
 
 
 @pytest.mark.parametrize('password', [

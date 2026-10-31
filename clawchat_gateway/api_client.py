@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import quote, unquote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from clawchat_gateway import __version__
@@ -156,62 +156,94 @@ def strip_url_userinfo(text: str) -> str:
 _PASSWORD_BOUNDARY = frozenset(" \t\r\n\f\v\"'`<(")
 
 
-def configured_userinfo(url: str | None) -> tuple[str, str]:
-    """Raw `userinfo@` and `password@` of a configured URL ("" when absent).
+def _occurrences(text: str, pattern: str):
+    """Start offsets of every (overlapping) occurrence, in O(len(text) + len(pattern))."""
+    failure = [0] * len(pattern)
+    matched = 0
+    for index in range(1, len(pattern)):
+        while matched and pattern[index] != pattern[matched]:
+            matched = failure[matched - 1]
+        if pattern[index] == pattern[matched]:
+            matched += 1
+        failure[index] = matched
+    matched = 0
+    for index, char in enumerate(text):
+        while matched and char != pattern[matched]:
+            matched = failure[matched - 1]
+        if char == pattern[matched]:
+            matched += 1
+        if matched == len(pattern):
+            yield index - matched + 1
+            matched = failure[matched - 1]
+
+
+def configured_userinfo(url: str | None) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Raw and decoded `userinfo@` / `password@` forms of a configured URL.
 
     The authority runs to the first `/?#` (not whitespace) and userinfo ends at
-    its last `@`, so credentials the URL scan cannot delimit (for example with
-    spaces, or echoed without the scheme by http.client) can be removed exactly.
+    its last `@`. urllib decodes the host before http.client echoes it, and a
+    "nonnumeric port" error shows only the part after the last colon, so the
+    password forms include the decoded password and both last-colon suffixes.
     """
     if not url or "://" not in url:
-        return "", ""
+        return (), ()
     authority = re.split(r"[/?#]", url.split("://", 1)[1], maxsplit=1)[0]
     at = authority.rfind("@")
     if at <= 0:
-        return "", ""
-    userinfo = authority[: at + 1]
-    password = userinfo.split(":", 1)[1] if ":" in userinfo else ""
-    return userinfo, password if len(password) > 1 else ""
+        return (), ()
+    raw = authority[:at]
+    decoded = unquote(raw)
+    userinfos = {raw, decoded}
+    passwords = {value.split(":", 1)[1] for value in userinfos if ":" in value}
+    passwords |= {value.rsplit(":", 1)[1] for value in userinfos if ":" in value}
+    by_length = lambda values: tuple(sorted(  # noqa: E731
+        (f"{value}@" for value in values if value), key=len, reverse=True))
+    return by_length(userinfos), by_length(passwords)
+
+
+def _remove_occurrences(text: str, pattern: str, keep: str, accept) -> str:
+    parts: list[str] = []
+    start = 0
+    for index in _occurrences(text, pattern):
+        if index < start or not accept(index):
+            continue
+        parts.append(text[start:index])
+        parts.append(keep)
+        start = index + len(pattern)
+    parts.append(text[start:])
+    return "".join(parts)
 
 
 def strip_configured_userinfo(text: str, *urls: str | None) -> str:
-    """Remove configured URLs' exact raw credentials at URL / text boundaries.
+    """Remove configured URLs' exact credentials at URL / text boundaries.
 
     `userinfo@` is removed right after `://`; `password@` only at the start of
     the text or after whitespace, a quote, `<` or `(`, and only outside a URL
     (no `://` earlier in the same whitespace-delimited run). A matching suffix
     inside another URL's credentials is left for the URL scan, which removes
-    that URL's whole userinfo. One forward cursor keeps this linear.
+    that URL's whole userinfo. Matching and boundary tracking are linear.
     """
     for url in urls:
-        userinfo, password = configured_userinfo(url)
-        if userinfo:
-            text = text.replace(f"://{userinfo}", "://")
-        if not password:
-            continue
-        parts: list[str] = []
-        start = 0
-        cursor = 0
-        last_space = -1
-        last_scheme = -1
-        index = text.find(password)
-        while index >= 0:
-            while cursor < index:
-                if text[cursor].isspace():
-                    last_space = cursor
-                elif text.startswith("://", cursor):
-                    last_scheme = cursor
-                cursor += 1
-            inside_url = last_scheme > last_space
-            if not inside_url and (index == 0 or text[index - 1] in _PASSWORD_BOUNDARY):
-                parts.append(text[start:index])
-                start = index + len(password)
-            else:
-                parts.append(text[start:index + 1])
-                start = index + 1
-            index = text.find(password, start)
-        parts.append(text[start:])
-        text = "".join(parts)
+        userinfos, passwords = configured_userinfo(url)
+        for userinfo in userinfos:
+            text = _remove_occurrences(text, f"://{userinfo}", "://", lambda _index: True)
+        for password in passwords:
+            state = {"cursor": 0, "space": -1, "scheme": -1}
+
+            def outside_url_at_boundary(index: int, text: str = text, state: dict = state) -> bool:
+                cursor = state["cursor"]
+                while cursor < index:
+                    if text[cursor].isspace():
+                        state["space"] = cursor
+                    elif text.startswith("://", cursor):
+                        state["scheme"] = cursor
+                    cursor += 1
+                state["cursor"] = cursor
+                if state["scheme"] > state["space"]:
+                    return False
+                return index == 0 or text[index - 1] in _PASSWORD_BOUNDARY
+
+            text = _remove_occurrences(text, password, "", outside_url_at_boundary)
     return text
 
 
