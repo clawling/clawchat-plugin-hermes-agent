@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, urlsplit, urlunsplit
+from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from clawchat_gateway import __version__
@@ -104,21 +104,21 @@ class RefreshResult:
 # A URL starts at an anchored, length-capped scheme. Its authority runs to the
 # first whitespace or `/?#`, and userinfo is everything before the authority's
 # last `@` (urllib accepts quotes, `<`, `>`, backticks and extra `@` there), with
-# no length cap so long credentials fail closed. The rest of the URL ends at
-# quotes and angle brackets so quoted URLs keep their closing delimiter.
-# Redaction is conservative: text glued to a credentialed URL up to a later `@`
-# may be dropped with it. Scanning resumes after each URL, so server-supplied
+# no length cap so long credentials fail closed. The host after that `@` ends at
+# quotes and angle brackets as well, and only `scheme://userinfo@host[:port]` is
+# rewritten; scanning continues right after it (or after the scheme when there
+# is no userinfo), so adjacent and embedded URLs are still checked. Redaction is
+# conservative: text glued to a credentialed URL up to a later `@` may be
+# dropped with it. Every search is bounded by one authority, so server-supplied
 # text is processed in linear time.
 _URL_SCHEME = re.compile(r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]{0,31}://")
 _AUTHORITY_END = re.compile(r"[\s/?#]")
-_URL_END = re.compile(r"""[\s"'<>`]""")
+_HOST_END = re.compile(r"""[\s"'<>`]""")
 
 
-def _strip_userinfo_from_url(url: str) -> str:
+def _strip_userinfo_from_authority(scheme: str, authority: str) -> str:
     try:
-        parsed = urlsplit(url)
-        if parsed.username is None and parsed.password is None:
-            return "[redacted-url]"
+        parsed = urlsplit(f"{scheme}{authority}")
         hostname = parsed.hostname
         port = parsed.port
         if not hostname:
@@ -126,7 +126,7 @@ def _strip_userinfo_from_url(url: str) -> str:
         netloc = f"[{hostname}]" if ":" in hostname else hostname
         if port is not None:
             netloc = f"{netloc}:{port}"
-        return urlunsplit(parsed._replace(netloc=netloc))
+        return f"{scheme}{netloc}"
     except ValueError:
         return "[redacted-url]"
 
@@ -141,15 +141,14 @@ def strip_url_userinfo(text: str) -> str:
         authority_start = scheme.end()
         end = _AUTHORITY_END.search(text, authority_start)
         authority_end = end.start() if end else len(text)
-        if text.rfind("@", authority_start, authority_end) < 0:
-            parts.append(text[copied:authority_end])
-            copied = authority_end
+        at = text.rfind("@", authority_start, authority_end)
+        if at < 0:
             continue
-        end = _URL_END.search(text, authority_end)
-        url_end = end.start() if end else len(text)
+        end = _HOST_END.search(text, at + 1, authority_end)
+        host_end = end.start() if end else authority_end
         parts.append(text[copied:scheme.start()])
-        parts.append(_strip_userinfo_from_url(text[scheme.start():url_end]))
-        copied = url_end
+        parts.append(_strip_userinfo_from_authority(scheme.group(0), text[authority_start:host_end]))
+        copied = host_end
     parts.append(text[copied:])
     return "".join(parts)
 

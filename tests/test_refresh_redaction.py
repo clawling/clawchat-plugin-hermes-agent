@@ -126,6 +126,7 @@ def test_long_url_userinfo_is_still_removed():
 @pytest.mark.parametrize('text', [
     'a' * 100_000, 'a' * 100_000 + '://', "a://'" * 25_000, 'https://' + 'a' * 100_000,
     'https://' + 'u:' + 'p' * 100_000 + '@example.com/',  # redact-allow:email
+    'a://x@' * 20_000, '"https://example.com",' * 20_000,
 ])
 def test_url_userinfo_stripping_is_linear_on_long_text(text):
     started = time.perf_counter()
@@ -133,12 +134,25 @@ def test_url_userinfo_stripping_is_linear_on_long_text(text):
     api.strip_url_userinfo(text)
     assert time.perf_counter() - started < 2.0
 
+
+@pytest.mark.parametrize('text, expected', [
+    ('["https://example.com","https://placeholder-user:placeholder-pass@example.com/"]',  # redact-allow:email
+     '["https://example.com","https://example.com/"]'),
+    ('["https://placeholder-user:placeholder-pass@example.com","https://u2:p2@example.org/x"]',  # redact-allow:email
+     '["https://example.com","https://example.org/x"]'),
+    ('https://example.com/next?u=https://placeholder-user:placeholder-pass@example.org/',  # redact-allow:email
+     'https://example.com/next?u=https://example.org/'),
+])
+def test_url_userinfo_is_removed_from_adjacent_and_embedded_urls(text, expected):
+    assert api.strip_url_userinfo(text) == expected
+    assert 'placeholder-pass' not in api.redact_refresh_message(text)
+
 @pytest.mark.parametrize('authority', [
     'u:p@example.com:99999x', 'u:p@example.com:99999', 'u:p@[example.com',  # redact-allow:email
 ])
 def test_refresh_message_redacts_unparseable_url(authority):
     text = api.redact_refresh_message(f'failed https://{authority}/')
-    assert text == 'failed [redacted-url]'
+    assert text == 'failed [redacted-url]/'
     assert 'u:p' not in text
 
 
