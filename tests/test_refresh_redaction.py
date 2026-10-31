@@ -6,6 +6,7 @@ import time
 import traceback
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from http.client import InvalidURL
 from urllib.error import HTTPError, URLError
 
 import pytest
@@ -182,18 +183,27 @@ def test_url_userinfo_is_removed_before_secret_replacement_and_truncation():
     assert 'placeholder-user' not in text and 'placeholder-pass' not in text
 
 
-async def test_url_transport_error_is_redacted_in_exception_outcome_and_log(monkeypatch, caplog):
+@pytest.mark.parametrize('password', ['placeholder-pass', 'placeholder pass with spaces', 'placeholder%20pass'])
+@pytest.mark.parametrize('make_error', ['url', 'authority', 'port'])
+async def test_url_transport_error_is_withheld_in_exception_outcome_and_log(
+        monkeypatch, caplog, password, make_error):
     http = api.ClawChatApiClient(
-        base_url='https://placeholder-user:placeholder-pass@example.com',  # redact-allow:email
+        base_url=f'https://placeholder-user:{password}@example.com',  # redact-allow:email
         token=ACCESS, device_id='placeholder-device',
     )
 
     def fail(request, **_kwargs):
-        raise URLError(f'opening {request.full_url}')
+        authority = request.full_url.split('://', 1)[1].split('/', 1)[0]
+        if make_error == 'url':
+            raise URLError(f'opening {request.full_url}')
+        if make_error == 'authority':
+            raise InvalidURL(f"nonnumeric port: '{authority}'")
+        raise InvalidURL(f"nonnumeric port: '{request.host.rsplit(':', 1)[-1]}'")
 
     monkeypatch.setattr(api, 'urlopen', fail)
     with pytest.raises(api.ClawChatApiError) as error:
         http._auth_refresh_sync(REFRESH, 'placeholder-device')
+    assert error.value.message == api.DIAGNOSTIC_WITHHELD
     http.auth_refresh = AsyncMock(side_effect=error.value)
     manager = RefreshManager(
         build_client=lambda: http, persist_tokens=AsyncMock(), persist_logout=AsyncMock(),
@@ -202,9 +212,99 @@ async def test_url_transport_error_is_redacted_in_exception_outcome_and_log(monk
     result = await manager.refresh(access_token=ACCESS, refresh_token=REFRESH)
     assert result.status == 'transient'
     for output in (str(error.value), result.error, caplog.text):
-        assert 'example.com/v1/auth/refresh' in output
-        assert 'placeholder-user' not in output
-        assert 'placeholder-pass' not in output
+        assert 'placeholder-user' not in output and 'placeholder' + '-pass' not in output
+        assert 'placeholder pass' not in output and 'pass with spaces' not in output
+
+
+@pytest.mark.parametrize('code,status', [(10003, 200), (10003, 401), (400, 200), (1, 200)])
+def test_server_message_is_withheld_for_credentialed_base_url(monkeypatch, code, status):
+    body = json.dumps({'code': code, 'msg': 'bad u:placeholder pass@example.com'}).encode()  # redact-allow:email
+
+    def urlopen(request, **_kwargs):
+        if status != 200:
+            raise HTTPError(request.full_url, status, 'placeholder', {}, Response(body))
+        return Response(body)
+
+    monkeypatch.setattr(api, 'urlopen', urlopen)
+    http = api.ClawChatApiClient(
+        base_url='https://u:placeholder pass@example.com',  # redact-allow:email
+        token=ACCESS, device_id='placeholder-device',
+    )
+    with pytest.raises(api.ClawChatApiError) as error:
+        http._auth_refresh_sync(REFRESH, 'placeholder-device')
+    assert error.value.code == code
+    assert 'placeholder pass' not in str(error.value)
+    assert 'placeholder pass' not in error.value.message
+
+
+# Every counterexample from the earlier exact-match designs: with credentials in
+# the configured base URL, only the fixed text is left.
+CREDENTIALED_ECHOES = [
+    ('https://u:placeholder pass@example.com', "nonnumeric port: 'u:placeholder pass@example.com'"),  # redact-allow:email
+    ('https://u:placeholder pass@example.com', "nonnumeric port: 'placeholder pass@example.com'"),  # redact-allow:email
+    ('https://u:placeholder%20pass@example.com', "nonnumeric port: 'placeholder pass@example.com'"),  # redact-allow:email
+    ('https://u:place:holder:pass@example.com', "nonnumeric port: 'holder:pass@example.com'"),  # redact-allow:email
+    ('https://u:place\\"holder pass@example.com', 'raw error place\\"holder pass@example.com'),  # redact-allow:email
+    ('https://u:placeholder pass"' + 'x' * 220 + '@example.com',  # redact-allow:email
+     json.dumps({'message': 'https://u:placeholder pass"' + 'x' * 220 + '@example.com'})),  # redact-allow:email
+    ('https://u:access-placeholder@example.com',  # redact-allow:email
+     'rejected placeholder-refresh-prefix-access-placeholder-private-tail here'),
+    ('https://u:placeholder-pass%40@example.com',  # redact-allow:email
+     'failed https://other-user:other-secret-placeholder-pass@example.org/v1'),  # redact-allow:email
+    ('https://u:aaaa%3Abbbb@example.com', "nonnumeric port: 'bbbb@example.com'"),  # redact-allow:email
+    ('https://u:abcd!:xy@example.com', 'bad abcd!%3Axy here'),  # redact-allow:email
+    ('https://u:' + ':' * 50_000 + '@example.com', 'x' * 50_000),  # redact-allow:email
+    ('https://u:abcde@example.com', 'abcd!'),  # redact-allow:email
+    ('https://u:abcd%2F@example.com', 'abcd%2f'),  # redact-allow:email
+    ('https://placeholder-user@example.com', 'failed placeholder-user'),  # redact-allow:email
+    ('https://u:p@ss/word@example.com', 'failed ss/word'),  # redact-allow:email
+    ('http://u:p@[bad', 'failed p'),
+]
+
+
+@pytest.mark.parametrize('base_url, text', CREDENTIALED_ECHOES)
+def test_credentialed_base_url_withholds_every_diagnostic(base_url, text):
+    from clawchat_gateway.connection import ClawChatConnection
+
+    assert api.url_has_userinfo(base_url)
+    assert api.redact_refresh_message(text, REFRESH, base_url=base_url) == api.DIAGNOSTIC_WITHHELD
+    connection = object.__new__(ClawChatConnection)
+    connection._cfg = SimpleNamespace(token=ACCESS, base_url=base_url, websocket_url='wss://example.com/ws')
+    assert connection._sanitize_secret_text(text) == api.DIAGNOSTIC_WITHHELD
+    connection._cfg = SimpleNamespace(token=ACCESS, base_url='https://example.com', websocket_url=base_url)
+    assert connection._sanitize_secret_text(text) == api.DIAGNOSTIC_WITHHELD
+
+
+@pytest.mark.parametrize('base_url', [
+    None, '', 'https://example.com', 'https://example.com:8443/a@b', 'https://example.com/v1?x=a@b#c@d',  # redact-allow:email
+])
+def test_base_url_without_userinfo_keeps_normal_redaction(base_url):
+    assert not api.url_has_userinfo(base_url)
+    assert api.redact_refresh_message(f'rejected {REFRESH}', REFRESH, base_url=base_url) == 'rejected ***'
+
+
+def test_redaction_fails_closed():
+    class Hostile:
+        def __str__(self):
+            raise RuntimeError('placeholder-boom')
+
+    assert api.redact_refresh_message(Hostile()) == api.DIAGNOSTIC_REDACTION_FAILED
+    from clawchat_gateway.connection import ClawChatConnection
+
+    connection = object.__new__(ClawChatConnection)
+    connection._cfg = SimpleNamespace(token=Hostile(), base_url='', websocket_url='')
+    assert connection._sanitize_secret_text('secret text') == api.DIAGNOSTIC_REDACTION_FAILED
+
+
+@pytest.mark.parametrize('base_url, text', [
+    ('https://u:' + 'a:' * 100_000 + '@example.com', 'x' * 100_000),  # redact-allow:email
+    ('https://example.com', 'https://' + 'u:' * 50_000 + '@' + 'a' * 50_000),
+    (None, 'a://x@' * 20_000),
+])
+def test_withhold_or_redact_is_fast_on_adversarial_input(base_url, text):
+    started = time.perf_counter()
+    api.redact_refresh_message(text, REFRESH, base_url=base_url)
+    assert time.perf_counter() - started < 2.0
 
 
 @pytest.mark.parametrize('password', ['placeholder-pass', "placeholder-pass`<x>@y'z"])
@@ -213,7 +313,7 @@ def test_connection_diagnostic_strips_url_userinfo(token, password):
     from clawchat_gateway.connection import ClawChatConnection
 
     connection = object.__new__(ClawChatConnection)
-    connection._cfg = SimpleNamespace(token=token)
+    connection._cfg = SimpleNamespace(token=token, base_url='https://example.com', websocket_url='wss://example.com/ws')
     text = connection._sanitize_secret_text(
         f'https://placeholder-user:{password}@example.com/ {ACCESS}')  # redact-allow:email
     assert 'https://example.com/' in text
@@ -223,7 +323,8 @@ def test_connection_diagnostic_strips_url_userinfo(token, password):
     assert connection._sanitize_secret_text(None) is None
 
 
-async def test_activation_stale_user_warning_strips_url_userinfo(monkeypatch, caplog):
+@pytest.mark.parametrize('password', ['placeholder-pass', 'placeholder pass with spaces'])
+async def test_activation_stale_user_warning_withholds_credentialed_base_url(monkeypatch, caplog, password):
     from clawchat_gateway import activate as activation
 
     monkeypatch.setattr(activation, '_load_config', lambda: (None, {}))
@@ -243,8 +344,8 @@ async def test_activation_stale_user_warning_strips_url_userinfo(monkeypatch, ca
     with pytest.raises(api.ClawChatApiError) as error:
         await activation.activate(
             'placeholder-code', repair=True,
-            base_url='https://placeholder-user:placeholder-pass@example.com',  # redact-allow:email
+            base_url=f'https://placeholder-user:{password}@example.com',  # redact-allow:email
         )
     assert error.value is stop and connect.await_count == 2
-    assert 'no longer exists on https://example.com' in caplog.text
-    assert 'placeholder-user' not in caplog.text and 'placeholder-pass' not in caplog.text
+    assert 'no longer exists on (base URL withheld: contains credentials)' in caplog.text
+    assert 'placeholder-user' not in caplog.text and password not in caplog.text
