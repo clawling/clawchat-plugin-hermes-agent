@@ -346,6 +346,10 @@ def _lookup_snapshot_locked(nonce: str, chat_id: str, session_id: str, turn_id: 
     # Execution IDs alone grant no authority outside the context nonce's session.
     if not any(nonce in values and target.nonce in values for values in _session_nonces.values()):
         return None
+    # Only a queued follow-up reads another nonce: its context nonce already ran
+    # an earlier execution. An unbound context never borrows a bound execution.
+    if target.nonce != nonce and _bindings.get(nonce) in (None, (session_id, turn_id)):
+        return None
     return target
 
 

@@ -25,16 +25,17 @@ def test_four_version_tiers(host, approval, monkeypatch, tier, has_turn, overrid
     owner = turns.register_turn(account_id="usr_agent", chat_id="cnv_owner", speakers=("usr_owner",),
                                 grants={}, session_key="owner", owner_verified=True, owner_side=True)
     try:
+        # These are independent executions; each needs its own turn identity.
         for s in (direct, ask, owner):
-            turns.bind_turn(s.nonce, "s", "t")
+            turns.bind_turn(s.nonce, "s", s.nonce)
         with host(**context(direct)):
-            result = call(**({"turn_id": "t"} if has_turn else {}))
+            result = call(**({"turn_id": direct.nonce} if has_turn else {}))
             assert result is None if has_turn else result["message"] == GRANT_BLOCK_MESSAGE
         source = SimpleNamespace(chat_id=direct.chat_id, chat_type="dm", user_id="usr_a", message_id=direct.nonce)
         if override:
             assert "docs" in guard.toolsets_for_source(source, owner_user_id="usr_owner")
         with host(**context(ask)):
-            result = call(**({"turn_id": "t"} if has_turn else {}))
+            result = call(**({"turn_id": ask.nonce} if has_turn else {}))
             if approve:
                 assert result["action"] == "approve"
             else:
@@ -42,7 +43,7 @@ def test_four_version_tiers(host, approval, monkeypatch, tier, has_turn, overrid
                 assert result["message"] == (GRANT_ASK_UNAVAILABLE_MESSAGE if has_turn else GRANT_BLOCK_MESSAGE)
         with host(**context(owner)):
             for tool in GRANT_TOOL_NAMES:
-                result = call(tool, **({"turn_id": "t"} if has_turn else {}))
+                result = call(tool, **({"turn_id": owner.nonce} if has_turn else {}))
                 assert result is None if has_turn else result == {"action": "block", "message": guard.MANAGEMENT_UPGRADE_MESSAGE}
     finally:
         for s in (direct, ask, owner):

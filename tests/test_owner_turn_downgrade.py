@@ -259,6 +259,9 @@ def test_binding_is_bijective_and_cannot_cross_plugin_sessions():
         assert turns.bound_snapshot(wrong_chat.nonce) is None
         assert turns.lookup_snapshot_for_call(first.nonce, OWNER_CHAT, "binding-session", "second").nonce == second.nonce
         assert turns.lookup_snapshot_for_call(other.nonce, OWNER_CHAT, "binding-session", "second") is None
+        # An unbound context never borrows another nonce's execution.
+        third = start("example-key")
+        assert turns.lookup_snapshot_for_call(third.nonce, OWNER_CHAT, "binding-session", "first") is None
         turns.release_session("example-account", "example-key")
         assert ("binding-session", "first") not in turns._execution_nonces
         assert ("binding-session", "second") not in turns._execution_nonces

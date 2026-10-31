@@ -99,21 +99,21 @@ CARD = dict(code="482193", grantees=[dict(id="usr_zhang", name="张三")],
             tools=["feishu_doc_read", "feishu_bitable_list"], mode="ask", label="飞书文档", now=NOW)
 
 ZH = "\n".join([
-    "授权确认（码 482193）", "允许：张三（usr_zhang）",
+    "授权确认（码 482193）", "允许：张三",
     "使用：feishu_doc_read、feishu_bitable_list（你说的「飞书文档」）", "方式：每次问我", "到期：不限", "想设期限就说「……到周五」。",
     "这意味着：张三能让我代为调用这些工具，你用这些工具能看到、能做到的，张三都能。",
     "这次按工具授权，不保证只限某份文档或某个资源。",
     "这类操作每次都会先问你。", "确认请点：`/clawchat-allow 482193`（10 分钟内有效；不确认就不会生效）",
 ])
 ZH_HANT = "\n".join([
-    "授權確認（碼 482193）", "允許：张三（usr_zhang）",
+    "授權確認（碼 482193）", "允許：张三",
     "使用：feishu_doc_read、feishu_bitable_list（你說的「飞书文档」）", "方式：每次問我", "到期：不限", "想設期限就說「……到週五」。",
     "這意味著：张三能讓我代為呼叫這些工具，你用這些工具能看到、能做到的，张三都能。",
     "這次按工具授權，不保證只限某份文件或某個資源。",
     "這類操作每次都會先問你。", "確認請點：`/clawchat-allow 482193`（10 分鐘內有效；不確認就不會生效）",
 ])
 EN = "\n".join([
-    "Grant confirmation (code 482193)", "Allow: 张三 (usr_zhang)",
+    "Grant confirmation (code 482193)", "Allow: 张三",
     "Use: feishu_doc_read, feishu_bitable_list (you called it “飞书文档”)", "Mode: Ask me each time", "Expires: No limit", 'To set an expiry, say “…until Friday.”',
     "This means: 张三 can have me call these tools for them. Whatever you can see or do with these tools, they can too.",
     "This grants access by tool; it does not guarantee access is limited to one document or resource.",
@@ -124,7 +124,9 @@ EN = "\n".join([
 
 @pytest.mark.parametrize("lang,expected", [("zh", ZH), ("zh_Hant", ZH_HANT), ("en", EN), ("ja", EN), ("es", EN)])
 def test_card_copy(lang, expected):
-    assert grants.build_grant_card(**CARD, lang=lang) == expected
+    card = grants.build_grant_card(**CARD, lang=lang)
+    assert card == expected
+    assert all(person["id"] not in card for person in CARD["grantees"])
 
 
 @pytest.mark.parametrize("lang,use,direct,ask,separator", [
@@ -150,7 +152,7 @@ def test_direct_baseline_people_and_expiry():
     expiry = int(datetime.fromisoformat("2026-10-21T06:59:00+00:00").timestamp() * 1000)
     baseline = grants.build_grant_card(**(CARD | dict(tools=["terminal"], mode="direct", expires_at=expiry,
         grantees=CARD["grantees"] + [dict(id="usr_agent", name="另一个 Agent")])), lang="zh")
-    assert "允许：张三（usr_zhang）、另一个 Agent（usr_agent）" in baseline
+    assert "允许：张三、另一个 Agent" in baseline and "usr_" not in baseline
     assert "方式：直接用" in baseline and "只给你完全信任的人。" in baseline
     assert "到期：2026-10-21 06:59 (UTC)" in baseline
     zoned = grants.build_grant_card(**CARD, lang="zh", expires_at=expiry, time_zone="America/Los_Angeles")
@@ -174,7 +176,8 @@ def test_invalid_card(changes):
 def test_clean_text_and_receipt_substitution():
     dirty = grants.build_grant_card(**(CARD | dict(grantees=[dict(id="usr_\u202ex", name="张\n三\u200b")],
         label="飞书\0\t文档", tools=["feishu_doc_read"])), lang="zh")
-    assert "张 三（usr_ x）" in dirty and "feishu_doc_read（你说的「飞书 文档」）" in dirty
+    assert "张 三" in dirty and "feishu_doc_read（你说的「飞书 文档」）" in dirty
+    assert "usr_" not in dirty
     assert not any(c in dirty for c in "\0\u200b\u202e")
     assert grants.build_grant_receipt(lang="zh", names=["张三"], tools=["x", "y"]) == "已生效：张三 现在可以使用 x、y"
     assert grants.build_grant_receipt(lang="zh_Hant", names=["{tools}"], tools=["x"]) == "已生效：{tools} 現在可以使用 x"
