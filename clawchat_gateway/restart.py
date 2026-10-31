@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import math
 import os
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -216,7 +218,13 @@ def restart_next_steps(plan: RestartPlan) -> list[str]:
     return []
 
 
-def schedule_gateway_restart(delay_seconds: int = 2) -> str:
+def schedule_gateway_restart(
+    delay_seconds: int = 2, *, retry_initial_seconds: float = 5,
+    retry_max_seconds: float = 60, retry_timeout_seconds: float = 1800,
+) -> str:
+    if not all(math.isfinite(value) and value > 0 for value in
+               (retry_initial_seconds, retry_max_seconds, retry_timeout_seconds)):
+        raise ValueError("Invalid restart retry timing")
     hermes_dir = _hermes_dir()
     hermes_home = _hermes_home()
     hermes_bin = _hermes_binary(hermes_dir)
@@ -232,23 +240,48 @@ def schedule_gateway_restart(delay_seconds: int = 2) -> str:
         "HERMES_DIR": str(hermes_dir),
         "CLAWCHAT_HERMES_BIN": str(hermes_bin),
         "CLAWCHAT_GATEWAY_RESTART_DELAY": str(int(delay_seconds)),
+        "CLAWCHAT_GATEWAY_RESTART_RETRY_INITIAL": str(retry_initial_seconds),
+        "CLAWCHAT_GATEWAY_RESTART_RETRY_MAX": str(retry_max_seconds),
+        "CLAWCHAT_GATEWAY_RESTART_RETRY_TIMEOUT": str(retry_timeout_seconds),
     }
     # The launcher's stdout/stderr ARE the log file, so the restart's own output
-    # lands there, followed by an explicit exit_code line once it returns.
-    launcher = (
-        "import os, subprocess, sys, time, datetime; "
-        "delay=int(os.environ.get('CLAWCHAT_GATEWAY_RESTART_DELAY', '2')); "
-        "time.sleep(delay); "
-        "now=lambda: datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'); "
-        "argv=[os.environ['CLAWCHAT_HERMES_BIN'], 'gateway', 'restart']; "
-        "print(f'[{now()}] running: {argv}', flush=True); "
-        "rc=127\n"
-        "try:\n"
-        "    rc=subprocess.call(argv, env=os.environ, stdin=subprocess.DEVNULL)\n"
-        "except OSError as exc:\n"
-        "    print(f'[{now()}] could not start: {exc}', flush=True)\n"
-        "print(f'[{now()}] exit_code={rc}', flush=True)"
-    )
+    # lands there, followed by an explicit exit_code for each attempt.
+    launcher = """
+import datetime
+import os
+import subprocess
+import time
+
+now = lambda: datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')
+deadline = time.monotonic() + float(os.environ['CLAWCHAT_GATEWAY_RESTART_RETRY_TIMEOUT'])
+backoff = float(os.environ['CLAWCHAT_GATEWAY_RESTART_RETRY_INITIAL'])
+maximum = float(os.environ['CLAWCHAT_GATEWAY_RESTART_RETRY_MAX'])
+time.sleep(min(max(0, int(os.environ['CLAWCHAT_GATEWAY_RESTART_DELAY'])),
+               max(0, deadline - time.monotonic())))
+argv = [os.environ['CLAWCHAT_HERMES_BIN'], 'gateway', 'restart']
+attempt = 0
+while time.monotonic() < deadline:
+    attempt += 1
+    print(f'[{now()}] attempt={attempt} running: {argv}', flush=True)
+    rc = 127
+    try:
+        rc = subprocess.call(argv, env=os.environ, stdin=subprocess.DEVNULL,
+                             timeout=max(0.001, deadline - time.monotonic()))
+    except OSError as exc:
+        print(f'[{now()}] could not start: {exc}', flush=True)
+    except subprocess.TimeoutExpired:
+        rc = 124
+    print(f'[{now()}] attempt={attempt} exit_code={rc}', flush=True)
+    if rc == 0:
+        break
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        break
+    time.sleep(min(backoff, maximum, remaining))
+    backoff = min(backoff * 2, maximum)
+if time.monotonic() >= deadline and (attempt == 0 or rc != 0):
+    print(f'[{now()}] restart wait expired; owner must restart manually', flush=True)
+"""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_file = open(log_path, "w", encoding="utf-8")  # noqa: SIM115 - handed to the child
     try:
@@ -281,9 +314,9 @@ def schedule_gateway_restart(delay_seconds: int = 2) -> str:
         log_file.close()
     return (
         f"sleep {int(delay_seconds)}; "
-        f"HERMES_HOME={str(hermes_home)!r} "
-        f"HERMES_DIR={str(hermes_dir)!r} "
-        f"{str(hermes_bin)!r} gateway restart"
+        f"HERMES_HOME={shlex.quote(str(hermes_home))} "
+        f"HERMES_DIR={shlex.quote(str(hermes_dir))} "
+        f"{shlex.quote(str(hermes_bin))} gateway restart"
     )
 
 
@@ -297,7 +330,7 @@ def owner_restart_lines(payload: dict[str, Any]) -> list[str]:
         "the gateway already had ClawChat enabled when it started, it connects only "
         "after the Hermes gateway restarts.",
         f"clawchat: first check the Hermes log for a '{READY_LOG_LINE}' line after "
-        "this activation. Only if none appears within a few minutes, ask the owner - "
+        "this activation. The background restarter waits up to 30 minutes for idle. If still offline, ask the owner - "
         f"after your current reply ends - to run this in a terminal outside Hermes: {cmd}",
         "clawchat: message for the owner if a restart is needed (en): ClawChat is activated. Once my reply "
         f"ends, please run `{cmd}` in a terminal (not in this chat). After the "
@@ -326,9 +359,11 @@ def format_restart_lines(payload: dict[str, Any]) -> list[str]:
             f"Hermes log (logs/ under the Hermes home) shows '{READY_LOG_LINE}'."
         )
         lines.append(
-            "clawchat: no exit_code line after a few minutes means the restart is "
-            "still waiting (e.g. for open sessions to finish) or was stopped together "
-            "with the old gateway; the ready line is what confirms the restart."
+            "clawchat: the restarter waits for current sessions to become idle, retrying "
+            "non-zero exits for up to 30 minutes. Each attempt logs its exit_code. "
+            "No exit_code can mean an attempt is still running or the launcher stopped. "
+            "If still offline after 30 minutes, the owner must restart manually; "
+            "the ready line confirms the restart."
         )
     for step in payload.get("restart_next_steps") or []:
         lines.append(f"clawchat: {step}" if not step.startswith("  ") else step)

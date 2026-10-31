@@ -402,17 +402,23 @@ restart that cannot work; it prints the next step instead:
 A requested restart is not a confirmed one. The detached process runs from
 `$HERMES_HOME` (never from the plugin folder, which a lingering process would
 keep locked on Windows) and writes the output of `hermes gateway restart` plus a
-final `exit_code=<n>` line to `$HERMES_HOME/clawchat/gateway-restart.log`,
-overwritten on each request. To verify:
+line `attempt=<n> exit_code=<n>` for every attempt to
+`$HERMES_HOME/clawchat/gateway-restart.log`, overwritten on each request.
+The restarter waits for current sessions to become idle by retrying non-zero
+exits, starting at 5 seconds and doubling up to 60 seconds, for at most 30 minutes.
+It never forces an interrupt. The first successful restart ends the retries;
+older hosts that succeed immediately keep that behavior. If it has not restarted
+at the deadline, the owner must run the printed restart command manually. To verify:
 
 1. The restart log ends with `exit_code=0`.
 2. The Hermes log (under `$HERMES_HOME/logs/`) has a `clawchat state -> ready`
    line from after the activation.
 
-No `exit_code` after a few minutes means the restart may still be waiting for
-sessions or the launcher stopped with the old gateway; confirm with the ready
-line. This check cannot detect a separately installed gateway holding the
-profile, service-manager errors or drain waits; inspect the restart log.
+Non-zero exit codes can mean the gateway is still busy; inspect each attempt's
+output. No `exit_code` means an attempt may still be running or the launcher
+stopped with the old gateway. Confirm completion with the ready line. This check
+cannot detect a separately installed gateway holding the profile, service-manager
+errors or drain waits; inspect the restart log.
 
 On macOS, launchd may contain two gateway definitions with labels such as
 `ai.hermes.gateway` and `ai.hermes.gateway-<profile>`; older and newer

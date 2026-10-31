@@ -142,8 +142,9 @@ async def test_activation_restart_payload_and_owner_lines(
         "the gateway already had ClawChat enabled when it started, it connects only "
         "after the Hermes gateway restarts.",
         f"clawchat: first check the Hermes log for a '{restart_mod.READY_LOG_LINE}' "
-        "line after this activation. Only if none appears within a few minutes, ask "
-        "the owner - after your current reply ends - to run this in a terminal "
+        "line after this activation. The background restarter waits up to 30 minutes "
+        "for idle. If still offline, ask the owner - after your current reply ends "
+        "- to run this in a terminal "
         f"outside Hermes: {owner_command}",
         "clawchat: message for the owner if a restart is needed (en): ClawChat is activated. Once my reply "
         f"ends, please run `{owner_command}` in a terminal (not in this chat). "
@@ -279,7 +280,12 @@ def test_scheduled_restart_sets_cwd_and_writes_outcome_log(
     def _popen(argv: list[str], **kwargs: Any) -> Any:
         spawned.append(kwargs)
         # Run the detached launcher to completion so its log can be inspected.
-        kwargs["env"] = {**kwargs["env"], "CLAWCHAT_GATEWAY_RESTART_DELAY": "0"}
+        kwargs["env"] = {
+            **kwargs["env"], "CLAWCHAT_GATEWAY_RESTART_DELAY": "0",
+            "CLAWCHAT_GATEWAY_RESTART_RETRY_INITIAL": "0.01",
+            "CLAWCHAT_GATEWAY_RESTART_RETRY_MAX": "0.02",
+            "CLAWCHAT_GATEWAY_RESTART_RETRY_TIMEOUT": "0.2",
+        }
         proc = real_popen(argv, **kwargs)
         proc.wait(timeout=30)
         return proc
@@ -310,7 +316,12 @@ def test_launcher_records_spawn_failure(
     real_popen = subprocess.Popen
 
     def _popen(argv: list[str], **kwargs: Any) -> Any:
-        kwargs["env"] = {**kwargs["env"], "CLAWCHAT_GATEWAY_RESTART_DELAY": "0"}
+        kwargs["env"] = {
+            **kwargs["env"], "CLAWCHAT_GATEWAY_RESTART_DELAY": "0",
+            "CLAWCHAT_GATEWAY_RESTART_RETRY_INITIAL": "0.01",
+            "CLAWCHAT_GATEWAY_RESTART_RETRY_MAX": "0.02",
+            "CLAWCHAT_GATEWAY_RESTART_RETRY_TIMEOUT": "0.2",
+        }
         proc = real_popen(argv, **kwargs)
         proc.wait(timeout=30)
         return proc

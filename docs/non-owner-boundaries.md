@@ -230,6 +230,18 @@ Queued follow-ups prefer the latest live unbound non-notification nonce in the
 same plugin session and chat; only when none exists do they choose a notification.
 Missing candidates fail closed. Each execution and nonce bind once.
 
+A real owner's ordinary private-chat input waits behind any registered,
+unreleased non-owner execution in the same grant session when busy input mode
+is `steer`, or when the text starts with `/steer`. The mode follows
+`HERMES_GATEWAY_BUSY_INPUT_MODE`, then `display.busy_input_mode`, defaulting to
+`interrupt`. Approval replies and control commands still pass immediately;
+groups and ordinary input in `queue` / `interrupt` keep their existing paths.
+Held inputs dispatch in order with fresh nonces after release, retaining owner
+tools when no third-party restrictions remain. The wait is capped at 120
+seconds; at timeout it dispatches with the existing
+overlap and unverified-input restrictions, without releasing the running nonce.
+The hold logs `owner_input_held reason=active_notice_turn`, without message text.
+
 Downgrades emit one INFO line, without message text:
 `owner_downgrade reason=<unverified_input|revoke|overlap> trigger=<input kind>`;
 a notice withdrawing grant management logs `reason=management trigger=plugin_notice`. Blocked calls in a bound
