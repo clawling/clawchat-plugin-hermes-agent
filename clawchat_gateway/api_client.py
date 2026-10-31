@@ -101,41 +101,57 @@ class RefreshResult:
     refresh_token: str
 
 
-# Userinfo may itself contain quotes, `<`, `>`, backticks or extra `@` (urllib
-# accepts them), so the optional userinfo part runs greedily to the last `@`
-# before whitespace or `/?#`; the rest of the URL still ends at quotes and
-# angle brackets so quoted URLs keep their closing delimiter. Redaction is
-# conservative: text glued to a credentialed URL up to a later `@` may be
-# dropped with it. The scheme is anchored and both it and the userinfo are
-# length-capped so server-supplied text is scanned in linear time.
-_URL_FRAGMENT = re.compile(
-    r"""(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]{0,31}://(?:[^\s/?#]{0,1024}@)?[^\s"'<>`]*"""
-)
+# A URL starts at an anchored, length-capped scheme. Its authority runs to the
+# first whitespace or `/?#`, and userinfo is everything before the authority's
+# last `@` (urllib accepts quotes, `<`, `>`, backticks and extra `@` there), with
+# no length cap so long credentials fail closed. The rest of the URL ends at
+# quotes and angle brackets so quoted URLs keep their closing delimiter.
+# Redaction is conservative: text glued to a credentialed URL up to a later `@`
+# may be dropped with it. Scanning resumes after each URL, so server-supplied
+# text is processed in linear time.
+_URL_SCHEME = re.compile(r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]{0,31}://")
+_AUTHORITY_END = re.compile(r"[\s/?#]")
+_URL_END = re.compile(r"""[\s"'<>`]""")
+
+
+def _strip_userinfo_from_url(url: str) -> str:
+    try:
+        parsed = urlsplit(url)
+        if parsed.username is None and parsed.password is None:
+            return "[redacted-url]"
+        hostname = parsed.hostname
+        port = parsed.port
+        if not hostname:
+            return "[redacted-url]"
+        netloc = f"[{hostname}]" if ":" in hostname else hostname
+        if port is not None:
+            netloc = f"{netloc}:{port}"
+        return urlunsplit(parsed._replace(netloc=netloc))
+    except ValueError:
+        return "[redacted-url]"
 
 
 def strip_url_userinfo(text: str) -> str:
     """Remove URL credentials from display text; redact unparseable URLs."""
-    def sanitize(match: re.Match[str]) -> str:
-        url = match.group(0)
-        authority = re.split(r"[/?#]", url.split("://", 1)[1], maxsplit=1)[0]
-        if "@" not in authority:
-            return url
-        try:
-            parsed = urlsplit(url)
-            if parsed.username is None and parsed.password is None:
-                return url
-            hostname = parsed.hostname
-            port = parsed.port
-            if not hostname:
-                return "[redacted-url]"
-            netloc = f"[{hostname}]" if ":" in hostname else hostname
-            if port is not None:
-                netloc = f"{netloc}:{port}"
-            return urlunsplit(parsed._replace(netloc=netloc))
-        except ValueError:
-            return "[redacted-url]"
-
-    return _URL_FRAGMENT.sub(sanitize, text)
+    parts: list[str] = []
+    copied = 0
+    for scheme in _URL_SCHEME.finditer(text):
+        if scheme.start() < copied:
+            continue
+        authority_start = scheme.end()
+        end = _AUTHORITY_END.search(text, authority_start)
+        authority_end = end.start() if end else len(text)
+        if text.rfind("@", authority_start, authority_end) < 0:
+            parts.append(text[copied:authority_end])
+            copied = authority_end
+            continue
+        end = _URL_END.search(text, authority_end)
+        url_end = end.start() if end else len(text)
+        parts.append(text[copied:scheme.start()])
+        parts.append(_strip_userinfo_from_url(text[scheme.start():url_end]))
+        copied = url_end
+    parts.append(text[copied:])
+    return "".join(parts)
 
 
 def redact_refresh_message(value: object, *secrets: str) -> str:

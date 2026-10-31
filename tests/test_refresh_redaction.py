@@ -116,8 +116,16 @@ def test_refresh_message_strips_url_userinfo_containing_delimiters(userinfo):
     assert 'placeholder-user' not in text and 'holder' not in text
 
 
+
+def test_long_url_userinfo_is_still_removed():
+    password = 'placeholder-' + 'p' * 5_000
+    text = api.redact_refresh_message(f'failed https://placeholder-user:{password}@example.com/v1')  # redact-allow:email
+    assert text == 'failed https://example.com/v1'
+    assert 'placeholder-' not in text
+
 @pytest.mark.parametrize('text', [
     'a' * 100_000, 'a' * 100_000 + '://', "a://'" * 25_000, 'https://' + 'a' * 100_000,
+    'https://' + 'u:' + 'p' * 100_000 + '@example.com/',  # redact-allow:email
 ])
 def test_url_userinfo_stripping_is_linear_on_long_text(text):
     started = time.perf_counter()
