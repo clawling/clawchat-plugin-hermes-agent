@@ -198,6 +198,17 @@ def redact_refresh_message(value: object, *secrets: str, base_url: str | None = 
         return DIAGNOSTIC_REDACTION_FAILED
 
 
+# A quoted credential value ends only at its own unescaped closing quote: a
+# JSON-escaped quote inside it (or one level of JSON nested in a JSON string,
+# where the quotes themselves are escaped) must not end the match early.
+_QUOTED_VALUE = (
+    r'\\"(?:\\\\\\"|\\\\|\\(?!")|[^\\\r\n])*?\\"'
+    r'|"(?:[^"\\\r\n]|\\.)*"'
+    r"|'(?:[^'\\\r\n]|\\.)*'"
+)
+_BARE_VALUE = r"[^\s&#\"'<>`,;}\]]+"
+
+
 def redact_display_text(value: object, *secrets: str) -> str:
     """Redact credentials before diagnostics become logs or caller-visible text."""
     try:
@@ -205,14 +216,15 @@ def redact_display_text(value: object, *secrets: str) -> str:
         for secret in sorted((s for s in secrets if s), key=len, reverse=True):
             text = text.replace(secret, "***")
         text = re.sub(
-            r'''(?ix)(["']?authorization["']?\s*[:=]\s*)'''
-            r'''(?:"[^"\r\n]*"|'[^'\r\n]*'|(?:(?:Bearer|Basic)\s+)?[^\s&\#\"'<>`,;}\]]+)''',
+            r"(?i)(\bauthorization(?:\\?[\"'])?\s*[:=]\s*)"
+            r"(?:" + _QUOTED_VALUE + r"|(?:(?:Bearer|Basic)\s+)?" + _BARE_VALUE + r")",
             lambda match: match.group(1) + "***", text,
         )
-        text = re.sub(r"(?i)\bBearer\s+[^\s\"'<>`,;&}\]]+", "Bearer ***", text)
+        text = re.sub(r"(?i)\bBearer\s+" + _BARE_VALUE, "Bearer ***", text)
         text = re.sub(
-            r'''(?ix)(\b["']?(?:(?:access[_-]?|refresh[_-]?)?token|api[_-]?key|key|secret|password|signature)["']?\s*[:=]\s*)'''
-            r'''(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s&\#\"'<>`,;}\]]+)''',
+            r"(?i)(\b(?:(?:access[_-]?|refresh[_-]?)?token|api[_-]?key|key|secret|password|signature)"
+            r"(?:\\?[\"'])?\s*[:=]\s*)"
+            r"(?:" + _QUOTED_VALUE + r"|" + _BARE_VALUE + r")",
             lambda match: match.group(1) + "***", text,
         )
         # Unlike refresh diagnostics, no blanket long-run rule: ids, paths and

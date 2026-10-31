@@ -166,3 +166,35 @@ def test_secret_assertion_failure_never_repeats_the_credential(assert_no_secrets
     assert "output 1" in str(raised.value)
     assert "credential #1" in str(raised.value)
     assert_no_secrets(raised.value)
+
+
+ESCAPED_TAIL = "placeholder-escaped-tail-g10"
+
+
+@pytest.mark.parametrize("text", [
+    json.dumps({"password": 'prefix"' + ESCAPED_TAIL}),
+    json.dumps({"Authorization": 'Bearer x"' + ESCAPED_TAIL}),
+    json.dumps({"msg": json.dumps({"refresh_token": 'a"' + ESCAPED_TAIL})}),
+    json.dumps({"msg": json.dumps({"secret": 'a\\"' + ESCAPED_TAIL})}),
+    "password='a\\'" + ESCAPED_TAIL + "'",
+])
+def test_display_redactor_quoted_values_survive_escaped_quotes(text, assert_no_secrets):
+    redacted = api.redact_display_text(text)
+    assert "***" in redacted
+    assert_no_secrets(redacted, secrets=(ESCAPED_TAIL,))
+
+
+async def test_api_error_with_escaped_quote_in_credential_stays_redacted(monkeypatch, caplog, assert_no_secrets):
+    http = client()
+    msg = json.dumps({"password": 'prefix"' + ESCAPED_TAIL})
+
+    def urlopen(request, **kwargs):
+        body = json.dumps({"code": 123, "msg": msg}).encode()
+        raise HTTPError(request.full_url, 500, "placeholder reason", {}, Response(body))
+
+    monkeypatch.setattr(api, "urlopen", urlopen)
+    monkeypatch.setattr(tools, "_build_client", lambda: (http, None))
+    with caplog.at_level(logging.INFO):
+        result = await tools.get_account_profile()
+    assert result["error"] == "api"
+    assert_no_secrets(json.dumps(result), caplog=caplog, secrets=(ESCAPED_TAIL,))
