@@ -1438,9 +1438,9 @@ Trackers belong to one socket generation and are disposed on teardown.
 Ack means durable receipt, not a completed turn. Lane completion marks done/failed
 for every kind (including recall); inline dispatch marks done/failed on return/error.
 Errors are redacted, at most 500 characters. Unavailable claims stay pending;
-no turn starts, and one timer retries recovery after 30 s.
+no turn starts, and one timer retries after 30 s, continuing after recovery failures until success.
 At every READY, even without a v2 grant, recover all pending kinds in received_at,
-rowid order, skipping keys this instance is processing; there is no startup cutoff.
+rowid order, skipping only dispatched work; frames waiting at the gate remain recoverable, with no startup cutoff.
 Enqueue recovered lane work before admitting new business frames; then release
 the ordering gate before awaiting inline handlers. Control frames bypass the gate;
 dseq persistence/acks precede it. Recovery failure or a 10 s timeout releases only this gate.

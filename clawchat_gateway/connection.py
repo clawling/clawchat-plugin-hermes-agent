@@ -2442,6 +2442,7 @@ class ClawChatConnection:
                 self._delivery_generation += 1
                 self._v2_declared = False
                 self._receipt_recovery_ready = asyncio.Event()
+                generation = self._delivery_generation
             self._pending_connect_id = None
             self._hello_resolved_device_id = None
             self._hello_delivery_mode = None
@@ -2461,7 +2462,9 @@ class ClawChatConnection:
             if not self._connection_credentials_current():
                 return False
             if self._cfg.reliable_delivery_v2:
-                await self._recover_inbound_receipts(ws, self._delivery_generation)
+                recovered = await self._recover_inbound_receipts(ws, generation)
+                if not recovered and self._receipt_connection_current(ws, generation):
+                    self._schedule_receipt_retry()
                 if not self._connection_credentials_current():
                     return False
             self._record_connection(
@@ -2666,7 +2669,8 @@ class ClawChatConnection:
                     if not tracker.current() or self._ws is not ws or self._stopping:
                         return
                     if written:
-                        self._track_inbound_receipt(frame, receipt)
+                        # Waiting at the order gate is durable receipt, not active processing.
+                        self._inbound_receipts[id(frame)] = receipt
                         tracker.record(dseq)
                     else:
                         logger.error("clawchat durable receipt unavailable; closing socket with dseq=%d unacked", dseq)
@@ -2686,6 +2690,9 @@ class ClawChatConnection:
                     self._release_inbound_receipt(frame)
                     return
             if sequenced:
+                receipt = self._inbound_receipts.get(id(frame))
+                if receipt is not None:
+                    self._track_inbound_receipt(frame, receipt)
                 await self._dispatch_with_receipt(frame)
             else:
                 await self._dispatch_inbound(frame)
@@ -2716,14 +2723,16 @@ class ClawChatConnection:
 
     def _track_inbound_receipt(self, frame: dict[str, Any], receipt: dict[str, Any]) -> None:
         self._inbound_receipts[id(frame)] = receipt
+        receipt["processing"] = True
         self._receipts_in_flight.add((receipt["kind"], receipt["key"]))
 
     def _release_inbound_receipt(self, frame: dict[str, Any]) -> None:
         receipt = self._inbound_receipts.pop(id(frame), None)
-        if receipt is not None:
+        if receipt is not None and receipt.get("processing"):
             key = (receipt["kind"], receipt["key"])
             # Coalesced live/replay frames may share a key while both are queued.
-            if not any((r["kind"], r["key"]) == key for r in self._inbound_receipts.values()):
+            if not any(r.get("processing") and (r["kind"], r["key"]) == key
+                       for r in self._inbound_receipts.values()):
                 self._receipts_in_flight.discard(key)
 
     @staticmethod
@@ -2797,12 +2806,15 @@ class ClawChatConnection:
             if not receipt.get("queued"):
                 await self._finish_inbound_receipt(frame)
 
-    async def _recover_inbound_receipts(self, ws: Any, generation: int) -> None:
+    async def _recover_inbound_receipts(self, ws: Any, generation: int) -> bool:
+        if not self._receipt_connection_current(ws, generation):
+            return True
         gate = self._receipt_recovery_ready
         deferred: list[dict[str, Any]] = []
+        recovered = False
         try:
             try:
-                await asyncio.wait_for(
+                recovered = await asyncio.wait_for(
                     self._queue_pending_receipts(ws, generation, deferred),
                     reliable_delivery.RECEIPT_RECOVERY_TIMEOUT_SECONDS,
                 )
@@ -2817,8 +2829,13 @@ class ClawChatConnection:
             # Inline handlers can wait for message.ack, so release the reader first.
             for frame in deferred:
                 if not self._receipt_connection_current(ws, generation):
-                    return
+                    return True
+                self._track_inbound_receipt(frame, self._inbound_receipts[id(frame)])
                 await self._dispatch_with_receipt(frame)
+            return recovered if self._receipt_connection_current(ws, generation) else True
+        except Exception:
+            logger.error("clawchat inbound receipt recovery raised")
+            return not self._receipt_connection_current(ws, generation)
         finally:
             for frame in deferred:
                 if not self._inbound_receipts.get(id(frame), {}).get("queued"):
@@ -2830,17 +2847,21 @@ class ClawChatConnection:
 
     async def _queue_pending_receipts(
         self, ws: Any, generation: int, deferred: list[dict[str, Any]],
-    ) -> None:
-        if self._store is None or not self._receipt_connection_current(ws, generation):
-            return
+    ) -> bool:
+        if not self._receipt_connection_current(ws, generation):
+            return True
+        if self._store is None:
+            return False
         rows = await asyncio.to_thread(
             self._store.recover_inbound_receipts, account_id=self._account_id,
         )
-        if rows is None or not self._receipt_connection_current(ws, generation):
-            return
+        if not self._receipt_connection_current(ws, generation):
+            return True
+        if rows is None:
+            return False
         for row in rows:
             if not self._receipt_connection_current(ws, generation):
-                return
+                return True
             if (row["kind"], row["key"]) in self._receipts_in_flight:
                 continue
             try:
@@ -2848,14 +2869,17 @@ class ClawChatConnection:
             except (TypeError, ValueError):
                 logger.error("clawchat pending receipt contains malformed JSON")
                 continue
-            self._track_inbound_receipt(frame, {
+            receipt = {
                 key: row[key] for key in ("kind", "key", "dseq", "epoch")
-            })
+            }
+            self._inbound_receipts[id(frame)] = receipt
             # Recovery uses ordinary dispatch, never the dseq tracker.
             if self._uses_inbound_lane(frame):
+                self._track_inbound_receipt(frame, receipt)
                 await self._dispatch_with_receipt(frame)
             else:
                 deferred.append(frame)
+        return True
 
     def _schedule_receipt_retry(self) -> None:
         if self._stopping or self._ws is None:
@@ -2875,8 +2899,8 @@ class ClawChatConnection:
                 if not self._receipt_connection_current(ws, generation):
                     return
                 self._receipt_retry_requested = False
-                await self._recover_inbound_receipts(ws, generation)
-                if not self._receipt_retry_requested:
+                recovered = await self._recover_inbound_receipts(ws, generation)
+                if recovered and not self._receipt_retry_requested:
                     return
         finally:
             if self._receipt_retry_task is asyncio.current_task():

@@ -424,7 +424,7 @@ async def test_ready_recovers_all_pending_kinds_and_ages_without_ack(monkeypatch
             assert h.conn._delivery_tracker.acked == 0
         assert len(rows(store)) == 6
         assert all(row["status"] == "done" for row in rows(store))
-        await h.conn._recover_inbound_receipts(h.ws, h.conn._delivery_generation)
+        assert await h.conn._recover_inbound_receipts(h.ws, h.conn._delivery_generation) is True
         assert handler.await_count == 3 and signal_handler.await_count == 1
 
 
@@ -563,8 +563,18 @@ async def test_recovery_queues_old_message_before_new_business_frame(monkeypatch
         return original(**kwargs)
     monkeypatch.setattr(store, "recover_inbound_receipts", recover)
     handler = AsyncMock()
+    async def on_message(frame):
+        # Recovery may also see the new frame persisted at the gate. Model the
+        # adapter's durable claim so this assertion counts turns, not raw dispatches.
+        claimed = await asyncio.to_thread(
+            store.claim_message_once, platform="hermes", account_id="default",
+            kind="message", direction="inbound", event_type=frame["event"],
+            message_id=frame["payload"]["message_id"], chat_id=frame["chat_id"], raw=frame,
+        )
+        if claimed is True:
+            await handler(frame)
     try:
-        async with peer(monkeypatch, store, hello=hello, on_message=handler, wait_for_recovery=False) as h:
+        async with peer(monkeypatch, store, hello=hello, on_message=on_message, wait_for_recovery=False) as h:
             await until(entered.is_set)
             h.ws.feed(message(1, "test-new", text="new"))
             if h.conn._delivery_tracker is not None:
@@ -581,6 +591,120 @@ async def test_recovery_queues_old_message_before_new_business_frame(monkeypatch
             assert h.conn._receipt_recovery_ready.is_set()
     finally:
         release.set()
+
+
+async def test_replayed_pending_message_keeps_recovery_order_and_claims_once(monkeypatch, store):
+    from clawchat_gateway.adapter import ClawChatAdapter
+    seed_pending(store, message(1, "test-A", text="old A"))
+    seed_pending(store, message(2, "test-B", text="B"))
+    adapter = ClawChatAdapter({})
+    adapter._store = store
+    dispatched = AsyncMock()
+    monkeypatch.setattr(adapter, "_handle_inbound", dispatched)
+    monkeypatch.setattr(adapter, "_handle_owner_forwarded_approval", AsyncMock(return_value=False))
+    monkeypatch.setattr(adapter, "_schedule_profile_sync", lambda coro: coro.close())
+    monkeypatch.setattr(adapter, "_resolve_inbound_sender_context", lambda inbound: inbound)
+    entered, release = threading.Event(), threading.Event()
+    original_recover = store.recover_inbound_receipts
+    def recover(**kwargs):
+        entered.set()
+        assert release.wait(3)
+        return original_recover(**kwargs)
+    monkeypatch.setattr(store, "recover_inbound_receipts", recover)
+    finishes = []
+    original_finish = store.finish_inbound_receipt
+    def finish(**kwargs):
+        result = original_finish(**kwargs)
+        finishes.append((kwargs["key"], kwargs["dseq"], kwargs["epoch"], kwargs["error"]))
+        return result
+    monkeypatch.setattr(store, "finish_inbound_receipt", finish)
+    async with peer(monkeypatch, store, on_message=adapter._on_message, wait_for_recovery=False) as h:
+        try:
+            await until(entered.is_set)
+            h.ws.feed(message(1, "test-A", text="replayed A"))
+            await until(lambda: h.conn._delivery_tracker.acked == 1)
+            await until(lambda: bool(h.ws.acks))
+            assert not h.conn._receipt_recovery_ready.is_set()
+            assert ("message", "test-A") not in h.conn._receipts_in_flight
+            assert len(h.conn._inbound_receipts) == 1
+            release.set()
+            await until(lambda: dispatched.await_count == 2 and not h.conn._inbound_lanes)
+            assert [c.args[0].raw_message["payload"]["message_id"] for c in dispatched.call_args_list] == ["test-A", "test-B"]
+            assert [r["status"] for r in rows(store)] == ["done", "done"]
+            assert [f for f in finishes if f[0] == "test-A"] == [
+                ("test-A", 1, "test-epoch", None), ("test-A", 1, "test-epoch", None),
+            ]
+            assert not h.conn._receipts_in_flight and not h.conn._inbound_receipts
+        finally:
+            release.set()
+
+
+@pytest.mark.parametrize("failure", ["return", "raise", "timeout"])
+async def test_retryable_receipt_retries_again_after_recovery_failure(monkeypatch, store, failure, caplog):
+    monkeypatch.setattr(delivery, "RECEIPT_RETRY_SECONDS", 0.03)
+    monkeypatch.setattr(delivery, "RECEIPT_RECOVERY_TIMEOUT_SECONDS", 0.02)
+    failed_read, release = threading.Event(), threading.Event()
+    original = store.recover_inbound_receipts
+    reads = []
+    def recover(**kwargs):
+        reads.append(True)
+        if len(reads) == 2:
+            failed_read.set()
+            if failure == "raise":
+                raise OSError("test transient recovery failure")
+            if failure == "timeout":
+                assert release.wait(3)
+            return None
+        return original(**kwargs)
+    monkeypatch.setattr(store, "recover_inbound_receipts", recover)
+    handler = AsyncMock(side_effect=[delivery.INBOUND_RETRYABLE, None])
+    async with peer(monkeypatch, store, on_message=handler) as h:
+        try:
+            h.ws.feed(message())
+            await until(failed_read.is_set)
+            assert handler.await_count == 1 and rows(store)[0]["status"] == "pending"
+            assert h.conn._receipt_retry_task is not None
+            await until(lambda: handler.await_count == 2 and not h.conn._inbound_lanes)
+            await until(lambda: h.conn._receipt_retry_task is None)
+            assert rows(store)[0]["status"] == "done" and len(reads) >= 3
+            if failure == "timeout":
+                assert "recovery timed out" in caplog.text
+            await asyncio.sleep(0.07)
+            assert handler.await_count == 2
+        finally:
+            release.set()
+
+
+@pytest.mark.parametrize("failure", ["return", "raise", "timeout"])
+async def test_ready_recovery_failure_schedules_retry(monkeypatch, store, failure):
+    seed_pending(store, message(message_id="test-pending"))
+    monkeypatch.setattr(delivery, "RECEIPT_RETRY_SECONDS", 0.05)
+    monkeypatch.setattr(delivery, "RECEIPT_RECOVERY_TIMEOUT_SECONDS", 0.02)
+    release = threading.Event()
+    original = store.recover_inbound_receipts
+    reads = []
+    def recover(**kwargs):
+        reads.append(True)
+        if len(reads) == 1:
+            if failure == "raise":
+                raise OSError("test initial recovery failure")
+            if failure == "timeout":
+                assert release.wait(3)
+            return None
+        return original(**kwargs)
+    monkeypatch.setattr(store, "recover_inbound_receipts", recover)
+    handler = AsyncMock()
+    async with peer(monkeypatch, store, on_message=handler) as h:
+        try:
+            assert h.conn._receipt_retry_task is not None
+            await until(lambda: handler.await_count == 1 and not h.conn._inbound_lanes)
+            await until(lambda: h.conn._receipt_retry_task is None)
+            assert rows(store)[0]["status"] == "done"
+            assert not h.ws.acks and h.conn._delivery_tracker.acked == 0
+            # A stale recovery must report success so an old retry loop can exit.
+            assert await h.conn._recover_inbound_receipts(h.ws, h.conn._delivery_generation - 1) is True
+        finally:
+            release.set()
 
 
 async def test_recovered_inline_signal_can_wait_for_control_ack_without_deadlock(monkeypatch, store):

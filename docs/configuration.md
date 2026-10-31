@@ -42,16 +42,16 @@ Automatic refresh, permanent-failure markers, empty credential tombstones and ac
 | `CLAWCHAT_WIKI_VERSION` | — | empty | Optional install-page stamp for connect/connect-check onboarding telemetry; profile-first, trimmed to 40 characters (`onboarding.wiki_version`), never gates activation. |
 | `CLAWCHAT_RELIABLE_DELIVERY_V2` | `reliable_delivery_v2` | `false` | Profile opt-in to durable inbound receipts and negotiated dseq acknowledgements (§11.7). |
 
-`platforms.clawchat.extra.reliable_delivery_v2` requires YAML booleans.
+`platforms.clawchat.extra.reliable_delivery_v2` is a YAML bool.
 Env overrides accept case-insensitive `true/false`, `1/0`, `yes/no`,
-`on/off`. Invalid values warn and disable it. Roll back: set `false`, disable any
-env override, restart. Disabled profiles use legacy: no receipt access or sync acks.
-Granted-v2 receipt-write failure closes for normal reconnect/backoff, without ack/dispatch.
-Each opt-in connection recovers all pending, skipping active work, even without a v2 grant.
-Recovered lane work precedes new business frames; controls bypass the ordering gate.
-Recovery failure or a 10 s timeout opens this gate. Unavailable message claims stay
-pending and retry after 30 s without starting a turn. Lane completion owns done/failed,
-including recall; inline unknown/transit frames become done on return. See
+`on/off`. Invalid values warn and disable it. Roll back: set `false`, disable env
+overrides, restart. Off: legacy, no receipts or sync acks.
+Granted-v2 receipt-write failure closes without ack/dispatch, using normal reconnect/backoff.
+Each opt-in connection recovers pending even without a v2 grant, skipping dispatched work only.
+Gate waiters can recover. Old lane work precedes new business; controls bypass the gate.
+Recovery failure/10 s timeout opens only the gate. Unavailable claims stay pending;
+recovery retries every 30 s through failures until success. Turns require a claim.
+Lane work (including recall) finishes done/failed; inline unknown/transit becomes done on return. See
 [delivery behavior](client-integration.md#hermes-optional-reliable_delivery_v2).
 
 ### Device id durability (deployment requirement)

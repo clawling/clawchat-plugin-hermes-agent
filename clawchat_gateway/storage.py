@@ -1575,6 +1575,9 @@ class ClawChatStore:
     ) -> bool:
         def write(conn: sqlite3.Connection) -> None:
             # A late handler must not finish a newer replay's pending receipt.
+            # Recovery can read the replay's new dseq/epoch while that replay waits
+            # at the order gate. Both finishes then match; the first marks done,
+            # and the duplicate finish is a no-op because status is already done.
             conn.execute("""
                 UPDATE inbound_receipts SET status = ?, error = ?, updated_at = ?
                 WHERE account_id = ? AND kind = ? AND key = ?
