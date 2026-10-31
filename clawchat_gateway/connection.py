@@ -25,7 +25,7 @@ except ImportError:  # pragma: no cover
     _ws_connect_impl = None  # type: ignore[assignment]
 
 from clawchat_gateway import __version__
-from clawchat_gateway.api_client import strip_configured_userinfo, strip_url_userinfo
+from clawchat_gateway.api_client import redact_configured_secrets, strip_url_userinfo
 from clawchat_gateway.config import ClawChatConfig
 from clawchat_gateway.hermes_home import hermes_home
 from clawchat_gateway import instance_lock, install_identity
@@ -3620,7 +3620,7 @@ class ClawChatConnection:
     def _sanitize_secret_text(self, text: str | None) -> str | None:
         if text is None:
             return None
-        text = strip_configured_userinfo(text, self._cfg.base_url, self._cfg.websocket_url)
+        text = redact_configured_secrets(text, self._cfg.base_url, self._cfg.websocket_url)
         token = self._cfg.token
         if token:
             text = text.replace(token, "***")

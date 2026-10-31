@@ -133,7 +133,7 @@ def test_url_userinfo_stripping_is_linear_on_long_text(text):
     started = time.perf_counter()
     api.redact_refresh_message(text)
     api.strip_url_userinfo(text)
-    api.strip_configured_userinfo(text, 'https://u:aa@example.com')  # redact-allow:email
+    api.redact_configured_secrets(text, 'https://u:aaaa@example.com')  # redact-allow:email
     assert time.perf_counter() - started < 2.0
 
 
@@ -152,13 +152,48 @@ def test_url_userinfo_is_removed_from_adjacent_and_embedded_urls(text, expected)
 
 @pytest.mark.parametrize('text, expected', [
     ('opening https://placeholder-user:placeholder pass@example.com/v1',  # redact-allow:email
-     'opening https://example.com/v1'),
-    ("nonnumeric port: 'placeholder pass@example.com'", "nonnumeric port: 'example.com'"),  # redact-allow:email
+     'opening https://***@example.com/v1'),
+    ("nonnumeric port: 'placeholder pass@example.com'", "nonnumeric port: '***@example.com'"),  # redact-allow:email
+    ("nonnumeric port: 'placeholder-user:placeholder pass@example.com'",  # redact-allow:email
+     "nonnumeric port: '***@example.com'"),
+    ('bad placeholder%20pass here', 'bad *** here'),
+    ('cut placeholder pa', 'cut ***'),
 ])
-def test_configured_url_userinfo_is_removed_exactly(text, expected):
+def test_configured_secrets_are_removed_anywhere(text, expected):
     base_url = 'https://placeholder-user:placeholder pass@example.com/'  # redact-allow:email
-    assert api.strip_configured_userinfo(text, base_url, None) == expected
-    assert api.configured_userinfo('https://example.com/a@b') == ((), ())
+    assert api.redact_configured_secrets(text, base_url, None) == expected
+    assert api.configured_secret_forms('https://example.com/a@b') == ()
+    assert api.configured_secret_forms('https://example.com:8443/a@b') == ()
+    assert api.configured_secret_forms(None) == ()
+
+
+@pytest.mark.parametrize('password, text', [
+    # http.client echoes the whole authority without a scheme.
+    ('placeholder pass', "nonnumeric port: 'u:placeholder pass@example.com'"),  # redact-allow:email
+    # urllib decodes %20 before echoing the host.
+    ('placeholder%20pass', "nonnumeric port: 'placeholder pass@example.com'"),  # redact-allow:email
+    ('placeholder%20pass', 'opening https://u:placeholder%20pass@example.com/'),  # redact-allow:email
+    # A password with colons: only the part after the last colon is echoed.
+    ('place:holder:pass', "nonnumeric port: 'holder:pass@example.com'"),  # redact-allow:email
+    ('place:holder-pass', "nonnumeric port: 'holder-pass@example.com'"),  # redact-allow:email
+    # Backslashes and quotes, raw, JSON-escaped and repr-escaped.
+    ('place\\holder"pass', 'raw place\\holder"pass@example.com'),  # redact-allow:email
+    ('place\\holder"pass', '{"msg":"bad place\\\\holder\\"pass@example.com"}'),  # redact-allow:email
+    ("place\\holder'pass", "error('bad place\\\\holder\\'pass@example.com')"),  # redact-allow:email
+    ('place holder"pass', '{"msg":"bad https://u:place holder\\"pass@example.com/"}'),  # redact-allow:email
+    # Percent-encoded forms of a raw password.
+    ('place holder/pass', 'opening https://u:place%20holder%2Fpass@example.com/'),  # redact-allow:email
+    # A diagnostic truncated inside the password.
+    ('placeholder pass' + 'x' * 220, ('{"msg":"https://u:placeholder pass' + 'x' * 220)[:120]),
+])
+def test_configured_secret_forms_never_leak(password, text):
+    base_url = f'https://u:{password}@example.com'  # redact-allow:email
+    secret = password.replace('%20', ' ')
+    redacted = api.redact_configured_secrets(text, base_url)
+    message = api.redact_refresh_message(redacted)
+    for output in (redacted, message):
+        for fragment in {secret[:4], secret[-4:], 'holder', secret.rsplit(':', 1)[-1][:4]}:
+            assert fragment not in output, (fragment, output)
 
 
 @pytest.mark.parametrize('text, expected', [
@@ -167,23 +202,24 @@ def test_configured_url_userinfo_is_removed_exactly(text, expected):
     ('failed https://placeholder-user:placeholder-pass@example.com/v1 and '  # redact-allow:email
      'https://other-user:other-placeholder-pass@example.org/',  # redact-allow:email
      'failed https://example.com/v1 and https://example.org/'),
-    ('metadata-placeholder-pass@x', 'metadata-placeholder-pass@x'),  # redact-allow:email
+    ('metadata-placeholder-pass@x', 'metadata-***@x'),  # redact-allow:email
     ("failed https://other-user:other-secret'placeholder-pass@example.org/v1",  # redact-allow:email
      'failed https://example.org/v1'),
-    ("refused: 'placeholder-pass@example.com'", "refused: 'example.com'"),  # redact-allow:email
+    ("refused: 'placeholder-pass@example.com'", "refused: '***@example.com'"),  # redact-allow:email
 ])
-def test_configured_credentials_keep_url_boundaries(text, expected):
+def test_configured_secret_removal_then_url_scan(text, expected):
     base_url = 'https://placeholder-user:placeholder-pass@example.com'  # redact-allow:email
-    assert api.strip_url_userinfo(api.strip_configured_userinfo(text, base_url)) == expected
+    assert api.strip_url_userinfo(api.redact_configured_secrets(text, base_url)) == expected
 
 
 @pytest.mark.parametrize('text, password', [
     ('@' * 100_000, '@' * 5_000),
     ("'" + 'a' * 99_999, 'a' * 5_000),
+    ('ab' * 50_000, 'ab' * 2_500 + 'c'),
 ])
-def test_configured_credential_removal_is_linear(text, password):
+def test_configured_secret_removal_is_linear(text, password):
     started = time.perf_counter()
-    api.strip_configured_userinfo(text, f'https://u:{password}@example.com')  # redact-allow:email
+    api.redact_configured_secrets(text, f'https://u:{password}@example.com')  # redact-allow:email
     assert time.perf_counter() - started < 2.0
 
 @pytest.mark.parametrize('authority', [
@@ -229,6 +265,10 @@ def _host_error(request):
     return InvalidURL(f"nonnumeric port: '{request.host.rsplit(':', 1)[1]}'")
 
 
+def _authority_error(request):
+    return InvalidURL(f"nonnumeric port: '{request.full_url.split('://', 1)[1].split('/', 1)[0]}'")
+
+
 @pytest.mark.parametrize('password, make_error', [
     ('placeholder-pass', _url_error),
     ('placeholder pass with spaces', _url_error),
@@ -236,6 +276,8 @@ def _host_error(request):
     ('placeholder-pass', _host_error),
     ('placeholder%20pass', _host_error),
     ('place:holder-pass', _host_error),
+    ('placeholder pass with spaces', _authority_error),
+    ('placeholder%20pass', _authority_error),
 ])
 async def test_url_transport_error_is_redacted_in_exception_outcome_and_log(
         monkeypatch, caplog, password, make_error):
