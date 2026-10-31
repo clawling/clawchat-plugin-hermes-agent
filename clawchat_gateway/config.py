@@ -554,6 +554,23 @@ def _read_groups(value: Any) -> dict[str, dict[str, Any]]:
     return groups
 
 
+def _reliable_delivery_v2(extra: dict[str, Any]) -> bool:
+    value = extra.get("reliable_delivery_v2", False)
+    if not isinstance(value, bool):
+        logger.warning("clawchat config reliable_delivery_v2 must be a bool; disabling")
+        value = False
+    env = _get_env("CLAWCHAT_RELIABLE_DELIVERY_V2")
+    if env:
+        normalized = env.lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+        logger.warning("clawchat env reliable_delivery_v2 is invalid; disabling")
+        return False
+    return value
+
+
 @dataclass(frozen=True)
 class ClawChatConfig:
     websocket_url: str
@@ -577,6 +594,7 @@ class ClawChatConfig:
     heartbeat_timeout_ms: int = 10000
     ack_timeout_ms: int = 15000
     ack_auto_resend_on_timeout: bool = False
+    reliable_delivery_v2: bool = False
     media_local_roots: tuple[str, ...] = field(default_factory=tuple)
     media_download_dir: str = "/tmp/clawchat-media"
     media_allow_http: bool = False
@@ -704,6 +722,7 @@ class ClawChatConfig:
                 extra, "heartbeat_timeout_ms", 10000
             ),
             ack_timeout_ms=_get_config_value(extra, "ack_timeout_ms", 15000),
+            reliable_delivery_v2=_reliable_delivery_v2(extra),
             ack_auto_resend_on_timeout=_get_config_value(
                 extra, "ack_auto_resend_on_timeout", False
             ),

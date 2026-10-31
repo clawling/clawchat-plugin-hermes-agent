@@ -40,6 +40,18 @@ Automatic refresh, permanent-failure markers, empty credential tombstones and ac
 | `CLAWCHAT_WEBSOCKET_URL` (or `CLAWCHAT_WS_URL`) | `websocket_url` | `wss://app.clawling.com/ws` | Activation records the env value when set, else derives one from `base_url` (`activate._derive_websocket_url`). |
 | `CLAWCHAT_DEVICE_ID` | — | derived (below) | Pin per agent in container deployments; used verbatim with `hermes-` prefix, otherwise sanitized to `[A-Za-z0-9_.:-]` and prefixed. |
 | `CLAWCHAT_WIKI_VERSION` | — | empty | Optional install-page stamp for connect/connect-check onboarding telemetry; profile-first, trimmed to 40 characters (`onboarding.wiki_version`), never gates activation. |
+| `CLAWCHAT_RELIABLE_DELIVERY_V2` | `reliable_delivery_v2` | `false` | Profile opt-in to durable inbound receipts and negotiated dseq acknowledgements (§11.7). |
+
+`platforms.clawchat.extra.reliable_delivery_v2` accepts only YAML booleans.
+The environment override uses the profile-first lookup above; case-insensitive
+`true/false`, `1/0`, `yes/no`, `on/off` override the config in either direction.
+Invalid values warn and disable the feature. Roll back by setting it to `false`
+(also remove or disable any env override), then restart. Disabled profiles keep
+legacy delivery: no receipt-table access and no sync acks. With granted v2,
+receipt-write failure closes the socket for normal reconnect/backoff and replay,
+without acking or dispatching the failed frame. Unknown-event and history.transit
+receipts become done with no error after dispatch returns. See
+[delivery behavior](client-integration.md#hermes-optional-reliable_delivery_v2).
 
 ### Device id durability (deployment requirement)
 

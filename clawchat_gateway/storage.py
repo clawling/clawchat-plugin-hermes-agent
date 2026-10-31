@@ -1518,6 +1518,98 @@ class ClawChatStore:
 
         return self._write("insert_message", write)
 
+    def _inbound_receipt_transaction(self, callback: Callable[[sqlite3.Connection], _T]) -> _T:
+        """Opt-in only; callers run these synchronous APIs on a storage thread."""
+        self.initialize()
+        if self._disabled:
+            raise RuntimeError("clawchat sqlite database is unavailable")
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS inbound_receipts (
+                    account_id TEXT NOT NULL, kind TEXT NOT NULL, key TEXT NOT NULL,
+                    dseq INTEGER NOT NULL, epoch TEXT NOT NULL, event TEXT NOT NULL,
+                    raw_json TEXT NOT NULL, status TEXT NOT NULL, error TEXT,
+                    received_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (account_id, kind, key)
+                )
+            """)
+            result = callback(conn)
+            conn.commit()
+            return result
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def upsert_inbound_receipt(
+        self, *, account_id: str, kind: str, key: str, dseq: int,
+        epoch: str, event: str, raw: dict[str, Any],
+    ) -> bool:
+        def write(conn: sqlite3.Connection) -> None:
+            now = _now_ms()
+            conn.execute("""
+                INSERT INTO inbound_receipts
+                    (account_id, kind, key, dseq, epoch, event, raw_json,
+                     status, error, received_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, ?)
+                ON CONFLICT(account_id, kind, key) DO UPDATE SET
+                    raw_json = excluded.raw_json, dseq = excluded.dseq,
+                    epoch = excluded.epoch, event = excluded.event,
+                    updated_at = excluded.updated_at, error = NULL,
+                    status = CASE WHEN inbound_receipts.status = 'done'
+                                  THEN 'done' ELSE 'pending' END
+            """, (account_id, kind, key, dseq, epoch, event, json_dumps(raw), now, now))
+        try:
+            self._inbound_receipt_transaction(write)
+            return True
+        except Exception:  # Do not pass potentially credential-bearing client errors to logs.
+            logger.error("clawchat inbound receipt upsert failed")
+            return False
+
+    def finish_inbound_receipt(
+        self, *, account_id: str, kind: str, key: str, dseq: int,
+        epoch: str, error: str | None = None,
+    ) -> bool:
+        def write(conn: sqlite3.Connection) -> None:
+            # A late handler must not finish a newer replay's pending receipt.
+            conn.execute("""
+                UPDATE inbound_receipts SET status = ?, error = ?, updated_at = ?
+                WHERE account_id = ? AND kind = ? AND key = ?
+                    AND dseq = ? AND epoch = ? AND status != 'done'
+            """, ("failed" if error is not None else "done",
+                  error[:500] if error is not None else None, _now_ms(),
+                  account_id, kind, key, dseq, epoch))
+        try:
+            self._inbound_receipt_transaction(write)
+            return True
+        except Exception:
+            logger.error("clawchat inbound receipt status write failed")
+            return False
+
+    def recover_inbound_receipts(
+        self, *, account_id: str, before: int,
+    ) -> list[dict[str, Any]] | None:
+        """Prune terminal receipts after eight days and load pre-start pending work."""
+        def read(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            conn.execute("""
+                DELETE FROM inbound_receipts WHERE account_id = ?
+                    AND status IN ('done', 'failed') AND updated_at < ?
+            """, (account_id, _now_ms() - 8 * 24 * 60 * 60 * 1000))
+            cursor = conn.execute("""
+                SELECT kind, key, dseq, epoch, event, raw_json FROM inbound_receipts
+                WHERE account_id = ? AND status = 'pending' AND received_at < ?
+                ORDER BY received_at, rowid
+            """, (account_id, before))
+            return [dict(zip((col[0] for col in cursor.description), row)) for row in cursor]
+        try:
+            return self._inbound_receipt_transaction(read)
+        except Exception:
+            logger.error("clawchat inbound receipt recovery failed")
+            return None
+
     def claim_message_once(
         self,
         *,

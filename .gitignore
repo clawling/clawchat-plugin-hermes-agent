@@ -382,3 +382,5 @@ CLAUDE.md
 !tests/test_token_refresh_s_fixes.py
 # Owner intro retries promptly within the existing attempt budget.
 !tests/test_liveware_intro_retry.py
+# Opt-in reliable_delivery_v2: acks only after a durable receipt; disabled stays legacy.
+!tests/test_reliable_delivery_v2.py
