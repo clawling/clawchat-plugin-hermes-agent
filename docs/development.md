@@ -71,8 +71,6 @@ uv run --extra test pytest
 uv run --extra test pytest tests/test_x.py
 ```
 
-`tests/conftest.py` uses real Hermes whenever `gateway.config` and `gateway.platforms.base` import from `PYTHONPATH` / `sys.path` (including `tmp/hermes`); only failed imports select the test double.
-
 Most of the adapter, protocol, and tool wiring is testable without a
 live Hermes process; the WebSocket transport
 (`clawchat_gateway/connection.py`) is the main piece that needs a fake
@@ -174,7 +172,9 @@ worktree. Without the required source marker, the skip reason lists every
 searched path; `HERMES_SOURCE_REQUIRED=1` turns these skips into failures.
 The pytest header shows the source found (or searched paths) and whether the
 session uses real Hermes or the double; the session stays on the double unless
-`HERMES_REAL_HOST=1` (most tests are written against it).
+`HERMES_REAL_HOST=1` (most tests are written against it). Exception: when Hermes
+already imports from `PYTHONPATH` / `sys.path`, `tests/conftest.py` uses the real
+host even without `HERMES_REAL_HOST=1`.
 `tests/test_multiplex_isolation.py` is the exception: it needs a Hermes
 checkout on `PYTHONPATH` and runs on its own
 ([multiplex-profile-isolation.md](multiplex-profile-isolation.md)).
