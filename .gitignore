@@ -243,6 +243,14 @@ tmp
 #     with HERMES_HOME, the OS home and CLAWCHAT_* env pointed away from the
 #     developer's real Hermes install (.env credentials, SQLite).
 tests/*
+# atomic_file pins sync ordering, private permissions and rollback-safe publication.
+!tests/test_atomic_file.py
+# state_write_gate requires every production write call to have a counted classification.
+!tests/test_state_write_gate.py
+# check_state_writes is the gate itself (`python tests/check_state_writes.py`).
+!tests/check_state_writes.py
+# secret_exits keeps fake credentials out of logs, caller errors and report bodies.
+!tests/test_secret_exits.py
 !tests/conftest.py
 !tests/hermes_source.py
 !tests/test_host_version.py

@@ -26,15 +26,14 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import re
-import tempfile
 import time
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from clawchat_gateway import atomic_file
 from clawchat_gateway.hermes_home import hermes_home
 
 logger = logging.getLogger(__name__)
@@ -260,24 +259,7 @@ def atomic_write_text(path: Path, text: str) -> None:
     that differs from ``"\\n"``, permanently diverging the on-disk sha from the
     manifest sha and livelocking the update check as "needs update" forever.
     """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=".skillmd-", suffix=".tmp", dir=str(path.parent)
-    )
-    tmp = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
+    atomic_file.atomic_write_text(path, text, newline="")
 
 
 # --- Local managed manifest -------------------------------------------------

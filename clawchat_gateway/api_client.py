@@ -198,6 +198,30 @@ def redact_refresh_message(value: object, *secrets: str, base_url: str | None = 
         return DIAGNOSTIC_REDACTION_FAILED
 
 
+def redact_display_text(value: object, *secrets: str) -> str:
+    """Redact credentials before diagnostics become logs or caller-visible text."""
+    try:
+        text = strip_url_userinfo(str(value or ""))
+        for secret in sorted((s for s in secrets if s), key=len, reverse=True):
+            text = text.replace(secret, "***")
+        text = re.sub(
+            r'''(?ix)(["']?authorization["']?\s*[:=]\s*)'''
+            r'''(?:"[^"\r\n]*"|'[^'\r\n]*'|(?:(?:Bearer|Basic)\s+)?[^\s&\#\"'<>`,;}\]]+)''',
+            lambda match: match.group(1) + "***", text,
+        )
+        text = re.sub(r"(?i)\bBearer\s+[^\s\"'<>`,;&}\]]+", "Bearer ***", text)
+        text = re.sub(
+            r'''(?ix)(\b["']?(?:(?:access[_-]?|refresh[_-]?)?token|api[_-]?key|key|secret|password|signature)["']?\s*[:=]\s*)'''
+            r'''(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s&\#\"'<>`,;}\]]+)''',
+            lambda match: match.group(1) + "***", text,
+        )
+        # Unlike refresh diagnostics, no blanket long-run rule: ids, paths and
+        # hosts in ordinary API errors stay readable.
+        return re.sub(r"eyJ[A-Za-z0-9_=-]*\.[A-Za-z0-9_=-]+\.[A-Za-z0-9_=-]+", "***", text)
+    except Exception:  # noqa: BLE001 - diagnostics must fail closed
+        return DIAGNOSTIC_REDACTION_FAILED
+
+
 def normalize_refresh_code(value: object) -> int | None:
     if type(value) is int:
         return value
@@ -1279,7 +1303,7 @@ class ClawChatApiClient:
         code = payload.get("code") if isinstance(payload, dict) else None
         msg = ""
         if isinstance(payload, dict):
-            msg = str(payload.get("msg") or payload.get("message") or "")
+            msg = redact_display_text(payload.get("msg") or payload.get("message") or "", self._token)
         if code != 0:
             kind = "auth" if status in (401, 403) else "api"
             gate_data = payload.get("data") if isinstance(payload, dict) else None
@@ -1375,18 +1399,18 @@ class ClawChatApiClient:
             data = None
             if isinstance(payload, dict):
                 code = payload.get("code")
-                message = str(payload.get("msg") or payload.get("message") or exc.reason)
+                message = redact_display_text(payload.get("msg") or payload.get("message") or exc.reason, self._token)
                 # Keep the envelope's data so connect-code guidance (next_action /
                 # hint) survives a non-200 answer such as a proxy-level 429.
                 if isinstance(payload.get("data"), dict):
                     data = payload["data"]
             else:
                 code = None
-                message = str(exc.reason or exc)
+                message = redact_display_text(exc.reason or exc, self._token)
             kind = "auth" if status in (401, 403) else "api"
             raise ClawChatApiError(
                 kind, message, status=status, path=path, code=code, data=data
-            ) from exc
+            ) from None
         except URLError as exc:
             # connection-refused / DNS arrive here and prove the request never
             # reached the server, so they are safe to retry (connect_failed).
@@ -1395,22 +1419,22 @@ class ClawChatApiClient:
             reason = exc.reason
             connect_failed = isinstance(reason, (ConnectionRefusedError, socket.gaierror))
             raise ClawChatApiError(
-                "transport", str(reason or exc), path=path, connect_failed=connect_failed
-            ) from exc
+                "transport", redact_display_text(reason or exc, self._token), path=path, connect_failed=connect_failed
+            ) from None
         except TimeoutError as exc:
             # A timeout is ambiguous (the server may already have processed a
             # single-use request), so it is explicitly NOT connect_failed and
             # will not be retried.
             raise ClawChatApiError(
-                "transport", str(exc) or "request timed out", path=path, connect_failed=False
-            ) from exc
+                "transport", redact_display_text(exc, self._token) or "request timed out", path=path, connect_failed=False
+            ) from None
         except Exception as exc:
-            raise ClawChatApiError("transport", str(exc), path=path) from exc
+            raise ClawChatApiError("transport", redact_display_text(exc, self._token), path=path) from None
 
         try:
             payload = json.loads(raw)
-        except Exception as exc:
-            raise ClawChatApiError("transport", "non-JSON response", status=status, path=path) from exc
+        except Exception:
+            raise ClawChatApiError("transport", "non-JSON response", status=status, path=path) from None
 
         return payload, status
 
