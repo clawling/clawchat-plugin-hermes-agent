@@ -44,6 +44,7 @@ BASELINE_CATEGORY = {
 
 NON_OWNER_GRANTS_HINT_A = "Explain only the requested ability in the conversation's language. For missing access, tell them the owner can allow it in their direct chat. For a mixed-turn block, an allowed person can ask again alone. Do not invent reasons or reveal others' access, settings, paths, or versions."
 NON_OWNER_GRANTS_HINT = "For missing access, call clawchat_tool_request with the ability ID and one short reason. Do not request after a denial or mixed-turn block. Explain only the requested ability in the conversation's language. Do not invent reasons or reveal others' access, settings, paths, or versions."
+OWNER_DOWNGRADED_MESSAGE = "Your owner started this turn, but other input arrived in the same chat, so it ran with guest-level tools. Ask them to send it again. Do not offer an access grant."
 GRANT_BLOCK_MESSAGE = 'This tool is not available to the caller yet. Do not try another way. Call clawchat_tool_request with the ability ID and one short reason.'
 GRANT_INTERSECTION_BLOCK_MESSAGE = 'Someone in this turn is not allowed to use this tool, so it did not run. Do not retry. Say that an allowed person can call you again alone.'
 GRANT_ASK_DENIED_MESSAGE = 'The owner did not approve this call or has not answered yet, so it did not run. Do not retry this request. They can try later or ask the owner directly.'
@@ -524,9 +525,7 @@ def build_grant_card(*, grantees, tools, mode, lang, code, now, label=None,
     en = lang == "en"
     separator = ", " if en else "、"
     names = separator.join(_clean_text(g["name"]) for g in grantees)
-    people = separator.join(
-        f'{_clean_text(g["name"])} ({_clean_text(g["id"], identifier=True)})' if en else
-        f'{_clean_text(g["name"])}（{_clean_text(g["id"], identifier=True)}）' for g in grantees)
+    people = names
     abilities = separator.join(_clean_text(selector_display(tool, lang), identifier=True) for tool in tools)
     label = _clean_text(label) if label else ""
     if label:

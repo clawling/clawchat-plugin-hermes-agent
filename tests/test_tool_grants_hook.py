@@ -363,7 +363,7 @@ def test_registration_and_resolution_require_grants_on(origins, monkeypatch):
 def dispatch(harness, monkeypatch):
     # Earlier admission tests deliberately poison sessions until host-idle proof.
     # Isolate that process-global latch while testing fresh host sessions here.
-    monkeypatch.setattr(turns, "_unverified_inputs", set())
+    monkeypatch.setattr(turns, "_unverified_inputs", {})
     async def base(self, event):
         harness.events.append(event)
         event._gateway_accepted = True

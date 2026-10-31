@@ -57,7 +57,7 @@ def _legacy_local_paths() -> bool:
         from clawchat_gateway import turn_attachments, turn_grants
 
         nonce = turn_grants.session_context_value("HERMES_SESSION_MESSAGE_ID")
-        pending = turn_grants.get_snapshot(nonce)
+        pending = turn_grants.effective_snapshot(nonce)
         if pending is not None:
             snapshot = turn_attachments.current_snapshot()
             if snapshot is None:
