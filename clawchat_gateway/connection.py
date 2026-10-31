@@ -25,7 +25,12 @@ except ImportError:  # pragma: no cover
     _ws_connect_impl = None  # type: ignore[assignment]
 
 from clawchat_gateway import __version__
-from clawchat_gateway.api_client import strip_url_userinfo
+from clawchat_gateway.api_client import (
+    DIAGNOSTIC_REDACTION_FAILED,
+    DIAGNOSTIC_WITHHELD,
+    strip_url_userinfo,
+    url_has_userinfo,
+)
 from clawchat_gateway.config import ClawChatConfig
 from clawchat_gateway.hermes_home import hermes_home
 from clawchat_gateway import instance_lock, install_identity
@@ -3620,10 +3625,15 @@ class ClawChatConnection:
     def _sanitize_secret_text(self, text: str | None) -> str | None:
         if text is None:
             return None
-        token = self._cfg.token
-        if token:
-            text = text.replace(token, "***")
-        return strip_url_userinfo(text)
+        try:
+            if url_has_userinfo(self._cfg.base_url) or url_has_userinfo(self._cfg.websocket_url):
+                return DIAGNOSTIC_WITHHELD
+            token = self._cfg.token
+            if token:
+                text = text.replace(token, "***")
+            return strip_url_userinfo(text)
+        except Exception:  # noqa: BLE001 - fail closed
+            return DIAGNOSTIC_REDACTION_FAILED
 
     def _finish_current_connection(
         self,

@@ -153,14 +153,49 @@ def strip_url_userinfo(text: str) -> str:
     return "".join(parts)
 
 
-def redact_refresh_message(value: object, *secrets: str) -> str:
-    """Sanitize refresh diagnostics at their first display-text boundary."""
-    text = strip_url_userinfo(str(value or ""))
-    for secret in sorted((s for s in secrets if s), key=len, reverse=True):
-        text = text.replace(secret, "***")
-    text = re.sub(r"eyJ[A-Za-z0-9_=-]*\.[A-Za-z0-9_=-]+\.[A-Za-z0-9_=-]+", "***", text)
-    text = re.sub(r"[A-Za-z0-9_\-\.=+/]{32,}", "***", text)
-    return " ".join(text.split())[:200]
+# When a configured URL carries credentials, their echoes take too many forms
+# (spaces, no scheme, escaping, percent-encoding, truncation) to remove
+# reliably, so the free text of the diagnostic is not shown at all; callers
+# keep the HTTP status, error kind and code around it.
+DIAGNOSTIC_WITHHELD = "(diagnostic text withheld: base URL contains credentials)"
+# Returned when redaction itself fails (fail closed, never the original text).
+DIAGNOSTIC_REDACTION_FAILED = "(diagnostic text withheld: redaction failed)"
+
+
+def url_has_userinfo(url: str | None) -> bool:
+    """True when a URL carries userinfo: the parser reports a username or
+    password, or its authority (up to the first `/?#\\`) contains `@`. An
+    unparseable URL containing `@` anywhere counts too (fail closed)."""
+    if not url:
+        return False
+    try:
+        parsed = urlsplit(url)
+        if parsed.username is not None or parsed.password is not None:
+            return True
+    except ValueError:
+        return "@" in url
+    rest = url.split("://", 1)[1] if "://" in url else url
+    return "@" in re.split(r"[/?#\\]", rest, maxsplit=1)[0]
+
+
+def redact_refresh_message(value: object, *secrets: str, base_url: str | None = None) -> str:
+    """Sanitize refresh diagnostics at their first display-text boundary.
+
+    With a credentialed `base_url` the whole text becomes `DIAGNOSTIC_WITHHELD`.
+    Any failure returns `DIAGNOSTIC_REDACTION_FAILED`; this never raises and
+    never falls back to the original text.
+    """
+    try:
+        if url_has_userinfo(base_url):
+            return DIAGNOSTIC_WITHHELD
+        text = strip_url_userinfo(str(value or ""))
+        for secret in sorted((s for s in secrets if s), key=len, reverse=True):
+            text = text.replace(secret, "***")
+        text = re.sub(r"eyJ[A-Za-z0-9_=-]*\.[A-Za-z0-9_=-]+\.[A-Za-z0-9_=-]+", "***", text)
+        text = re.sub(r"[A-Za-z0-9_\-\.=+/]{32,}", "***", text)
+        return " ".join(text.split())[:200]
+    except Exception:  # noqa: BLE001 - fail closed
+        return DIAGNOSTIC_REDACTION_FAILED
 
 
 def normalize_refresh_code(value: object) -> int | None:
@@ -1046,19 +1081,19 @@ class ClawChatApiClient:
             connect_failed = isinstance(reason, (ConnectionRefusedError, socket.gaierror))
             raise ClawChatApiError(
                 "transport",
-                redact_refresh_message(reason or exc, *secret_values),
+                redact_refresh_message(reason or exc, *secret_values, base_url=self._base_url),
                 path="/v1/auth/refresh",
                 connect_failed=connect_failed,
             ) from None
         except TimeoutError as exc:
             raise ClawChatApiError(
                 "transport",
-                redact_refresh_message(exc, *secret_values) or "refresh request timed out",
+                redact_refresh_message(exc, *secret_values, base_url=self._base_url) or "refresh request timed out",
                 path="/v1/auth/refresh",
             ) from None
         except Exception as exc:  # noqa: BLE001
             raise ClawChatApiError(
-                "transport", redact_refresh_message(exc, *secret_values),
+                "transport", redact_refresh_message(exc, *secret_values, base_url=self._base_url),
                 path="/v1/auth/refresh",
             ) from None
 
@@ -1076,7 +1111,8 @@ class ClawChatApiClient:
         msg = ""
         if isinstance(payload, dict):
             msg = redact_refresh_message(
-                payload.get("msg") or payload.get("message"), *secret_values)
+                payload.get("msg") or payload.get("message"), *secret_values,
+                base_url=self._base_url)
         if status != 200 and code != REFRESH_CODE_INVALID_REFRESH:
             raise ClawChatApiError(
                 "transport",
