@@ -24,7 +24,9 @@ scanner must report zero high findings as well as zero critical findings.
 This check runs the real scanner, so it needs a Hermes Agent source checkout:
 ``$HERMES_SOURCE_DIR``, or the ignored ``tmp/hermes`` / ``tmp/hermes-agent``
 of this checkout or, from a linked worktree, of the main checkout (see
-``docs/hermes-source-lookup.md``). Without one it skips. The scanner runs
+``docs/hermes-source-lookup.md``). The shared ``hermes_source.py`` helper lists
+searched paths when skipping; ``HERMES_SOURCE_REQUIRED=1`` fails instead.
+The scanner runs
 in a subprocess so its ``tools`` package never shadows anything in this test
 session, and over a copy of exactly the tracked files — what a clone contains.
 """
@@ -40,6 +42,8 @@ from pathlib import Path
 
 import pytest
 
+from hermes_source import require_hermes_source
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 #: Hermes release tags whose install scanner the tracked tree must also pass.
@@ -48,8 +52,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #: ``dns_exfil`` rule fires on the prose word "host" followed by any ``$`` on
 #: the line (fixed upstream in v0.21.3).
 PINNED_SCANNER_TAGS = ("v2026.8.31", "v2026.9.11")
-#: v0.22.5 is the newest Hermes release.
-HIGH_CLEAN_SCANNER_TAGS = ("v0.22.5",)
+#: A single high finding is a *caution* verdict: the install stops until the
+#: owner approves it. v2026.9.21 carries the scanner of the v2026.9.21 /
+#: v2026.9.24 releases, v0.21.6 the first that steps findings under tests/
+#: down, and v0.22.5 is the newest Hermes release. The scanner of v2026.9.14
+#: and older still rates two lines of the bundled skills high; those lines come
+#: from the shared skill source, not from this repository.
+HIGH_CLEAN_SCANNER_TAGS = ("v2026.9.21", "v0.21.6", "v0.22.5")
 
 
 def _scanner_tags(
@@ -60,49 +69,6 @@ def _scanner_tags(
     if raw is not None:
         return [t.strip() for t in raw.split(",") if t.strip()]
     return list(defaults)
-
-
-def _main_checkout() -> Path | None:
-    """The main working tree when this one is a linked ``git worktree``.
-
-    ``tmp/`` is ignored, so a linked worktree has none; without this the scan
-    silently skipped in every worktree.
-    """
-    if shutil.which("git") is None:
-        return None
-    proc = subprocess.run(
-        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
-        cwd=REPO_ROOT, capture_output=True, text=True, check=False,
-    )
-    if proc.returncode != 0:
-        return None
-    common = Path(proc.stdout.strip())
-    if common.name == ".git":
-        return common.parent
-    # A submodule keeps its git dir under the superproject's .git/modules/.
-    proc = subprocess.run(
-        ["git", "config", "--file", str(common / "config"), "core.worktree"],
-        capture_output=True, text=True, check=False,
-    )
-    if proc.returncode != 0 or not proc.stdout.strip():
-        return None
-    return (common / proc.stdout.strip()).resolve()
-
-
-def _hermes_source() -> Path | None:
-    candidates = []
-    if os.environ.get("HERMES_SOURCE_DIR"):
-        candidates.append(Path(os.environ["HERMES_SOURCE_DIR"]))
-    roots = [REPO_ROOT]
-    main = _main_checkout()
-    if main is not None and main != REPO_ROOT:
-        roots.append(main)
-    for root in roots:
-        candidates += [root / "tmp" / "hermes", root / "tmp" / "hermes-agent"]
-    for path in candidates:
-        if (path / "tools" / "plugin_guard.py").is_file():
-            return path
-    return None
 
 
 def _tracked_files() -> list[str] | None:
@@ -198,9 +164,7 @@ def _run_scan(scanner_root: Path, tree: Path) -> dict | None:
 
 @pytest.mark.parametrize("tag", _scanner_tags() or [pytest.param("", marks=pytest.mark.skip(reason="no pinned tags"))])
 def test_tracked_tree_passes_the_install_scanner_of_older_hermes(tmp_path, tag):
-    hermes = _hermes_source()
-    if hermes is None:
-        pytest.skip("no Hermes source checkout (set HERMES_SOURCE_DIR or use tmp/hermes)")
+    hermes = require_hermes_source("tools/plugin_guard.py")
     scanner = _pinned_scanner(hermes, tag, tmp_path / "scanners")
     if scanner is None:
         pytest.skip(f"Hermes checkout has no {tag} scanner (not a git checkout, or tag missing)")
@@ -221,9 +185,7 @@ def test_tracked_tree_passes_the_install_scanner_of_older_hermes(tmp_path, tag):
     or [pytest.param("", marks=pytest.mark.skip(reason="no high-clean pinned tags"))],
 )
 def test_tracked_tree_has_no_high_findings(tmp_path, tag):
-    hermes = _hermes_source()
-    if hermes is None:
-        pytest.skip("no Hermes source checkout (set HERMES_SOURCE_DIR or use tmp/hermes)")
+    hermes = require_hermes_source("tools/plugin_guard.py")
     scanner = _pinned_scanner(hermes, tag, tmp_path / "scanners")
     if scanner is None:
         pytest.skip(f"Hermes checkout has no {tag} scanner (not a git checkout, or tag missing)")
@@ -239,9 +201,7 @@ def test_tracked_tree_has_no_high_findings(tmp_path, tag):
 
 
 def test_tracked_tree_is_not_blocked_by_the_hermes_install_scanner(tmp_path):
-    hermes = _hermes_source()
-    if hermes is None:
-        pytest.skip("no Hermes source checkout (set HERMES_SOURCE_DIR or use tmp/hermes)")
+    hermes = require_hermes_source("tools/plugin_guard.py")
     files = _tracked_files()
     if files is None:
         pytest.skip("not a git checkout")

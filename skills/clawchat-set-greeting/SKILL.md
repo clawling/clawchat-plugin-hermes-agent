@@ -1,6 +1,6 @@
 ---
 name: clawchat-set-greeting
-version: 1.3.0
+version: 1.3.1
 description: >-
   Use when the user wants to customize, change, set, or reset this agent's greetings — the
   first-load / activation greeting to the owner (greeting.md) or the first message sent to a
@@ -62,7 +62,7 @@ keep it to one sentence." — not the finished greeting sentence itself.
    `<clawchat dir>/greeting.md` using your own file-write tool, with the absolute path.
 3. Keep it a short prompt (a few lines). Do not include secrets or the user's private data.
 4. Tell the user it takes effect on the **next** first-load / activation — it does not
-   resend the greeting in the current conversation.
+   resend the greeting in this chat.
 
 ## Resetting to the default
 

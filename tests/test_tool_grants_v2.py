@@ -618,12 +618,12 @@ def test_guest_search_guard_neutralizes_only_unverified_clawchat_turns(host, sea
         values["HERMES_SESSION_MESSAGE_ID"] = "missing"
     if turn == "wrong-chat":
         # An owner snapshot in another chat must not bypass the guard.
-        monkeypatch.setattr(turns, "get_snapshot", lambda _: replace(snapshot, owner_side=True))
+        monkeypatch.setattr(turns, "effective_snapshot", lambda _: replace(snapshot, owner_side=True))
         values["HERMES_SESSION_CHAT_ID"] = "cnv_other"
     if turn == "error":
         def broken_snapshot(_):
             raise RuntimeError("snapshot unavailable")
-        monkeypatch.setattr(turns, "get_snapshot", broken_snapshot)
+        monkeypatch.setattr(turns, "effective_snapshot", broken_snapshot)
     if turn == "other-platform":
         values["HERMES_SESSION_PLATFORM"] = "telegram"
     try:
@@ -672,11 +672,11 @@ def test_search_bridges_fail_closed_without_matching_filtered_catalog(host, sear
             # The finite Mapping view is identical, but future-tool access differs.
             broader = resolve([row("terminal", kind="tool"), row()])
             assert dict(broader) == dict(snapshot.grants)
-            monkeypatch.setattr(turns, "get_snapshot", lambda _: replace(snapshot, grants=broader))
+            monkeypatch.setattr(turns, "effective_snapshot", lambda _: replace(snapshot, grants=broader))
         elif failure in {"chat", "grants", "speakers"}:
             changes = {"chat_id": "cnv_other"} if failure == "chat" else (
                 {"grants": resolve([row()])} if failure == "grants" else {"non_owner_speakers": frozenset({"usr_bob"})})
-            monkeypatch.setattr(turns, "get_snapshot", lambda _: replace(snapshot, **changes))
+            monkeypatch.setattr(turns, "effective_snapshot", lambda _: replace(snapshot, **changes))
         if failure == "overlap":
             overlap = turns.register_turn(account_id="usr_agent", chat_id=snapshot.chat_id,
                 speakers=("usr_bob",), grants=resolve([], ("usr_bob",)), session_key="rules")
@@ -700,7 +700,7 @@ def test_search_bridges_accept_equivalent_catalog_snapshot(host, search_catalog,
     with bound_rules([row("terminal", kind="tool")]) as snapshot, host(**context(snapshot)):
         equivalent = replace(snapshot, grants=resolve([row("terminal", kind="tool")]))
         assert equivalent is not snapshot and equivalent.grants is not snapshot.grants
-        monkeypatch.setattr(turns, "get_snapshot", lambda _: equivalent)
+        monkeypatch.setattr(turns, "effective_snapshot", lambda _: equivalent)
         assert call(bridge, turn_id="t") is None
 
 
@@ -777,7 +777,7 @@ def test_host_catalog_uses_platform_policy_not_last_narrowed_catalog(monkeypatch
 
 
 ALL_CARDS = {('zh', 'direct'): '授权确认（码 000123）\n'
-                   '允许：Person（usr_alice）\n'
+                   '允许：Person\n'
                    '使用：all\n'
                    '方式：直接用\n'
                    '到期：不限\n'
@@ -793,7 +793,7 @@ ALL_CARDS = {('zh', 'direct'): '授权确认（码 000123）\n'
                    'Person派出去的定时任务、子 Agent 和看板任务会用主人的配置带全部工具执行。\n'
                    '确认请点：`/clawchat-allow 000123`（10 分钟内有效；不确认就不会生效）',
  ('zh', 'ask'): '授权确认（码 000123）\n'
-                '允许：Person（usr_alice）\n'
+                '允许：Person\n'
                 '使用：all\n'
                 '方式：每次问我\n'
                 '到期：不限\n'
@@ -808,7 +808,7 @@ ALL_CARDS = {('zh', 'direct'): '授权确认（码 000123）\n'
                 '这类操作每次都会先问你。\n'
                 '确认请点：`/clawchat-allow 000123`（10 分钟内有效；不确认就不会生效）',
  ('zh_Hant', 'direct'): '授權確認（碼 000123）\n'
-                        '允許：Person（usr_alice）\n'
+                        '允許：Person\n'
                         '使用：all\n'
                         '方式：直接用\n'
                         '到期：不限\n'
@@ -824,7 +824,7 @@ ALL_CARDS = {('zh', 'direct'): '授权确认（码 000123）\n'
                         'Person派出去的定時任務、子 Agent 和看板任務會用主人的設定帶全部工具執行。\n'
                         '確認請點：`/clawchat-allow 000123`（10 分鐘內有效；不確認就不會生效）',
  ('zh_Hant', 'ask'): '授權確認（碼 000123）\n'
-                     '允許：Person（usr_alice）\n'
+                     '允許：Person\n'
                      '使用：all\n'
                      '方式：每次問我\n'
                      '到期：不限\n'
@@ -839,7 +839,7 @@ ALL_CARDS = {('zh', 'direct'): '授权确认（码 000123）\n'
                      '這類操作每次都會先問你。\n'
                      '確認請點：`/clawchat-allow 000123`（10 分鐘內有效；不確認就不會生效）',
  ('en', 'direct'): 'Grant confirmation (code 000123)\n'
-                   'Allow: Person (usr_alice)\n'
+                   'Allow: Person\n'
                    'Use: all\n'
                    'Mode: Use directly\n'
                    'Expires: No limit\n'
@@ -860,7 +860,7 @@ ALL_CARDS = {('zh', 'direct'): '授权确认（码 000123）\n'
                    'Click to confirm: `/clawchat-allow 000123` (valid for 10 minutes; it will not take '
                    'effect without confirmation)',
  ('en', 'ask'): 'Grant confirmation (code 000123)\n'
-                'Allow: Person (usr_alice)\n'
+                'Allow: Person\n'
                 'Use: all\n'
                 'Mode: Ask me each time\n'
                 'Expires: No limit\n'
@@ -901,7 +901,7 @@ def test_direct_card_reports_unavailable_ask_and_never_offers_it(lang):
 def test_profile_semicolon_cannot_create_a_new_card_field():
     card = grants.build_grant_card(grantees=[dict(id="usr_alice", name="Person; Mode: injected")],
         tools=["tool:read_file"], mode="direct", lang="en", code="000123", now=NOW)
-    assert card.splitlines()[1] == "Allow: Person; Mode: injected (usr_alice)"
+    assert card.splitlines()[1] == "Allow: Person; Mode: injected"
     assert card.splitlines()[3] == "Mode: Use directly"
 
 
@@ -1801,7 +1801,11 @@ def test_owner_direct_overlap_never_borrows_session_owner_identity(host, order):
             assert not current.owner_side
             assert guard._filter_grant_definitions(definitions, current) == definitions[-1:]
             with host(**dict(context(snapshot), HERMES_SESSION_USER_ID="usr_owner")):
-                assert call("terminal", turn_id=snapshot.nonce) == guard._grant_block("denied")
+                expected = guard._grant_block("denied")
+                if current.originally_owner_side:
+                    expected.update(message=grants.OWNER_DOWNGRADED_MESSAGE,
+                                    blockReason=grants.OWNER_DOWNGRADED_MESSAGE)
+                assert call("terminal", turn_id=snapshot.nonce) == expected
                 for tool in grants.GRANT_TOOL_NAMES:
                     assert call(tool, turn_id=snapshot.nonce)["action"] == "block"
     finally:

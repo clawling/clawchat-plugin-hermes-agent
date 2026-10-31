@@ -53,7 +53,7 @@ async def test_owner_grant_sends_localized_card_without_code_in_model_result(man
     text = h.adapter._send_owner_text.call_args.args[1]
     code = text.split("码 ")[1][:6]
     assert code.isdigit() and code not in result and "code" not in data
-    assert "允许：张三（usr_a）" in text
+    assert "允许：张三" in text and PARAMS["userIds"][0] not in text
     assert h.adapter._store.list_grants(account_id="usr_agent") == []
     assert guard.clawchat_pre_tool_call(tool_name=GRANT_TOOL_NAMES[0], session_id="s", turn_id="t") is None
     incoming = message("usr_owner", f"/clawchat-allow {code}", chat=OWNER_CHAT)
@@ -244,7 +244,8 @@ async def test_management_hook_and_handler_refuse_unreliable_owner_rounds(manage
         turn_id = ""
     elif case == "unbound":
         with turns._lock:
-            turns._bindings.pop(s.nonce)
+            execution = turns._bindings.pop(s.nonce)
+            turns._execution_nonces.pop(execution)
     elif case == "session_mismatch":
         session_id = "different"
     else:

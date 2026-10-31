@@ -93,7 +93,7 @@ def stores(tmp_path, monkeypatch):
 
 
 def _conn(monkeypatch, cfg):
-    conn = ClawChatConnection(cfg, on_message=lambda *_args: None)
+    conn = ClawChatConnection(cfg, on_message=lambda *_args: None, proactive_jitter=lambda: 0.0)
     monkeypatch.setattr(conn, "_refresh_device_id", lambda: "hermes-test-device")
     conn._refresh_manager = conn._build_refresh_manager()
     conn._refresh_manager._max_transient_retries = 0
@@ -604,7 +604,7 @@ async def test_new_activation_is_adopted_marker_cleared_refresh_then_connect(sto
     (404, b'{"code":400}', False), (200, b'{"code":400}', True),
     (502, b'<html>gateway failure</html>', False),
     (401, b'{"code":"10003"}', False), (500, b'{"code":"400"}', False),
-    (500, b'{"code":10003.0}', False), (500, b'not-json', False),
+    (500, b'{"code":10003.0}', True), (500, b'not-json', False),
     (500, b'{"code":0,"data":{"access_token":"a","refresh_token":"r"}}', False),
 ])
 async def test_refresh_business_classification(stores, monkeypatch, http_error, status, body, permanent):

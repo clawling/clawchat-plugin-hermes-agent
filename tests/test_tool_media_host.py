@@ -1,12 +1,7 @@
-"""REST tool uploads go to the MEDIA host, not the API host.
+"""Chat attachments use the media host; long-lived images use the API host.
 
-``/media/upload`` is served by the media service. In deployments where the
-API and media hosts or ports differ (the API port answers 404 for
-``/media/upload``; the media port answers 200), the tools' REST
-client posted every local moment image and ``upload_media_file`` to the API
-host. The adapter's send path already resolved the media host with
-``media_runtime.derive_base_url`` (explicit media base URL, else the WebSocket
-host); the tools' client now resolves it the same way.
+``upload_media_file`` uses ``/media/upload`` on the resolved media host.
+Avatars and local moment images use ``/v1/files/upload-url`` on the API host.
 """
 
 from __future__ import annotations
@@ -74,7 +69,7 @@ def seen_urls(monkeypatch):
 
     def _urlopen(request, timeout=None):
         urls.append(request.full_url)
-        if request.full_url.endswith("/media/upload"):
+        if request.full_url.endswith(("/media/upload", "/v1/files/upload-url")):
             return _Resp({"code": 0, "data": {
                 "kind": "image", "url": "https://cdn.example.test/a.png",
                 "name": "a.png", "mime": "image/png", "size": 4,
@@ -119,14 +114,16 @@ def test_without_media_base_url_the_websocket_host_is_used(profile, seen_urls, t
     assert seen_urls == ["https://gw.example.test:8443/media/upload"]
 
 
-def test_moment_local_image_uploads_to_media_host_and_posts_to_api_host(profile, seen_urls, tmp_path):
+def test_moment_local_image_uses_long_lived_upload_on_api_host(profile, seen_urls, tmp_path):
     profile({"media_base_url": "http://media.example.test:9000"})
 
-    asyncio.run(tools.create_moment(text="hi", images=[str(_png(tmp_path))]))
+    result = asyncio.run(tools.create_moment(text="hi", images=[str(_png(tmp_path))]))
 
-    assert seen_urls[0] == "http://media.example.test:9000/media/upload"
-    assert all(u.startswith("http://api.example.test:8080/") for u in seen_urls[1:]), seen_urls
-    assert len(seen_urls) == 2
+    assert "error" not in result, result
+    assert seen_urls == [
+        "http://api.example.test:8080/v1/files/upload-url",
+        "http://api.example.test:8080/v1/moments",
+    ]
 
 
 def test_avatar_upload_stays_on_the_api_host(profile, seen_urls, tmp_path):

@@ -141,13 +141,13 @@ def main(argv: list[str] | None = None) -> int:
 
     update_parser = subparsers.add_parser("update", help="Update the configured ClawChat account profile")
     update_parser.add_argument("--nickname")
-    update_parser.add_argument("--avatar-url")
+    update_parser.add_argument("--avatar-url", help="Long-lived URL from clawchat_upload_avatar_image (upload-avatar); never a chat attachment URL, which is deleted after about 14 days")
     update_parser.add_argument("--bio")
 
-    upload_avatar_parser = subparsers.add_parser("upload-avatar", help="Upload a local avatar image")
+    upload_avatar_parser = subparsers.add_parser("upload-avatar", help="Upload a local image for a long-lived avatar or moment URL")
     upload_avatar_parser.add_argument("path", help="Absolute local avatar image path")
 
-    upload_media_parser = subparsers.add_parser("upload-media", help="Upload a local media/file attachment")
+    upload_media_parser = subparsers.add_parser("upload-media", help="Upload a local chat attachment, deleted after about 14 days; use upload-avatar for avatars and moment images")
     upload_media_parser.add_argument("path", help="Absolute local file path")
 
     args = parser.parse_args(argv)

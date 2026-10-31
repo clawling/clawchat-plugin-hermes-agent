@@ -26,6 +26,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from gateway.config import Platform
+from gateway.platforms import base as _host_base
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -164,28 +165,22 @@ from clawchat_gateway.terminal_send import (
 )
 
 
-def _resolve_host_agent_version() -> str:
-    """Best-effort host hermes-agent version; "" on failure (never raises)."""
-    try:
-        from importlib.metadata import PackageNotFoundError, version
-
-        try:
-            return version("hermes-agent")
-        except PackageNotFoundError:
-            pass
-    except Exception:  # noqa: BLE001 — best-effort, must never break import
-        pass
-    try:
-        from hermes_cli import __version__ as host_version
-
-        return host_version
-    except Exception:  # noqa: BLE001
-        return ""
+from clawchat_gateway.host_version import resolve_host_agent_version as _resolve_host_agent_version
 
 
 _HOST_AGENT_VERSION = _resolve_host_agent_version()
 
 logger = logging.getLogger("clawchat_gateway.adapter")
+
+# Older Hermes hosts only extract known extensions. Keep the compatibility
+# scan local to ClawChat; every additional path still needs host validation.
+_LEGACY_MEDIA_TAG_RE = re.compile(
+    r'''[`"']?MEDIA:\s*'''
+    r'''(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|'''
+    r'''(?:~/|/|[A-Za-z]:[/\\])\S+(?:[^\S\n]+\S+)*?\.[A-Za-z0-9]+)'''
+    r'''(?=[\s`"',;:)\]}]|$)[`"']?''',
+    re.IGNORECASE,
+)
 inbound_trace = logging.getLogger("clawchat_gateway.inbound_trace")
 
 CLAWCHAT_PLUGIN_PLATFORM = "hermes"
@@ -1043,6 +1038,55 @@ def _read_host_compression_cap() -> int | None:
     return int(value)
 
 
+def _legacy_extra_media(text: str, *, is_voice: bool) -> tuple[list[tuple[str, bool]], str]:
+    """Extract residual MEDIA tags on older hosts, accepting only host-validated paths."""
+    validate = getattr(_host_base, "validate_media_delivery_path", None)
+    if not callable(validate):
+        validate = getattr(BasePlatformAdapter, "validate_media_delivery_path", None)
+    if not callable(validate):
+        return [], text
+
+    scan_content = text
+    for name in ("_mask_protected_spans", "_mask_json_string_media"):
+        mask = getattr(BasePlatformAdapter, name, None)
+        if callable(mask):
+            scan_content = mask(scan_content)
+
+    media = []
+    seen = set()
+    spans = []
+    for match in _LEGACY_MEDIA_TAG_RE.finditer(scan_content):
+        path = match.group("path").strip()
+        if len(path) >= 2 and path[0] == path[-1] and path[0] in "`\"'":
+            path = path[1:-1].strip()
+        path = path.lstrip("`\"'").rstrip("`\"',.;:)}]")
+        try:
+            safe_path = validate(os.path.expanduser(path)) if path else None
+        except Exception:
+            logger.debug("ClawChat MEDIA path validation failed", exc_info=True)
+            continue
+        if not safe_path:
+            continue
+        if safe_path not in seen:
+            seen.add(safe_path)
+            media.append((safe_path, is_voice))
+        spans.append(match.span())
+
+    if spans:
+        for start, end in reversed(spans):
+            text = text[:start] + text[end:]
+        text = re.sub(r"\n{3,}", "\n\n", text).rstrip()
+    return media, text
+
+
+# Fixed reason codes the server sends on permission receipts. Any other reason
+# (including a one-word error) keeps the receipt untrusted.
+_TRUSTED_RECEIPT_REASONS = frozenset({
+    "", "owner_allowed", "owner_denied", "owner_timeout", "owner_turn_only",
+    "policy_allow", "policy_deny", "policy_forbidden", "window_allow",
+})
+
+
 class ClawChatAdapter(BasePlatformAdapter):
     SUPPORTS_MESSAGE_EDITING = True
     # ClawChat renders markdown: Hermes then shows a terminal tool call as a
@@ -1057,6 +1101,19 @@ class ClawChatAdapter(BasePlatformAdapter):
     # when every character costs 6 bytes on the hub's side (a JSON escape), so
     # a long answer arrives as one message instead of a run of 4000-char ones.
     MAX_MESSAGE_LENGTH = 32000
+
+    @staticmethod
+    def extract_media(content: str) -> tuple[list[tuple[str, bool]], str]:
+        """Use native extraction, adding validated extensions on older hosts only."""
+        result = BasePlatformAdapter.extract_media(content)
+        if hasattr(_host_base, "MEDIA_EXTENSIONLESS_TAG_RE"):
+            return result
+
+        media, cleaned = result
+        extras, cleaned = _legacy_extra_media(cleaned, is_voice="[[audio_as_voice]]" in content)
+        seen = {path for path, _ in media}
+        media.extend(item for item in extras if item[0] not in seen)
+        return media, cleaned
 
     def __init__(self, platform_config: Any) -> None:
         super().__init__(platform_config, _clawchat_platform())
@@ -1764,6 +1821,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         if not owner_user_id or not owner_chat_id:
             return
         inbound = InboundMessage.internal_synthetic(
+            plugin_notification=True,
             chat_id=owner_chat_id,
             chat_type="direct",
             sender_id="clawchat-awareness",
@@ -2928,6 +2986,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                     return  # asked on a later connection, once the owner chat is known
                 await self._handle_inbound(
                     InboundMessage.internal_synthetic(
+                        plugin_notification=True,
                         chat_id=owner_chat_id,
                         chat_type="direct",
                         sender_id="clawchat-maintenance",
@@ -3174,6 +3233,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         owner_user_id = str(getattr(claim, "owner_user_id", "") or "")
         claimed_at = getattr(claim, "claimed_at", None)
         inbound = InboundMessage.internal_synthetic(
+            plugin_notification=True,
             owner_action=True,  # One-time owner pairing, claimed from activation storage.
             chat_id=conversation_id,
             chat_type="direct",
@@ -3417,6 +3477,12 @@ class ClawChatAdapter(BasePlatformAdapter):
                 )
                 return
             if _synthetic is not None:
+                # The rendered receipt carries operation, outcome, reason and the
+                # server-generated result. A failure reason can be a free-form
+                # error string, so only a known server reason code attests no guest text.
+                if (not _synthetic.orchestrate_retry
+                        and str(_synthetic.raw_message.get("reason") or "") in _TRUSTED_RECEIPT_REASONS):
+                    _synthetic = _synthetic.as_plugin_notification()
                 logger.info(
                     "clawchat permission_result dispatched chat_id=%s request_id=%s operation=%s outcome=%s",
                     frame.get("chat_id"),
@@ -4504,7 +4570,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 snapshot = register_turn(account_id=self._account_id(), chat_id=origin.chat_id,
                     speakers=speakers, grants=grants, any_granted_tools=any_tools, session_key=key,
                     non_owner_speakers=origin.non_owner_speakers, owner_side=False, owner_verified=False,
-                    approve_eligible=False)
+                    approve_eligible=False, trigger="host_internal")
             elif existing is None:
                 platform = getattr(source, "platform", None)
                 chat_id = getattr(source, "chat_id", "")
@@ -4519,7 +4585,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                     key = chat_id + ":__direct__"
                     snapshot = register_turn(account_id=self._account_id(), chat_id=chat_id,
                         speakers=(owner,), grants=resolve_turn_grants([owner], owner, [], int(time.time() * 1000)),
-                        session_key=key, owner_side=True, owner_verified=False)
+                        session_key=key, owner_side=True, owner_verified=False, trigger="host_internal")
             if snapshot is not None:
                 try:
                     from gateway.session_identity import replace_source
@@ -4639,6 +4705,28 @@ class ClawChatAdapter(BasePlatformAdapter):
                 and not inbound.is_internal_synthetic
                 and not inbound.raw_message.get("synthetic"))
 
+    def _inbound_grant_trigger(self, inbound: InboundMessage) -> str:
+        if inbound.grant_origin:
+            return "grant_wake"
+        if inbound.is_internal_synthetic:
+            for kind in ("moment_comment", "awareness", "permission_result", "memory_migration_hint",
+                         "bootstrap", "clawchat_sediment"):
+                if inbound.raw_message.get(kind):
+                    return kind
+            return "host_internal"
+        if inbound.raw_message.get("synthetic"):
+            return "wire_synthetic"
+        if not inbound.sender_id:
+            return "unknown_sender"
+        if inbound.sender_id != self._owner_user_id():
+            return "foreign_sender"
+        return "owner_message"
+
+    def _trusted_owner_notification(self, inbound: InboundMessage) -> bool:
+        return (inbound.is_plugin_notification and inbound.chat_type == "direct"
+                and bool(self._owner_user_id()) and bool(self._owner_direct_chat_id())
+                and inbound.chat_id == self._owner_direct_chat_id())
+
     def _admit_owner_direct_inbound(self, inbound: InboundMessage) -> bool:
         if inbound.chat_type != "direct" or inbound.chat_id != self._owner_direct_chat_id():
             return False
@@ -4647,7 +4735,9 @@ class ClawChatAdapter(BasePlatformAdapter):
 
             # The host may merge this input using an earlier source nonce.
             # Revoke before any confirmation/command handler can consume it.
-            revoke_owner_verification(self._account_id(), self._grant_session_key(inbound))
+            revoke_owner_verification(self._account_id(), self._grant_session_key(inbound),
+                                      trigger=self._inbound_grant_trigger(inbound),
+                                      management_only=self._trusted_owner_notification(inbound))
         return True
 
     def _hold_granted_inbound(self, inbound: InboundMessage, *, from_dispatch: bool = False,
@@ -4855,6 +4945,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         if self._verified_owner_inbound(inbound):
             # Owner input stays immediate; idle only determines verification.
             self._grant_session_busy(key)
+        from clawchat_gateway.turn_grants import pending_input_restriction
+        arrival_restriction = pending_input_restriction(self._account_id(), key)
         self._admit_owner_direct_inbound(inbound)
         if await self._consume_grant_confirmation(inbound):
             return
@@ -4863,19 +4955,21 @@ class ClawChatAdapter(BasePlatformAdapter):
             return
         if not self._is_owner_turn(inbound) and self._hold_granted_inbound(inbound, from_dispatch=True):
             return
+        unverified_token = ""
         if (inbound.chat_type == "direct" and inbound.chat_id == self._owner_direct_chat_id()
-                and not self._verified_owner_inbound(inbound)):
+                and not self._verified_owner_inbound(inbound) and not self._trusted_owner_notification(inbound)):
             from clawchat_gateway.turn_grants import mark_unverified_input
 
             # The host can await before installing its guard, then merge this
             # input into another nonce without ever completing its own event.
-            mark_unverified_input(self._account_id(), key)
+            unverified_token = mark_unverified_input(self._account_id(), key, trigger=self._inbound_grant_trigger(inbound))
         self._grant_dispatching[key] = self._grant_dispatching.get(key, 0) + 1
         self._grant_dispatching_grants[key] = (
             self._grant_dispatching_grants.get(key, False) or bool(self._turn_grant_values(inbound)[1])
         )
         try:
-            await self._handle_inbound_now(inbound)
+            await self._handle_inbound_now(inbound, unverified_token=unverified_token,
+                                           arrival_restriction=arrival_restriction)
         except BaseException:
             self._finish_request_wake(inbound, 'dispatch-failed')
             raise
@@ -4887,7 +4981,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 self._grant_dispatching.pop(key, None)
                 self._grant_dispatching_grants.pop(key, None)
 
-    async def _handle_inbound_now(self, inbound: InboundMessage) -> None:
+    async def _handle_inbound_now(self, inbound: InboundMessage, *, unverified_token: str = "", arrival_restriction=None) -> None:
         try:
             self._check_request_wake(inbound)
         except Exception:
@@ -4967,6 +5061,9 @@ class ClawChatAdapter(BasePlatformAdapter):
                 owner_verified=self._verified_owner_inbound(inbound),
                 owner_side=getattr(grants, "owner_only", False),
                 orchestrate_retry=inbound.orchestrate_retry,
+                trusted_notification=self._trusted_owner_notification(inbound),
+                trigger=self._inbound_grant_trigger(inbound), unverified_token=unverified_token,
+                arrival_restriction=arrival_restriction,
                 legacy_owner_tools=(inbound.is_owner_action
                                     and inbound.sender_id == self._owner_user_id()
                                     and inbound.chat_type == "direct"
@@ -5225,6 +5322,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             if unseen:
                 text = f"{unseen}\n\n{text}"
         inbound = InboundMessage.internal_synthetic(
+            plugin_notification=(chat_type == "direct" and chat_id == self._owner_direct_chat_id()
+                                 and sender_id == self._owner_user_id()),
             chat_id=chat_id,
             chat_type=chat_type,
             # A shared group session is keyed without the sender; a direct (or

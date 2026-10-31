@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import random
+import re
 import socket
 import time
 import uuid
@@ -13,7 +15,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from clawchat_gateway import __version__
@@ -97,6 +99,111 @@ class RefreshResult:
 
     access_token: str
     refresh_token: str
+
+
+# A URL starts at an anchored, length-capped scheme. Its authority runs to the
+# first whitespace or `/?#`, and userinfo is everything before the authority's
+# last `@` (urllib accepts quotes, `<`, `>`, backticks and extra `@` there), with
+# no length cap so long credentials fail closed. The host after that `@` ends at
+# quotes and angle brackets as well, and only `scheme://userinfo@host[:port]` is
+# rewritten; scanning continues right after it (or after the scheme when there
+# is no userinfo), so adjacent and embedded URLs are still checked. Redaction is
+# conservative: text glued to a credentialed URL up to a later `@` may be
+# dropped with it. Every search is bounded by one authority, so server-supplied
+# text is processed in linear time.
+_URL_SCHEME = re.compile(r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]{0,31}://")
+_AUTHORITY_END = re.compile(r"[\s/?#]")
+_HOST_END = re.compile(r"""[\s"'<>`]""")
+
+
+def _strip_userinfo_from_authority(scheme: str, authority: str) -> str:
+    try:
+        parsed = urlsplit(f"{scheme}{authority}")
+        hostname = parsed.hostname
+        port = parsed.port
+        if not hostname:
+            return "[redacted-url]"
+        netloc = f"[{hostname}]" if ":" in hostname else hostname
+        if port is not None:
+            netloc = f"{netloc}:{port}"
+        return f"{scheme}{netloc}"
+    except ValueError:
+        return "[redacted-url]"
+
+
+def strip_url_userinfo(text: str) -> str:
+    """Remove URL credentials from display text; redact unparseable URLs."""
+    parts: list[str] = []
+    copied = 0
+    for scheme in _URL_SCHEME.finditer(text):
+        if scheme.start() < copied:
+            continue
+        authority_start = scheme.end()
+        end = _AUTHORITY_END.search(text, authority_start)
+        authority_end = end.start() if end else len(text)
+        at = text.rfind("@", authority_start, authority_end)
+        if at < 0:
+            continue
+        end = _HOST_END.search(text, at + 1, authority_end)
+        host_end = end.start() if end else authority_end
+        parts.append(text[copied:scheme.start()])
+        parts.append(_strip_userinfo_from_authority(scheme.group(0), text[authority_start:host_end]))
+        copied = host_end
+    parts.append(text[copied:])
+    return "".join(parts)
+
+
+# When a configured URL carries credentials, their echoes take too many forms
+# (spaces, no scheme, escaping, percent-encoding, truncation) to remove
+# reliably, so the free text of the diagnostic is not shown at all; callers
+# keep the HTTP status, error kind and code around it.
+DIAGNOSTIC_WITHHELD = "(diagnostic text withheld: base URL contains credentials)"
+# Returned when redaction itself fails (fail closed, never the original text).
+DIAGNOSTIC_REDACTION_FAILED = "(diagnostic text withheld: redaction failed)"
+
+
+def url_has_userinfo(url: str | None) -> bool:
+    """True when a URL carries userinfo: the parser reports a username or
+    password, or its authority (up to the first `/?#\\`) contains `@`. An
+    unparseable URL containing `@` anywhere counts too (fail closed)."""
+    if not url:
+        return False
+    try:
+        parsed = urlsplit(url)
+        if parsed.username is not None or parsed.password is not None:
+            return True
+    except ValueError:
+        return "@" in url
+    rest = url.split("://", 1)[1] if "://" in url else url
+    return "@" in re.split(r"[/?#\\]", rest, maxsplit=1)[0]
+
+
+def redact_refresh_message(value: object, *secrets: str, base_url: str | None = None) -> str:
+    """Sanitize refresh diagnostics at their first display-text boundary.
+
+    With a credentialed `base_url` the whole text becomes `DIAGNOSTIC_WITHHELD`.
+    Any failure returns `DIAGNOSTIC_REDACTION_FAILED`; this never raises and
+    never falls back to the original text.
+    """
+    try:
+        if url_has_userinfo(base_url):
+            return DIAGNOSTIC_WITHHELD
+        text = strip_url_userinfo(str(value or ""))
+        for secret in sorted((s for s in secrets if s), key=len, reverse=True):
+            text = text.replace(secret, "***")
+        text = re.sub(r"eyJ[A-Za-z0-9_=-]*\.[A-Za-z0-9_=-]+\.[A-Za-z0-9_=-]+", "***", text)
+        text = re.sub(r"[A-Za-z0-9_\-\.=+/]{32,}", "***", text)
+        return " ".join(text.split())[:200]
+    except Exception:  # noqa: BLE001 - fail closed
+        return DIAGNOSTIC_REDACTION_FAILED
+
+
+def normalize_refresh_code(value: object) -> int | None:
+    if type(value) is int:
+        return value
+    if type(value) is float and math.isfinite(value) and value.is_integer():
+        return int(value)
+    return None
 
 
 @dataclass(frozen=True)
@@ -944,6 +1051,7 @@ class ClawChatApiClient:
                 path="/v1/auth/refresh",
                 code=REFRESH_CODE_BAD_REQUEST,
             )
+        secret_values = (refresh_token, refresh_token.strip(), self._token)
         body = json.dumps({"refresh_token": refresh_token.strip()}).encode("utf-8")
         # NO authorization header — the refresh token in the body is the credential.
         request = Request(
@@ -973,34 +1081,38 @@ class ClawChatApiClient:
             connect_failed = isinstance(reason, (ConnectionRefusedError, socket.gaierror))
             raise ClawChatApiError(
                 "transport",
-                str(reason or exc),
+                redact_refresh_message(reason or exc, *secret_values, base_url=self._base_url),
                 path="/v1/auth/refresh",
                 connect_failed=connect_failed,
-            ) from exc
+            ) from None
         except TimeoutError as exc:
             raise ClawChatApiError(
                 "transport",
-                str(exc) or "refresh request timed out",
+                redact_refresh_message(exc, *secret_values, base_url=self._base_url) or "refresh request timed out",
                 path="/v1/auth/refresh",
-            ) from exc
+            ) from None
         except Exception as exc:  # noqa: BLE001
-            raise ClawChatApiError("transport", str(exc), path="/v1/auth/refresh") from exc
+            raise ClawChatApiError(
+                "transport", redact_refresh_message(exc, *secret_values, base_url=self._base_url),
+                path="/v1/auth/refresh",
+            ) from None
 
         try:
             payload = json.loads(raw)
-        except Exception as exc:
+        except Exception:
             raise ClawChatApiError(
                 "transport",
                 "refresh non-JSON response",
                 status=status,
                 path="/v1/auth/refresh",
-            ) from exc
+            ) from None
         code = payload.get("code") if isinstance(payload, dict) else None
-        if type(code) is not int:
-            code = None
+        code = normalize_refresh_code(code)
         msg = ""
         if isinstance(payload, dict):
-            msg = str(payload.get("msg") or payload.get("message") or "")
+            msg = redact_refresh_message(
+                payload.get("msg") or payload.get("message"), *secret_values,
+                base_url=self._base_url)
         if status != 200 and code != REFRESH_CODE_INVALID_REFRESH:
             raise ClawChatApiError(
                 "transport",
@@ -1018,8 +1130,10 @@ class ClawChatApiClient:
                     path="/v1/auth/refresh",
                     code=code,
                 )
-            access_token = str(data.get("access_token") or "").strip()
-            new_refresh_token = str(data.get("refresh_token") or "").strip()
+            access = data.get("access_token")
+            rotated = data.get("refresh_token")
+            access_token = access.strip() if isinstance(access, str) else ""
+            new_refresh_token = rotated.strip() if isinstance(rotated, str) else ""
             if not access_token or not new_refresh_token:
                 raise ClawChatApiError(
                     "transport",
@@ -1324,9 +1438,10 @@ def is_permanent_refresh_error(exc: ClawChatApiError) -> bool:
     again. A ``10003`` after such a timeout is still permanent: it means the
     window has passed or the token was revoked (spec §B escalation).
     """
-    return type(exc.code) is int and (
-        exc.code == REFRESH_CODE_INVALID_REFRESH
-        or (exc.code == REFRESH_CODE_BAD_REQUEST and exc.status in (None, 200))
+    code = normalize_refresh_code(exc.code)
+    return code is not None and (
+        code == REFRESH_CODE_INVALID_REFRESH
+        or (code == REFRESH_CODE_BAD_REQUEST and exc.status in (None, 200))
     )
 
 
@@ -1340,7 +1455,7 @@ def _refresh_outcome_unknown(exc: ClawChatApiError) -> bool:
     """
     if exc.connect_failed:
         return False
-    return exc.code != REFRESH_CODE_INTERNAL
+    return normalize_refresh_code(exc.code) != REFRESH_CODE_INTERNAL
 
 
 def _refresh_backoff_delay(attempt: int) -> float:
@@ -1418,7 +1533,7 @@ async def auth_refresh_with_retry(
                 "clawchat token refresh transient failure (attempt %d), retrying in %.1fs: %s",
                 attempt,
                 delay,
-                exc,
+                redact_refresh_message(exc.message, refresh_token, getattr(client, "_token", "")),
             )
             if not await can_continue():
                 raise

@@ -34,7 +34,9 @@ ln -s /path/to/hermes-agent tmp/hermes
 git clone <hermes-agent-repo-url> tmp/hermes
 ```
 
-Match the checkout to the Hermes version that hosts this plugin. The plugin currently requires Hermes Agent v0.12.0+; cross-check by reading `RELEASE_v0.X.0.md` under `tmp/hermes/` for the version actually in use.
+Tests also accept `tmp/hermes-agent` and look in the main checkout when running from a linked worktree.
+
+Match the checkout to the Hermes version that hosts this plugin, within the [supported range](install.md#compatibility); cross-check by reading `RELEASE_v0.X.0.md` under `tmp/hermes/` for the version actually in use.
 
 Use focused searches so unrelated source files do not dominate the results. Examples:
 

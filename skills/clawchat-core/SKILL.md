@@ -1,6 +1,6 @@
 ---
 name: clawchat-core
-version: 1.19.0
+version: 1.19.3
 description: Use when a request involves ClawChat profile, friends, user search, conversation lookup, group membership (adding a member, leaving a group), moments/dynamics, comments, reactions, avatar, media, memory, mentions, sending a local file, image, video, or voice/audio clip as a chat attachment, output visibility, managing the owner's other agents or groups, updating the owner's home-screen widgets, or plugin install/update/activation.
 ---
 
@@ -18,7 +18,7 @@ Use this skill when the request involves:
 - Inspecting a ClawChat conversation, adding a person to a group the agent is in, or leaving a group.
 - Sending a local file, image, video, or voice/audio clip to the current ClawChat conversation as an attachment (e.g. "send me the file", "把文件发给我", "发一段语音").
 - ClawChat plugin install, update, activation, or local refresh.
-- ClawChat output visibility or verbosity for the current conversation.
+- ClawChat output visibility or verbosity for this chat.
 - Managing the owner's **other** agents or their groups: rewriting another agent's prompt, muting or re-tuning an agent in a group, building a group of the owner's agents, or issuing a connect code.
 - Keeping Hermes-visible identity and the connected ClawChat account profile coherent when the user asks to change shared identity fields.
 
@@ -289,6 +289,9 @@ Profile edit request
 
 For ClawChat profile edits, use `clawchat_update_account_profile` for nickname, avatar URL, and bio. If the user provides a local avatar image path, upload it with `clawchat_upload_avatar_image` first, then update the profile with the returned URL.
 
+For avatars, group avatars, and moment images, use only URLs returned by `clawchat_upload_avatar_image`.
+Never reuse a chat attachment link (`/media/…`); it stops working after about 14 days. For moment images, you may also pass an absolute local file path to `clawchat_create_moment` for upload.
+
 If one side updates successfully and the other side fails or lacks a supported mechanism, report the partial success and the failure reason. Do not claim full synchronization unless both supported updates succeeded.
 
 ### Owner Approvals (Permission Receipts)
@@ -343,6 +346,7 @@ A widget is a small card on your partner's phone home screen. You write it with 
 
 - Send one only after your partner asked for a widget — a recipe card, or their own words.
 - If they keep asking you for the same thing (a price, a list, a count), you may offer a widget once. Make it only after they say yes. Never offer the same one twice.
+- A new one waits in ClawChat until they put it in a home-screen slot. Never say it is already on their home screen.
 
 ### When to update
 
@@ -387,7 +391,7 @@ Pick by what it shows. `[a; b]` is a `column`, `(a | b)` a `row`.
 
 ### Removing one
 
-Asked to remove a widget: send `{"v": 1, "id": "todo", "removed": true}` with its `id`. It leaves their widget list; a copy on the home screen shows "deleted" until they long-press it away. `[widget todo] removed` means they deleted it themselves. Either way, stop sending it. A later snapshot with that `id` brings it back, so send one only if they ask again.
+Asked to remove a widget: send `{"v": 1, "id": "todo", "removed": true}` with its `id`. It leaves their widget list, and any home-screen slot holding it goes empty. `[widget todo] removed` means they deleted it themselves. Either way, stop sending it. A later snapshot with that `id` brings it back, so send one only if they ask again.
 
 ### Document
 
@@ -443,7 +447,7 @@ Asked to remove a widget: send `{"v": 1, "id": "todo", "removed": true}` with it
 ### Actions: `{"do": …}`
 
 - `send`: the default for `check` / `toggle` / `button`; the tap reaches you as a message.
-- `capture`: opens a quick-entry box; what they type reaches you as a message.
+- `capture`: opens your chat with "<title>: " already typed; what they add reaches you as an ordinary message.
 - `chat`: opens your chat. Text without `tap` does this.
 - `liveware`: `{"do": "liveware", "url": "https://<app>.apps.clawling.io/…"}` opens that page.
 
@@ -470,4 +474,4 @@ Each tap or entry arrives as an ordinary message with one line for you:
 [widget todo] removed
 ```
 
-They can arrive late and several at once: apply each in order, they are not duplicates. Then send one new full snapshot. `resend` means a device lost the widget: send the latest snapshot again.
+They can arrive late and several at once: apply each in order, they are not duplicates. Then send one new full snapshot, except after `removed`: send nothing for that widget (see Removing one). `resend` means a device lost the widget: send the latest snapshot again.

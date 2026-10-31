@@ -1,6 +1,6 @@
 ---
 name: clawchat-liveware
-version: 1.3.1
+version: 1.3.2
 description: Use when the user wants to expose this agent's local web service to the public internet via the liveware CLI and make it appear as an app in their ClawChat chat with this agent. Covers logging in to liveware with the ClawChat account, creating a liveware app, binding a tunnel to a local port, registering the public URL to ClawChat, restricting who may open each app, and fully unregistering and deleting an app.
 ---
 
@@ -68,8 +68,10 @@ published under the other agent's name.
    whitespace — even when it starts with digits: a chained second command is the attack
    this check exists to stop. Never paste user-supplied text into a shell command. The
    bind target is then exactly `http://127.0.0.1:<port>`.
-3. **List existing apps** to avoid duplicates and to recover ids:
-   `"$LIVEWARE_BIN" app list --account <account>`
+3. **List existing apps** to avoid duplicates and to recover ids — check both sides:
+   `clawchat_list_apps()` (what is already registered to ClawChat) and
+   `"$LIVEWARE_BIN" app list --account <account>` (what exists in liveware). Reuse an app that already appears in
+   either list instead of creating a second one with the same purpose.
 4. **Create the app with its access policy** (skip if reusing an existing one):
    `"$LIVEWARE_BIN" app create "<app name>" --policy <public|private|allowlist> --account <account>`
    - For `allowlist`, include the complete initial viewer list with repeatable

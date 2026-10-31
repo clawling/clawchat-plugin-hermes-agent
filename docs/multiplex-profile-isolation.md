@@ -45,7 +45,7 @@ Credential reads stay delegated to Hermes rather than re-deciding the fallback
 here. `_get_env` takes its scoped branch whenever a secret scope is installed
 *or* multiplexing is on, and lets `get_scoped_secret` separate the fallback cases:
 the default profile (multiplex on, unscoped) and a single-profile deployment
-(own-home scope, multiplex off) both still reach `os.environ`, because there it
+(own-home scope, multiplex off) both still reach the process environment, because there it
 is their own value and env-injected deployments keep nothing else. A foreign-home
 scope also fails closed on a miss under Hermes 0.21.6+, just like a scoped
 secondary profile under multiplexing; the host decides and the plugin follows.
@@ -55,7 +55,7 @@ deliveries and env-only containers.
 Auto-logout leaves a tombstone. `clear_persisted_credentials` writes
 `CLAWCHAT_TOKEN` / `CLAWCHAT_REFRESH_TOKEN` back EMPTY instead of deleting the
 lines, because the secret scope is a snapshot taken at gateway start: a deleted
-line leaves that snapshot (and any ambient `os.environ` value) holding the token
+line leaves that snapshot (and any ambient process-environment value) holding the token
 we just revoked, and the next adapter reads it straight back and retries auth
 forever. An empty value in those two keys resolves to `""` ahead of every
 fallback. Only those two: an empty value is ordinary elsewhere — activation
@@ -64,11 +64,11 @@ so a blanket rule would strip optional settings of their env fallback.
 
 The platform seed Hermes builds per profile (`_clawchat_env_enablement`) reads
 through the same scoped resolver. Reading `CLAWCHAT_HOME_CHANNEL` and the
-endpoint overrides from process-wide `os.environ` handed a named profile the
+endpoint overrides from the process-wide environment handed a named profile the
 default profile's home conversation, so home delivery went to the wrong chat.
 
 Every module that needs the home goes through `clawchat_gateway.hermes_home`;
-inlining `os.environ["HERMES_HOME"]` is what breaks isolation. `skill_update`
+reading `HERMES_HOME` straight from the process environment is what breaks isolation. `skill_update`
 (managed skills, manifest, `pending.json`) and the adapter's `liveware-sample`
 root were the last two holdouts — both are per-profile mutable state, and a
 process-wide read let profiles consume each other's pending approvals or drive

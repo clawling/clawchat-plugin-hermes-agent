@@ -205,6 +205,7 @@ tmp
 #     flush.
 #   * hello_fail_classification — Pins exact terminal authentication matching
 #     and transient unknown reasons.
+#   * hermes_workspace_member — Pins unique per-profile virtual names and source-only imports.
 #   * inbound_claim_fail_closed — Pins fail-closed inbound dispatch when ledger
 #     claims are unavailable.
 #   * liveware_agent_status — Pins positive-only Liveware status detection from stdout.
@@ -243,6 +244,8 @@ tmp
 #     developer's real Hermes install (.env credentials, SQLite).
 tests/*
 !tests/conftest.py
+!tests/hermes_source.py
+!tests/test_host_version.py
 !tests/test_instance_lock.py
 !tests/test_install_conflict.py
 !tests/test_takeover_close_backoff.py
@@ -262,6 +265,7 @@ tests/*
 !tests/test_pre_dispatch_self_echo.py
 !tests/test_command_gating.py
 !tests/test_register_platform_cron.py
+!tests/test_media_any_extension.py
 !tests/test_install_scan.py
 !tests/test_inbound_dispatch_lanes.py
 # Socket, queue, ACK futures and timers stay on the connection's owner loop.
@@ -317,6 +321,8 @@ tests/*
 !tests/test_home_isolation.py
 !tests/test_tool_grants.py
 !tests/test_tool_grants_storage.py
+# Owner batch provenance, queued follow-ups and grant subject boundaries.
+!tests/test_owner_turn_downgrade.py
 !tests/test_turn_grants.py
 !tests/test_tool_grants_hook.py
 !tests/test_tool_grants_admission.py
@@ -358,8 +364,21 @@ tests/*
 !tests/test_widget_send_owner_only.py
 !tests/test_inbound_widget_action.py
 !tests/test_version_consistency.py
+!tests/test_hermes_workspace_member.py
 !tests/test_source_doc_links.py
 deploy/
 scripts/
 docs/superpowers/
 CLAUDE.md
+# Only pinned CLI downloads and verified cached binaries may be executed.
+!tests/test_liveware_cli_pinning.py
+# Older managed Liveware skills reseed with the bundled procedure and manifest.
+!tests/test_liveware_skill_reseed.py
+# POSIX credential modes warn once on failure without disabling persistence.
+!tests/test_credential_file_modes.py
+# Refresh diagnostics redact credentials at exception and log boundaries.
+!tests/test_refresh_redaction.py
+# Refresh envelopes, JWT claims, refusal delays and jitter preserve strict typing.
+!tests/test_token_refresh_s_fixes.py
+# Owner intro retries promptly within the existing attempt budget.
+!tests/test_liveware_intro_retry.py
