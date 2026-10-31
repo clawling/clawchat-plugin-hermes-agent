@@ -165,23 +165,7 @@ from clawchat_gateway.terminal_send import (
 )
 
 
-def _resolve_host_agent_version() -> str:
-    """Best-effort host hermes-agent version; "" on failure (never raises)."""
-    try:
-        from importlib.metadata import PackageNotFoundError, version
-
-        try:
-            return version("hermes-agent")
-        except PackageNotFoundError:
-            pass
-    except Exception:  # noqa: BLE001 — best-effort, must never break import
-        pass
-    try:
-        from hermes_cli import __version__ as host_version
-
-        return host_version
-    except Exception:  # noqa: BLE001
-        return ""
+from clawchat_gateway.host_version import resolve_host_agent_version as _resolve_host_agent_version
 
 
 _HOST_AGENT_VERSION = _resolve_host_agent_version()

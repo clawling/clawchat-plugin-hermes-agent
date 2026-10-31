@@ -9,6 +9,7 @@ import sys
 import pytest
 
 from clawchat_gateway import adapter as adapter_mod
+from hermes_source import require_hermes_source
 from test_channel_prompt_split import (
     NOW,
     dispatch,
@@ -23,18 +24,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 @pytest.fixture
 def hermes_source():
-    candidates = []
-    if os.environ.get("HERMES_SOURCE_DIR"):
-        candidates.append(Path(os.environ["HERMES_SOURCE_DIR"]))
-    candidates += [REPO_ROOT / "tmp" / "hermes-agent", REPO_ROOT / "tmp" / "hermes"]
-    for candidate in candidates:
-        if (candidate / "gateway" / "platforms" / "event.py").is_file():
-            return candidate.resolve()
-    pytest.skip("no Hermes source checkout (set HERMES_SOURCE_DIR or use tmp/hermes-agent / tmp/hermes)")
+    return require_hermes_source("gateway/platforms/event.py")
 
 
 def run_host(source, tmp_path, script):
     # Do not let the pytest process's gateway double mask real host imports.
+    pythonpath = os.pathsep.join((str(source), str(REPO_ROOT)))
+    if inherited := os.environ.get("PYTHONPATH"):
+        pythonpath += os.pathsep + inherited
     wrapped = "try:\n" + "\n".join("    " + line for line in script.splitlines()) + "\n"
     wrapped += (
         "except ModuleNotFoundError as exc:\n"
@@ -43,7 +40,7 @@ def run_host(source, tmp_path, script):
     )
     result = subprocess.run(
         [sys.executable, "-c", wrapped], cwd=tmp_path,
-        env={**os.environ, "PYTHONPATH": os.pathsep.join((str(source), str(REPO_ROOT)))},
+        env={**os.environ, "PYTHONPATH": pythonpath},
         capture_output=True, text=True, check=False, timeout=30,
     )
     assert result.returncode == 0, result.stderr
@@ -106,7 +103,7 @@ print(json.dumps({'prefixed': results}))
     ["current"] + (["old"] if os.environ.get("HERMES_SOURCE_DIR_OLD") else []),
 )
 async def test_real_host_two_turns_keep_system_and_history_bytes(
-    split_env, monkeypatch, hermes_source, tmp_path, host_version,
+    clawchat_test_platform, split_env, monkeypatch, hermes_source, tmp_path, host_version,
 ):
     source = hermes_source if host_version == "current" else Path(os.environ["HERMES_SOURCE_DIR_OLD"]).resolve()
     assert (source / "gateway" / "platforms" / "event.py").is_file()

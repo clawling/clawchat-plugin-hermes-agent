@@ -1,22 +1,21 @@
 """Make ``clawchat_gateway.adapter`` importable without a Hermes Agent checkout.
 
 ``adapter.py`` imports four names from the **host** package (``gateway.config``,
-``gateway.platforms.base``). That package ships with Hermes Agent, is not a
-dependency of this repository, and — per ``docs/hermes-source-lookup.md`` — is
-expected to live in an ignored ``tmp/hermes/`` checkout that most machines do
-not have. The practical consequence, until now, was that **no test in this repo
-could import the adapter at all**, which is why the largest module here had the
-least coverage.
+``gateway.platforms.base``). That package ships with Hermes Agent and is not a
+dependency of this repository. ``hermes_source.py`` finds a checkout through
+``HERMES_SOURCE_DIR``, then ``tmp/hermes`` or ``tmp/hermes-agent`` here or in the
+main checkout when running from a linked worktree.
 
 The policy below is *prefer the real host*:
 
 1. If ``gateway`` already imports (a real Hermes checkout is on ``sys.path``, or
-   ``tmp/hermes`` exists and is added below), the tests run against it and this
-   file installs nothing.
+   a source with ``gateway/platforms/base.py`` is found and added below), the
+   tests run against it and this file installs nothing.
 2. Only when it does not, a **minimal double** is installed under the real
    module names.
 
-Read ``clawchat_host_is_double`` in a test to tell which one you got.
+Read ``clawchat_host_is_double`` in a test to tell which one you got. The pytest
+header reports the source found (or searched paths) and real-host/double mode.
 
 **What the double is honestly good for.** It reproduces exactly the four
 imported names and nothing else. That is enough for logic that lives entirely in
@@ -46,7 +45,12 @@ from typing import Any
 
 import pytest
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
+from hermes_source import candidates, find_hermes_source
+
 _ORIGINAL_OS_HOME = Path.home().resolve()
 
 # A real host reads its home while being imported below (``gateway.platforms.base``
@@ -64,10 +68,9 @@ os.environ.update(
 for _name in [n for n in os.environ if n.startswith("CLAWCHAT_")]:
     del os.environ[_name]
 
-# Option A from docs/hermes-source-lookup.md: an ignored local checkout.
-_LOCAL_HERMES = _REPO_ROOT / "tmp" / "hermes"
-if _LOCAL_HERMES.is_dir() and str(_LOCAL_HERMES) not in sys.path:
-    sys.path.insert(0, str(_LOCAL_HERMES))
+_HERMES_SOURCE = find_hermes_source("gateway/platforms/base.py")
+if _HERMES_SOURCE is not None and str(_HERMES_SOURCE) not in sys.path:
+    sys.path.insert(0, str(_HERMES_SOURCE))
 
 
 def _real_host_available() -> bool:
@@ -80,6 +83,15 @@ def _real_host_available() -> bool:
 
 
 _USING_DOUBLE = not _real_host_available()
+
+
+def pytest_report_header():
+    source = (
+        str(_HERMES_SOURCE) if _HERMES_SOURCE is not None
+        else "none; searched: " + ", ".join(str(path) for path in candidates())
+    )
+    mode = "double" if _USING_DOUBLE else "real host"
+    return f"Hermes source: {source}; session uses {mode}"
 
 
 @contextmanager

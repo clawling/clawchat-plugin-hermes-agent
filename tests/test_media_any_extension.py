@@ -12,6 +12,8 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from hermes_source import require_hermes_source
+
 from gateway.platforms import base
 from clawchat_gateway.adapter import ClawChatAdapter
 
@@ -350,14 +352,7 @@ def test_registration_leaves_shared_media_state_unchanged(old_host, monkeypatch,
 
 @pytest.fixture
 def hermes_source():
-    candidates = []
-    if os.environ.get("HERMES_SOURCE_DIR"):
-        candidates.append(Path(os.environ["HERMES_SOURCE_DIR"]))
-    candidates += [REPO_ROOT / "tmp" / "hermes-agent", REPO_ROOT / "tmp" / "hermes"]
-    for candidate in candidates:
-        if (candidate / "hermes_cli" / "plugin_validate_core_override.py").is_file():
-            return candidate.resolve()
-    pytest.skip("no Hermes core override validator source (set HERMES_SOURCE_DIR)")
+    return require_hermes_source("hermes_cli/plugin_validate_core_override.py")
 
 
 def test_real_host_reports_no_shared_media_override(hermes_source, tmp_path):
