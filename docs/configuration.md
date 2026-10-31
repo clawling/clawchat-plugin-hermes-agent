@@ -42,15 +42,16 @@ Automatic refresh, permanent-failure markers, empty credential tombstones and ac
 | `CLAWCHAT_WIKI_VERSION` | — | empty | Optional install-page stamp for connect/connect-check onboarding telemetry; profile-first, trimmed to 40 characters (`onboarding.wiki_version`), never gates activation. |
 | `CLAWCHAT_RELIABLE_DELIVERY_V2` | `reliable_delivery_v2` | `false` | Profile opt-in to durable inbound receipts and negotiated dseq acknowledgements (§11.7). |
 
-`platforms.clawchat.extra.reliable_delivery_v2` accepts only YAML booleans.
-The environment override uses the profile-first lookup above; case-insensitive
-`true/false`, `1/0`, `yes/no`, `on/off` override the config in either direction.
-Invalid values warn and disable the feature. Roll back by setting it to `false`
-(also remove or disable any env override), then restart. Disabled profiles keep
-legacy delivery: no receipt-table access and no sync acks. With granted v2,
-receipt-write failure closes the socket for normal reconnect/backoff and replay,
-without acking or dispatching the failed frame. Unknown-event and history.transit
-receipts become done with no error after dispatch returns. See
+`platforms.clawchat.extra.reliable_delivery_v2` requires YAML booleans.
+Env overrides accept case-insensitive `true/false`, `1/0`, `yes/no`,
+`on/off`. Invalid values warn and disable it. Roll back: set `false`, disable any
+env override, restart. Disabled profiles use legacy: no receipt access or sync acks.
+Granted-v2 receipt-write failure closes for normal reconnect/backoff, without ack/dispatch.
+Each opt-in connection recovers all pending, skipping active work, even without a v2 grant.
+Recovered lane work precedes new business frames; controls bypass the ordering gate.
+Recovery failure or a 10 s timeout opens this gate. Unavailable message claims stay
+pending and retry after 30 s without starting a turn. Lane completion owns done/failed,
+including recall; inline unknown/transit frames become done on return. See
 [delivery behavior](client-integration.md#hermes-optional-reliable_delivery_v2).
 
 ### Device id durability (deployment requirement)

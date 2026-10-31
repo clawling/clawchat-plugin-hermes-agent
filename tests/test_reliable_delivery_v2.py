@@ -111,9 +111,16 @@ def has_receipts_table(store):
         return bool(db.execute("SELECT 1 FROM sqlite_master WHERE name = 'inbound_receipts'").fetchone())
 
 
+def seed_pending(store, frame, *, epoch="old-epoch"):
+    receipt = ClawChatConnection._receipt_identity(frame, epoch, frame.get("dseq", 1))
+    assert store.upsert_inbound_receipt(
+        account_id="default", event=frame["event"], raw=frame, **receipt,
+    )
+
+
 @asynccontextmanager
 async def peer(monkeypatch, store, *, enabled=True, hello=None, hello_form="event", on_message=None,
-               on_signal=None):
+               on_signal=None, wait_for_recovery=True, cleanup_workers=True):
     ws = FakeWS(GRANT if hello is None else hello, hello_form)
     monkeypatch.setattr(connection, "_ws_connect", AsyncMock(return_value=ws))
     cfg = ClawChatConfig(websocket_url="wss://example.invalid/ws", token="t",
@@ -125,16 +132,19 @@ async def peer(monkeypatch, store, *, enabled=True, hello=None, hello_form="even
     monkeypatch.setattr(conn, "_watch_activation_credentials", watch)
     conn._supervisor_task = asyncio.create_task(conn._run_one_connection())
     try:
-        await until(lambda: conn._credential_watch_task is not None or conn._supervisor_task.done())
+        await until(lambda: conn._supervisor_task.done() or (
+            conn._credential_watch_task is not None if wait_for_recovery else
+            conn._hello_wait is not None and conn._hello_wait.done()))
         assert not conn._supervisor_task.done(), conn._supervisor_task.exception()
         assert conn._state == ConnectionState.READY
         yield SimpleNamespace(conn=conn, ws=ws)
     finally:
         await asyncio.wait_for(conn.stop(), 3)
         # Finish storage workers before pytest tears down this function's loop.
-        shutdown = asyncio.create_task(asyncio.get_running_loop().shutdown_default_executor())
-        await until(shutdown.done)
-        await shutdown
+        if cleanup_workers:
+            shutdown = asyncio.create_task(asyncio.get_running_loop().shutdown_default_executor())
+            await until(shutdown.done)
+            await shutdown
 
 
 @pytest.mark.parametrize("conflict", [False, True])
@@ -158,6 +168,7 @@ async def test_disabled_dseq_ignored_no_table_or_ack(monkeypatch, store):
         await asyncio.sleep(0.23)
         assert h.conn._delivery_tracker is None
         assert not h.ws.acks and not has_receipts_table(store)
+        assert h.conn._receipt_recovery_ready is None and h.conn._receipt_retry_task is None
         assert not h.conn.dseq_density_violations
         assert "reliable_delivery_v2" not in h.ws.sent[0]["payload"]["capabilities"]
 
@@ -381,7 +392,8 @@ async def test_replayed_message_upserts_copy_but_adapter_claims_once(monkeypatch
         assert "coalesced" in row["raw_json"]
 
 
-async def test_startup_recovers_only_old_pending_once_without_ack(monkeypatch, store):
+@pytest.mark.parametrize("hello", [GRANT, {}])
+async def test_ready_recovers_all_pending_kinds_and_ages_without_ack(monkeypatch, store, hello):
     now = int(time.time() * 1000)
     def insert(frame, kind, key):
         assert store.upsert_inbound_receipt(account_id="default", kind=kind, key=key,
@@ -392,22 +404,256 @@ async def test_startup_recovers_only_old_pending_once_without_ack(monkeypatch, s
     insert(message(message_id="test-new"), "message", "test-new")
     insert(message(message_id="test-done"), "message", "test-done")
     insert(message(message_id="test-failed"), "message", "test-failed")
+    insert(message(event="message.recall"), "other", "old-epoch:recall")
+    insert({"event": "future.event", "dseq": 3}, "other", "old-epoch:unknown")
+    insert({"event": "history.transit", "dseq": 4}, "other", "old-epoch:transit")
     with sqlite3.connect(store.db_path) as db:
         db.execute("UPDATE inbound_receipts SET received_at = ? WHERE key != 'test-new'",
-                   (connection._PROCESS_STARTED_AT_MS - 10000,))
+                   (now - 10000,))
         db.execute("UPDATE inbound_receipts SET received_at = ? WHERE key = 'test-new'", (now + 10000,))
         db.execute("UPDATE inbound_receipts SET status = 'done', updated_at = ? WHERE key = 'test-done'",
                    (now - 9 * 86400000,))
         db.execute("UPDATE inbound_receipts SET status = 'failed', updated_at = ? WHERE key = 'test-failed'",
                    (now - 9 * 86400000,))
     handler, signal_handler = AsyncMock(), AsyncMock()
-    async with peer(monkeypatch, store, on_message=handler, on_signal=signal_handler) as h:
+    async with peer(monkeypatch, store, on_message=handler, on_signal=signal_handler, hello=hello) as h:
         await until(lambda: not h.conn._inbound_lanes)
-        assert handler.await_count == signal_handler.await_count == 1
-        assert not h.ws.acks and h.conn._delivery_tracker.acked == 0
-        assert len(rows(store)) == 3
+        assert handler.await_count == 3 and signal_handler.await_count == 1
+        assert not h.ws.acks
+        if h.conn._delivery_tracker is not None:
+            assert h.conn._delivery_tracker.acked == 0
+        assert len(rows(store)) == 6
+        assert all(row["status"] == "done" for row in rows(store))
         await h.conn._recover_inbound_receipts(h.ws, h.conn._delivery_generation)
-        assert handler.await_count == signal_handler.await_count == 1
+        assert handler.await_count == 3 and signal_handler.await_count == 1
+
+
+@pytest.mark.parametrize("poison", [False, True])
+async def test_other_recall_receipt_finishes_only_after_lane_processing(monkeypatch, store, poison):
+    release = asyncio.Event()
+    async def handler(frame):
+        if frame["event"] == "message.send":
+            await release.wait()
+        elif poison:
+            raise ValueError("test recall failure")
+    async with peer(monkeypatch, store, on_message=handler) as h:
+        h.ws.feed(message(1))
+        h.ws.feed(message(2, event="message.recall"))
+        await until(lambda: h.conn._delivery_tracker.acked == 2)
+        recall = next(r for r in rows(store) if r["event"] == "message.recall")
+        assert recall["kind"] == "other" and recall["status"] == "pending"
+        assert ("other", recall["key"]) in h.conn._receipts_in_flight
+        release.set()
+        await until(lambda: not h.conn._inbound_lanes)
+        recall = next(r for r in rows(store) if r["event"] == "message.recall")
+        assert recall["status"] == ("failed" if poison else "done")
+        assert bool(recall["error"]) is poison
+        assert not h.conn._receipts_in_flight
+
+
+async def test_new_instance_recovers_pending_left_by_stopped_instance(monkeypatch, store):
+    entered = asyncio.Event()
+    async def blocked(frame):
+        entered.set()
+        await asyncio.Event().wait()
+    async with peer(monkeypatch, store, on_message=blocked, cleanup_workers=False) as old:
+        old.ws.feed(message())
+        await until(entered.is_set)
+        await old.conn.stop()
+        assert rows(store)[0]["status"] == "pending"
+        assert not old.conn._receipts_in_flight
+    handler = AsyncMock()
+    async with peer(monkeypatch, store, on_message=handler) as new:
+        await until(lambda: not new.conn._inbound_lanes)
+        assert handler.await_count == 1 and rows(store)[0]["status"] == "done"
+        assert new.conn._delivery_tracker.acked == 0 and not new.ws.acks
+
+
+async def test_reconnect_recovers_pending_but_skips_work_still_in_flight(monkeypatch, store):
+    release = asyncio.Event()
+    handler = AsyncMock(side_effect=lambda frame: None)
+    async def blocked(frame):
+        await handler(frame)
+        await release.wait()
+    async with peer(monkeypatch, store, on_message=blocked) as h:
+        h.ws.feed(message())
+        await until(lambda: handler.await_count == 1)
+        old_gate = h.conn._receipt_recovery_ready
+        await h.ws.close()
+        await until(lambda: h.conn._supervisor_task.done())
+        seed_pending(store, message(2, "test-between-connections"))
+        ws = FakeWS({})  # Recovery also runs when the new connection has no v2 grant.
+        monkeypatch.setattr(connection, "_ws_connect", AsyncMock(return_value=ws))
+        h.conn._supervisor_task = asyncio.create_task(h.conn._run_one_connection())
+        await until(lambda: h.conn._credential_watch_task is not None)
+        assert h.conn._receipt_recovery_ready is not old_gate
+        assert h.conn._receipt_recovery_ready.is_set()
+        assert handler.await_count == 1
+        assert len(h.conn._inbound_lanes["cnv_test"].frames) == 1
+        assert ("message", "test-message") in h.conn._receipts_in_flight
+        release.set()
+        await until(lambda: not h.conn._inbound_lanes)
+        assert [c.args[0]["payload"]["message_id"] for c in handler.call_args_list] == [
+            "test-message", "test-between-connections",
+        ]
+        assert all(row["status"] == "done" for row in rows(store))
+        assert not h.conn._receipts_in_flight
+
+
+async def test_retryable_claim_stays_pending_and_retries_without_another_delivery(monkeypatch, store):
+    from clawchat_gateway.adapter import ClawChatAdapter
+    monkeypatch.setattr(delivery, "RECEIPT_RETRY_SECONDS", 0.05)
+    adapter = ClawChatAdapter({})
+    adapter._store = store
+    dispatched = AsyncMock()
+    monkeypatch.setattr(adapter, "_handle_inbound", dispatched)
+    monkeypatch.setattr(adapter, "_handle_owner_forwarded_approval", AsyncMock(return_value=False))
+    monkeypatch.setattr(adapter, "_schedule_profile_sync", lambda coro: coro.close())
+    monkeypatch.setattr(adapter, "_resolve_inbound_sender_context", lambda inbound: inbound)
+    available = False
+    original = store.claim_message_once
+    def claim(**kwargs):
+        return original(**kwargs) if available else None
+    monkeypatch.setattr(store, "claim_message_once", claim)
+    async with peer(monkeypatch, store, on_message=adapter._on_message) as h:
+        h.ws.feed(message())
+        await until(lambda: bool(h.ws.acks) and not h.conn._inbound_lanes)
+        assert dispatched.await_count == 0
+        assert rows(store)[0]["status"] == "pending"
+        assert not h.conn._receipts_in_flight
+        assert h.ws.acks[0]["payload"]["dseq"] == 1
+        timer = h.conn._receipt_retry_task
+        assert timer is not None
+        h.conn._schedule_receipt_retry()
+        assert h.conn._receipt_retry_task is timer
+        available = True
+        await until(lambda: dispatched.await_count == 1 and not h.conn._inbound_lanes)
+        await until(lambda: h.conn._receipt_retry_task is None)
+        assert rows(store)[0]["status"] == "done"
+        await asyncio.sleep(0.12)
+        assert dispatched.await_count == 1 and not h.conn._receipts_in_flight
+
+
+async def test_stop_cancels_retry_timer_and_disabled_lane_ignores_sentinel(monkeypatch, store):
+    monkeypatch.setattr(delivery, "RECEIPT_RETRY_SECONDS", 10)
+    retryable = AsyncMock(return_value=delivery.INBOUND_RETRYABLE)
+    async with peer(monkeypatch, store, on_message=retryable, cleanup_workers=False) as h:
+        h.ws.feed(message())
+        await until(lambda: h.conn._receipt_retry_task is not None)
+        timer = h.conn._receipt_retry_task
+        await h.conn.stop()
+        await until(timer.done)
+        assert timer.cancelled() and h.conn._receipt_retry_task is None
+        assert rows(store)[0]["status"] == "pending"
+    async with peer(monkeypatch, store, enabled=False, on_message=retryable) as disabled:
+        disabled.ws.feed(message(99))
+        await until(lambda: retryable.await_count == 2)
+        assert disabled.conn._receipt_retry_task is None
+        assert disabled.conn._receipt_recovery_ready is None
+
+
+@pytest.mark.parametrize("hello", [GRANT, {}])
+async def test_recovery_queues_old_message_before_new_business_frame(monkeypatch, store, hello):
+    seed_pending(store, message(message_id="test-old", text="old"))
+    entered, release = threading.Event(), threading.Event()
+    original = store.recover_inbound_receipts
+    def recover(**kwargs):
+        entered.set()
+        assert release.wait(3)
+        return original(**kwargs)
+    monkeypatch.setattr(store, "recover_inbound_receipts", recover)
+    handler = AsyncMock()
+    try:
+        async with peer(monkeypatch, store, hello=hello, on_message=handler, wait_for_recovery=False) as h:
+            await until(entered.is_set)
+            h.ws.feed(message(1, "test-new", text="new"))
+            if h.conn._delivery_tracker is not None:
+                await until(lambda: h.conn._delivery_tracker.acked == 1)
+                await until(lambda: bool(h.ws.acks))
+            else:
+                await asyncio.sleep(0.03)
+            assert handler.await_count == 0 and not h.conn._receipt_recovery_ready.is_set()
+            release.set()
+            await until(lambda: handler.await_count == 2 and not h.conn._inbound_lanes)
+            assert [c.args[0]["payload"]["message_id"] for c in handler.call_args_list] == [
+                "test-old", "test-new",
+            ]
+            assert h.conn._receipt_recovery_ready.is_set()
+    finally:
+        release.set()
+
+
+async def test_recovered_inline_signal_can_wait_for_control_ack_without_deadlock(monkeypatch, store):
+    seed_pending(store, {"event": "notify.signal", "dseq": 1,
+                         "payload": {"event_id": "test-signal", "type": "test.changed"}})
+    seed_pending(store, message(message_id="test-old"))
+    entered, ack_seen = asyncio.Event(), asyncio.Event()
+    async def signal(frame):
+        entered.set()
+        await ack_seen.wait()
+    async with peer(monkeypatch, store, on_signal=signal, wait_for_recovery=False) as h:
+        await until(entered.is_set)
+        assert h.conn._receipt_recovery_ready.is_set()
+        monkeypatch.setattr(h.conn, "_handle_ack", lambda frame: ack_seen.set())
+        h.ws.feed({"event": "message.ack", "payload": {}})
+        await until(lambda: h.conn._credential_watch_task is not None and not h.conn._inbound_lanes)
+        assert all(row["status"] == "done" for row in rows(store))
+
+
+async def test_transport_controls_bypass_blocked_recovery_gate(monkeypatch, store):
+    entered, release = threading.Event(), threading.Event()
+    original = store.recover_inbound_receipts
+    def recover(**kwargs):
+        entered.set()
+        assert release.wait(3)
+        return original(**kwargs)
+    monkeypatch.setattr(store, "recover_inbound_receipts", recover)
+    try:
+        async with peer(monkeypatch, store, wait_for_recovery=False) as h:
+            await until(entered.is_set)
+            dispatch = AsyncMock(wraps=h.conn._dispatch_inbound)
+            monkeypatch.setattr(h.conn, "_dispatch_inbound", dispatch)
+            monkeypatch.setattr(h.conn, "_handle_ack", lambda frame: None)
+            monkeypatch.setattr(h.conn, "_handle_message_error", lambda frame: None)
+            for event in ("message.ack", "message.error", "pong", "history.truncated"):
+                h.ws.feed({"event": event, "payload": {}})
+            h.ws.feed({"event": "sync.mark", "dseq": 1})
+            h.ws.feed({"event": "replay.done", "dseq": 2, "payload": {"ack_epoch": "test-epoch"}})
+            await until(lambda: dispatch.await_count == 6 and bool(h.ws.acks))
+            assert not h.conn._receipt_recovery_ready.is_set()
+            assert h.ws.acks[0]["payload"]["dseq"] == 2
+            release.set()
+            await until(lambda: h.conn._credential_watch_task is not None)
+    finally:
+        release.set()
+
+
+@pytest.mark.parametrize("failure", ["return", "raise", "timeout"])
+async def test_recovery_failure_releases_order_gate_without_finishing_pending(monkeypatch, store, failure, caplog):
+    seed_pending(store, message(message_id="test-old"))
+    release = threading.Event()
+    def recover(**kwargs):
+        if failure == "raise":
+            raise OSError("test recovery failure")
+        if failure == "timeout":
+            assert release.wait(3)
+        return None
+    monkeypatch.setattr(store, "recover_inbound_receipts", recover)
+    monkeypatch.setattr(delivery, "RECEIPT_RECOVERY_TIMEOUT_SECONDS", 0.03)
+    handler = AsyncMock()
+    try:
+        async with peer(monkeypatch, store, on_message=handler) as h:
+            assert h.conn._receipt_recovery_ready.is_set()
+            h.ws.feed(message(1, "test-new"))
+            await until(lambda: handler.await_count == 1 and not h.conn._inbound_lanes)
+            release.set()
+            await asyncio.sleep(0.04)
+            assert next(r for r in rows(store) if r["key"] == "test-old")["status"] == "pending"
+            assert handler.await_count == 1
+            if failure == "timeout":
+                assert "recovery timed out" in caplog.text
+    finally:
+        release.set()
 
 
 @pytest.mark.parametrize("env,configured,expected", [("TRUE", False, True), ("false", True, False),

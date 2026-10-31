@@ -1412,8 +1412,7 @@ restart**. An in-memory cache is insufficient (§11).
 
 #### Hermes: optional reliable_delivery_v2
 
-`platforms.clawchat.extra.reliable_delivery_v2` defaults to `false`; see
-[configuration](configuration.md#connection) for its environment override and rollback.
+`platforms.clawchat.extra.reliable_delivery_v2` defaults to `false`; [configuration](configuration.md#connection) covers overrides and rollback.
 Only opt-in Hermes connections advertise `reliable_delivery_v2:true`;
 OpenClaw does not declare this capability. Every hello independently requires
 `ack_mode:"dseq"` and a non-empty string `ack_epoch`; otherwise delivery is legacy.
@@ -1436,13 +1435,18 @@ immediate flush or dispatch. Send `message.sync_ack` with `{dseq,epoch}` after
 graceful shutdown, and unconditionally resend a nonzero watermark every 30 s.
 Trackers belong to one socket generation and are disposed on teardown.
 
-Ack means durable receipt, not a completed agent turn. Existing message claims
-prevent repeat turns; lane/signal completion marks receipts done, exceptions
-mark failed with a redacted error of at most 500 characters. At first READY,
-recover pre-process-start pending messages/signals in received order through
-ordinary dispatch without recording dseq. Claims can suppress an interrupted
-turn already claimed before a crash. Delete done/failed receipts older than
-eight days at startup. Unknown events and history.transit become done with no error after dispatch returns.
+Ack means durable receipt, not a completed turn. Lane completion marks done/failed
+for every kind (including recall); inline dispatch marks done/failed on return/error.
+Errors are redacted, at most 500 characters. Unavailable claims stay pending;
+no turn starts, and one timer retries recovery after 30 s.
+At every READY, even without a v2 grant, recover all pending kinds in received_at,
+rowid order, skipping keys this instance is processing; there is no startup cutoff.
+Enqueue recovered lane work before admitting new business frames; then release
+the ordering gate before awaiting inline handlers. Control frames bypass the gate;
+dseq persistence/acks precede it. Recovery failure or a 10 s timeout releases only this gate.
+Recovery never records dseq. A new instance can take over stop-cancelled work;
+message claims dedupe surviving old handlers but can suppress an already-claimed interrupted turn.
+In the recovery transaction, delete done/failed receipts older than eight days.
 Disabled profiles neither create nor access this table and send no sync acks.
 
 ---

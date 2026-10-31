@@ -1590,9 +1590,9 @@ class ClawChatStore:
             return False
 
     def recover_inbound_receipts(
-        self, *, account_id: str, before: int,
+        self, *, account_id: str,
     ) -> list[dict[str, Any]] | None:
-        """Prune terminal receipts after eight days and load pre-start pending work."""
+        """Prune terminal receipts after eight days and load all pending work."""
         def read(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             conn.execute("""
                 DELETE FROM inbound_receipts WHERE account_id = ?
@@ -1600,9 +1600,9 @@ class ClawChatStore:
             """, (account_id, _now_ms() - 8 * 24 * 60 * 60 * 1000))
             cursor = conn.execute("""
                 SELECT kind, key, dseq, epoch, event, raw_json FROM inbound_receipts
-                WHERE account_id = ? AND status = 'pending' AND received_at < ?
+                WHERE account_id = ? AND status = 'pending'
                 ORDER BY received_at, rowid
-            """, (account_id, before))
+            """, (account_id,))
             return [dict(zip((col[0] for col in cursor.description), row)) for row in cursor]
         try:
             return self._inbound_receipt_transaction(read)
