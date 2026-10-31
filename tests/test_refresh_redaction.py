@@ -133,6 +133,7 @@ def test_url_userinfo_stripping_is_linear_on_long_text(text):
     started = time.perf_counter()
     api.redact_refresh_message(text)
     api.strip_url_userinfo(text)
+    api.strip_configured_userinfo(text, 'https://u:aa@example.com')  # redact-allow:email
     assert time.perf_counter() - started < 2.0
 
 
@@ -167,6 +168,9 @@ def test_configured_url_userinfo_is_removed_exactly(text, expected):
      'https://other-user:other-placeholder-pass@example.org/',  # redact-allow:email
      'failed https://example.com/v1 and https://example.org/'),
     ('metadata-placeholder-pass@x', 'metadata-placeholder-pass@x'),  # redact-allow:email
+    ("failed https://other-user:other-secret'placeholder-pass@example.org/v1",  # redact-allow:email
+     'failed https://example.org/v1'),
+    ("refused: 'placeholder-pass@example.com'", "refused: 'example.com'"),  # redact-allow:email
 ])
 def test_configured_credentials_keep_url_boundaries(text, expected):
     base_url = 'https://placeholder-user:placeholder-pass@example.com'  # redact-allow:email

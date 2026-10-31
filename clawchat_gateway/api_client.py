@@ -178,9 +178,10 @@ def strip_configured_userinfo(text: str, *urls: str | None) -> str:
     """Remove configured URLs' exact raw credentials at URL / text boundaries.
 
     `userinfo@` is removed right after `://`; `password@` only at the start of
-    the text or after whitespace, a quote, `<` or `(`. A matching suffix inside
-    another URL's credentials is left for the URL scan, which removes that URL's
-    whole userinfo.
+    the text or after whitespace, a quote, `<` or `(`, and only outside a URL
+    (no `://` earlier in the same whitespace-delimited run). A matching suffix
+    inside another URL's credentials is left for the URL scan, which removes
+    that URL's whole userinfo. One forward cursor keeps this linear.
     """
     for url in urls:
         userinfo, password = configured_userinfo(url)
@@ -190,9 +191,19 @@ def strip_configured_userinfo(text: str, *urls: str | None) -> str:
             continue
         parts: list[str] = []
         start = 0
+        cursor = 0
+        last_space = -1
+        last_scheme = -1
         index = text.find(password)
         while index >= 0:
-            if index == 0 or text[index - 1] in _PASSWORD_BOUNDARY:
+            while cursor < index:
+                if text[cursor].isspace():
+                    last_space = cursor
+                elif text.startswith("://", cursor):
+                    last_scheme = cursor
+                cursor += 1
+            inside_url = last_scheme > last_space
+            if not inside_url and (index == 0 or text[index - 1] in _PASSWORD_BOUNDARY):
                 parts.append(text[start:index])
                 start = index + len(password)
             else:
