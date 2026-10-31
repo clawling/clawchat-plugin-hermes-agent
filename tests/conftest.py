@@ -6,16 +6,20 @@ dependency of this repository. ``hermes_source.py`` finds a checkout through
 ``HERMES_SOURCE_DIR``, then ``tmp/hermes`` or ``tmp/hermes-agent`` here or in the
 main checkout when running from a linked worktree.
 
-The policy below is *prefer the real host*:
+The policy below is *double unless asked*:
 
-1. If ``gateway`` already imports (a real Hermes checkout is on ``sys.path``, or
-   a source with ``gateway/platforms/base.py`` is found and added below), the
-   tests run against it and this file installs nothing.
-2. Only when it does not, a **minimal double** is installed under the real
-   module names.
+1. If ``gateway`` already imports (a real Hermes checkout is on ``sys.path``,
+   or ``HERMES_REAL_HOST=1`` and a source with ``gateway/platforms/base.py`` is
+   found and added below), the tests run against it and this file installs
+   nothing.
+2. Otherwise a **minimal double** is installed under the real module names.
 
-Read ``clawchat_host_is_double`` in a test to tell which one you got. The pytest
-header reports the source found (or searched paths) and real-host/double mode.
+Most of the suite is written against the double, so a found checkout does not
+switch the whole session to the real host by itself. Tests that check real host
+behaviour use ``hermes_source.require_hermes_source`` and run the host in a
+subprocess instead. Read ``clawchat_host_is_double`` in a test to tell which one
+you got. The pytest header reports the source found (or searched paths) and
+real-host/double mode.
 
 **What the double is honestly good for.** It reproduces exactly the four
 imported names and nothing else. That is enough for logic that lives entirely in
@@ -69,7 +73,8 @@ for _name in [n for n in os.environ if n.startswith("CLAWCHAT_")]:
     del os.environ[_name]
 
 _HERMES_SOURCE = find_hermes_source("gateway/platforms/base.py")
-if _HERMES_SOURCE is not None and str(_HERMES_SOURCE) not in sys.path:
+_REAL_HOST_REQUESTED = os.environ.get("HERMES_REAL_HOST") == "1"
+if _REAL_HOST_REQUESTED and _HERMES_SOURCE is not None and str(_HERMES_SOURCE) not in sys.path:
     sys.path.insert(0, str(_HERMES_SOURCE))
 
 
@@ -90,7 +95,10 @@ def pytest_report_header():
         str(_HERMES_SOURCE) if _HERMES_SOURCE is not None
         else "none; searched: " + ", ".join(str(path) for path in candidates())
     )
-    mode = "double" if _USING_DOUBLE else "real host"
+    mode = "real host" if not _USING_DOUBLE else (
+        "double (HERMES_REAL_HOST=1 to use the source)" if _HERMES_SOURCE is not None
+        and not _REAL_HOST_REQUESTED else "double"
+    )
     return f"Hermes source: {source}; session uses {mode}"
 
 

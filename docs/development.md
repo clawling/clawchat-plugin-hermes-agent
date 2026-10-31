@@ -171,8 +171,12 @@ tracked files and fails on any critical finding. The shared
 worktree. Without the required source marker, the skip reason lists every
 searched path; `HERMES_SOURCE_REQUIRED=1` turns these skips into failures.
 The pytest header shows the source found (or searched paths) and whether the
-session uses real Hermes or the double. Run with a source present before a
-release. The scan also runs each pinned older Hermes scanner, so the checkout
+session uses real Hermes or the double; the session stays on the double unless
+`HERMES_REAL_HOST=1` (most tests are written against it).
+`tests/test_multiplex_isolation.py` is the exception: it needs a Hermes
+checkout on `PYTHONPATH` and runs on its own
+([multiplex-profile-isolation.md](multiplex-profile-isolation.md)).
+Run with a source present before a release. The scan also runs each pinned older Hermes scanner, so the checkout
 needs those tags (`git fetch --tags`). Hermes v0.20.3–v0.20.6 are an
 [unsupported range](install.md#compatibility), so their scanners are not pinned
 by these tests. Prose counts too: older scanners rate `host` followed

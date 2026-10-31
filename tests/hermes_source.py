@@ -69,4 +69,4 @@ def require_hermes_source(marker: str) -> Path:
         reason += f"; HERMES_SOURCE_DIR was set to {source_dir} but lacks {marker}"
     if os.environ.get("HERMES_SOURCE_REQUIRED") == "1":
         pytest.fail(reason)
-    pytest.skip(reason)
+    pytest.skip(reason, allow_module_level=True)
