@@ -44,11 +44,12 @@ def host(monkeypatch):
     monkeypatch.setitem(sys.modules, "model_tools", model)
     guard._ORCHESTRATE_ORIGINS.clear()
 
-    def start(*, chat=CHAT, speakers=(), **kw):
+    def start(*, chat=CHAT, speakers=(), turn="turn", **kw):
         snapshot = turns.register_turn(account_id="usr_agent", chat_id=chat, speakers=speakers,
                                        grants=kw.pop("grants", {}), session_key="owner-only:" + chat, **kw)
         nonces.append(snapshot.nonce)
-        turns.bind_turn(snapshot.nonce, "session", "turn")
+        # One host execution belongs to one nonce; overlapping turns pass their own turn ID.
+        turns.bind_turn(snapshot.nonce, "session", turn)
         session.update(HERMES_SESSION_PLATFORM="clawchat", HERMES_SESSION_CHAT_ID=chat,
                        HERMES_SESSION_MESSAGE_ID=snapshot.nonce, HERMES_SESSION_USER_ID=OWNER,
                        HERMES_SESSION_CHAT_TYPE="group" if chat == CHAT else "direct")
@@ -452,8 +453,8 @@ async def test_cached_origin_rechecks_live_snapshot_before_building_client(host,
 @pytest.mark.asyncio
 @pytest.mark.parametrize("order", ["retry-first", "owner-first"])
 async def test_retry_and_owner_overlap_preserve_only_orchestration_in_both_orders(host, monkeypatch, order):
-    retry = lambda: host.start(orchestrate_retry=True)
-    owner = lambda: host.start(speakers=(OWNER,), owner_side=True)
+    retry = lambda: host.start(orchestrate_retry=True, turn="retry-turn")
+    owner = lambda: host.start(speakers=(OWNER,), owner_side=True, turn="owner-turn")
     first, second = (retry(), owner()) if order == "retry-first" else (owner(), retry())
     client = SimpleNamespace(orch_list_agents=AsyncMock(return_value={"code": 0}))
     monkeypatch.setattr(tools, "_build_client", lambda: (client, None))
@@ -465,22 +466,23 @@ async def test_retry_and_owner_overlap_preserve_only_orchestration_in_both_order
         names = {item["function"]["name"] for item in guard._filter_grant_definitions(DEFINITIONS, snapshot)}
         assert set(OWNER_ONLY_TOOLS) <= names and "terminal" not in names
         call_id = "overlap:" + snapshot.nonce
+        turn = turns._bindings[snapshot.nonce][1]
         assert guard._clawchat_pre_tool_decision(tool_name=OWNER_ONLY_TOOLS[0], session_id="session",
-                                               turn_id="turn", tool_call_id=call_id) is None
+                                               turn_id=turn, tool_call_id=call_id) is None
         token = host.approval._approval_tool_call_id.set(call_id)
         try:
             assert await tools.orchestrate_list_agents(purpose="check") == {"code": 0}
         finally:
             host.approval._approval_tool_call_id.reset(token)
     assert client.orch_list_agents.await_count == 2
-    host.start(speakers=(FRIEND,))
+    host.start(speakers=(FRIEND,), turn="friend-turn")
     for item in (first, second):
         snapshot = turns.get_snapshot(item.nonce)
         assert not snapshot.orchestrate_retry
         assert guard.orchestrate_owner_turn(snapshot) is None
         host.session["HERMES_SESSION_MESSAGE_ID"] = snapshot.nonce
         assert guard._clawchat_pre_tool_decision(tool_name=OWNER_ONLY_TOOLS[0], session_id="session",
-                                               turn_id="turn")["action"] == "block"
+                                               turn_id=turns._bindings[snapshot.nonce][1])["action"] == "block"
         assert (await tools.orchestrate_list_agents(purpose="check"))["status"] == "owner_turn_only"
     assert client.orch_list_agents.await_count == 2
 

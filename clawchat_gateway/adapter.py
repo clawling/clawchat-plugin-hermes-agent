@@ -3469,7 +3469,11 @@ class ClawChatAdapter(BasePlatformAdapter):
                 )
                 return
             if _synthetic is not None:
-                if not _synthetic.orchestrate_retry:
+                # The rendered receipt carries operation, outcome, reason and the
+                # server-generated result. A failure reason can be a free-form
+                # error string, so only a plain reason code attests no guest text.
+                if (not _synthetic.orchestrate_retry
+                        and re.fullmatch(r"[a-z][a-z0-9_]*", str(_synthetic.raw_message.get("reason") or "x"))):
                     _synthetic = _synthetic.as_plugin_notification()
                 logger.info(
                     "clawchat permission_result dispatched chat_id=%s request_id=%s operation=%s outcome=%s",
