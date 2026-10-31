@@ -44,6 +44,7 @@ from clawchat_gateway.api_client import (
     ClawChatApiClient,
     ClawChatApiError,
     agents_connect_with_retry,
+    strip_url_userinfo,
 )
 from clawchat_gateway.hermes_home import hermes_home
 from clawchat_gateway.config import _get_env
@@ -993,7 +994,7 @@ async def activate(
             "clawchat activation: stored user_id %s no longer exists on %s; "
             "retrying as a fresh pairing",
             existing_user_id,
-            base_url,
+            strip_url_userinfo(base_url),
         )
         # The replayed identity doesn't exist on this backend: this IS a
         # brand-new agent (rule 5), so it must get its own per-profile

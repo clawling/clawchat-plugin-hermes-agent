@@ -25,6 +25,7 @@ except ImportError:  # pragma: no cover
     _ws_connect_impl = None  # type: ignore[assignment]
 
 from clawchat_gateway import __version__
+from clawchat_gateway.api_client import strip_url_userinfo
 from clawchat_gateway.config import ClawChatConfig
 from clawchat_gateway.hermes_home import hermes_home
 from clawchat_gateway import instance_lock, install_identity
@@ -3621,8 +3622,8 @@ class ClawChatConnection:
             return None
         token = self._cfg.token
         if token:
-            return text.replace(token, "***")
-        return text
+            text = text.replace(token, "***")
+        return strip_url_userinfo(text)
 
     def _finish_current_connection(
         self,

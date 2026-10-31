@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from clawchat_gateway import __version__
@@ -101,9 +101,61 @@ class RefreshResult:
     refresh_token: str
 
 
+# A URL starts at an anchored, length-capped scheme. Its authority runs to the
+# first whitespace or `/?#`, and userinfo is everything before the authority's
+# last `@` (urllib accepts quotes, `<`, `>`, backticks and extra `@` there), with
+# no length cap so long credentials fail closed. The host after that `@` ends at
+# quotes and angle brackets as well, and only `scheme://userinfo@host[:port]` is
+# rewritten; scanning continues right after it (or after the scheme when there
+# is no userinfo), so adjacent and embedded URLs are still checked. Redaction is
+# conservative: text glued to a credentialed URL up to a later `@` may be
+# dropped with it. Every search is bounded by one authority, so server-supplied
+# text is processed in linear time.
+_URL_SCHEME = re.compile(r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]{0,31}://")
+_AUTHORITY_END = re.compile(r"[\s/?#]")
+_HOST_END = re.compile(r"""[\s"'<>`]""")
+
+
+def _strip_userinfo_from_authority(scheme: str, authority: str) -> str:
+    try:
+        parsed = urlsplit(f"{scheme}{authority}")
+        hostname = parsed.hostname
+        port = parsed.port
+        if not hostname:
+            return "[redacted-url]"
+        netloc = f"[{hostname}]" if ":" in hostname else hostname
+        if port is not None:
+            netloc = f"{netloc}:{port}"
+        return f"{scheme}{netloc}"
+    except ValueError:
+        return "[redacted-url]"
+
+
+def strip_url_userinfo(text: str) -> str:
+    """Remove URL credentials from display text; redact unparseable URLs."""
+    parts: list[str] = []
+    copied = 0
+    for scheme in _URL_SCHEME.finditer(text):
+        if scheme.start() < copied:
+            continue
+        authority_start = scheme.end()
+        end = _AUTHORITY_END.search(text, authority_start)
+        authority_end = end.start() if end else len(text)
+        at = text.rfind("@", authority_start, authority_end)
+        if at < 0:
+            continue
+        end = _HOST_END.search(text, at + 1, authority_end)
+        host_end = end.start() if end else authority_end
+        parts.append(text[copied:scheme.start()])
+        parts.append(_strip_userinfo_from_authority(scheme.group(0), text[authority_start:host_end]))
+        copied = host_end
+    parts.append(text[copied:])
+    return "".join(parts)
+
+
 def redact_refresh_message(value: object, *secrets: str) -> str:
     """Sanitize refresh diagnostics at their first display-text boundary."""
-    text = str(value or "")
+    text = strip_url_userinfo(str(value or ""))
     for secret in sorted((s for s in secrets if s), key=len, reverse=True):
         text = text.replace(secret, "***")
     text = re.sub(r"eyJ[A-Za-z0-9_=-]*\.[A-Za-z0-9_=-]+\.[A-Za-z0-9_=-]+", "***", text)
