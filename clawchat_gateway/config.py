@@ -300,14 +300,14 @@ def _resolve_user_id(token: str, configured: str) -> str:
     return token_sub
 
 
-def _jwt_exp(token: str) -> int | None:
+def _jwt_exp(token: str) -> int | float | None:
     """Decode the access token's ``exp`` claim (epoch seconds).
 
     Returns ``None`` when the token is empty / malformed / has no numeric
     ``exp`` — callers fall back to ``activated_at + 24h`` (spec A.0). No expiry
     column is persisted: the value is derived from the live token on each load.
     """
-    if not token:
+    if not isinstance(token, str) or not token:
         return None
     parts = token.split(".")
     if len(parts) < 2:
@@ -321,23 +321,17 @@ def _jwt_exp(token: str) -> int | None:
     if not isinstance(data, dict):
         return None
     exp = data.get("exp")
-    if isinstance(exp, bool):
+    if type(exp) not in (int, float):
         return None
-    if isinstance(exp, int):
-        return exp
-    if isinstance(exp, float):
-        return int(exp)
-    if isinstance(exp, str):
-        try:
-            return int(float(exp.strip()))
-        except (TypeError, ValueError):
-            return None
-    return None
+    try:
+        return exp if math.isfinite(exp) else None
+    except OverflowError:
+        return None
 
 
-def _jwt_iat(token: str) -> int | None:
+def _jwt_iat(token: str) -> int | float | None:
     """Decode the access token's ``iat`` claim (epoch seconds) or ``None``."""
-    if not token:
+    if not isinstance(token, str) or not token:
         return None
     parts = token.split(".")
     if len(parts) < 2:
@@ -351,16 +345,12 @@ def _jwt_iat(token: str) -> int | None:
     if not isinstance(data, dict):
         return None
     iat = data.get("iat")
-    if isinstance(iat, bool):
+    if type(iat) not in (int, float):
         return None
-    if isinstance(iat, (int, float)):
-        return int(iat)
-    if isinstance(iat, str):
-        try:
-            return int(float(iat.strip()))
-        except (TypeError, ValueError):
-            return None
-    return None
+    try:
+        return iat if math.isfinite(iat) else None
+    except OverflowError:
+        return None
 
 
 def _read_group_mode(value: Any) -> str:

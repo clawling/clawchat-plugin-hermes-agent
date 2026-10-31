@@ -1042,8 +1042,9 @@ def _classify_moment_images(
 ) -> tuple[list[tuple[str, Path | None]] | None, dict[str, Any] | None]:
     """Each entry as ``(url, None)`` or ``("", local_path)``, or a validation error.
 
-    A moment image must be an http(s) URL. An existing absolute local image
-    file is accepted too and uploaded by the caller; anything else (a relative
+    A remote moment image must already have a long-lived http(s) URL. An
+    existing absolute local image file is accepted too and uploaded to
+    long-lived storage by the caller; anything else (a relative
     or ``~`` path, ``file://``, a missing file, a non-image) is refused before
     anything is uploaded or created, so a bad entry never yields a moment with
     a broken image.
@@ -1101,11 +1102,13 @@ async def create_moment(
                 if path is None:
                     resolved.append(url)
                     continue
-                uploaded = await client.upload_media(
+                uploaded = await client.upload_avatar(
                     buffer=path.read_bytes(),
                     filename=path.name,
                     mime=_infer_mime(path),
                 )
+                if not uploaded.mime.startswith("image/"):
+                    return _validation_error("uploaded moment image must have an image/ MIME type")
                 resolved.append(uploaded.url)
         return await client.create_moment(text=text, images=resolved)
     except ClawChatApiError as exc:
@@ -1537,7 +1540,10 @@ async def liveware_login() -> dict[str, Any]:
 
     liveware_path = resolve_liveware_path()
     if liveware_path is None:
-        return _validation_error("liveware CLI not found in PATH")
+        return _validation_error(
+            "liveware CLI was not found on PATH or in the plugin download directory "
+            "(<HERMES_HOME>/clawchat/liveware). The automatic download may still be "
+            "running or may have failed verification; see the gateway log.")
 
     proc = await asyncio.create_subprocess_exec(
         liveware_path,
@@ -1609,8 +1615,8 @@ async def _orchestrate(call, *, purpose, operation):
     from clawchat_gateway.gate_outcome import map_gate_outcome
     origin = orchestrate_handler_origin()
     if origin is None:
-        from clawchat_gateway.turn_grants import get_snapshot, session_context_value
-        snapshot = get_snapshot(session_context_value("HERMES_SESSION_MESSAGE_ID"))
+        from clawchat_gateway.turn_grants import effective_snapshot, session_context_value
+        snapshot = effective_snapshot(session_context_value("HERMES_SESSION_MESSAGE_ID"))
         return orchestrate_owner_only(operation, snapshot)
     purpose = purpose.strip()[:60].strip() if isinstance(purpose, str) else ""
     if not purpose:
@@ -1790,7 +1796,7 @@ def _tool_request_context(session_id):
         sender = get_clawchat_sender()
         if (snapshot and snapshot.request_origin and sender and sender._account_id() == snapshot.account_id
                 and sender._clawchat_config.tool_grants == 'on'
-                and snapshot.request_origin.requester_user_id != sender._owner_user_id()):
+                and snapshot.request_origin.requester_user_id not in {sender._owner_user_id(), sender._account_id()}):
             return snapshot, sender
     except Exception:
         pass
@@ -1958,6 +1964,10 @@ async def manage_tool_grants(operation: str, params: Any, *, session_id: str = "
         now = int(time.time() * 1000)
         try:
             values = validate_grant_params(params, now)
+            ids = values.get("user_ids", ())
+            if ids and any(identity in {sender._owner_user_id(), sender._account_id()} for identity in ids):
+                return {"error": "validation", "message": "owner-or-self",
+                        "note": "The owner already has every tool; nothing to record."}
             known, available = host_tool_catalog()
             values["tools"] = normalize_grant_selectors(values["tools"], known_tools=known, available_tools=available)
             ask_available = ask_grants_available()

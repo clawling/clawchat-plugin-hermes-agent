@@ -6,9 +6,17 @@ This is the install and activation guide for Hermes operators.
 
 | Component       | Requirement                                  |
 |-----------------|----------------------------------------------|
-| Hermes Agent    | `v0.12.0` or newer (uses `ctx.register_platform`) |
+| Hermes Agent    | `v0.12.0` or newer, except `v0.20.3`–`v0.20.6` |
 | Python runtime  | `>=3.11` (per `pyproject.toml`)              |
 | Dependencies    | `websockets>=13,<16`                        |
+
+Hermes v0.20.3–v0.20.6 are unsupported: their install-time security scan rates
+this plugin `dangerous`, a hard block that `--force` cannot override, so both
+install and update fail. Upgrade Hermes with `hermes update` to v0.21.6 or
+newer, which scans the plugin clean (v0.21.0–v0.21.5 install it but may ask
+the owner to confirm). v0.20.2 and older have no install scan and remain
+supported. When loaded on an unsupported release, the plugin logs a warning and
+`hermes clawchat status` prints it on stderr.
 
 YAML reads use the parser bundled with Hermes: `hermes_yaml` / `ruamel.yaml`
 on newer versions, or PyYAML on older versions. The plugin does not declare
@@ -51,8 +59,8 @@ hermes plugins install clawling/clawchat-plugin-hermes-agent
 hermes plugins enable clawchat
 ```
 
-Hermes 0.20.3 and newer scan the plugin before installing it and stop on a
-*caution* verdict for this plugin — expected; see
+Supported Hermes releases with an install scanner may ask the owner to
+confirm a *caution* verdict; see
 [Hermes security scan](#hermes-security-scan).
 
 If Hermes is not on `PATH`, source the venv first (e.g.
@@ -72,8 +80,8 @@ docker exec hermes sh -lc \
   'HERMES_HOME=/opt/data /opt/hermes/.venv/bin/hermes plugins enable clawchat'
 ```
 
-`docker exec` without `-it` gives Hermes no terminal, so on Hermes 0.20.3+
-the scan's *caution* verdict ends the install with "Requires confirmation"
+`docker exec` without `-it` gives Hermes no terminal, so when the scanner
+reports *caution*, the install ends with "Requires confirmation"
 instead of a prompt. Review it as described in
 [Hermes security scan](#hermes-security-scan); only the owner of the
 deployment decides to install past it (`docker exec -it` to answer the
@@ -160,10 +168,9 @@ For protocol-level checks (WebSocket handshake, ack flow), see
   Not listed: the install did not land — rerun it and read its output; a
   security-scan stop is the next entry, not a reason to add `--force`.
 - <a id="hermes-security-scan"></a>**Hermes security scan stops the install**
-  — Hermes 0.20.3+ scans every third-party plugin. For this plugin a
-  *caution* verdict is expected: a couple of dozen findings, all matches in
-  comments and docs, ending in `Decision: BLOCKED ... Use --force to
-  override.` In a terminal Hermes then waits at `Install anyway? ... [y/N]`;
+  — See [Compatibility](#compatibility) for the unsupported releases that
+  block this plugin and require a Hermes upgrade. On supported releases,
+  a *caution* verdict may ask `Install anyway? ... [y/N]` in a terminal;
   without one it refuses. Check that the report's `Scan:` line names
   `clawling/clawchat-plugin-hermes-agent` (anything else: do not install),
   then it is the **owner's** decision: the owner answers `y`, or adds
@@ -171,6 +178,34 @@ For protocol-level checks (WebSocket handshake, ack flow), see
   answers the prompt or adds `--force` on its own, and an unattended
   install stops and reports instead. A *dangerous* verdict is refused and
   `--force` does not override it.
+- <a id="duplicate-workspace-member"></a>**Two workspace members are both named `clawchat-gateway`**
+  — Hermes 0.22+ combines enabled plugins across all profiles into one uv
+  workspace, where two older copies with a build backend share this name.
+  Use `-p default` for the default profile and follow
+  [Confirm the target profile](#confirm-the-target-profile-before-every-install--activate)
+  for each command.
+  - **Two older copies:** run `hermes -p <profile> plugins update clawchat`
+    once for either profile; the updated copy gets a unique member name.
+    If the other profile's copy was left disabled by the collision, run
+    `hermes -p <other> plugins enable clawchat` afterwards.
+  - **Three or more older copies:** updating one still leaves at least two
+    old names colliding, so use this recovery sequence:
+    1. Pick one profile to keep. In **every other profile with the plugin**,
+       run `hermes -p <profile> plugins remove clawchat`. Removal does not
+       solve the workspace and preserves `.env`, `platforms.clawchat` in
+       `config.yaml`, and `$HERMES_HOME/clawchat/` (credentials and data).
+    2. Run `hermes -p <kept> plugins update clawchat`.
+    3. In each removed profile, run
+       `hermes -p <profile> plugins install clawling/clawchat-plugin-hermes-agent`,
+       then `hermes -p <profile> plugins enable clawchat`. The same
+       [security-scan and consent prompts](#hermes-security-scan) apply as
+       on first install; retained credentials mean no new activation code
+       is needed.
+    4. Restart the gateway as described under
+       [Multiple agents on one host](#multiple-agents-on-one-host-hermes-profiles).
+
+  `disable` does not help: like `update` and `enable`, it re-solves the
+  workspace before publishing changes; a failed solve changes nothing.
 - **Activation exits non-zero with `validation` / `auth`** — the
   activation code is single-use; request a fresh one. Surface stderr
   verbatim.
@@ -215,11 +250,14 @@ For protocol-level checks (WebSocket handshake, ack flow), see
 - **Activation said the restart was requested, but the agent never came
   online** — read `$HERMES_HOME/clawchat/gateway-restart.log`: it holds the
   output of `hermes gateway restart` and a final `exit_code=<n>`. A non-zero
-  exit names the reason (for example another gateway already running on
-  Windows). No `exit_code` line yet usually means the restart is waiting for
-  open sessions to finish; ask the owner before restarting the service directly,
-  since that ends those sessions. Success is a `clawchat state -> ready` line
-  in the Hermes log from after the activation.
+  exit names the reason. No `exit_code` yet can mean it is waiting for open
+  sessions, including the agent's current turn. If no new `clawchat state -> ready`
+  line appears within a few minutes, relay the printed owner message: run the
+  printed restart command after the reply ends, in a terminal outside Hermes.
+- **macOS shows multiple launchd gateway definitions** — match the running PID
+  to its label before restarting; `launchctl kickstart` on another label may
+  start an extra gateway. See [Restart Or Reload](./activation.md#restart-or-reload)
+  for the status/list checks and owner-controlled cleanup.
 - **Activation printed `gateway install` / `gateway start` instead of
   restarting** — this profile has never run a gateway. For a named profile the
   output leads with the preferred fix: serve it from the default profile's
@@ -228,8 +266,9 @@ For protocol-level checks (WebSocket handshake, ack flow), see
   hosts that don't multiplex. For the default profile, run the two commands.
 - **Activation printed `hermes -p default gateway restart`** — the profile is
   served by the default profile's multiplexing gateway, which refuses a
-  per-profile restart. Restarting it restarts every profile it serves, so check
-  with the owner first.
+  per-profile restart. On Hermes 0.21.6+ the running multiplexer picks the
+  profile up within about 30 seconds; restart only if no ready line appears.
+  Restarting restarts every profile it serves, so check with the owner first.
 - **The bot replies to its own messages in a loop** — the
   `pre_gateway_dispatch` hook drops self-echo frames; if you are seeing
   loops, confirm the plugin was registered (look for
@@ -237,6 +276,10 @@ For protocol-level checks (WebSocket handshake, ack flow), see
   Hermes log).
 
 ## Multiple agents on one host (Hermes profiles)
+
+The plugin can be enabled in several profiles on one host. If Hermes reports
+a duplicate workspace member, follow the
+[recovery steps for the number of older copies](#duplicate-workspace-member).
 
 Each Hermes profile is an independent `HERMES_HOME`, so each profile is a
 separate ClawChat agent with its own account and its own database file under
@@ -251,7 +294,8 @@ hermes profile create coder
 # install + activate, scoped to the profile:
 npx -y @clawling/clawchat-plugin-install-cli@latest install \
   --target hermes --profile coder --activate <CONNECT_CODE>
-# the multiplexer enumerates profiles only at start - restart it (all profiles restart):
+# Hermes 0.21.6+: a running multiplexer serves the profile within ~30 s, no restart.
+# Older Hermes, or multiplexing just turned on - restart it (all profiles restart):
 hermes -p default gateway restart
 ```
 

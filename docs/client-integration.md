@@ -18,8 +18,8 @@ catalogue with the server implementation inspected at `dd7eafc`.
 
 Known upstream changes after that full sync **not yet incorporated in full**:
 
-- `agent_muted` rejection and recovery semantics: now included in this subset's
-  §14.3; this does not imply a full upstream sync.
+- `agent_muted` and `agent_turn_limit` rejection and recovery semantics: now included
+  in this subset's §14.3; this does not imply a full upstream sync.
 - `replay.done`'s `truncation_check` and v2 `ack_epoch` fields, and revised
   `history.truncated` rules for fresh cursors and a single boundary per connection.
 - Compatible versus strict ack-silence clocks and the `ack_progress_clock` capability.
@@ -1281,7 +1281,7 @@ before depending on them — an unmodelled field never survives the relay.
 
 Treat media URLs as opaque, using the supplied URL without rewriting it.
 They may be public capability URLs bounded by storage retention (default
-**15 days**) or presigned GET URLs valid for up to **7 days**. There is no
+**about 14 days**) or presigned GET URLs valid for up to **7 days**. There is no
 re-signing endpoint; expired content must come from its original source.
 
 **Receivers must tolerate absent or empty `url`** on image/video/audio/file
@@ -1560,6 +1560,7 @@ semantics remain upstream; their codes do not authorize new Hermes uplinks.
 | `capability_missing` | Required capability absent, currently history transfer. Terminal uplink (§11.4). |
 | `not_member` | Sender is not a chat member. Terminal uplink; re-resolve membership. |
 | `agent_muted` | Enabled owner-mute guard refused an agent's group uplink. Terminal uplink; **do not gate `chat_id` or resend this message**. New messages may succeed after unmute. |
+| `agent_turn_limit` | Owner's per-group agent round-limit guard (off by default) refused an agent's group uplink when enabled. Terminal uplink; **do not gate `chat_id` or resend this message**. New messages may be accepted after human group speech or an owner limit change. |
 | `unsupported_version` | Envelope version missing or not string `"2"`; applies before event handling, including controls. Terminal uplink; connection stays open. |
 | `bad_request` | Invalid structure/value; fix frame before retry. The five source classes are listed below. |
 | `message_too_large` | Marshaled downlink exceeds produce cap, default **1,000,000 bytes**. No fanout; split or upload media. |
@@ -1608,8 +1609,10 @@ Clear this gate early on either:
 - any inbound frame with that chat ID **except `message.error`**; or
 - `notify.signal` with a type starting `conversation.` **except `conversation.dissolved`**.
 
-`agent_muted` never enters this gate: discard the rejected attempt; new messages
-can succeed after unmute. The distinct `conversation.dissolved` gate suppresses
+`agent_muted` and `agent_turn_limit` never enter this gate: discard the rejected
+attempt. New messages can succeed after unmute for `agent_muted`, or after human
+group speech or an owner limit change for `agent_turn_limit`.
+The distinct `conversation.dissolved` gate suppresses
 **typing only**, never `message.send`.
 
 ### 14.4 `message.delivered` — device-level delivery receipt
@@ -1733,7 +1736,7 @@ Inferred from the final stored MIME prefix:
 |------------|---------|
 | Max single-file size | **100 MiB** (`media.max_size_bytes`; `413` if exceeded) |
 | Allowed MIME prefixes | Empty allowlist accepts all types; configured restrictions may return `415`. See Content-Disposition below. |
-| Object retention | 15 days (server-side bucket lifecycle deletion) |
+| Object retention | about 14 days (server-side bucket lifecycle deletion) |
 
 **Content-Disposition prevents stored active content from executing.** Objects
 are stored `inline` only for raster image types (`image/jpeg`, `image/png`,

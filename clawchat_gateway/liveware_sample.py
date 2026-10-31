@@ -822,6 +822,7 @@ def load_intro_text(app_dir: Path, language: str) -> str:
 _DEFAULT_SAMPLE_PORT = 43110
 _RESTART_WINDOW_S = 30 * 60
 _MAX_RESTARTS_PER_WINDOW = 5
+_INTRO_EARLY_RETRY_DELAYS_S = (2.0, 5.0, 10.0)
 _INTRO_RETRY_DELAY_S = 30.0
 _INTRO_MAX_TRIES = 20
 # Backoff for transient start() failures (template CDN 429s, network blips):
@@ -863,6 +864,7 @@ class LivewareSampleDeps:
     spawn: "SpawnFn | None" = None
     exec: "ExecFn | None" = None
     log: "logging.Logger | None" = None
+    intro_sleep: Callable[[float], Awaitable[None]] | None = None
 
 
 class LivewareSampleSupervisor:
@@ -1393,6 +1395,7 @@ class LivewareSampleSupervisor:
             return
         d = self._d
         delivered = False
+        generation = self._generation
         try:
             language = resolve_owner_language(
                 d.resolve_owner_locale() if d.resolve_owner_locale else None
@@ -1400,6 +1403,8 @@ class LivewareSampleSupervisor:
             delivered = await d.notify_owner(load_intro_text(d.sample_root / "app", language))
         except Exception as exc:  # noqa: BLE001
             self._log.debug("liveware-sample intro send error: %s", exc)
+        if self._stopped or generation != self._generation:
+            return
         if delivered:
             d.store.mark_liveware_sample_intro_sent(
                 platform=d.platform, account_id=d.account_id)
@@ -1407,11 +1412,20 @@ class LivewareSampleSupervisor:
         if try_index + 1 >= _INTRO_MAX_TRIES:
             self._log.debug("liveware-sample intro not delivered; will retry next boot")
             return
-        self._spawn_task(self._retry_intro(try_index + 1))
+        self._spawn_task(self._retry_intro(try_index + 1, generation=generation))
 
-    async def _retry_intro(self, try_index: int) -> None:
+    async def _retry_intro(self, try_index: int, *, generation: int | None = None) -> None:
+        if generation is None:
+            generation = self._generation
+        if self._stopped or generation != self._generation:
+            return
         try:
-            await asyncio.sleep(_INTRO_RETRY_DELAY_S)
+            delay = (_INTRO_EARLY_RETRY_DELAYS_S[try_index - 1]
+                     if 1 <= try_index <= len(_INTRO_EARLY_RETRY_DELAYS_S)
+                     else _INTRO_RETRY_DELAY_S)
+            await (self._d.intro_sleep or asyncio.sleep)(delay)
         except asyncio.CancelledError:
+            return
+        if self._stopped or generation != self._generation:
             return
         await self._deliver_intro(try_index)

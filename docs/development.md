@@ -13,8 +13,8 @@ same modules Hermes loads.
 ├── __init__.py                  # Hermes entrypoint; only defines register(ctx) and helpers
 ├── clawchat_cli.py              # v0.12.0 compatibility CLI
 ├── plugin.yaml                  # Plugin manifest — canonical for provides_tools
-├── pyproject.toml               # Python distribution (name: clawchat-gateway)
-├── MANIFEST.in                  # Bundles prompts/*.md when building a wheel
+├── pyproject.toml               # Project metadata only (name: clawchat-gateway)
+├── MANIFEST.in                  # Setuptools prompt inclusion rules
 ├── clawchat_gateway/            # All runtime modules — adapter, connection, protocol, tools, …
 ├── prompts/                     # Required platform.md + optional defaults
 ├── skills/                      # All bundled */SKILL.md skills (currently six) + manifest.json
@@ -25,15 +25,14 @@ same modules Hermes loads.
 
 ## Setting up a local environment
 
-The package metadata supports plain `pip` and `uv`. The tracked `uv.lock`
+The project is metadata-only and supports plain `pip` and `uv`. The tracked `uv.lock`
 locks the development and test environment. Hermes installs the source tree
 without using this lockfile; runtime requirements are in `pyproject.toml`.
 
 ### With `uv`
 
 ```bash
-uv venv
-uv pip install -e ".[test]"
+uv sync --extra test
 ```
 
 ### With `pip`
@@ -44,7 +43,9 @@ python -m venv .venv
 pip install -e ".[test]"
 ```
 
-`-e` mirrors how Hermes imports the source tree.
+Without a `[build-system]` table, pip uses its setuptools PEP 517 fallback;
+`-e` mirrors how Hermes imports the source tree. `uv` keeps the project
+non-package via `tool.uv.package = false` and installs its dependencies.
 
 ## Running tests
 
@@ -79,7 +80,7 @@ or recorded server.
 
 The supported development loop is:
 
-1. Activate a fresh Hermes Agent v0.12.0+ instance.
+1. Activate a fresh Hermes Agent instance in the [supported range](install.md#compatibility).
 2. `hermes plugins install` this repo (or symlink the source tree into
    `$HERMES_HOME/plugins/clawchat/`).
 3. Run `hermes gateway setup` or `hermes clawchat activate <CODE>` to
@@ -107,7 +108,7 @@ reached the agent.
 When a question crosses into Hermes host behavior — plugin SDK contract,
 `ctx.register_platform`/`ctx.register_skill`, gateway dispatch, the
 `send_message` tool, or activation lifecycle — point `tmp/hermes/` at a
-matching Hermes Agent v0.12.0+ checkout and follow
+matching Hermes Agent checkout in the [supported range](install.md#compatibility) and follow
 [`./hermes-source-lookup.md`](./hermes-source-lookup.md). The path is
 already in `.gitignore`; nothing committed depends on it.
 
@@ -164,12 +165,23 @@ file, even as test data — a destructive shell command (recursive delete of
 a root path), reading a secrets file, a reverse shell, and similar. Use a
 harmless placeholder such as `run-cleanup --everything` instead.
 `tests/test_install_scan.py` runs the real scanner over a copy of the
-tracked files and fails on any critical finding; it needs a Hermes source
-checkout (`$HERMES_SOURCE_DIR`, or `tmp/hermes` / `tmp/hermes-agent` in this
-checkout or, from a linked worktree, the main checkout) and skips without
-one, so run it with one present before a release. It also runs the scanner of
-each pinned older Hermes release, so the checkout needs those tags
-(`git fetch --tags`). Prose counts too: older scanners rate `host` followed
+tracked files and fails on any critical finding. The shared
+`tests/hermes_source.py` helper checks `HERMES_SOURCE_DIR` first, then
+`tmp/hermes` or `tmp/hermes-agent` here and in the main checkout from a linked
+worktree. Without the required source marker, the skip reason lists every
+searched path; `HERMES_SOURCE_REQUIRED=1` turns these skips into failures.
+The pytest header shows the source found (or searched paths) and whether the
+session uses real Hermes or the double; the session stays on the double unless
+`HERMES_REAL_HOST=1` (most tests are written against it). Exception: when Hermes
+already imports from `PYTHONPATH` / `sys.path`, `tests/conftest.py` uses the real
+host even without `HERMES_REAL_HOST=1`.
+`tests/test_multiplex_isolation.py` is the exception: it needs a Hermes
+checkout on `PYTHONPATH` and runs on its own
+([multiplex-profile-isolation.md](multiplex-profile-isolation.md)).
+Run with a source present before a release. The scan also runs each pinned older Hermes scanner, so the checkout
+needs those tags (`git fetch --tags`). Hermes v0.20.3–v0.20.6 are an
+[unsupported range](install.md#compatibility), so their scanners are not pinned
+by these tests. Prose counts too: older scanners rate `host` followed
 later on the same line by a `$` as DNS exfiltration, so keep "host" and a
 `$VARIABLE` off the same line.
 
@@ -194,23 +206,20 @@ not plugin runtime dependencies. The plugin does not write YAML itself:
 config writes go through `hermes_cli.config.save_config`, so Hermes owns
 formatting and comments.
 
-`MANIFEST.in` only ships `prompts/*.md`, and `[tool.setuptools.packages.find]`
-in `pyproject.toml` only includes the `clawchat_gateway*` package. The
-top-level `skills/` tree — all bundled `skills/*/SKILL.md` directories
-(currently six; see [skill updates](./skill-updates.md#bundled-ids-are-auto-discovered-not-hardcoded)) **and**
-`skills/manifest.json` — lives outside that package and is not referenced by
-`MANIFEST.in` either, so none of it is included in a built wheel. A
-wheel-only install therefore has an empty `bundled_skill_ids()` result (the
-glob over `skills/*/SKILL.md` matches nothing) and a no-op load-time
-tombstone sweep (`apply_bundled_tombstones()` finds no `skills/manifest.json`
-and returns `[]`) — no bundled skills register, and no stale managed ids get
-purged. This is acceptable today because Hermes installs from the source
-tree, not from a wheel — every file in the tracked tree, `skills/` included,
-is copied into `$HERMES_HOME/plugins/clawchat/` on install — but if you ever
-publish to PyPI, packaging must be reworked first (extend `MANIFEST.in` and
-the packaging config to carry `skills/` alongside the package, and adjust
-`bundled_skills_dir()`'s path resolution if the layout changes) or a
-wheel-based install will silently ship with zero bundled skills.
+No wheel is built or published; Hermes copies every tracked file, including
+`skills/`, into the plugin directory and imports from there. The project has
+no build backend because Hermes 0.22+ merges every profile's plugins into one
+uv workspace and only gives metadata-only members unique names; a backend
+would make multiple copies collide on `clawchat-gateway` (see
+[workspace-name troubleshooting](./install.md#duplicate-workspace-member)).
+
+The retained setuptools configuration only includes `clawchat_gateway*`, and
+`MANIFEST.in` only includes `prompts/*.md`. The top-level `skills/` tree — all
+bundled `skills/*/SKILL.md` directories (currently six; see
+[skill updates](./skill-updates.md#bundled-ids-are-auto-discovered-not-hardcoded))
+and `skills/manifest.json` — lives outside the package. A future wheel would
+need packaging rework to include that tree and, if its layout changes, adjust
+`bundled_skills_dir()` so skill discovery and the tombstone sweep still work.
 
 ## Branches and releasing
 

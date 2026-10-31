@@ -167,7 +167,7 @@ def homes(tmp_path, monkeypatch):
     monkeypatch.setattr(connection, "hermes_root", lambda: root)
     monkeypatch.setattr(connection, "get_clawchat_store", lambda: None)
     monkeypatch.setattr(connection, "INSTANCE_LOCK_RETRY_SECONDS", 0.05)
-    monkeypatch.setattr(connection, "is_token_near_expiry", lambda *_: True)
+    monkeypatch.setattr(connection, "is_token_near_expiry", lambda *_, **_kw: True)
     monkeypatch.setattr(ClawChatConnection, "_warn_if_device_id_volatile", lambda _: None)
     monkeypatch.setattr(ClawChatConnection, "_refresh_device_id", lambda _: "test-device")
     return root

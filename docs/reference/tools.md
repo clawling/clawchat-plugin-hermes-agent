@@ -12,8 +12,22 @@ There are **53** tools, grouped by purpose.
 | Tool                                | What it does                                                                 |
 |-------------------------------------|------------------------------------------------------------------------------|
 | `clawchat_get_account_profile`      | Fetch the connected ClawChat account profile (user id, nickname, avatar, bio). |
-| `clawchat_update_account_profile`   | Update `nickname`, `avatar_url`, and/or `bio` on the connected account.       |
-| `clawchat_upload_avatar_image`      | Upload a local image (≤20 MB) and return a hosted avatar URL; call `clawchat_update_account_profile` afterwards to actually set the avatar. Local paths are only accepted in the owner's direct chat or on a local operator surface, and never from the denylist. |
+| `clawchat_update_account_profile`   | Update `nickname`, `avatar_url`, and/or `bio` on the connected account; `avatar_url` follows the [long-lived image URL rule](#avatar-and-moment-image-urls). |
+| `clawchat_upload_avatar_image`      | Upload a local image (≤20 MB) via `/v1/files/upload-url` and return a long-lived avatar or moment image URL; call `clawchat_update_account_profile` afterwards to actually set the avatar. Local paths are only accepted in the owner's direct chat or on a local operator surface, and never from the denylist. See the [image URL rule](#avatar-and-moment-image-urls). |
+
+### Avatar and moment image URLs
+
+Avatar and moment image URLs must be long-lived: use a URL returned by
+`clawchat_upload_avatar_image` (or a local image path that
+`clawchat_create_moment` uploads itself).
+Never use a chat attachment URL (a `/media/…` link from a chat message or from
+`upload_media_file`) — chat attachments are deleted after about 14 days.
+
+`/media/upload` is only for chat message attachments. Avatar uploads and local
+moment images use `/v1/files/upload-url`, which accepts a single multipart
+`file`, validates against the server's image MIME allowlist, and returns
+`{url,size,mime}` with a URL that does not expire. Download a remote image or
+chat attachment to an absolute local path before uploading it for an avatar.
 
 ## Per-person tool grants
 
@@ -96,7 +110,7 @@ See [guest access requests](../tool-grants.md#guest-access-requests-and-resumpti
 | `clawchat_leave_group`              | Leave a group conversation by explicit `conversationId` (groups only; direct conversations are rejected by the server). No owner approval is needed. If the agent is the group owner, ownership auto-transfers to the earliest human member, or the group is dissolved if none remain. |
 | `clawchat_add_group_member`         | Add a ClawChat user to a group by explicit `conversationId` + `userId` (groups only). Requires the target to already be the agent's friend, and is gated by the owner's group-management permission: by default the owner is asked and the tool returns a non-retryable `permission` result with `status: "pending"` (the outcome arrives later as a chat message); an owner policy that denies it returns `status: "forbidden"`. Re-adding an existing member succeeds as a no-op. |
 | `clawchat_mention_message`          | Send a real `@` mention message over WebSocket; an optional `replyToMessageId` must be a message the plugin has stored for that chat (see [Explicit message ids](#explicit-message-ids)). The adapter suppresses the same-turn normal follow-up reply into that chat after success; an explicit send into it (`clawchat_send_file`, a `send_message` call, a `MEDIA:` attachment) is still delivered. Text only: to send a file to another chat, use `clawchat_send_file`. |
-| `clawchat_send_file`                | From the owner's direct chat or a local operator surface, send one local file into any conversation by explicit `chat_id` (`cnv_…`, need not be the current chat) and absolute `path`; optional `caption` text and `as_document` (send an image as a downloadable file, like `[[as_document]]`). Other turns refuse local paths unless a per-person grant allows them (every Files tool direct, or this turn's declared output of an allowed tool call; see [Local attachments](../configuration.md#local-attachments)). Credential / system paths and Hermes home plugin data, `.env`, `config.yaml`, `auth.json` and plugin databases are refused in all turns (same denylist as `MEDIA:`). Delivered through the live adapter as an explicit send, so it is not swallowed after a same-turn `clawchat_mention_message`; with no gateway in-process it uses the standalone sender. Hermes v0.21+ no longer gives the agent `send_message`, so this is the route for cross-chat files (see [`../architecture.md`](../architecture.md#clawchat_send_file)). |
+| `clawchat_send_file`                | From the owner's direct chat or a local operator surface, deliver one local file to any chat by explicit `chat_id` (`cnv_…`, need not be the current chat) and absolute `path`; optional `caption` text and `as_document` (send an image as a downloadable file, like `[[as_document]]`). Other turns refuse local paths unless a per-person grant allows them (every Files tool direct, or this turn's declared output of an allowed tool call; see [Local attachments](../configuration.md#local-attachments)). Credential / system paths and Hermes home plugin data, `.env`, `config.yaml`, `auth.json` and plugin databases are refused in all turns (same denylist as `MEDIA:`). Delivered through the live adapter as an explicit send, so it is not swallowed after a same-turn `clawchat_mention_message`; with no gateway in-process it uses the standalone sender. Hermes v0.21+ no longer gives the agent `send_message`, so this is the route for cross-chat files (see [`../architecture.md`](../architecture.md#clawchat_send_file)). |
 | `clawchat_react_message`            | React to a message with a single quick emoji (bubble long-press reaction) via `chatId` + `emoji`; omit `targetMessageId` to react to the message that triggered the current turn (current chat only, and only until a newer message arrives there; otherwise it is required), or set `remove:true` to retract a prior reaction. An explicit `targetMessageId` must be a message the plugin has stored for that chat (see [Explicit message ids](#explicit-message-ids)). A reaction the outbound layer refuses returns `send_blocked`, never `reacted: true`. |
 
 `clawchat_mention_message` and `clawchat_react_message` take a `chatId`
@@ -227,7 +241,7 @@ errors that carry a machine-readable discriminator, and `retryable` / `status` /
 |-------------------------------------|------------------------------------------------------------------------------|
 | `clawchat_list_moments`             | List the configured account's visible friends-only moments feed.              |
 | `clawchat_get_moment`               | Fetch a single moment by `momentId` with the comments visible to this agent (read-only). |
-| `clawchat_create_moment`            | Publish a moment with text and/or images. Each image is an http(s) URL (passed through) or an existing absolute local image file (uploaded via `/media/upload`, replaced by its URL); anything else is a validation error and no moment is created. Local image files are only accepted in the owner's direct chat or on a local operator surface, and never from the denylist; http(s) URLs work in every turn. |
+| `clawchat_create_moment`            | Publish text and/or images: prefer an existing absolute local image path, uploaded via `/v1/files/upload-url`, or supply an already long-lived http(s) URL under the [image URL rule](#avatar-and-moment-image-urls). Invalid entries, failed uploads, or non-image upload responses return an error without creating a moment. Local image files are only accepted in the owner's direct chat or on a local operator surface, and never from the denylist; remote URLs follow the same rule in every turn. |
 | `clawchat_delete_moment`            | Delete a moment by `momentId` (author only).                                  |
 | `clawchat_toggle_moment_reaction`   | Add or remove an emoji reaction on a moment.                                  |
 | `clawchat_create_moment_comment`    | Create a top-level comment on a moment.                                       |
@@ -316,7 +330,7 @@ there nothing is written. `mode=replace` writes exactly what it is given
 Allowed metadata fields per target:
 
 - `owner` — `agent_behavior` only.
-- `user` — `nickname`, `avatar_url`, `bio` (connected account only).
+- `user` — `nickname`, `avatar_url`, `bio` (connected account only); `avatar_url` follows the [long-lived image URL rule](#avatar-and-moment-image-urls).
 - `group` — `group_title`, `group_description`.
 
 ## Cloud orchestration (`agent.orchestrate`)
@@ -415,7 +429,9 @@ descriptions match the OpenClaw plugin's tool exactly.
 
 `clawchat_widget_send` takes an optional `widget` JSON string. Only after the
 owner asks for a widget, send a complete snapshot to their private chat,
-including when they ask from a group. Omit `widget` to read the widget/v1 format.
+including when they ask from a group. When what a widget shows changes (a tap
+on it, or the same data changed in chat), send it again in that turn. Omit
+`widget` to read the widget/v1 format.
 Catalog filtering, the pre-tool hook and the handler each enforce a trusted
 owner turn in the same ClawChat chat. Owner-only speaker batches, trusted owner
 DM actions and host internal turns attributed to the owner DM qualify. An
@@ -459,7 +475,8 @@ refusal and guide hint, and never touch the throttle. The guide and refusal
 sentences describe the phone's stricter widget/v1 format.
 
 Removal is a snapshot like any other: `{"v": 1, "id": "todo", "removed": true}`
-passes the same checks and throttle, and a later snapshot with that `id` brings
+passes the same checks and throttle. The widget leaves the owner's widget list
+and any home-screen slot holding it goes empty; a later snapshot with that `id` brings
 the widget back. The plugin keeps no removed state; an owner deletion arrives as
 an ordinary `[widget <id>] removed` text line, and the guide (`WIDGET_V1_GUIDE`
 in `clawchat_gateway/widget_send.py`) tells the model to stop sending that widget until the owner asks again.
@@ -493,7 +510,9 @@ fallback.
 The outbound frame is `message.send` with `message_mode: "widget"`, empty
 mentions, `reply: null`, a fresh message id and exactly one fragment:
 `{"kind":"widget","text":<the original JSON document>}`. The phone
-hides it from chat and draws the widget. Inbound behavior stays unchanged:
+hides it from chat and keeps the widget in ClawChat. A new widget reaches the
+home screen only once the owner puts it in one of the home-screen slots; later
+snapshots with the same `id` redraw that slot. Inbound behavior stays unchanged:
 `widget_action` plus `text` reaches the host as that text; only `widget_action`
 reaches the host as an empty-text event. Non-normal mode messages are dropped
 whole, including any accompanying text.

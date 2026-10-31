@@ -145,7 +145,7 @@ async def test_deleted_db_credentials_close_live_socket_and_stop_recovery(stores
         assert conn._state == ConnectionState.READY
         _delete(stores)
         # The same poll must detect deletion before a due proactive refresh.
-        monkeypatch.setattr(connection, "is_token_near_expiry", lambda *_args: True)
+        monkeypatch.setattr(connection, "is_token_near_expiry", lambda *_args, **_kw: True)
         await real_sleep(0)
 
     monkeypatch.setattr(connection, "_ws_connect", connect)
@@ -955,7 +955,7 @@ async def test_proactive_waiter_closes_socket_after_rest_adopts_refresh(stores, 
         await asyncio.wait_for(ready.wait(), timeout=2)
         tasks.append(asyncio.create_task(conn.reactive_refresh()))
         await asyncio.wait_for(started.wait(), timeout=2)
-        monkeypatch.setattr(connection, "is_token_near_expiry", lambda *_args: True)
+        monkeypatch.setattr(connection, "is_token_near_expiry", lambda *_args, **_kw: True)
         tasks.append(asyncio.create_task(conn._maybe_proactive_refresh()))
         await real_sleep(0)
         release.set()
@@ -984,7 +984,7 @@ async def test_startup_refresh_deletion_waits_without_connecting(stores, monkeyp
     connect = AsyncMock(side_effect=AssertionError("revoked startup must not connect"))
     monkeypatch.setattr(conn, "_run_one_connection", connect)
     monkeypatch.setattr(connection, "_ws_connect", connect)
-    monkeypatch.setattr(connection, "is_token_near_expiry", lambda *_args: True)
+    monkeypatch.setattr(connection, "is_token_near_expiry", lambda *_args, **_kw: True)
     states, polls, refreshes = [], [], []
 
     async def state_changed(state):
@@ -1097,7 +1097,7 @@ async def test_unbounded_proactive_transient_retry_observes_deletion(stores, mon
     monkeypatch.setattr(conn, "_attempt_refresh", attempt)
     monkeypatch.setattr(conn, "_run_one_connection", connect)
     monkeypatch.setattr(conn._refresh_manager, "_sleep", retry_sleep)
-    monkeypatch.setattr(connection, "is_token_near_expiry", lambda *_args: conn._state == ConnectionState.READY)
+    monkeypatch.setattr(connection, "is_token_near_expiry", lambda *_args, **_kw: conn._state == ConnectionState.READY)
     monkeypatch.setattr(connection.asyncio, "sleep", poll)
     with pytest.raises(_PollReached):
         await conn._supervisor()

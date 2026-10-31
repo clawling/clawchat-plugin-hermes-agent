@@ -46,7 +46,8 @@ server-controlled.
 - **Unauthenticated** — send **no** `Authorization` header; the refresh token in the body is the credential.
 - **Required header:** `X-Device-Id` — must equal the device id baked into the session at connect time (the backend rejects any mismatch against the session's device id). ≤128 bytes.
 - **Body:** `{ "refresh_token": "<64-char hex>" }`.
-- **Normally returns HTTP 200.** Hermes classifies both the HTTP status and the integer envelope `code`:
+- **Normally returns HTTP 200.** Hermes classifies both the HTTP status and the integer envelope `code` (finite integral JSON numbers such as `10003.0` are
+normalized; booleans and strings are rejected):
 
 | HTTP status / integer `code` | meaning | class |
 |--------|---------|-------|
@@ -61,6 +62,8 @@ OpenClaw applies the same classification, including the non-200 `10003`
 row. The failure matrix in §B and logout rule in §C describe Hermes.
 
 - The refreshed access token preserves the agent identity (`aid`/`oid`); scopes are read live server-side.
+- Rotated tokens must be non-blank strings; malformed success bodies are transient.
+- Refresh diagnostic messages redact credentials before errors or logs, normalize whitespace and cap at 200 characters. URL userinfo (`scheme://user:pass@host`) is stripped to `scheme://host`, and a credential-bearing URL that cannot be parsed becomes `[redacted-url]`; the match is conservative, so text glued to such a URL up to a later `@` may be dropped with it. The connection error text uses the same URL rule.
 - Token lifetimes are determined by the server; use JWT `exp` for access expiry.
 
 ### ⚠️ Rotation hazard (drives persistence ordering)
@@ -112,7 +115,8 @@ and, for OpenClaw, per transport:
 ### A.0 Knowing expiry — decode the JWT `exp` locally
 
 Decode the access token's `exp` claim (base64url-decode the payload segment, read `exp` as
-epoch seconds). **Client fallback assumption** if unparseable / no `exp`:
+epoch seconds). Both `exp` and `iat` accept only finite JSON numbers, preserving
+fractional values; booleans and numeric strings are rejected. **Client fallback assumption** if unparseable / no `exp`:
 `activated_at + 24h` from the
 `activations` row (`access_token_exp` in `token_refresh.py`). This is a client
 fallback, **not a server TTL**. Without either a usable `exp` or activation
@@ -120,14 +124,14 @@ timestamp, Hermes cannot schedule proactive refresh. Do **not** persist a
 separate expiry column — derive it on each load.
 
 - OpenClaw: `decodeJwtExp(token): number | null`.
-- Hermes: `_jwt_exp(token) -> int | None` next to `_jwt_claim` in `config.py`.
+- Hermes: `_jwt_exp(token) -> int | float | None` next to `_jwt_claim` in `config.py`.
 
 ### A.1 Proactive refresh
 
 Compute `refresh_at = exp - max(30min, min(2h, 0.25 * (exp - iat)))`.
-Hermes runtime checks `now >= refresh_at` without jitter through
-`is_token_near_expiry`; the jittered `refresh_at_epoch` helper is not used by the
-connection. If `iat` is absent or not earlier than `exp`, the quarter-life term
+Hermes adds `±5min` jitter via `refresh_at_epoch`, drawing once per access token
+per connection and caching that jitter until the token changes. Runtime checks
+`now >= refresh_at`. If `iat` is absent or not earlier than `exp`, the quarter-life term
 uses the client's 24h fallback constant, not a server TTL.
 For example, a hypothetical 24h token reaches the margin about 2h before expiry.
 OpenClaw adds `±5min` scheduling jitter.
@@ -323,7 +327,8 @@ keeps waiting until local reclaim or successful activation clears the state.
 Two retryable closes carry timing the client must honour: **`4001`** (takeover) → raise the reconnect
 floor per §3.6 of [the protocol guide](./client-integration.md#36-duplicate-session-policy);
 **`4002`** (`duplicate_session_throttled`, takeover refusal or handshake limiting)
-→ wait the JSON close reason's server-determined `retry_after_ms`.
+→ wait the JSON close reason's finite positive numeric `retry_after_ms` (not a
+boolean); invalid values use the takeover floor, valid values are capped at the ceiling.
 Both clients read the close code: openclaw in `ws-client.ts`'s
 `handleClose`, hermes in its supervisor loop in `connection.py`; each keeps its own
 takeover streak and applies these floors.

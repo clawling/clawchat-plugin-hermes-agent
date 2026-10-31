@@ -151,9 +151,10 @@ async def test_host_internal_turn_uses_existing_owner_dm_attribution(host, monke
         message_id: str = ''
 
     # Overlapping turns left registered by other tests would merge into this one.
-    for name in ('_snapshots', '_bindings', '_active', '_session_nonces', '_released_turns'):
+    for name in ('_snapshots', '_bindings', '_execution_nonces', '_context_execution', '_active', '_session_nonces',
+                 '_released_turns', '_unverified_inputs'):
         monkeypatch.setattr(turns, name, {})
-    monkeypatch.setattr(turns, '_unverified_inputs', set())
+    monkeypatch.setattr(turns, '_consumed_batches', set())
     a = ClawChatAdapter({})
     a._clawchat_config = replace(a._clawchat_config, user_id='usr_agent', owner_user_id=OWNER)
     a._owner_direct_chat_id = lambda: 'cnv_owner'

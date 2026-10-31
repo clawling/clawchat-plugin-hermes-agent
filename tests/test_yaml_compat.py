@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from clawchat_gateway import _yaml
+from hermes_source import require_hermes_source
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_TEXT = "platforms:\n  clawchat:\n    extra:\n      user_id: usr_yaml\n      flag: y\n"
@@ -138,13 +139,7 @@ def test_hermes_yaml_delegation_and_success_cache(yaml_env):
 
 def test_real_hermes_yaml_policy(yaml_env):
     pytest.importorskip("ruamel.yaml")
-    candidates = []
-    if source_dir := os.environ.get("HERMES_SOURCE_DIR"):
-        candidates.append(Path(source_dir) / "hermes_yaml.py")
-    candidates += [REPO_ROOT / "tmp" / name / "hermes_yaml.py" for name in ("hermes", "hermes-agent")]
-    source = next((path for path in candidates if path.is_file()), None)
-    if source is None:
-        pytest.skip("Hermes source with hermes_yaml.py is unavailable")
+    source = require_hermes_source("hermes_yaml.py") / "hermes_yaml.py"
     host = _load_module(source, "_clawchat_test_hermes_yaml")
     yaml_error = importlib.import_module("ruamel.yaml.error").YAMLError
     yaml_env.setitem(sys.modules, "hermes_yaml", host)

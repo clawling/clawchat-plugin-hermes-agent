@@ -75,7 +75,7 @@ def build_request_card(request, *, lang, ask_available, source_name=None):
         raise ValueError('Missing request profile')
     cap = TOOL_CAPABILITIES[request['capability_id']]
     sep = ': ' if lang == 'en' else '：'
-    lines = [copy['title'].format(code=code), copy['person'] + sep + name + ' (' + sanitize_request_text(request['requester_user_id'], 120) + ')',
+    lines = [copy['title'].format(code=code), copy['person'] + sep + name,
              copy['source'] + sep + source, copy['ability'] + sep + cap['names'][lang],
              copy['reason'] + sep + sanitize_request_text(request['reason']),
              copy['allow'] + ': `/clawchat-allow ' + code + '`']

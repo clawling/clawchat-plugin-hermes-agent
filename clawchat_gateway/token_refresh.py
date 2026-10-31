@@ -27,6 +27,7 @@ from clawchat_gateway.api_client import (
     RefreshSkipped,
     auth_refresh_with_retry,
     is_permanent_refresh_error,
+    redact_refresh_message,
 )
 from clawchat_gateway.config import _jwt_exp, _jwt_iat
 
@@ -55,7 +56,7 @@ class RefreshOutcome:
     error: str | None = None
 
 
-def proactive_margin_seconds(exp: int, iat: int | None) -> float:
+def proactive_margin_seconds(exp: int | float, iat: int | float | None) -> float:
     """§A.1 margin: max(30min, min(2h, 0.25 * (exp - iat)))."""
     if iat is not None and exp > iat:
         quarter = PROACTIVE_MARGIN_RATIO * (exp - iat)
@@ -68,7 +69,7 @@ def proactive_margin_seconds(exp: int, iat: int | None) -> float:
     )
 
 
-def access_token_exp(token: str, activated_at_ms: int | None) -> int | None:
+def access_token_exp(token: str, activated_at_ms: int | None) -> int | float | None:
     """Best-effort access-token expiry (epoch seconds).
 
     Decode the JWT ``exp``; fall back to ``activated_at + 24h`` (§A.0). Returns
@@ -82,15 +83,16 @@ def access_token_exp(token: str, activated_at_ms: int | None) -> int | None:
     return None
 
 
-def refresh_at_epoch(token: str, activated_at_ms: int | None) -> int | None:
+def refresh_at_epoch(token: str, activated_at_ms: int | None, *,
+                     jitter: Callable[[], float] | None = None) -> float | None:
     """Compute the proactive ``refresh_at`` epoch-seconds for a token (± jitter)."""
     exp = access_token_exp(token, activated_at_ms)
     if exp is None:
         return None
     iat = _jwt_iat(token)
     margin = proactive_margin_seconds(exp, iat)
-    jitter = random.uniform(-PROACTIVE_JITTER_SECONDS, PROACTIVE_JITTER_SECONDS)
-    return int(exp - margin + jitter)
+    offset = jitter() if jitter is not None else random.uniform(-PROACTIVE_JITTER_SECONDS, PROACTIVE_JITTER_SECONDS)
+    return exp - margin + offset
 
 
 def is_token_near_expiry(
@@ -98,17 +100,14 @@ def is_token_near_expiry(
     activated_at_ms: int | None,
     *,
     now: float | None = None,
+    jitter: float = 0.0,
 ) -> bool:
-    """True when ``now`` has reached/passed the proactive ``refresh_at`` (§A.1/§A.4)."""
+    """Whether the proactive threshold is due; other callers default to no jitter."""
     if not token:
         return False
-    exp = access_token_exp(token, activated_at_ms)
-    if exp is None:
-        return False
-    iat = _jwt_iat(token)
-    margin = proactive_margin_seconds(exp, iat)
+    refresh_at = refresh_at_epoch(token, activated_at_ms, jitter=lambda: jitter)
     current = now if now is not None else time.time()
-    return current >= (exp - margin)
+    return refresh_at is not None and current >= refresh_at
 
 
 # Callback signatures wired by the connection.
@@ -257,13 +256,11 @@ class RefreshManager:
         except RefreshSkipped as exc:
             return RefreshOutcome(status="skipped", error=str(exc))
         except ClawChatApiError as exc:
+            message = redact_refresh_message(exc.message, refresh_token, access_token)
+            logger.warning("clawchat token refresh failure kind=%s status=%s code=%s: %s",
+                           exc.kind, exc.status, exc.code, message)
             if is_permanent_refresh_error(exc):
                 # §B / §C: adopted permanent → latch + auto-logout (keep identity).
-                logger.warning(
-                    "clawchat token refresh permanent failure code=%s: %s",
-                    exc.code,
-                    exc,
-                )
                 try:
                     if self._persist_rejection is not None:
                         if await self._persist_rejection(refresh_token) is False:
@@ -271,16 +268,15 @@ class RefreshManager:
                 except Exception:  # noqa: BLE001
                     logger.warning("clawchat revoked-refresh marker persistence failed")
                 try:
-                    if await self._persist_logout(str(exc)) is False:
+                    if await self._persist_logout(message) is False:
                         return RefreshOutcome(status="skipped", error="permanent refresh discarded")
                 except Exception:  # noqa: BLE001
                     logger.warning("clawchat logout persistence failed", exc_info=True)
                 self._rejected_credentials = (access_token, refresh_token)
                 self._logged_out = True
-                return RefreshOutcome(status="permanent", error=str(exc))
+                return RefreshOutcome(status="permanent", error=message)
             # Retries were exhausted or stopped by the credential-source guard.
-            logger.warning("clawchat token refresh transient failure: %s", exc)
-            return RefreshOutcome(status="transient", error=str(exc))
+            return RefreshOutcome(status="transient", error=message)
 
         # §0 rotation hazard: persist the rotated pair durably BEFORE the caller
         # treats the refresh as complete / swaps the in-memory token.

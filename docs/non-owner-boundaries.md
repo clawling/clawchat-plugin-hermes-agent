@@ -36,11 +36,11 @@ targets retain the local-file and remote-address policy. Without a matching
 explicit rule, web search/extract and skills keep their existing access.
 Owner-side turns keep ordinary host access; plugin resource checks remain.
 
-The plugin's own synthetic-turn rules are unchanged: its one-time activation
-greeting keeps ordinary owner tools based on the stored pairing;
-contact/comment notifications, permission receipts, memory migration hints and
-sediment turns use defaults. Synthetic turns cannot manage grants. Management
-requires the verified real owner in that direct chat. See
+Locally attested plugin notifications are neutral to overlapping owner turns;
+their own turns use defaults, except the existing activation owner action. See
+[owner turns and overlapping input](#owner-turns-and-overlapping-input).
+Synthetic turns cannot manage grants; management requires the verified real owner
+in that direct chat. Host-origin rules are in
 [Spontaneous turns and origin inheritance](#spontaneous-turns-and-origin-inheritance).
 On old hosts without plugin hooks, plugin-generated turns that use defaults
 are refused entirely; all supported host versions provide hooks.
@@ -185,14 +185,13 @@ Exact-name resolution canonicalizes verified host aliases without rewriting stor
 
 The adapter freezes grants before dispatch and carries a nonce in the source
 message id. `pre_llm_call` binds it once to the actual session and turn; calls
-must match nonce, chat, session and turn, with no latest-session fallback.
+must match the bound execution nonce, chat, session and turn.
 Overlapping snapshots in one session intersect. Messages that could mix
 permissions with an executing granted non-owner turn wait for the next batch;
 the owner's direct chat admits approvals and control messages immediately.
-Plugin synthetic or unidentified input in that direct chat removes owner
-verification and intersects live grants with defaults until the session is
-idle; finishing one nonce alone cannot restore it. Trusted host-internal turns
-use the origin rules below and never gain grant-management verification.
+Local notifications preserve the owner's permissions; other inputs narrow the batch
+as described below. Trusted host-internal turns use the origin rules below and
+never gain grant-management verification.
 Read failures, expired grants and missing snapshots add no authority.
 Inner calls without execution IDs, such as `execute_code` RPC calls, use the
 snapshot already bound to `HERMES_SESSION_MESSAGE_ID`; an explicit deny on a
@@ -203,6 +202,46 @@ host's trusted `HERMES_SESSION_MESSAGE_ID` context names a turn with speakers;
 host-started and plugin synthetic turns get defaults without approve. Hosts
 that do not expose `HERMES_SESSION_MESSAGE_ID` to tools cannot attribute any
 turn, so group approve is unavailable there.
+
+### Owner turns and overlapping input
+
+Owner messages retain ordinary owner tools when overlapping a locally marked
+plugin notification: awareness, memory migration hints, activation bootstrap,
+permission-result receipts whose reason is a known server code (a free-form
+failure reason stays untrusted), and maintenance prompts in the owner's
+private chat. The marker exists only in this process; wire `synthetic` fields
+never establish trust. These notifications withdraw `owner_verified` from the
+batch, so grant management remains unavailable; the owner's ordinary permissions
+remain. Notification snapshots keep default grants, `owner_side=False` and
+`owner_verified=False`; only activation/owner actions retain legacy owner tools.
+Notifications neither restrict owner snapshots nor inherit their permissions.
+Approved orchestration retry receipts retain their separate retry semantics.
+Group maintenance prompts with unseen messages do not receive this marker.
+
+Moment comments, foreign or missing senders, wire synthetic input, guest grant
+wakes and unclassified internal input still narrow overlapping owner snapshots.
+Each snapshot retains whether it originally belonged to the owner and its first
+downgrade reason and trigger. A downgraded snapshot stays restricted until release.
+Each unverified input is associated with its own nonce; binding or releasing it
+clears its pending marker. New owner batches recover after all such inputs have
+been consumed; already preparing inputs retain their arrival restrictions.
+Inputs without a registered nonce require proven session idle.
+Queued follow-ups prefer the latest live unbound non-notification nonce in the
+same plugin session and chat; only when none exists do they choose a notification.
+Missing candidates fail closed. Each execution and nonce bind once.
+
+Downgrades emit one INFO line, without message text:
+`owner_downgrade reason=<unverified_input|revoke|overlap> trigger=<input kind>`;
+a notice withdrawing grant management logs `reason=management trigger=plugin_notice`. Blocked calls in a bound
+owner-origin downgraded snapshot tell the model:
+“Your owner started this turn, but other input arrived in the same chat, so it ran
+with guest-level tools. Ask them to send it again. Do not offer an access grant.”
+This changes refusal guidance only, never permission checks.
+
+Grant operations reject an explicit subject list containing the owner or this
+Agent as `validation` / `owner-or-self`, before profile lookup or pending writes.
+Revoke accepts old owner rows for cleanup. Guest requests reject both identities.
+Grant and request confirmation cards display resolved names without user IDs.
 
 With grants enabled, a bound non-owner turn can use `tool_search` and
 `tool_describe` only when the grants catalog filter is installed and the
@@ -223,7 +262,7 @@ unpacked by the host and the real inner tool still passes through the execution 
 ## Local attachments
 
 Replies and `clawchat_send_file` share the same local-file policy. A non-owner
-turn can send a local file into its current conversation when **every caller
+turn can send a local file to the chat it is answering in when **every caller
 has direct access to every Files tool** (`read_file`, `write_file`, `patch`,
 `search_files`). The ordinary selector priority and group intersection apply:
 `cap:files` with mode `ask` does not open attachments, and an exact-tool ask/deny exception
@@ -471,8 +510,8 @@ cannot use the four authorization tools. This depends on guest turns being
 confined to their own execution session by `cross-session` checks, unable to
 start a turn in the owner's chat. If the host adds a tool that can start turns
 in another session before the plugin's audited route inventory is updated,
-that premise breaks. The plugin's own synthetic-turn rules described above
-remain unchanged.
+that premise breaks. Plugin-generated inputs follow the local notification rules
+above.
 
 Host background review forks with a nonempty thread tool whitelist also use
 ordinary owner tools in the owner's direct-chat session, subject to the host's

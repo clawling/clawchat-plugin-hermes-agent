@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -42,6 +44,7 @@ from clawchat_gateway.api_client import (
     ClawChatApiClient,
     ClawChatApiError,
     agents_connect_with_retry,
+    strip_url_userinfo,
 )
 from clawchat_gateway.hermes_home import hermes_home
 from clawchat_gateway.config import _get_env
@@ -52,6 +55,8 @@ from clawchat_gateway.output_visibility import (
     runtime_status_messages_for_visibility,
 )
 from clawchat_gateway.restart import (
+    RestartPlan,
+    _hermes_cmd,
     plan_gateway_restart,
     restart_log_path,
     restart_next_steps,
@@ -60,6 +65,27 @@ from clawchat_gateway.restart import (
 from clawchat_gateway.storage import _active_profile_name, get_clawchat_store
 
 logger = logging.getLogger(__name__)
+
+_env_mode_warned = False
+_env_mode_lock = threading.Lock()
+
+
+def _warn_open_credentials(path: Path | str) -> None:
+    global _env_mode_warned
+    if os.name == "nt":
+        return
+    path = Path(path)
+    try:
+        if not path.stat().st_mode & 0o077:
+            return
+    except OSError:
+        return
+    with _env_mode_lock:
+        if not _env_mode_warned:
+            _env_mode_warned = True
+            logger.warning("clawchat credentials file is readable by group/others: %s; "
+                           "restrict access with chmod 600 %s", path, path)
+
 
 CLAWCHAT_GLOBAL_DISPLAY_DEFAULTS = {
     "busy_input_mode": "queue",
@@ -580,6 +606,7 @@ def persist_activation(
             }
         )
     env_path = _write_env_values(env_values)
+    _warn_open_credentials(env_path)
     _write_config(config_path, config)
     return {
         "config_path": str(config_path),
@@ -967,7 +994,7 @@ async def activate(
             "clawchat activation: stored user_id %s no longer exists on %s; "
             "retrying as a fresh pairing",
             existing_user_id,
-            base_url,
+            strip_url_userinfo(base_url),
         )
         # The replayed identity doesn't exist on this backend: this IS a
         # brand-new agent (rule 5), so it must get its own per-profile
@@ -1043,8 +1070,27 @@ async def activate_and_maybe_restart(
         code.strip(), base_url=base_url, new_account=new_account, repair=repair
     )
     payload["ok"] = True
-    if restart:
+    try:
         plan = plan_gateway_restart()
+    except Exception:  # noqa: BLE001 - the code is already spent; never hide success
+        if restart:
+            raise
+        logger.warning("clawchat restart plan detection failed", exc_info=True)
+        try:
+            profile = _active_profile_name()
+        except Exception:  # noqa: BLE001
+            profile = "default"
+        plan = RestartPlan("schedule", profile, hermes_home())
+    # A running multiplexer (Hermes 0.21.6+) builds a served profile's adapters
+    # once its config/.env change, so only the fallback command is reported.
+    payload["gateway_restart_required"] = plan.action == "schedule"
+    if plan.action != "no_gateway":
+        payload["owner_restart_command"] = (
+            "hermes -p default gateway restart"
+            if plan.action == "multiplexed"
+            else f"{_hermes_cmd(plan.profile)} gateway restart"
+        )
+    if restart:
         if plan.action != "schedule":
             # Scheduling would fail silently (multiplexer refuses a per-profile
             # restart) or start an unmanaged gateway (none installed); tell the

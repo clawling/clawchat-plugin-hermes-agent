@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from clawchat_gateway.config import ClawChatConfig
@@ -9,6 +9,7 @@ from clawchat_gateway.protocol import MENTION_ALL_USER_ID
 _INTERNAL_SYNTHETIC = object()
 _OWNER_ACTION = object()
 _ORCHESTRATE_RETRY = object()
+_PLUGIN_NOTIFICATION = object()
 
 
 @dataclass(frozen=True)
@@ -43,7 +44,18 @@ class InboundMessage:
     _orchestrate_retry: object | None = field(default=None, repr=False, compare=False)
     _owner_action_origin: object | None = field(default=None, repr=False, compare=False)
 
+    _plugin_notification_origin: object | None = field(default=None, repr=False, compare=False)
+
     _grant_request_origin: tuple[str, str, int] | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def is_plugin_notification(self) -> bool:
+        return (self.is_internal_synthetic and not self.grant_origin and not self.orchestrate_retry
+                and self._plugin_notification_origin is _PLUGIN_NOTIFICATION)
+
+    def as_plugin_notification(self) -> InboundMessage:
+        """Only local producers may attest that a notification contains no guest text."""
+        return replace(self, _plugin_notification_origin=_PLUGIN_NOTIFICATION)
 
     @property
     def orchestrate_retry(self) -> bool:
@@ -70,9 +82,10 @@ class InboundMessage:
         return self._synthetic_origin is _INTERNAL_SYNTHETIC
 
     @classmethod
-    def internal_synthetic(cls, *, owner_action: bool = False, orchestrate_retry: bool = False, grant_origin: tuple[str, str, int] | None = None, **kwargs: Any) -> InboundMessage:
+    def internal_synthetic(cls, *, owner_action: bool = False, plugin_notification: bool = False, orchestrate_retry: bool = False, grant_origin: tuple[str, str, int] | None = None, **kwargs: Any) -> InboundMessage:
         """Construct a plugin-owned event without granting trust to raw fields."""
         return cls(**kwargs, _synthetic_origin=_INTERNAL_SYNTHETIC,
+                   _plugin_notification_origin=_PLUGIN_NOTIFICATION if plugin_notification else None,
                    _owner_action_origin=_OWNER_ACTION if owner_action and not grant_origin else None,
                    _grant_request_origin=grant_origin,
                    _orchestrate_retry=_ORCHESTRATE_RETRY if orchestrate_retry else None)

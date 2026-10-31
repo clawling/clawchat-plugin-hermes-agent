@@ -257,6 +257,7 @@ def test_request_card_exact_copy_and_untrusted_text_neutralized(store, lang):
     assert REQUEST_COPY[lang]['reason'] in card and REQUEST_COPY[lang]['expiry'] in card
     assert '/clawchat-ask' not in card
     assert card.count('/clawchat-allow') == card.count('/clawchat-deny') == 1
+    assert request['requester_user_id'] not in card
     assert 'https:' not in card and '\u202e' not in card
     assert '／clawchat' in card and len(sanitize_request_text(request['reason'])) <= 60
     assert len(sanitize_request_text('😀' * 61)) == 60
