@@ -103,6 +103,15 @@ def test_refresh_message_strips_url_userinfo(userinfo):
     assert 'placeholder-user' not in text and 'placeholder-pass' not in text
 
 
+
+@pytest.mark.parametrize('userinfo', [
+    "placeholder-user:place'holder", 'placeholder-user:place"holder',
+])
+def test_refresh_message_strips_url_userinfo_containing_quotes(userinfo):
+    text = api.redact_refresh_message(f'failed https://{userinfo}@example.com/v1/auth/refresh')  # redact-allow:email
+    assert text == 'failed https://example.com/v1/auth/refresh'
+    assert 'placeholder-user' not in text and 'holder' not in text
+
 @pytest.mark.parametrize('authority', [
     'u:p@example.com:99999x', 'u:p@example.com:99999', 'u:p@[example.com',  # redact-allow:email
 ])

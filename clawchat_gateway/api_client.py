@@ -101,7 +101,10 @@ class RefreshResult:
     refresh_token: str
 
 
-_URL_FRAGMENT = re.compile(r"""[A-Za-z][A-Za-z0-9+.-]*://[^\s"'<>`]*""")
+# Userinfo may itself contain quotes (urllib accepts them), so the optional
+# `...@` part only stops at whitespace and URL delimiters; the rest of the URL
+# still ends at quotes so quoted URLs keep their closing quote.
+_URL_FRAGMENT = re.compile(r"""[A-Za-z][A-Za-z0-9+.-]*://(?:[^\s/?#@<>`]*@)?[^\s"'<>`]*""")
 
 
 def strip_url_userinfo(text: str) -> str:
