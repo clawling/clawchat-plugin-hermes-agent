@@ -104,8 +104,13 @@ class RefreshResult:
 # Userinfo may itself contain quotes, `<`, `>`, backticks or extra `@` (urllib
 # accepts them), so the optional userinfo part runs greedily to the last `@`
 # before whitespace or `/?#`; the rest of the URL still ends at quotes and
-# angle brackets so quoted URLs keep their closing delimiter.
-_URL_FRAGMENT = re.compile(r"""[A-Za-z][A-Za-z0-9+.-]*://(?:[^\s/?#]*@)?[^\s"'<>`]*""")
+# angle brackets so quoted URLs keep their closing delimiter. Redaction is
+# conservative: text glued to a credentialed URL up to a later `@` may be
+# dropped with it. The scheme is anchored and both it and the userinfo are
+# length-capped so server-supplied text is scanned in linear time.
+_URL_FRAGMENT = re.compile(
+    r"""(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]{0,31}://(?:[^\s/?#]{0,1024}@)?[^\s"'<>`]*"""
+)
 
 
 def strip_url_userinfo(text: str) -> str:

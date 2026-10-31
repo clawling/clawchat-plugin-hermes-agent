@@ -2,6 +2,7 @@
 import base64
 import io
 import json
+import time
 import traceback
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -113,6 +114,16 @@ def test_refresh_message_strips_url_userinfo_containing_delimiters(userinfo):
     text = api.redact_refresh_message(f'failed https://{userinfo}@example.com/v1/auth/refresh')  # redact-allow:email
     assert text == 'failed https://example.com/v1/auth/refresh'
     assert 'placeholder-user' not in text and 'holder' not in text
+
+
+@pytest.mark.parametrize('text', [
+    'a' * 100_000, 'a' * 100_000 + '://', "a://'" * 25_000, 'https://' + 'a' * 100_000,
+])
+def test_url_userinfo_stripping_is_linear_on_long_text(text):
+    started = time.perf_counter()
+    api.redact_refresh_message(text)
+    api.strip_url_userinfo(text)
+    assert time.perf_counter() - started < 2.0
 
 @pytest.mark.parametrize('authority', [
     'u:p@example.com:99999x', 'u:p@example.com:99999', 'u:p@[example.com',  # redact-allow:email
