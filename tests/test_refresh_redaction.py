@@ -90,3 +90,115 @@ def test_whitespace_length_and_known_short_secret():
 
 def test_short_padded_jwt_is_redacted():
     assert api.redact_refresh_message('rejected eyJh.YQ==.Yg==') == 'rejected ***'
+
+
+@pytest.mark.parametrize('userinfo', [
+    'placeholder-user:placeholder-pass', 'u:p', 'placeholder-user:p%40ss',
+])
+def test_refresh_message_strips_url_userinfo(userinfo):
+    message = f'<urlopen error opening https://{userinfo}@example.com/v1/auth/refresh>'  # redact-allow:email
+    text = api.redact_refresh_message(message)
+    assert text == '<urlopen error opening https://example.com/v1/auth/refresh>'
+    assert userinfo not in text
+    assert 'placeholder-user' not in text and 'placeholder-pass' not in text
+
+
+@pytest.mark.parametrize('authority', [
+    'u:p@example.com:99999x', 'u:p@example.com:99999', 'u:p@[example.com',  # redact-allow:email
+])
+def test_refresh_message_redacts_unparseable_url(authority):
+    text = api.redact_refresh_message(f'failed https://{authority}/')
+    assert text == 'failed [redacted-url]'
+    assert 'u:p' not in text
+
+
+def test_url_without_userinfo_is_unchanged():
+    text = 'HTTPS://Example.com:443/v1/auth/refresh?q=placeholder#placeholder'
+    assert api.strip_url_userinfo(text) == text
+    short = 'https://example.com/v1/auth/refresh'
+    assert api.redact_refresh_message(short) == short
+    assert api.strip_url_userinfo('https://example.com/placeholder@placeholder') == (
+        'https://example.com/placeholder@placeholder')
+
+
+@pytest.mark.parametrize('delimiter', [' ', '\n', '"', "'", '<', '>', '`'])
+def test_url_userinfo_stripping_preserves_delimiters_and_url_parts(delimiter):
+    text = f'https://u:p@example.com:8443/path?q=placeholder#placeholder{delimiter}suffix'  # redact-allow:email
+    assert api.strip_url_userinfo(text) == (
+        f'https://example.com:8443/path?q=placeholder#placeholder{delimiter}suffix')
+
+
+def test_url_userinfo_is_removed_before_secret_replacement_and_truncation():
+    text = api.redact_refresh_message(
+        ' https://placeholder-user:placeholder-pass@example.com/\n' + 'word ' * 100,  # redact-allow:email
+        'https://',
+    )
+    assert text.startswith('***example.com/ word ')
+    assert len(text) == 200 and '\n' not in text
+    assert 'placeholder-user' not in text and 'placeholder-pass' not in text
+
+
+async def test_url_transport_error_is_redacted_in_exception_outcome_and_log(monkeypatch, caplog):
+    http = api.ClawChatApiClient(
+        base_url='https://placeholder-user:placeholder-pass@example.com',  # redact-allow:email
+        token=ACCESS, device_id='placeholder-device',
+    )
+
+    def fail(request, **_kwargs):
+        raise URLError(f'opening {request.full_url}')
+
+    monkeypatch.setattr(api, 'urlopen', fail)
+    with pytest.raises(api.ClawChatApiError) as error:
+        http._auth_refresh_sync(REFRESH, 'placeholder-device')
+    http.auth_refresh = AsyncMock(side_effect=error.value)
+    manager = RefreshManager(
+        build_client=lambda: http, persist_tokens=AsyncMock(), persist_logout=AsyncMock(),
+        device_id_provider=lambda: 'placeholder-device', max_transient_retries=0,
+    )
+    result = await manager.refresh(access_token=ACCESS, refresh_token=REFRESH)
+    assert result.status == 'transient'
+    for output in (str(error.value), result.error, caplog.text):
+        assert 'example.com/v1/auth/refresh' in output
+        assert 'placeholder-user' not in output
+        assert 'placeholder-pass' not in output
+
+
+@pytest.mark.parametrize('token', ['', ACCESS])
+def test_connection_diagnostic_strips_url_userinfo(token):
+    from clawchat_gateway.connection import ClawChatConnection
+
+    connection = object.__new__(ClawChatConnection)
+    connection._cfg = SimpleNamespace(token=token)
+    text = connection._sanitize_secret_text(
+        f'https://placeholder-user:placeholder-pass@example.com/ {ACCESS}')  # redact-allow:email
+    assert 'https://example.com/' in text
+    assert 'placeholder-user' not in text and 'placeholder-pass' not in text
+    assert (ACCESS not in text) == bool(token)
+    assert connection._sanitize_secret_text(None) is None
+
+
+async def test_activation_stale_user_warning_strips_url_userinfo(monkeypatch, caplog):
+    from clawchat_gateway import activate as activation
+
+    monkeypatch.setattr(activation, '_load_config', lambda: (None, {}))
+    monkeypatch.setattr(activation, '_read_existing_user_id',
+                        lambda *_args, **_kwargs: 'placeholder-stale-identity')
+    monkeypatch.setattr(activation, '_resolve_activation_device_id',
+                        lambda **_kwargs: 'placeholder-device')
+    monkeypatch.setattr(activation, '_identity_is_this_profiles_own', lambda _value: True)
+    monkeypatch.setattr(activation, 'get_device_id', lambda: 'placeholder-device')
+    monkeypatch.setattr(activation, 'onboarding_context', lambda: {})
+    monkeypatch.setattr(api.ClawChatApiClient, 'agents_connect_check', AsyncMock(return_value=None))
+    stop = api.ClawChatApiError('validation', 'placeholder-stop')
+    connect = AsyncMock(side_effect=[
+        api.ClawChatApiError('api', 'placeholder-missing', code=api.AGENT_NOT_FOUND_CODE), stop,
+    ])
+    monkeypatch.setattr(activation, 'agents_connect_with_retry', connect)
+    with pytest.raises(api.ClawChatApiError) as error:
+        await activation.activate(
+            'placeholder-code', repair=True,
+            base_url='https://placeholder-user:placeholder-pass@example.com',  # redact-allow:email
+        )
+    assert error.value is stop and connect.await_count == 2
+    assert 'no longer exists on https://example.com' in caplog.text
+    assert 'placeholder-user' not in caplog.text and 'placeholder-pass' not in caplog.text

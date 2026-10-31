@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from clawchat_gateway import __version__
@@ -101,9 +101,37 @@ class RefreshResult:
     refresh_token: str
 
 
+_URL_FRAGMENT = re.compile(r"""[A-Za-z][A-Za-z0-9+.-]*://[^\s"'<>`]*""")
+
+
+def strip_url_userinfo(text: str) -> str:
+    """Remove URL credentials from display text; redact unparseable URLs."""
+    def sanitize(match: re.Match[str]) -> str:
+        url = match.group(0)
+        authority = re.split(r"[/?#]", url.split("://", 1)[1], maxsplit=1)[0]
+        if "@" not in authority:
+            return url
+        try:
+            parsed = urlsplit(url)
+            if parsed.username is None and parsed.password is None:
+                return url
+            hostname = parsed.hostname
+            port = parsed.port
+            if not hostname:
+                return "[redacted-url]"
+            netloc = f"[{hostname}]" if ":" in hostname else hostname
+            if port is not None:
+                netloc = f"{netloc}:{port}"
+            return urlunsplit(parsed._replace(netloc=netloc))
+        except ValueError:
+            return "[redacted-url]"
+
+    return _URL_FRAGMENT.sub(sanitize, text)
+
+
 def redact_refresh_message(value: object, *secrets: str) -> str:
     """Sanitize refresh diagnostics at their first display-text boundary."""
-    text = str(value or "")
+    text = strip_url_userinfo(str(value or ""))
     for secret in sorted((s for s in secrets if s), key=len, reverse=True):
         text = text.replace(secret, "***")
     text = re.sub(r"eyJ[A-Za-z0-9_=-]*\.[A-Za-z0-9_=-]+\.[A-Za-z0-9_=-]+", "***", text)
