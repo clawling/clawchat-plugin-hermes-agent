@@ -245,6 +245,8 @@ tmp
 tests/*
 # atomic_file pins sync ordering, private permissions and rollback-safe publication.
 !tests/test_atomic_file.py
+# state_lock serializes state mutations across threads and processes.
+!tests/test_state_lock.py
 # state_write_gate requires every production write call to have a counted classification.
 !tests/test_state_write_gate.py
 # check_state_writes is the gate itself (`python tests/check_state_writes.py`).

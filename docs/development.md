@@ -84,6 +84,12 @@ permission bits by default and creates new files with private permissions.
 Create-only seed publication and directory installation retain their specialized
 publish steps and use the shared directory-sync helper.
 
+Memory, managed skill manifest/publication, and plugin `.env` read-modify-write
+operations hold `state_lock.state_file_lock` for the complete mutation.
+Locks are reentrant within a thread and serialize cooperating threads and processes;
+timeouts or unavailable locking fail closed by raising `StateLockError` before mutation.
+Hermes' own `.env` writers do not acquire this plugin lock and remain outside its protection.
+
 `tests/check_state_writes.py` scans production filesystem write calls.
 `tests/test_state_write_gate.py` runs this gate. New writes either use the atomic
 helper or have a counted `ALLOWLIST` entry with a B/C classification and a

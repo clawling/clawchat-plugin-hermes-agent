@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from clawchat_gateway import atomic_file
+from clawchat_gateway.state_lock import state_file_lock
 from clawchat_gateway.plugin_prompts import (
     default_group_bio_prompt,
     default_owner_behavior_prompt,
@@ -374,10 +375,11 @@ def search_clawchat_memory(
 
 def delete_clawchat_memory_file(root: str | Path, target_type: str, target_id: str) -> None:
     path = ensure_clawchat_memory_target_safe(root, target_type, target_id)
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        return
+    with state_file_lock(path):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return
 
 
 def _append_body(existing_body: str, content: str) -> str:
@@ -442,23 +444,24 @@ def write_clawchat_memory_body(
     was already there nothing is written.
     """
     path = ensure_clawchat_memory_target_safe(root, target_type, target_id)
-    content = _normalize_line_endings(content)
-    existing = _normalize_line_endings(_read_existing_content(path))
-    skipped = 0
-    if mode == "append":
-        if not content:
-            raise ValueError("append content must be non-empty")
-        existing_body = _parse_clawchat_memory_content(existing)["body"]
-        content, skipped = _drop_duplicate_paragraphs(existing_body, content)
-        if not content:
-            return {"appended": False, "skipped_duplicate_paragraphs": skipped}
-        body = _append_body(existing_body, content)
-    elif mode == "replace":
-        body = content
-    else:
-        raise ValueError("mode must be 'append' or 'replace'")
-    _atomic_write(path, _replace_body(existing, body))
-    return {"appended": mode == "append", "skipped_duplicate_paragraphs": skipped}
+    with state_file_lock(path):
+        content = _normalize_line_endings(content)
+        existing = _normalize_line_endings(_read_existing_content(path))
+        skipped = 0
+        if mode == "append":
+            if not content:
+                raise ValueError("append content must be non-empty")
+            existing_body = _parse_clawchat_memory_content(existing)["body"]
+            content, skipped = _drop_duplicate_paragraphs(existing_body, content)
+            if not content:
+                return {"appended": False, "skipped_duplicate_paragraphs": skipped}
+            body = _append_body(existing_body, content)
+        elif mode == "replace":
+            body = content
+        else:
+            raise ValueError("mode must be 'append' or 'replace'")
+        _atomic_write(path, _replace_body(existing, body))
+        return {"appended": mode == "append", "skipped_duplicate_paragraphs": skipped}
 
 
 def edit_clawchat_memory_body(
@@ -472,14 +475,15 @@ def edit_clawchat_memory_body(
         raise ValueError("old_text must be non-empty")
 
     path = ensure_clawchat_memory_target_safe(root, target_type, target_id)
-    existing = _normalize_line_endings(_read_existing_content(path))
-    parsed = _parse_clawchat_memory_content(existing)
-    body = parsed["body"]
-    old_text = _normalize_line_endings(old_text)
-    new_text = _normalize_line_endings(new_text)
-    if body.count(old_text) != 1:
-        raise ValueError("old_text must match exactly one body occurrence")
-    _atomic_write(path, _replace_body(existing, body.replace(old_text, new_text, 1)))
+    with state_file_lock(path):
+        existing = _normalize_line_endings(_read_existing_content(path))
+        parsed = _parse_clawchat_memory_content(existing)
+        body = parsed["body"]
+        old_text = _normalize_line_endings(old_text)
+        new_text = _normalize_line_endings(new_text)
+        if body.count(old_text) != 1:
+            raise ValueError("old_text must match exactly one body occurrence")
+        _atomic_write(path, _replace_body(existing, body.replace(old_text, new_text, 1)))
 
 
 def write_clawchat_metadata(
@@ -489,8 +493,9 @@ def write_clawchat_metadata(
     metadata: dict[str, str],
 ) -> None:
     path = ensure_clawchat_memory_target_safe(root, target_type, target_id)
-    exists = path.exists()
-    existing = _normalize_line_endings(_read_existing_content(path))
-    filtered_metadata = _filter_metadata_for_target(target_type, metadata)
-    filtered_metadata = _metadata_with_initial_defaults(target_type, exists, filtered_metadata)
-    _atomic_write(path, _replace_metadata_block(existing, filtered_metadata))
+    with state_file_lock(path):
+        exists = path.exists()
+        existing = _normalize_line_endings(_read_existing_content(path))
+        filtered_metadata = _filter_metadata_for_target(target_type, metadata)
+        filtered_metadata = _metadata_with_initial_defaults(target_type, exists, filtered_metadata)
+        _atomic_write(path, _replace_metadata_block(existing, filtered_metadata))

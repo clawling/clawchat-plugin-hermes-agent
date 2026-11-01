@@ -134,12 +134,16 @@ def _write_config(_config_path: Path, config: dict[str, Any]) -> None:
 
 
 def _write_env_values(values: dict[str, str | None]) -> Path:
-    for key, value in values.items():
-        if value is None:
-            remove_env_value(key)
-        else:
-            save_env_value(key, str(value))
-    return Path(get_env_path())
+    from clawchat_gateway.state_lock import state_file_lock
+
+    env_path = Path(get_env_path())
+    with state_file_lock(env_path):
+        for key, value in values.items():
+            if value is None:
+                remove_env_value(key)
+            else:
+                save_env_value(key, str(value))
+        return env_path
 
 
 def _read_existing_user_id(config: dict[str, Any], *, base_url: str = "") -> str:
@@ -837,19 +841,29 @@ def _persisted_env_credentials_match(
 def _clear_persisted_env_credentials(
     *, expected_access_token: str | None = None, expected_refresh_token: str | None = None,
 ) -> bool:
-    if expected_access_token is not None or expected_refresh_token is not None:
-        if _persisted_env_credentials_match(expected_access_token, expected_refresh_token) is not True:
-            return False
+    from clawchat_gateway.state_lock import StateLockError, state_file_lock
+
     try:
-        cleared = bool(_write_env_values({
-            "CLAWCHAT_TOKEN": "", "CLAWCHAT_REFRESH_TOKEN": "",
-        }))
-        if not cleared:
-            logger.warning("clawchat logout .env clear returned false")
-        return cleared
+        # Compare and clear under one lock so a concurrent re-pair that just
+        # stored new credentials is never wiped by a stale logout.
+        with state_file_lock(Path(get_env_path())):
+            if expected_access_token is not None or expected_refresh_token is not None:
+                if _persisted_env_credentials_match(
+                    expected_access_token, expected_refresh_token,
+                ) is not True:
+                    return False
+            cleared = bool(_write_env_values({
+                "CLAWCHAT_TOKEN": "", "CLAWCHAT_REFRESH_TOKEN": "",
+            }))
+    except StateLockError as exc:
+        logger.warning("clawchat logout .env clear skipped: %s", exc)
+        return False
     except Exception:  # noqa: BLE001
         logger.warning("clawchat logout .env clear failed")
         return False
+    if not cleared:
+        logger.warning("clawchat logout .env clear returned false")
+    return cleared
 
 
 def clear_persisted_credentials(
