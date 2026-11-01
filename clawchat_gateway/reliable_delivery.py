@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+import time
 from typing import Any, Callable
 
 from clawchat_gateway.protocol import encode_frame
@@ -16,6 +18,16 @@ ACK_FLUSH_TIMEOUT_SECONDS = 1.0
 RECEIPT_RETRY_SECONDS = 30.0
 RECEIPT_RECOVERY_TIMEOUT_SECONDS = 10.0
 INBOUND_RETRYABLE = object()
+_last_write_order = 0
+_write_order_lock = threading.Lock()
+
+
+def next_write_order() -> int:
+    """Order receipt attempts across all connection instances and owner loops."""
+    global _last_write_order
+    with _write_order_lock:
+        _last_write_order = max(time.time_ns(), _last_write_order + 1)
+        return _last_write_order
 
 
 class DseqAckTracker:

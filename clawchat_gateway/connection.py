@@ -2665,7 +2665,8 @@ class ClawChatConnection:
                         await tracker.flush_now()
                 else:
                     receipt = self._receipt_identity(frame, tracker.epoch, dseq)
-                    written = await self._upsert_inbound_receipt(frame, receipt)
+                    write_order = reliable_delivery.next_write_order()
+                    written = await self._upsert_inbound_receipt(frame, receipt, write_order)
                     if not tracker.current() or self._ws is not ws or self._stopping:
                         return
                     if written:
@@ -2749,13 +2750,15 @@ class ClawChatConnection:
         return {"kind": kind, "key": key if isinstance(key, str) and key else fallback,
                 "dseq": dseq, "epoch": epoch}
 
-    async def _upsert_inbound_receipt(self, frame: dict[str, Any], receipt: dict[str, Any]) -> bool:
+    async def _upsert_inbound_receipt(
+        self, frame: dict[str, Any], receipt: dict[str, Any], write_order: int,
+    ) -> bool:
         if self._store is None:
             return False
         try:
             return await asyncio.to_thread(
                 self._store.upsert_inbound_receipt, account_id=self._account_id,
-                event=str(frame.get("event") or ""), raw=frame, **receipt,
+                event=str(frame.get("event") or ""), raw=frame, write_order=write_order, **receipt,
             ) is True
         except Exception:
             logger.error("clawchat inbound receipt upsert raised")
@@ -2784,7 +2787,8 @@ class ClawChatConnection:
         try:
             if url_has_userinfo(self._cfg.base_url) or url_has_userinfo(self._cfg.websocket_url):
                 return DIAGNOSTIC_WITHHELD
-            return redact_refresh_message(error, self._cfg.token, self._cfg.refresh_token)
+            text = redact_display_text(error, self._cfg.token, self._cfg.refresh_token)
+            return redact_refresh_message(text)
         except Exception:  # noqa: BLE001 - fail closed
             return DIAGNOSTIC_REDACTION_FAILED
 

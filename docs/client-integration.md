@@ -1424,7 +1424,8 @@ ordinary reconnect. `history.truncated` is excluded even if it carries dseq.
 Persist each raw frame in profile SQLite `inbound_receipts` before recording
 its dseq, including unknown events and `history.transit`. Message keys use
 `payload.message_id`, signals use `payload.event_id`, with epoch:dseq fallback;
-other events always use epoch:dseq. Upserts refresh raw content, preserving done.
+other events always use epoch:dseq. `provisional` (`payload.stream_merged:true`) never replaces an unflagged final.
+Only greater `write_order` (a process-wide monotonic timestamp) updates a receipt, preserving done; stale writes succeed unchanged.
 Failed writes log ERROR, increment `receipt_write_failures`, dispose the tracker
 and close the socket for ordinary reconnect/backoff; the failed frame is not acked or dispatched.
 
@@ -1435,9 +1436,8 @@ immediate flush or dispatch. Send `message.sync_ack` with `{dseq,epoch}` after
 graceful shutdown, and unconditionally resend a nonzero watermark every 30 s.
 Trackers belong to one socket generation and are disposed on teardown.
 
-Ack means durable receipt, not a completed turn. Lane completion marks done/failed
-for every kind (including recall); inline dispatch marks done/failed on return/error.
-Errors are redacted, at most 500 characters. Unavailable claims stay pending;
+Ack means durable receipt, not a completed turn; lanes (including recall) and inline handlers mark done/failed on completion/error.
+Errors use display redaction plus long-secret/JWT filtering, at most 500 characters. Unavailable claims stay pending;
 no turn starts, and one timer retries after 30 s, continuing after recovery failures until success.
 At every READY, even without a v2 grant, recover all pending kinds in received_at,
 rowid order, skipping only dispatched work; frames waiting at the gate remain recoverable, with no startup cutoff.
@@ -1447,7 +1447,7 @@ dseq persistence/acks precede it. Recovery failure or a 10 s timeout releases on
 Recovery never records dseq. A new instance can take over stop-cancelled work;
 message claims dedupe surviving old handlers but can suppress an already-claimed interrupted turn.
 In the recovery transaction, delete done/failed receipts older than eight days.
-Disabled profiles neither create nor access this table and send no sync acks.
+Disabled profiles neither create nor access this table and send no sync acks. [Drain pending receipts before rollback](configuration.md#reliable-delivery-rollback).
 
 ---
 

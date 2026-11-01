@@ -4,14 +4,18 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import secrets
 import sqlite3
 import threading
 import time
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+
+from conftest import FAKE_SECRETS
 
 from clawchat_gateway import connection, config as config_module, reliable_delivery as delivery
 from clawchat_gateway.config import ClawChatConfig
@@ -114,7 +118,8 @@ def has_receipts_table(store):
 def seed_pending(store, frame, *, epoch="old-epoch"):
     receipt = ClawChatConnection._receipt_identity(frame, epoch, frame.get("dseq", 1))
     assert store.upsert_inbound_receipt(
-        account_id="default", event=frame["event"], raw=frame, **receipt,
+        account_id="default", event=frame["event"], raw=frame,
+        write_order=delivery.next_write_order(), **receipt,
     )
 
 
@@ -372,6 +377,64 @@ async def test_poison_acked_and_failed_error_redacted(monkeypatch, store, event,
             assert secret not in row["error"] and secret not in caplog.text
 
 
+@pytest.mark.parametrize("event", ["message.send", "notify.signal"])
+async def test_receipt_errors_redact_display_credentials_and_unconfigured_long_secret(monkeypatch, store, event, caplog):
+    opaque = secrets.token_hex(20)
+    error = ("Authorization: Bearer abc123short https://h/x?access_token=shortq&sig=zz "
+             "password=hunter2 " + opaque)
+    handler = AsyncMock(side_effect=ValueError(error))
+    async with peer(monkeypatch, store, on_message=handler, on_signal=handler) as h:
+        h.conn._cfg = replace(h.conn.config, token=FAKE_SECRETS["access"],
+                              refresh_token=FAKE_SECRETS["refresh"])
+        frame = message()
+        if event == "notify.signal":
+            frame = {"event": event, "dseq": 1,
+                     "payload": {"event_id": "test-signal", "type": "test.changed"}}
+        h.ws.feed(frame)
+        await until(lambda: bool(rows(store)) and rows(store)[0]["status"] == "failed")
+        await until(lambda: bool(h.ws.acks))
+        for secret in ("abc123short", "shortq", "hunter2", opaque):
+            assert secret not in rows(store)[0]["error"]
+            assert secret not in caplog.text
+        assert "raised" in caplog.text and "***" in rows(store)[0]["error"]
+
+
+@pytest.mark.parametrize("field", ["base_url", "websocket_url"])
+def test_receipt_error_with_userinfo_remains_withheld(monkeypatch, store, field):
+    cfg = ClawChatConfig(websocket_url="wss://example.invalid/ws")
+    cfg = replace(cfg, **{field: FAKE_SECRETS["userinfo_url"]})
+    conn = ClawChatConnection(cfg, on_message=AsyncMock())
+    assert conn._receipt_error_text(ValueError("placeholder-error-secret")) == connection.DIAGNOSTIC_WITHHELD
+
+
+def test_receipt_error_redaction_failure_remains_closed(monkeypatch, store):
+    conn = ClawChatConnection(ClawChatConfig(websocket_url="wss://example.invalid/ws"), on_message=AsyncMock())
+    def fail(*args):
+        raise ValueError("placeholder-redaction-secret")
+    monkeypatch.setattr(connection, "redact_display_text", fail)
+    assert conn._receipt_error_text(ValueError("placeholder-error-secret")) == connection.DIAGNOSTIC_REDACTION_FAILED
+
+
+@pytest.mark.parametrize("final_first", [False, True])
+async def test_provisional_merged_reply_never_replaces_final_and_both_are_acked(monkeypatch, store, final_first):
+    final = message(1 if final_first else 2, "test-merged-reply", text="final", event="message.reply")
+    provisional = message(2 if final_first else 1, "test-merged-reply", text="provisional", event="message.reply")
+    provisional["payload"]["stream_merged"] = True
+    async with peer(monkeypatch, store) as h:
+        first, second = (final, provisional) if final_first else (provisional, final)
+        h.ws.feed(first)
+        await until(lambda: h.conn._delivery_tracker.acked == 1 and not h.conn._inbound_lanes)
+        assert rows(store)[0]["provisional"] == (0 if final_first else 1)
+        h.ws.feed(second)
+        await until(lambda: bool(h.ws.acks) and h.ws.acks[-1]["payload"]["dseq"] == 2
+                    and not h.conn._inbound_lanes)
+        row = rows(store)[0]
+        assert json.loads(row["raw_json"]) == final
+        assert row["provisional"] == 0 and row["dseq"] == 2
+        assert row["status"] == "done"
+        assert h.ws.acks[-1]["payload"]["epoch"] == "test-epoch"
+
+
 async def test_replayed_message_upserts_copy_but_adapter_claims_once(monkeypatch, store):
     from clawchat_gateway.adapter import ClawChatAdapter
     adapter = ClawChatAdapter({})
@@ -397,7 +460,8 @@ async def test_ready_recovers_all_pending_kinds_and_ages_without_ack(monkeypatch
     now = int(time.time() * 1000)
     def insert(frame, kind, key):
         assert store.upsert_inbound_receipt(account_id="default", kind=kind, key=key,
-                                            dseq=1, epoch="old-epoch", event=frame["event"], raw=frame)
+                                            dseq=1, epoch="old-epoch", event=frame["event"], raw=frame,
+                                            write_order=delivery.next_write_order())
     insert(message(), "message", "test-message")
     signal = {"event": "notify.signal", "dseq": 2, "payload": {"event_id": "test-signal", "type": "test.changed"}}
     insert(signal, "signal", "test-signal")
@@ -856,6 +920,49 @@ async def test_old_receipt_completion_cannot_record_after_dispose(monkeypatch, s
         assert handler.await_count == 0 and rows(store)[0]["status"] == "pending"
 
 
+async def test_old_instance_blocked_write_cannot_replace_new_instance_finished_receipt(monkeypatch, store):
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    original = store.upsert_inbound_receipt
+    old_orders = []
+    def write(**kwargs):
+        if kwargs["epoch"] == "test-epoch":
+            old_orders.append(kwargs["write_order"])
+            entered.set()
+            assert release.wait(4)
+            result = original(**kwargs)
+            finished.set()
+            return result
+        return original(**kwargs)
+    monkeypatch.setattr(store, "upsert_inbound_receipt", write)
+    old_handler, new_handler = AsyncMock(), AsyncMock()
+    try:
+        async with peer(monkeypatch, store, on_message=old_handler, cleanup_workers=False) as old:
+            old.ws.feed(message(text="old connection"))
+            await until(entered.is_set)
+            old_tracker = old.conn._delivery_tracker
+            await old.conn.stop()
+            async with peer(monkeypatch, store, on_message=new_handler, cleanup_workers=False,
+                            hello={"ack_mode": "dseq", "ack_epoch": "new-epoch"}) as new:
+                new.ws.feed(message(text="new connection"))
+                new.ws.feed({"event": "replay.done", "dseq": 2, "payload": {"ack_epoch": "new-epoch"}})
+                await until(lambda: new_handler.await_count == 1 and not new.conn._inbound_lanes and bool(new.ws.acks))
+                snapshot = rows(store)[0]
+                assert snapshot["epoch"] == "new-epoch" and snapshot["dseq"] == 1
+                assert snapshot["write_order"] > old_orders[0] and snapshot["status"] == "done"
+                assert "new connection" in snapshot["raw_json"]
+                release.set()
+                await until(finished.is_set)
+                assert rows(store)[0] == snapshot
+                assert new.ws.acks[-1]["payload"] == {"dseq": 2, "epoch": "new-epoch"}
+                assert old_tracker.disposed and old_tracker.acked == 0
+                assert old_handler.await_count == 0 and not old.ws.acks
+    finally:
+        release.set()
+        shutdown = asyncio.create_task(asyncio.get_running_loop().shutdown_default_executor())
+        await until(shutdown.done)
+        await shutdown
+
+
 async def test_stop_waits_for_sync_ack_send_before_closing(monkeypatch, store):
     monkeypatch.setattr(delivery, "ACK_DEBOUNCE_SECONDS", 10)
     async with peer(monkeypatch, store) as h:
@@ -961,11 +1068,13 @@ async def test_missing_identity_falls_back_to_epoch_dseq(monkeypatch, store, eve
 
 def test_storage_preserves_done_upserts_pending_and_isolates_accounts(store):
     kwargs = dict(account_id="default", kind="message", key="test-message", dseq=1,
-                  epoch="test-epoch", event="message.send", raw=message())
+                  epoch="test-epoch", event="message.send", raw=message(),
+                  write_order=delivery.next_write_order())
     assert store.upsert_inbound_receipt(**kwargs) is True
     finish = {k: kwargs[k] for k in ("account_id", "kind", "key", "dseq", "epoch")}
     assert store.finish_inbound_receipt(**finish, error="failed") is True
-    kwargs.update(dseq=2, epoch="replay-epoch", raw=message(2, text="new"))
+    kwargs.update(dseq=2, epoch="replay-epoch", raw=message(2, text="new"),
+                  write_order=delivery.next_write_order())
     assert store.upsert_inbound_receipt(**kwargs) is True
     assert rows(store)[0]["status"] == "pending" and rows(store)[0]["error"] is None
     # Finishing an old generation cannot finish the refreshed pending row.
@@ -973,7 +1082,7 @@ def test_storage_preserves_done_upserts_pending_and_isolates_accounts(store):
     assert rows(store)[0]["status"] == "pending"
     finish.update(dseq=2, epoch="replay-epoch")
     assert store.finish_inbound_receipt(**finish) is True
-    kwargs.update(dseq=3, raw=message(3, text="latest"))
+    kwargs.update(dseq=3, raw=message(3, text="latest"), write_order=delivery.next_write_order())
     assert store.upsert_inbound_receipt(**kwargs) is True
     assert rows(store)[0]["status"] == "done"
     assert "latest" in rows(store)[0]["raw_json"]
@@ -987,5 +1096,32 @@ def test_storage_reports_real_failure_without_exception_text(monkeypatch, store,
         raise OSError("placeholder-storage-secret")
     monkeypatch.setattr(store, "_inbound_receipt_transaction", fail)
     assert store.upsert_inbound_receipt(account_id="default", kind="message", key="test-message",
-        dseq=1, epoch="test-epoch", event="message.send", raw=message()) is False
+        dseq=1, epoch="test-epoch", event="message.send", raw=message(),
+        write_order=delivery.next_write_order()) is False
     assert "placeholder-storage-secret" not in caplog.text
+
+
+@pytest.mark.parametrize("equal_order", [False, True])
+def test_stale_receipt_upsert_preserves_every_newer_column(store, equal_order):
+    old_order, new_order = delivery.next_write_order(), delivery.next_write_order()
+    newer = dict(account_id="default", kind="message", key="test-message", dseq=9,
+                 epoch="new-epoch", event="message.reply", raw=message(9, text="newer", event="message.reply"),
+                 write_order=new_order)
+    assert store.upsert_inbound_receipt(**newer) is True
+    finish = {k: newer[k] for k in ("account_id", "kind", "key", "dseq", "epoch")}
+    assert store.finish_inbound_receipt(**finish, error="test newer failure") is True
+    snapshot = rows(store)[0]
+    assert store.upsert_inbound_receipt(
+        account_id="default", kind="message", key="test-message", dseq=1, epoch="old-epoch",
+        event="message.send", raw=message(text="older"), write_order=new_order if equal_order else old_order,
+    ) is True
+    assert rows(store)[0] == snapshot
+
+
+def test_receipt_write_order_is_process_wide_monotonic_when_clock_moves_back(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    monkeypatch.setattr(delivery.time, "time_ns", lambda: 1)
+    start = delivery.next_write_order()
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        orders = list(pool.map(lambda _: delivery.next_write_order(), range(64)))
+    assert sorted(orders) == list(range(start + 1, start + 65))

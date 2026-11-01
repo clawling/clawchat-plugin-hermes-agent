@@ -44,8 +44,8 @@ Automatic refresh, permanent-failure markers, empty credential tombstones and ac
 
 `platforms.clawchat.extra.reliable_delivery_v2` is a YAML bool.
 Env overrides accept case-insensitive `true/false`, `1/0`, `yes/no`,
-`on/off`. Invalid values warn and disable it. Roll back: set `false`, disable env
-overrides, restart. Off: legacy, no receipts or sync acks.
+`on/off`. Invalid values warn and disable it. For rollback, [drain pending receipts first](#reliable-delivery-rollback).
+Off: legacy, no receipts or sync acks.
 Granted-v2 receipt-write failure closes without ack/dispatch, using normal reconnect/backoff.
 Each opt-in connection recovers pending even without a v2 grant, skipping dispatched work only.
 Gate waiters can recover. Old lane work precedes new business; controls bypass the gate.
@@ -53,6 +53,21 @@ Recovery failure/10 s timeout opens only the gate. Unavailable claims stay pendi
 recovery retries every 30 s through failures until success. Turns require a claim.
 Lane work (including recall) finishes done/failed; inline unknown/transit becomes done on return. See
 [delivery behavior](client-integration.md#hermes-optional-reliable_delivery_v2).
+
+### Reliable delivery rollback
+
+Treat `pending` receipts as already-acked work awaiting Hermes handoff or completion.
+Disabling v2 stops reading this table, so drain it before rollback:
+
+1. Stop the profile's gateway.
+2. Choose that profile's SQLite file from [Database location](#database-location) and count pending receipts:
+
+   ```sh
+   sqlite3 "<profile-clawchat-sqlite>" "SELECT count(*) FROM inbound_receipts WHERE status='pending'"
+   ```
+
+3. If the count is nonzero, start once with the switch still enabled. Wait for recovery to drain pending work (repeat the query until it returns `0`), then stop again.
+4. Set `reliable_delivery_v2: false`, remove or disable any enabling env override, and start the gateway.
 
 ### Device id durability (deployment requirement)
 

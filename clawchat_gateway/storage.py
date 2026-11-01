@@ -1531,6 +1531,7 @@ class ClawChatStore:
                     account_id TEXT NOT NULL, kind TEXT NOT NULL, key TEXT NOT NULL,
                     dseq INTEGER NOT NULL, epoch TEXT NOT NULL, event TEXT NOT NULL,
                     raw_json TEXT NOT NULL, status TEXT NOT NULL, error TEXT,
+                    provisional INTEGER NOT NULL DEFAULT 0, write_order INTEGER NOT NULL,
                     received_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
                     PRIMARY KEY (account_id, kind, key)
                 )
@@ -1546,22 +1547,30 @@ class ClawChatStore:
 
     def upsert_inbound_receipt(
         self, *, account_id: str, kind: str, key: str, dseq: int,
-        epoch: str, event: str, raw: dict[str, Any],
+        epoch: str, event: str, raw: dict[str, Any], write_order: int,
     ) -> bool:
+        payload = raw.get("payload")
+        provisional = int(isinstance(payload, dict) and payload.get("stream_merged") is True)
         def write(conn: sqlite3.Connection) -> None:
             now = _now_ms()
             conn.execute("""
                 INSERT INTO inbound_receipts
-                    (account_id, kind, key, dseq, epoch, event, raw_json,
+                    (account_id, kind, key, dseq, epoch, event, raw_json, provisional, write_order,
                      status, error, received_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, ?)
                 ON CONFLICT(account_id, kind, key) DO UPDATE SET
-                    raw_json = excluded.raw_json, dseq = excluded.dseq,
+                    raw_json = CASE WHEN inbound_receipts.provisional = 0 AND excluded.provisional = 1
+                                    THEN inbound_receipts.raw_json ELSE excluded.raw_json END,
+                    provisional = CASE WHEN inbound_receipts.provisional = 0 AND excluded.provisional = 1
+                                       THEN 0 ELSE excluded.provisional END,
+                    dseq = excluded.dseq,
                     epoch = excluded.epoch, event = excluded.event,
-                    updated_at = excluded.updated_at, error = NULL,
+                    write_order = excluded.write_order, updated_at = excluded.updated_at, error = NULL,
                     status = CASE WHEN inbound_receipts.status = 'done'
                                   THEN 'done' ELSE 'pending' END
-            """, (account_id, kind, key, dseq, epoch, event, json_dumps(raw), now, now))
+                WHERE excluded.write_order > inbound_receipts.write_order
+            """, (account_id, kind, key, dseq, epoch, event, json_dumps(raw),
+                  provisional, write_order, now, now))
         try:
             self._inbound_receipt_transaction(write)
             return True
