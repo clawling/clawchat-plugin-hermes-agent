@@ -78,7 +78,7 @@ from clawchat_gateway.inbound import (
     split_leading_mentions,
 )
 from clawchat_gateway.hermes_home import hermes_home
-from clawchat_gateway import memory_migration
+from clawchat_gateway import atomic_file, memory_migration
 from clawchat_gateway.liveware_cli import resolve_liveware_path, wait_liveware_cli_ready
 from clawchat_gateway.liveware_sample import LivewareSampleDeps, LivewareSampleSupervisor
 try:
@@ -3001,8 +3001,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                     scan.memory_person_entries,
                     scan.user_entries,
                 )
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.write_text(str(int(time.time())), encoding="utf-8")
+            atomic_file.atomic_write_text(marker, str(int(time.time())))
         except Exception:  # noqa: BLE001 - a hint, never a failure
             logger.warning("clawchat memory migration hint failed", exc_info=True)
 

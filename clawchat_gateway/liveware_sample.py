@@ -11,15 +11,20 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import shutil
+import stat
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from clawchat_gateway import atomic_file
+
 from . import skill_update as _skill_update
+from .api_client import redact_display_text
 from .liveware_cli import liveware_account_args, liveware_account_name
 from .owner_language import resolve_owner_language
 from .skill_update import DEFAULT_SKILLS_REF, OFFICIAL_SKILLS_BASE, Fetcher
@@ -186,11 +191,21 @@ def _fetch_sample_files(
         return list(pool.map(_one, manifest.files))
 
 
+def _write_synced(path: Path, data: bytes, mode: int | None = None) -> None:
+    with path.open("wb") as stream:
+        stream.write(data)
+        stream.flush()
+        if mode is not None and os.name != "nt":
+            os.chmod(path, mode)
+        os.fsync(stream.fileno())
+
+
 def download_liveware_sample(
     *, fetch: Fetcher, sample_root: Path, ref: str = DEFAULT_SKILLS_REF
 ) -> tuple[str, Path]:
     """Download + verify + atomically install the sample under sample_root/app.
 
+    Renames the old app before swapping in the new one; rolls back on swap failure.
     Preserves _USER_DATA_FILES from an existing install. Raises on any failure;
     never leaves a partially-written app/ dir behind.
 
@@ -207,6 +222,12 @@ def download_liveware_sample(
         _fetch_verified(fetch, livewares_manifest_url(ref))
     )
     app_dir = sample_root / "app"
+    old_dir = sample_root / ".app.old"
+    if not app_dir.exists() and old_dir.is_dir():
+        # A crash between the two swap renames left only the retained old app:
+        # restore it so its user data files are preserved by this install.
+        old_dir.replace(app_dir)
+        atomic_file.fsync_dir(sample_root)
     if _local_install_matches(app_dir, manifest):
         return manifest.version, app_dir
     tmp_dir = sample_root / ".app.tmp"
@@ -215,15 +236,25 @@ def download_liveware_sample(
     tmp_dir.mkdir(parents=True, exist_ok=True)
     try:
         for name, raw in _fetch_sample_files(fetch, manifest, ref):
-            (tmp_dir / name).write_bytes(raw)
+            _write_synced(tmp_dir / name, raw)
         # Preserve agent/user-owned data files from a previous install.
         for name in _USER_DATA_FILES:
             prev = app_dir / name
             if prev.exists():
-                shutil.copyfile(prev, tmp_dir / name)
-        if app_dir.exists():
-            shutil.rmtree(app_dir, ignore_errors=True)
-        tmp_dir.replace(app_dir)
+                _write_synced(tmp_dir / name, prev.read_bytes(), stat.S_IMODE(prev.stat().st_mode))
+        atomic_file.fsync_dir(tmp_dir)
+        had_app = app_dir.exists()
+        if had_app:
+            shutil.rmtree(old_dir, ignore_errors=True)
+            app_dir.replace(old_dir)
+        try:
+            tmp_dir.replace(app_dir)
+        except BaseException:
+            if had_app:
+                old_dir.replace(app_dir)
+            raise
+        atomic_file.fsync_dir(sample_root)
+        shutil.rmtree(old_dir, ignore_errors=True)
         return manifest.version, app_dir
     except Exception:
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -620,7 +651,7 @@ async def _communicate(proc, timeout: float, label: str):
 
 
 def _scrub(text: str, token: str) -> str:
-    return text.replace(token, "***") if token else text
+    return redact_display_text(text, token)
 
 
 async def liveware_login(*, liveware_path, token: str, exec: ExecFn | None = None,

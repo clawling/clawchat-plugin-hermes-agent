@@ -28,8 +28,8 @@ from clawchat_gateway import __version__
 from clawchat_gateway.api_client import (
     DIAGNOSTIC_REDACTION_FAILED,
     DIAGNOSTIC_WITHHELD,
+    redact_display_text,
     redact_refresh_message,
-    strip_url_userinfo,
     url_has_userinfo,
 )
 from clawchat_gateway.config import ClawChatConfig
@@ -2414,7 +2414,7 @@ class ClawChatConnection:
                 state=ConnectionState.CONNECTING.value,
                 action="connect",
                 fields=[
-                    ("url", self._cfg.websocket_url),
+                    ("url", redact_display_text(self._cfg.websocket_url, self._cfg.token)),
                     ("queue_size", len(self._send_queue)),
                 ],
             )
@@ -4000,7 +4000,7 @@ class ClawChatConnection:
             token = self._cfg.token
             if token:
                 text = text.replace(token, "***")
-            return strip_url_userinfo(text)
+            return redact_display_text(text)
         except Exception:  # noqa: BLE001 - fail closed
             return DIAGNOSTIC_REDACTION_FAILED
 
