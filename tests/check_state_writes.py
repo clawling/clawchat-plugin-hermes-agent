@@ -61,6 +61,8 @@ ALLOWLIST: list[tuple[str, str, str, int, str, str]] = [
      "C: per-message inbound media publication, consumed once"),
     ("clawchat_gateway/restart.py", "schedule_gateway_restart", "open", 1, "C",
      "C: child restart log, never read for decisions"),
+    ("clawchat_gateway/restart.py", "_restart_guard", "os.open", 1, "C",
+     "C: persistent restart mutex inode; only the kernel lock grants ownership"),
     ("clawchat_gateway/storage.py", "ClawChatStore._relocate_legacy_db", "src.replace", 1, "C",
      "C (G2): SQLite file migration, database writes governed by G2"),
 ]

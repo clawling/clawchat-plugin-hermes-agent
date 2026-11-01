@@ -249,11 +249,16 @@ For protocol-level checks (WebSocket handshake, ack flow), see
   [Confirm the target profile](#confirm-the-target-profile-before-every-install--activate).
 - **Activation said the restart was requested, but the agent never came
   online** — read `$HERMES_HOME/clawchat/gateway-restart.log`: it holds the
-  output of `hermes gateway restart` and a final `exit_code=<n>`. A non-zero
-  exit names the reason. No `exit_code` yet can mean it is waiting for open
-  sessions, including the agent's current turn. If no new `clawchat state -> ready`
-  line appears within a few minutes, relay the printed owner message: run the
-  printed restart command after the reply ends, in a terminal outside Hermes.
+  output of `hermes gateway restart` and `attempt=<n> exit_code=<n>` for every
+  attempt. It waits for current sessions to become idle, retrying non-zero exits
+  with backoff for up to 30 minutes. A newer restart request or a detected completed
+  restart stops older waiters. Missing or incomparable gateway identity stops
+  retries after the first attempt (`gateway identity unavailable; stopping`).
+  Token publication and the final check through command spawn share a file lock;
+  waiting for the command releases it. No exit code can mean an attempt is running
+  or the launcher stopped. If no new `clawchat state -> ready` line appears by
+  the deadline, the owner must run the printed restart command manually in a
+  terminal outside Hermes. See [Restart Or Reload](./activation.md#restart-or-reload).
 - **macOS shows multiple launchd gateway definitions** — match the running PID
   to its label before restarting; `launchctl kickstart` on another label may
   start an extra gateway. See [Restart Or Reload](./activation.md#restart-or-reload)
