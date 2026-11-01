@@ -20,6 +20,7 @@ from clawchat_gateway.tool_grants import (
 
 from clawchat_gateway.tool_capabilities import (
     GrantSelector, parse_grant_selector, normalize_grant_selectors, selector_string, plan_deny_removal,
+    TOOL_CAPABILITIES, canonical_tool_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -708,12 +709,18 @@ class ClawChatStore:
             payload = dict(grantees=[dict(id=request['requester_user_id'], name=request['requester_name'])],
                            tools=['cap:' + request['capability_id']], mode=mode)
             rows = self._write_grant_payload(conn, account_id, payload, now)
-            conn.execute('UPDATE tool_grant_pending SET consumed_at = ? WHERE account_id = ? AND code = ?', (now, account_id, code))
-            conn.execute('''UPDATE tool_grant_requests SET status = ?, decision_mode = ?, decided_by_user_id = ?,
-                decided_at = ?, updated_at = ?, wake_state = 'pending' WHERE account_id = ? AND request_id = ?''',
-                ({'direct': 'allowed', 'ask': 'asked', 'deny': 'denied'}[mode], mode, decided_by_user_id, now, now, account_id, pending[0]))
+            self._decide_request(conn, request, mode, decided_by_user_id, now)
             return dict(request=self._request_row(conn, account_id, pending[0]), rows=rows)
         return self._tool_grants_transaction(write)
+
+    @staticmethod
+    def _decide_request(conn, request, mode, decider, now):
+        conn.execute('UPDATE tool_grant_pending SET consumed_at = ? WHERE account_id = ? AND code = ?',
+                     (now, request['account_id'], request['code']))
+        conn.execute('''UPDATE tool_grant_requests SET status = ?, decision_mode = ?, decided_by_user_id = ?,
+            decided_at = ?, updated_at = ?, wake_state = 'pending' WHERE account_id = ? AND request_id = ?''',
+            ({'direct': 'allowed', 'ask': 'asked', 'deny': 'denied'}[mode], mode, decider, now, now,
+             request['account_id'], request['request_id']))
 
     def claim_wake(self, *, account_id, wake_key, now=None):
         now = _now_ms() if now is None else now
@@ -830,12 +837,20 @@ class ClawChatStore:
     def confirm_pending_grant(
         self, *, account_id: str, code: str, now: int | None = None, ask_available: bool = True,
     ) -> list[dict[str, Any]] | None:
+        result = self.confirm_pending_grant_decision(
+            account_id=account_id, code=code, now=now, ask_available=ask_available)
+        return result['rows'] if result else None
+
+    def confirm_pending_grant_decision(
+        self, *, account_id: str, code: str, decided_by_user_id: str = "",
+        now: int | None = None, ask_available: bool = True,
+    ) -> dict[str, Any] | None:
         """Consume once atomically; invalid/expired codes return None, write errors raise."""
         now = _now_ms() if now is None else now
         if not _finite(now):
             raise ValueError("Invalid tool grant time")
 
-        def write(conn: sqlite3.Connection) -> list[dict[str, Any]] | None:
+        def write(conn: sqlite3.Connection) -> dict[str, Any] | None:
             pending = conn.execute(
                 """SELECT payload_json, payload_version FROM tool_grant_pending
                 WHERE account_id = ? AND code = ? AND consumed_at IS NULL AND expires_at > ? AND purpose = 'grant'""",
@@ -857,7 +872,37 @@ class ClawChatStore:
                 "UPDATE tool_grant_pending SET consumed_at = ? WHERE account_id = ? AND code = ?",
                 (now, account_id, code),
             )
-            return rows
+            requests = []
+            if decided_by_user_id and payload['mode'] in ('direct', 'ask'):
+                grantees = {grantee['id'] for grantee in payload['grantees']}
+                covered = set()
+                for row in rows:
+                    if row['what_kind'] == 'capability':
+                        covered.update(canonical_tool_name(tool) for tool in TOOL_CAPABILITIES.get(row['what'], {}).get('tools', ()))
+                    elif row['what_kind'] == 'tool':
+                        covered.add(canonical_tool_name(row['what']))
+                all_tools = any(row['what_kind'] == 'all' for row in rows)
+                candidates = conn.execute('''SELECT request_id FROM tool_grant_requests
+                    WHERE account_id = ? AND status IN ('sending','pending') AND expires_at > ?''',
+                    (account_id, now)).fetchall()
+                for (request_id,) in candidates:
+                    request = self._request_row(conn, account_id, request_id)
+                    if request['requester_user_id'] not in grantees:
+                        continue
+                    capability = TOOL_CAPABILITIES.get(request['capability_id'])
+                    if capability is None:
+                        continue
+                    members = {canonical_tool_name(tool) for tool in capability['tools']}
+                    if not all_tools and not members <= covered:
+                        continue
+                    registered = conn.execute('''SELECT 1 FROM tool_grant_pending WHERE account_id = ? AND code = ?
+                        AND purpose = 'request' AND consumed_at IS NULL AND expires_at > ?''',
+                        (account_id, request['code'], now)).fetchone()
+                    if not registered:
+                        continue
+                    self._decide_request(conn, request, payload['mode'], decided_by_user_id, now)
+                    requests.append(self._request_row(conn, account_id, request_id))
+            return dict(rows=rows, requests=requests)
 
         return self._tool_grants_transaction(write)
 

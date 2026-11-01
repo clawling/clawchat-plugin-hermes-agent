@@ -361,6 +361,15 @@ A proactive 10-minute card still accepts only `/clawchat-allow` for its frozen
 mode. Every matching command is consumed before model dispatch; only a real,
 platform-identified owner in this account's owner direct chat may confirm.
 A card left in `sending` is also decidable: receiving the code proves delivery.
+Confirming a proactive direct/ask card also decides matching, unexpired,
+undecided requests from its grantees in the same SQLite transaction. Its selectors
+must cover every mapped tool in the requested capability (`all` covers every
+capability); exact-tool aliases use the canonical mapping. The requests become
+allowed/asked, their old codes are consumed, and the existing wake mechanism
+resumes each original guest chat after the owner's receipt, always with guest
+authority. Ask retains per-call approval. Deny grants create no confirmation
+card and do not decide or wake requests. Unconfirmed, expired or replayed cards
+and unmatched requests do not wake anything.
 
 See [wake and notice delivery](non-owner-boundaries.md#guest-access-requests-and-resumption)
 for the atomic decision, continuation and fallback notice lifecycle.

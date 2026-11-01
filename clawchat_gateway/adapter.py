@@ -919,6 +919,8 @@ _MESSAGE_ID_ECHO_LIMIT = 64
 # swallows a non-cancellation BaseException) would otherwise keep its chat
 # "busy" forever and switch the react default off there for good.
 TURN_TRIGGER_TTL_SECONDS = 30 * 60
+# A held owner input waits this long for a notice execution to end.
+OWNER_INPUT_HOLD_SECONDS = 120
 ORCHESTRATE_RETRY_IDLE_POLL_SECONDS = 0.2
 
 
@@ -1022,6 +1024,24 @@ def _read_host_compression_ratio() -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 1:
         return None
     return float(value)
+
+
+def _read_host_busy_input_mode() -> str:
+    """Mirror the gateway env/config loader and its interrupt default."""
+    mode = os.environ.get("HERMES_GATEWAY_BUSY_INPUT_MODE", "").strip()
+    if not mode:
+        try:
+            try:
+                from gateway.run import _load_gateway_config
+                config = _load_gateway_config()
+            except ImportError:
+                from hermes_cli.config import read_raw_config
+                config = read_raw_config()
+            mode = str((config or {}).get("display", {}).get("busy_input_mode") or "").strip()
+        except Exception:  # noqa: BLE001 - the host defaults to interrupt
+            mode = ""
+    mode = mode.lower()
+    return mode if mode in {"queue", "steer"} else "interrupt"
 
 
 def _read_host_compression_cap() -> int | None:
@@ -1251,6 +1271,11 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._grant_timeout_tasks: set[asyncio.Task[Any]] = set()
         self._grant_dispatch_started: dict[str, str] = {}
         self._grant_reply_anchors: OrderedDict[str, str] = OrderedDict()
+        self._owner_input_pending: dict[str, list[tuple[InboundMessage, float]]] = {}
+        self._owner_input_tasks: dict[str, asyncio.Task] = {}
+        self._owner_input_deadlines: dict[int, float] = {}
+        self._owner_input_hold_seconds = OWNER_INPUT_HOLD_SECONDS
+        self._owner_input_poll_seconds = 0.5
         self._grant_admission_queue = GroupMessageCoalescer(
             idle_seconds=0.0,
             max_wait_seconds=30.0,
@@ -1393,6 +1418,13 @@ class ClawChatAdapter(BasePlatformAdapter):
         await self._connection.stop()
         await self._group_message_coalescer.cancel()
         await self._grant_admission_queue.cancel()
+        owner_tasks = list(self._owner_input_tasks.values())
+        for task in owner_tasks:
+            task.cancel()
+        if owner_tasks:
+            await asyncio.gather(*owner_tasks, return_exceptions=True)
+        self._owner_input_pending.clear()
+        self._owner_input_deadlines.clear()
         from clawchat_gateway.turn_grants import release_session
 
         for key in list(self._grant_sessions):
@@ -3582,6 +3614,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._admit_owner_direct_inbound(inbound)
         if await self._consume_grant_confirmation(inbound):
             return
+        if self._hold_owner_inbound(inbound):
+            return
         if self._hold_granted_inbound(inbound):
             return
         await self._route_inbound(inbound)
@@ -4739,6 +4773,81 @@ class ClawChatAdapter(BasePlatformAdapter):
                                       management_only=self._trusted_owner_notification(inbound))
         return True
 
+    def _hold_owner_inbound(self, inbound: InboundMessage) -> bool:
+        if not self._verified_owner_inbound(inbound):
+            return False
+        # Worker preparation rechecks asynchronously after media download using
+        # the original deadline; it must not enqueue this input again.
+        if self._owner_input_tasks.get(self._grant_session_key(inbound)) is asyncio.current_task():
+            return False
+        text = inbound.text.strip()
+        explicit_steer = text.lower().startswith('/steer')
+        if not explicit_steer and (
+            _slash_command_name(text) or self._owner_plaintext_control_reply(inbound)
+            or any(pattern.fullmatch(text) for pattern in _PLAINTEXT_GATEWAY_RESTART_RES)
+        ):
+            return False
+        if not explicit_steer and _read_host_busy_input_mode() != 'steer':
+            return False
+        from clawchat_gateway.turn_grants import has_non_owner_turn
+
+        key = self._grant_session_key(inbound)
+        if not has_non_owner_turn(self._account_id(), key) and key not in self._owner_input_tasks:
+            return False
+        self._owner_input_pending.setdefault(key, []).append(
+            (inbound, time.monotonic() + self._owner_input_hold_seconds))
+        logger.info('owner_input_held reason=active_notice_turn')
+        if key not in self._owner_input_tasks:
+            self._owner_input_tasks[key] = asyncio.create_task(self._dispatch_held_owner_inputs(key))
+        return True
+
+    def _owner_plaintext_control_reply(self, inbound: InboundMessage) -> bool:
+        text = inbound.text.strip()
+        if not (_slash_confirm_choice(text) or text.lower() in _PLAINTEXT_APPROVAL_WORDS):
+            return False
+        if self._direct_chat_approval_blocking(inbound.chat_id):
+            return True
+        try:
+            from tools.slash_confirm import get_pending
+
+            return any(get_pending(key) for key in getattr(self, '_active_sessions', {})
+                       if inbound.chat_id in str(key).split(':'))
+        except Exception:  # noqa: BLE001 - no known confirmation exempts ordinary text
+            return False
+
+    async def _wait_held_owner_input(self, key: str, deadline: float, task: asyncio.Task,
+                                     *, ignore_dispatch: bool = False) -> bool:
+        from clawchat_gateway.turn_grants import has_non_owner_turn
+
+        # The busy check also expires snapshots the idle host left behind.
+        while self._owner_input_tasks.get(key) is task:
+            if not (time.monotonic() < deadline and self._grant_session_busy(key, ignore_dispatch=ignore_dispatch)
+                    and has_non_owner_turn(self._account_id(), key)):
+                return True
+            await asyncio.sleep(self._owner_input_poll_seconds)
+        return False
+
+    async def _dispatch_held_owner_inputs(self, key: str) -> None:
+        task = asyncio.current_task()
+        try:
+            pending = self._owner_input_pending[key]
+            while pending and self._owner_input_tasks.get(key) is task:
+                inbound, deadline = pending[0]
+                if not await self._wait_held_owner_input(key, deadline, task):
+                    return
+                pending.pop(0)
+                self._owner_input_deadlines[id(inbound)] = deadline
+                try:
+                    await self._route_inbound(inbound)
+                except Exception:  # noqa: BLE001 - keep later held inputs
+                    logger.warning('clawchat held owner input dispatch failed', exc_info=True)
+                finally:
+                    self._owner_input_deadlines.pop(id(inbound), None)
+        finally:
+            if self._owner_input_tasks.get(key) is task:
+                self._owner_input_tasks.pop(key, None)
+                self._owner_input_pending.pop(key, None)
+
     def _hold_granted_inbound(self, inbound: InboundMessage, *, from_dispatch: bool = False,
                               ignore_dispatch: bool = False, new_grants: dict[str, str] | None = None) -> bool:
         # Owner approvals and controls must reach their existing handlers even
@@ -4876,14 +4985,21 @@ class ClawChatAdapter(BasePlatformAdapter):
             lang = "en"
         lang = lang if lang in ("zh", "zh_Hant") else "en"
         decision = None
+        wakes = []
         try:
             from clawchat_gateway.host_tools_guard import ask_grants_available
             mode = {'allow': 'direct', 'ask': 'ask', 'deny': 'deny'}[match[1]]
             decision = self._store.confirm_request(account_id=self._account_id(), code=match[2], mode=mode,
                 decided_by_user_id=inbound.sender_id, ask_available=ask_grants_available())
-            rows = decision['rows'] if decision else (
-                self._store.confirm_pending_grant(account_id=self._account_id(), code=match[2],
+            if decision:
+                rows = decision['rows']
+                wakes = [decision['request']['wake_key']]
+            else:
+                proactive = (self._store.confirm_pending_grant_decision(
+                    account_id=self._account_id(), code=match[2], decided_by_user_id=inbound.sender_id,
                     ask_available=ask_grants_available()) if match[1] == 'allow' else None)
+                rows = proactive['rows'] if proactive else None
+                wakes = [request['wake_key'] for request in proactive['requests']] if proactive else []
         except ValueError as exc:
             text = GRANT_ASK_UNAVAILABLE_RECEIPT[lang] if str(exc) == "ask-unavailable" else GRANT_WRITE_FAILED_MESSAGE[lang]
         except Exception:  # noqa: BLE001 - never acknowledge a failed write as active
@@ -4908,8 +5024,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         try:
             await self._send_owner_text(inbound.chat_id, text)
         finally:
-            if decision:
-                task = asyncio.create_task(self._dispatch_request_wake(decision['request']['wake_key']))
+            for wake_key in wakes:
+                task = asyncio.create_task(self._dispatch_request_wake(wake_key))
                 self._request_wake_tasks.add(task)
                 task.add_done_callback(self._request_wake_tasks.discard)
         return True
@@ -4941,8 +5057,10 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._finish_request_wake(inbound, 'host-rejected')
             return
         key = self._grant_session_key(inbound)
+        if self._hold_owner_inbound(inbound):
+            return
         if self._verified_owner_inbound(inbound):
-            # Owner input stays immediate; idle only determines verification.
+            # Controls stay immediate; idle determines verification.
             self._grant_session_busy(key)
         from clawchat_gateway.turn_grants import pending_input_restriction
         arrival_restriction = pending_input_restriction(self._account_id(), key)
@@ -5034,6 +5152,16 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
         chat_name, user_name = self._session_names(inbound)
         downloaded_media = await self._download_inbound_media(inbound)
+        # A non-owner execution may have started during media preparation.
+        # Queued inputs retain their deadline through media preparation. Ignore
+        # this input's own dispatch counter when checking for a busy session.
+        deadline = self._owner_input_deadlines.get(id(inbound))
+        if deadline is not None:
+            key = self._grant_session_key(inbound)
+            if not await self._wait_held_owner_input(key, deadline, asyncio.current_task(), ignore_dispatch=True):
+                return
+        if self._hold_owner_inbound(inbound):
+            return
         speakers, grants, any_tools = self._turn_grant_values(inbound)
         # Recheck after all preparation awaits, using exactly the grants that
         # will enter the snapshot. A grant added during download must not get
