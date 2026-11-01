@@ -535,7 +535,8 @@ async def test_poison_acked_and_failed_error_redacted(monkeypatch, store, event,
 async def test_receipt_errors_redact_display_credentials_and_unconfigured_long_secret(monkeypatch, store, event, caplog):
     opaque = secrets.token_hex(20)
     error = ("message_id=msg-1 chat_id=c1 Authorization: Bearer abc123short "
-             "https://h/x?access_token=shortq password=hunter2 " + opaque)
+             "https://h/x?access_token=shortq&sig=zz&X-Amz-Signature=shortsig1"
+             "&X-Amz-Security-Token=shorttok1&X-Goog-Signature=shortgoog1 password=hunter2 " + opaque)
     handler = AsyncMock(side_effect=ValueError(error))
     async with peer(monkeypatch, store, on_message=handler, on_signal=handler) as h:
         h.conn._cfg = replace(h.conn.config, token=FAKE_SECRETS["access"],
@@ -547,7 +548,7 @@ async def test_receipt_errors_redact_display_credentials_and_unconfigured_long_s
         h.ws.feed(frame)
         await until(lambda: bool(rows(store)) and rows(store)[0]["status"] == "failed")
         await until(lambda: bool(h.ws.acks))
-        for secret in ("abc123short", "shortq", "hunter2", opaque):
+        for secret in ("abc123short", "shortq", "zz", "shortsig1", "shorttok1", "shortgoog1", "hunter2", opaque):
             assert secret not in rows(store)[0]["error"]
             assert secret not in caplog.text
         assert "raised" in caplog.text and "***" in rows(store)[0]["error"]
