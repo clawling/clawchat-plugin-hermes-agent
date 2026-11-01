@@ -22,6 +22,8 @@ from collections.abc import Callable
 from concurrent.futures import Future, TimeoutError as FutureTimeout
 from pathlib import Path
 
+from clawchat_gateway import atomic_file
+
 logger = logging.getLogger(__name__)
 
 LIVEWARE_BASE_URL = "https://media.clawling.chat/liveware/"
@@ -267,15 +269,12 @@ def _download(url: str, dest: Path, *, sleep: Callable[[float], None] = time.sle
                 raise TimeoutError("liveware download deadline exceeded")
             if os.name != "nt":
                 os.chmod(tmp, 0o755)
+                with tmp.open("rb") as stream:
+                    os.fsync(stream.fileno())
             # Every writer publishes verified bytes. Another pin can replace
             # them later; this process's resolver then fails closed by digest.
             os.replace(tmp, dest)
-            if os.name != "nt":
-                directory = os.open(dest.parent, os.O_RDONLY)
-                try:
-                    os.fsync(directory)
-                finally:
-                    os.close(directory)
+            atomic_file.fsync_dir(dest.parent)
             return
         except Exception as exc:
             if isinstance(exc, FutureTimeout) and (not result.done() or result.exception() is not exc):

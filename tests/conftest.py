@@ -42,12 +42,65 @@ import os
 import shutil
 import sys
 import tempfile
+import traceback
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+FAKE_SECRETS = {
+    "access": "placeholder-access-secret-g10",
+    "refresh": "placeholder-refresh-secret-g10",
+    # Assembled at runtime so the shapes do not trip credential scanners.
+    "bearer": " ".join(("Bearer", "placeholder-bearer-g10")),
+    "userinfo_url": "https://" + ":".join(("user-g10", "placeholder-pass-g10")) + "@example.invalid",
+    "query": "token=placeholder-query-g10",
+}
+FAKE_SECRETS_VALUES = tuple(FAKE_SECRETS.values()) + (
+    "user-g10", "placeholder-pass-g10", "placeholder-bearer-g10", "placeholder-query-g10",
+)
+
+
+@pytest.fixture
+def assert_no_secrets():
+    """Assert recursively across caller results, exceptions, payloads and logs."""
+    def expand(value):
+        if isinstance(value, str):
+            yield value
+        elif isinstance(value, bytes):
+            yield value.decode("utf-8", errors="replace")
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                yield from expand(key)
+                yield from expand(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                yield from expand(item)
+        elif isinstance(value, BaseException):
+            yield str(value)
+            yield repr(value)
+            yield "".join(traceback.format_exception(type(value), value, value.__traceback__))
+        else:
+            yield repr(value)
+
+    def check(*outputs, caplog=None, secrets=FAKE_SECRETS_VALUES):
+        exits = [(f"output {index}", output) for index, output in enumerate(outputs, 1)]
+        if caplog is not None:
+            for index, record in enumerate(caplog.records, 1):
+                texts = [record.getMessage(), record.exc_text or ""]
+                if record.exc_info:
+                    texts.append("".join(traceback.format_exception(*record.exc_info)))
+                exits.append((f"log record {index}", texts))
+        for label, output in exits:
+            for text in expand(output):
+                for index, secret in enumerate(secrets, 1):
+                    if secret and secret in text:
+                        pytest.fail(f"{label} contains fake credential #{index} [redacted]", pytrace=False)
+
+    return check
+
 
 _TESTS_DIR = Path(__file__).resolve().parent
 if str(_TESTS_DIR) not in sys.path:

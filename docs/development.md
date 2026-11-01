@@ -76,6 +76,23 @@ live Hermes process; the WebSocket transport
 (`clawchat_gateway/connection.py`) is the main piece that needs a fake
 or recorded server.
 
+## State files and the write gate
+
+State files use `clawchat_gateway/atomic_file.py`, the repository's single
+implementation of synced, atomic file publication. It preserves existing
+permission bits by default and creates new files with private permissions.
+Create-only seed publication and directory installation retain their specialized
+publish steps and use the shared directory-sync helper.
+
+`tests/check_state_writes.py` scans production filesystem write calls.
+`tests/test_state_write_gate.py` runs this gate. New writes either use the atomic
+helper or have a counted `ALLOWLIST` entry with a B/C classification and a
+specific reason. Import aliases are outside the static scanner's coverage.
+
+Credential exit tests use `assert_no_secrets` from `tests/conftest.py` to check
+caller results, exceptions, logs and report payloads against obvious fake values.
+Redact credentials where values first become display text.
+
 ## Live debugging against a Hermes process
 
 The supported development loop is:
