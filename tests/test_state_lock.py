@@ -413,3 +413,80 @@ def test_bootstrap_refresh_never_overwrites_concurrent_repair(tmp_path, monkeypa
     ) is True
     _finish_competitors(competitors)
     assert env == {'CLAWCHAT_TOKEN': 'new-access', 'CLAWCHAT_REFRESH_TOKEN': 'new-refresh'}
+
+
+def _sha_sequence(monkeypatch, skill_update, answers):
+    calls = iter(answers)
+    monkeypatch.setattr(skill_update, 'local_skill_sha', lambda skill_id: next(calls))
+
+
+def test_skill_diverging_after_unlocked_check_is_fetched_once_more(tmp_path, monkeypatch):
+    from clawchat_gateway import skill_update
+
+    monkeypatch.setattr(skill_update, 'managed_skills_dir', lambda: tmp_path / 'clawchat-skills')
+    update = skill_update.PendingSkillUpdate(
+        'test-skill', None, '1.0.0', 'test-skill/SKILL.md', 'placeholder-sha', 1)
+    # converged (no fetch) -> diverged under lock -> diverged (fetch) -> diverged under lock
+    _sha_sequence(monkeypatch, skill_update, ['placeholder-sha', 'other', 'other', 'other'])
+    fetches = []
+    monkeypatch.setattr(skill_update, 'fetch_skill_markdown',
+                        lambda *a, **k: fetches.append(1) or 'fetched')
+    assert skill_update.apply_skill_update([update]) == ['test-skill']
+    assert fetches == [1]
+    assert skill_update.read_local_manifest() == {'test-skill': '1.0.0'}
+
+
+def test_skill_still_diverging_fails_without_publishing(tmp_path, monkeypatch):
+    from clawchat_gateway import skill_update
+
+    monkeypatch.setattr(skill_update, 'managed_skills_dir', lambda: tmp_path / 'clawchat-skills')
+    updates = [
+        skill_update.PendingSkillUpdate('racing-skill', None, '1.0.0', 'racing-skill/SKILL.md', 'sha-a', 1),
+        skill_update.PendingSkillUpdate('steady-skill', None, '1.0.0', 'steady-skill/SKILL.md', 'sha-b', 1),
+    ]
+    # Each round: unlocked checks (racing converged, steady diverged -> fetched
+    # in round 1 only), then locked checks (racing diverged, steady diverged).
+    _sha_sequence(monkeypatch, skill_update, [
+        'sha-a', 'old-b', 'other', 'old-b',
+        'sha-a', 'other', 'old-b',
+    ])
+    monkeypatch.setattr(skill_update, 'fetch_skill_markdown', lambda *a, **k: 'fetched')
+    with pytest.raises(skill_update.SkillUpdateIncomplete) as raised:
+        skill_update.apply_skill_update(updates)
+    assert raised.value.skill_ids == ['racing-skill']
+    assert not (tmp_path / 'clawchat-skills' / 'steady-skill').exists()
+    assert not (tmp_path / 'clawchat-skills' / 'manifest.json').exists()
+
+
+async def test_incomplete_skill_update_keeps_pending_and_reports_failure(monkeypatch, clawchat_test_platform):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from clawchat_gateway import skill_update
+    from clawchat_gateway.adapter import ClawChatAdapter
+
+    instance = ClawChatAdapter({})
+    update = skill_update.PendingSkillUpdate(
+        'test-skill', None, '1.0.0', 'test-skill/SKILL.md', 'placeholder-sha', 1)
+    pending = SimpleNamespace(updates=[update], removals=[], is_expired=lambda: False)
+    instance._pending_skill_update = pending
+    monkeypatch.setattr(instance, '_owner_user_id', lambda: 'placeholder-owner')
+    monkeypatch.setattr(skill_update, 'classify_consent', lambda text: 'affirm')
+    monkeypatch.setattr(skill_update, 'clear_pending', lambda: None)
+    kept = []
+    monkeypatch.setattr(skill_update, 'write_pending', kept.append)
+
+    def incomplete(updates):
+        raise skill_update.SkillUpdateIncomplete(['test-skill'])
+
+    monkeypatch.setattr(skill_update, 'apply_skill_update', incomplete)
+    removal = []
+    monkeypatch.setattr(skill_update, 'apply_skill_removal', lambda removals: removal.append(1) or [])
+    sent = AsyncMock()
+    monkeypatch.setattr(instance, '_send_owner_text', sent)
+    inbound = SimpleNamespace(chat_type='direct', sender_id='placeholder-owner',
+                              text='yes', chat_id='placeholder-chat')
+    assert await instance._maybe_consume_skill_update_consent(inbound) is True
+    assert kept == [pending]
+    assert instance._pending_skill_update is pending
+    assert not removal
+    assert '失败' in sent.await_args.args[1]

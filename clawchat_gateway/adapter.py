@@ -2163,6 +2163,13 @@ class ClawChatAdapter(BasePlatformAdapter):
             removed = await asyncio.to_thread(skill_update.apply_skill_removal, removals)
         except Exception as exc:  # noqa: BLE001
             logger.warning("clawchat skill update apply failed: %s", exc, exc_info=True)
+            if isinstance(exc, skill_update.SkillUpdateIncomplete):
+                # Nothing was published: keep the request so the owner can retry.
+                try:
+                    skill_update.write_pending(pending)
+                    self._pending_skill_update = pending
+                except Exception as keep_exc:  # noqa: BLE001
+                    logger.warning("clawchat could not keep pending skill update: %s", keep_exc)
             await self._send_owner_text(inbound.chat_id, "技能更新失败,请稍后再试。")
             return True
         # A brand-new skill id (never bundled, never applied before) is on disk

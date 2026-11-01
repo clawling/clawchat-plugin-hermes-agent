@@ -90,6 +90,14 @@ class SkillUpdateError(Exception):
     """Raised on any manifest/skill validation or fetch failure."""
 
 
+class SkillUpdateIncomplete(SkillUpdateError):
+    """Local skills kept changing during the update; nothing was published."""
+
+    def __init__(self, skill_ids: list[str]) -> None:
+        super().__init__(f"skills changed during update: {', '.join(skill_ids)}")
+        self.skill_ids = list(skill_ids)
+
+
 # --- Version comparison (mirrors install-cli parseComparableVersion) --------
 
 _VERSION_RE = re.compile(r"^(\d+(?:\.\d+){1,3})(?:-(\d+))?$")
@@ -663,45 +671,53 @@ def apply_skill_update(
     if not updates:
         return []
 
-    # Phase 1: fetch + validate everything up front, outside the manifest lock
-    # so a slow download never makes other processes time out on it.
+    # Downloads and validation run outside the manifest lock so a slow fetch
+    # never makes other processes time out on it. Under the lock the local
+    # state is re-read before publishing; a skill that diverged after the
+    # unlocked check gets one more unlocked fetch. If it still is not covered,
+    # nothing is published and the caller sees SkillUpdateIncomplete.
     fetched: dict[str, str] = {}
-    for update in updates:
-        if local_skill_sha(update.skill_id) == update.sha256:
-            continue
-        fetched[update.skill_id] = fetch_skill_markdown(update, fetcher=fetcher, ref=ref)
-
-    # Phase 2: re-read state under the lock, then publish files + manifest.
-    with _manifest_lock():
-        local = read_local_manifest()
-        manifest_changed = False
-        staged: list[tuple[PendingSkillUpdate, str]] = []
+    missing: list[str] = []
+    for _round in range(2):
         for update in updates:
-            if local_skill_sha(update.skill_id) == update.sha256:
-                # Idempotent: on-disk bytes already converged to the manifest.
-                # Keep the local manifest's version in sync anyway.
-                if local.get(update.skill_id) != update.target:
-                    local[update.skill_id] = update.target
-                    manifest_changed = True
+            if update.skill_id in fetched or local_skill_sha(update.skill_id) == update.sha256:
                 continue
-            content = fetched.get(update.skill_id)
-            if content is None:
-                # Converged before the fetch but changed since; the next update
-                # check retries it rather than downloading under the lock.
-                logger.warning("clawchat skill %s changed during update; retry later", update.skill_id)
-                continue
-            staged.append((update, content))
+            fetched[update.skill_id] = fetch_skill_markdown(update, fetcher=fetcher, ref=ref)
 
-        applied: list[str] = []
-        for update, content in staged:
-            atomic_write_text(managed_skill_path(update.skill_id), content)
-            local[update.skill_id] = update.target
-            applied.append(update.skill_id)
-        if applied or manifest_changed:
-            write_local_manifest(local)
-        if applied:
-            logger.info("clawchat applied skill updates: %s", applied)
-        return applied
+        with _manifest_lock():
+            local = read_local_manifest()
+            manifest_changed = False
+            staged: list[tuple[PendingSkillUpdate, str]] = []
+            missing = []
+            for update in updates:
+                if local_skill_sha(update.skill_id) == update.sha256:
+                    # Idempotent: on-disk bytes already converged to the manifest.
+                    # Keep the local manifest's version in sync anyway.
+                    if local.get(update.skill_id) != update.target:
+                        local[update.skill_id] = update.target
+                        manifest_changed = True
+                    continue
+                content = fetched.get(update.skill_id)
+                if content is None:
+                    missing.append(update.skill_id)
+                    continue
+                staged.append((update, content))
+            if missing:
+                continue  # Publish nothing; fetch the diverged skills unlocked.
+
+            applied: list[str] = []
+            for update, content in staged:
+                atomic_write_text(managed_skill_path(update.skill_id), content)
+                local[update.skill_id] = update.target
+                applied.append(update.skill_id)
+            if applied or manifest_changed:
+                write_local_manifest(local)
+            if applied:
+                logger.info("clawchat applied skill updates: %s", applied)
+            return applied
+
+    logger.warning("clawchat skill update incomplete; skills changed during update: %s", missing)
+    raise SkillUpdateIncomplete(missing)
 
 
 def apply_skill_removal(removals: list[PendingSkillRemoval]) -> list[str]:
