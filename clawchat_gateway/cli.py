@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import sys
 
-from clawchat_gateway.api_client import ClawChatApiError, format_connect_guidance
+from clawchat_gateway.api_client import ClawChatApiError, format_connect_guidance, redact_display_text
 from clawchat_gateway.config import resolve_activation_base_url
 from clawchat_gateway.restart import format_restart_lines
 
@@ -77,14 +77,14 @@ def format_activation_failure(exc: ClawChatApiError) -> list[str]:
     """
     details = f"{exc.kind}"
     if exc.path:
-        details = f"{details} {exc.path}"
+        details = f"{details} {redact_display_text(exc.path)}"
     if exc.status is not None:
         details = f"{details} status={exc.status}"
     if exc.code is not None:
         details = f"{details} code={exc.code}"
     return [
-        f"clawchat: activation failed ({details}): {exc.message}",
-        *format_connect_guidance(exc),
+        f"clawchat: activation failed ({details}): {redact_display_text(exc.message)}",
+        *(redact_display_text(line) for line in format_connect_guidance(exc)),
     ]
 
 
@@ -140,10 +140,10 @@ def handle_clawchat_cli(args: argparse.Namespace) -> int:
     except ExistingActivationError as exc:
         # A precondition failure, not a server rejection: the connect code was
         # never spent, so the operator can still redeem it the right way.
-        print(f"clawchat: activation refused — {exc}", file=sys.stderr)
+        print(f"clawchat: activation refused — {redact_display_text(exc)}", file=sys.stderr)
         return 1
     except ClawChatApiError as exc:
-        print("\n".join(format_activation_failure(exc)), file=sys.stderr)
+        print("\n".join(redact_display_text(line) for line in format_activation_failure(exc)), file=sys.stderr)
         return 1
 
     print(f"clawchat: activation complete for {payload['user_id']}")

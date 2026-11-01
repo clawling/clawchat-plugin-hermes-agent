@@ -84,6 +84,16 @@ permission bits by default and creates new files with private permissions.
 Create-only seed publication and directory installation retain their specialized
 publish steps and use the shared directory-sync helper.
 
+Memory, managed skill manifest/publication, and plugin `.env` read-modify-write
+operations hold `state_lock.state_file_lock` for the complete mutation.
+Locks are reentrant within a thread and serialize cooperating threads and processes;
+timeouts or unavailable locking fail closed by raising `StateLockError` before mutation.
+Credential compare-and-write steps (logout clears, bootstrap token rotation) check the
+persisted `.env` pair and write it inside one lock, so a concurrent re-pair is never
+overwritten. Managed skill downloads happen before taking the manifest lock; state is
+re-read under the lock before publishing.
+Hermes' own `.env` writers do not acquire this plugin lock and remain outside its protection.
+
 `tests/check_state_writes.py` scans production filesystem write calls.
 `tests/test_state_write_gate.py` runs this gate. New writes either use the atomic
 helper or have a counted `ALLOWLIST` entry with a B/C classification and a
@@ -91,7 +101,11 @@ specific reason. Import aliases are outside the static scanner's coverage.
 
 Credential exit tests use `assert_no_secrets` from `tests/conftest.py` to check
 caller results, exceptions, logs and report payloads against obvious fake values.
-Redact credentials where values first become display text.
+Redact credentials where values first become display text. Debug snapshots and
+tool audits pass through `redact_display_data` before being written to disk;
+message bodies are omitted from routing logs (only their lengths are recorded).
+Parse errors that carry a source position (YAML) are shown as error class and
+line/column only, never the quoted source.
 
 ## Live debugging against a Hermes process
 

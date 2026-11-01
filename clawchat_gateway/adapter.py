@@ -41,6 +41,7 @@ from clawchat_gateway.api_client import (
     DEFAULT_BASE_URL,
     ClawChatApiClient,
     ClawChatApiError,
+    redact_display_text,
 )
 from clawchat_gateway.clawchat_memory import (
     METADATA_END,
@@ -2162,6 +2163,13 @@ class ClawChatAdapter(BasePlatformAdapter):
             removed = await asyncio.to_thread(skill_update.apply_skill_removal, removals)
         except Exception as exc:  # noqa: BLE001
             logger.warning("clawchat skill update apply failed: %s", exc, exc_info=True)
+            if isinstance(exc, skill_update.SkillUpdateIncomplete):
+                # Nothing was published: keep the request so the owner can retry.
+                try:
+                    skill_update.write_pending(pending)
+                    self._pending_skill_update = pending
+                except Exception as keep_exc:  # noqa: BLE001
+                    logger.warning("clawchat could not keep pending skill update: %s", keep_exc)
             await self._send_owner_text(inbound.chat_id, "技能更新失败,请稍后再试。")
             return True
         # A brand-new skill id (never bundled, never applied before) is on disk
@@ -3367,7 +3375,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         Why: hermes-agent has been observed to enter an interrupt-loop where
         it treats its own outbound chunks as new user input. This emits one
         log line per inbound frame with the fields needed to confirm/refute
-        that hypothesis (sender_id vs bot user_id, message_id, text head).
+        that hypothesis (sender_id vs bot user_id, message_id, text length).
         The per-chat rate warning is :meth:`_note_inbound_rate`, counted only
         after the self-echo drop and the message-id dedupe.
 
@@ -3390,33 +3398,32 @@ class ClawChatAdapter(BasePlatformAdapter):
         fragments = message.get("fragments") if isinstance(message.get("fragments"), list) else []
         frag_count = len(fragments)
 
-        text_head = ""
+        message_text = ""
         for frag in fragments:
             if not isinstance(frag, dict):
                 continue
             for key in ("text", "content", "value"):
                 value = frag.get(key)
                 if isinstance(value, str) and value:
-                    text_head = value
+                    message_text = value
                     break
-            if text_head:
+            if message_text:
                 break
-        if not text_head:
+        if not message_text:
             body = message.get("body")
             if isinstance(body, str):
-                text_head = body
+                message_text = body
             elif isinstance(body, dict):
                 for key in ("text", "content", "value"):
                     value = body.get(key)
                     if isinstance(value, str) and value:
-                        text_head = value
+                        message_text = value
                         break
-        text_head = text_head[:80].replace("\n", " ")
 
         log_fn = inbound_trace.warning if is_self_echo else inbound_trace.info
         log_fn(
             "inbound chat_id=%s chat_type=%s sender_id=%s bot_user_id=%s "
-            "is_self_echo=%s message_id=%s trace_id=%s frag_count=%d text_head=%r",
+            "is_self_echo=%s message_id=%s trace_id=%s frag_count=%d text_len=%d",
             chat_id,
             chat_type,
             sender_id,
@@ -3425,7 +3432,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             message_id,
             frame.get("trace_id"),
             frag_count,
-            text_head,
+            len(message_text),
         )
 
         return is_self_echo
@@ -3660,20 +3667,20 @@ class ClawChatAdapter(BasePlatformAdapter):
                     command_allowed = False
                 if not command_allowed:
                     logger.info(
-                        "clawchat group command dropped chat_id=%s sender_id=%s mode=%s owner=%s text_head=%r",
+                        "clawchat group command dropped chat_id=%s sender_id=%s mode=%s owner=%s text_len=%d",
                         inbound.chat_id,
                         inbound.sender_id,
                         command_mode,
                         inbound.sender_relation == "owner",
-                        inbound.text[:80],
+                        len(inbound.text),
                     )
                     return
                 logger.info(
-                    "clawchat group command dispatching directly chat_id=%s sender_id=%s mode=%s text_head=%r",
+                    "clawchat group command dispatching directly chat_id=%s sender_id=%s mode=%s text_len=%d",
                     inbound.chat_id,
                     inbound.sender_id,
                     command_mode,
-                    inbound.text[:80],
+                    len(inbound.text),
                 )
                 receipt = self._owner_group_command_receipt(inbound, command_text)
                 if receipt is None:
@@ -3717,19 +3724,19 @@ class ClawChatAdapter(BasePlatformAdapter):
             return
         if not self._direct_command_allowed(inbound):
             logger.info(
-                "clawchat direct command dropped chat_id=%s sender_id=%s reason=non_owner text_head=%r",
+                "clawchat direct command dropped chat_id=%s sender_id=%s reason=non_owner text_len=%d",
                 inbound.chat_id,
                 inbound.sender_id,
-                inbound.text[:80],
+                len(inbound.text),
             )
             return
         if not self._direct_text_allowed_on_old_host(inbound):
             logger.info(
                 "clawchat direct message dropped chat_id=%s sender_id=%s "
-                "reason=non_owner_gateway_control text_head=%r",
+                "reason=non_owner_gateway_control text_len=%d",
                 inbound.chat_id,
                 inbound.sender_id,
-                inbound.text[:80],
+                len(inbound.text),
             )
             return
         await self._handle_inbound(inbound)
@@ -3782,7 +3789,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 "clawchat group command receipt kept in group reason=missing_owner_direct_chat_id "
                 "group=%s command=%r",
                 receipt.group_id,
-                receipt.command_text,
+                redact_display_text(receipt.command_text),
             )
             return None
         if not receipt.group_title:
@@ -3802,12 +3809,13 @@ class ClawChatAdapter(BasePlatformAdapter):
                 _clawchat_message_mode=message_mode,
                 **dm_kwargs,
             )
-        except Exception:  # noqa: BLE001 — fall back to the group
+        except Exception as exc:  # noqa: BLE001 — fall back to the group
             logger.warning(
-                "clawchat group command receipt to owner failed group=%s owner_chat=%s",
+                "clawchat group command receipt to owner failed group=%s owner_chat=%s error=%s: %s",
                 receipt.group_id,
                 owner_chat_id,
-                exc_info=True,
+                type(exc).__name__,
+                redact_display_text(exc),
             )
             return None
         if not getattr(result, "success", False):
@@ -3816,14 +3824,14 @@ class ClawChatAdapter(BasePlatformAdapter):
                 "group=%s owner_chat=%s error=%s",
                 receipt.group_id,
                 owner_chat_id,
-                getattr(result, "error", None),
+                redact_display_text(getattr(result, "error", None)),
             )
             return None
         logger.info(
             "clawchat group command receipt sent to owner group=%s owner_chat=%s command=%r",
             receipt.group_id,
             owner_chat_id,
-            receipt.command_text,
+            redact_display_text(receipt.command_text),
         )
         await self._react_group_command_receipt(receipt)
         return result
@@ -5309,7 +5317,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 )
                 if _debug_prompt_injection_enabled():
                     context_block = (
-                        (DEBUG_CHANNEL_CONTEXT_BEGIN, getattr(event, 'channel_context', None) or '',
+                        (DEBUG_CHANNEL_CONTEXT_BEGIN, redact_display_text(getattr(event, 'channel_context', None) or ''),
                          DEBUG_CHANNEL_CONTEXT_END)
                         if split else ()
                     )
@@ -5320,11 +5328,11 @@ class ClawChatAdapter(BasePlatformAdapter):
                         inbound.chat_type,
                         inbound.sender_id,
                         DEBUG_PROMPT_INJECTION_BEGIN,
-                        channel_prompt,
+                        redact_display_text(channel_prompt),
                         DEBUG_PROMPT_INJECTION_END,
                         *context_block,
                         DEBUG_EVENT_TEXT_BEGIN,
-                        event.text,
+                        redact_display_text(event.text),
                         DEBUG_EVENT_TEXT_END,
                     )
             write_llm_context_snapshot(
@@ -6624,7 +6632,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             message_id or "-",
             len(text),
             DEBUG_HERMES_OUTPUT_BEGIN,
-            text,
+            redact_display_text(text),
             DEBUG_HERMES_OUTPUT_END,
         )
 

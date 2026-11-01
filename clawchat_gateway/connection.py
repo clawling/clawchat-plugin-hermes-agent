@@ -1206,7 +1206,7 @@ class ClawChatConnection:
     ) -> bool:
         from clawchat_gateway.activate import (
             CredentialClearResult, _clear_persisted_env_credentials,
-            _persisted_env_credentials_match, clear_persisted_credentials,
+            _match_and_clear_env_credentials, clear_persisted_credentials,
         )
 
         if not await self._permanent_refresh_is_current(
@@ -1239,12 +1239,12 @@ class ClawChatConnection:
             elif expected_credentials is not None:
                 # Read .env once at logout, confirming ownership before its
                 # marker/clear. Missing keys still authorize tombstones (§C.1).
-                env_matched = _persisted_env_credentials_match(
+                # Match, marker and clear share one .env lock so a concurrent
+                # re-pair cannot be wiped by this stale logout.
+                env_matched, env_cleared = _match_and_clear_env_credentials(
                     expected_credentials.token, expected_credentials.refresh_token,
+                    on_match=lambda: self._record_refresh_rejection(expected_credentials.refresh_token),
                 )
-                if env_matched is True:
-                    self._record_refresh_rejection(expected_credentials.refresh_token)
-                env_cleared = env_matched is True and _clear_persisted_env_credentials()
                 sqlite_cleared = False
                 try:
                     sqlite_cleared = self._store is not None and self._store.clear_activation_credentials(
