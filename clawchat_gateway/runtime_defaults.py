@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from clawchat_gateway import atomic_file
 from clawchat_gateway.hermes_home import hermes_home
 
 
@@ -34,5 +35,5 @@ def configure_clawchat_allow_all() -> bool:
         changed = True
 
     if changed:
-        env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        atomic_file.atomic_write_text(env_path, "\n".join(lines) + "\n", newline="")
     return changed

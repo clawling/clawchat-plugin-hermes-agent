@@ -3,10 +3,10 @@ from __future__ import annotations
 import os
 import re
 import stat
-import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
+from clawchat_gateway import atomic_file
 from clawchat_gateway.plugin_prompts import (
     default_group_bio_prompt,
     default_owner_behavior_prompt,
@@ -263,24 +263,7 @@ def _read_existing_content(path: Path) -> str:
 
 
 def _atomic_write(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        dir=path.parent,
-        text=True,
-    )
-    tmp_path = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as file:
-            file.write(content)
-        tmp_path.replace(path)
-    except BaseException:
-        try:
-            tmp_path.unlink()
-        except FileNotFoundError:
-            pass
-        raise
+    atomic_file.atomic_write_text(path, content, newline="")
 
 
 def read_clawchat_memory_file(root: str | Path, target_type: str, target_id: str) -> dict:

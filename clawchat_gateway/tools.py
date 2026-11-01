@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from pathlib import Path
 from typing import Any
 
-from clawchat_gateway.api_client import ClawChatApiClient, ClawChatApiError
+from clawchat_gateway.api_client import ClawChatApiClient, ClawChatApiError, redact_display_text
 from clawchat_gateway.device_id import get_device_id, resolve_paired_device_id
 from clawchat_gateway.gate_outcome import PERMISSION_RECEIPT_RULE_TEXT, map_gate_outcome
 from clawchat_gateway.liveware_cli import (
@@ -1582,8 +1582,8 @@ async def liveware_login() -> dict[str, Any]:
         }
 
     # Non-zero exit: scrub the token from all output before returning.
-    stderr_text = err.decode(errors="replace").replace(token, "***")
-    stdout_text = out.decode(errors="replace").replace(token, "***")
+    stderr_text = redact_display_text(err.decode(errors="replace"), token)
+    stdout_text = redact_display_text(out.decode(errors="replace"), token)
     detail = (stderr_text or stdout_text).strip()
     return {
         "error": "subprocess",
