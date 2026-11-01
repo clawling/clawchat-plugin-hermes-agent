@@ -5,7 +5,7 @@ import os
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse, urlunparse
 
 try:
@@ -771,16 +771,21 @@ def persist_rotated_tokens(
         ) is True
 
     def write_env() -> bool:
-        if not bootstrap_env_matches():
-            return False
+        from clawchat_gateway.state_lock import state_file_lock
+
         try:
-            _write_env_values(
-                {
-                    "CLAWCHAT_TOKEN": access_token,
-                    "CLAWCHAT_REFRESH_TOKEN": refresh_token or None,
-                }
-            )
-            return True
+            # The bootstrap ownership check and the write share one .env lock,
+            # so a re-pair landing in between is never overwritten.
+            with state_file_lock(Path(get_env_path())):
+                if not bootstrap_env_matches():
+                    return False
+                _write_env_values(
+                    {
+                        "CLAWCHAT_TOKEN": access_token,
+                        "CLAWCHAT_REFRESH_TOKEN": refresh_token or None,
+                    }
+                )
+                return True
         except Exception as exc:  # noqa: BLE001
             logger.warning("clawchat rotated-token .env persistence failed: %s: %s", type(exc).__name__, redact_display_text(exc))
             return False
@@ -867,6 +872,31 @@ def _clear_persisted_env_credentials(
     return cleared
 
 
+def _match_and_clear_env_credentials(
+    expected_access_token: str | None, expected_refresh_token: str | None,
+    *, on_match: Callable[[], None] | None = None,
+) -> tuple[bool | None, bool]:
+    """Compare the persisted .env pair and clear it inside one .env lock.
+
+    Returns ``(env_matched, env_cleared)``. ``on_match`` runs under the lock
+    after a confirmed match and before the clear. A lock failure reports an
+    unknown match and clears nothing.
+    """
+    from clawchat_gateway.state_lock import StateLockError, state_file_lock
+
+    try:
+        with state_file_lock(Path(get_env_path())):
+            matched = _persisted_env_credentials_match(expected_access_token, expected_refresh_token)
+            if matched is not True:
+                return matched, False
+            if on_match is not None:
+                on_match()
+            return True, _clear_persisted_env_credentials()
+    except StateLockError as exc:
+        logger.warning("clawchat logout .env clear skipped: %s", exc)
+        return None, False
+
+
 def clear_persisted_credentials(
     *, account_id: str = "default", expected_access_token: str | None = None,
     expected_refresh_token: str | None = None,
@@ -891,9 +921,10 @@ def clear_persisted_credentials(
     env_matched = None
     conditional = expected_access_token is not None or expected_refresh_token is not None
     if conditional:
-        env_matched = _persisted_env_credentials_match(expected_access_token, expected_refresh_token)
-    env_cleared = False
-    if not conditional or env_matched is True:
+        env_matched, env_cleared = _match_and_clear_env_credentials(
+            expected_access_token, expected_refresh_token,
+        )
+    else:
         env_cleared = _clear_persisted_env_credentials()
     sqlite_cleared = False
     try:

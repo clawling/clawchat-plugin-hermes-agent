@@ -218,9 +218,10 @@ def _marked_parse_error_text(exc: BaseException) -> str | None:
     mark = getattr(exc, "problem_mark", None) or getattr(exc, "context_mark", None)
     if mark is None or not hasattr(mark, "line"):
         return None
-    problem = getattr(exc, "problem", None) or getattr(exc, "context", None) or "parse error"
+    # The problem text can quote source too (undefined aliases, unknown tags),
+    # so only the error class and position are shown.
     return (
-        f"{type(exc).__name__}: {problem} "
+        f"{type(exc).__name__} "
         f"(line {int(mark.line) + 1}, column {int(getattr(mark, 'column', 0)) + 1})"
     )
 
@@ -239,7 +240,7 @@ def redact_display_text(value: object, *secrets: str) -> str:
         )
         text = re.sub(r"(?i)\bBearer\s+" + _BARE_VALUE, "Bearer ***", text)
         text = re.sub(
-            r"(?i)(\b(?:(?:access[_-]?|refresh[_-]?)?token|api[_-]?key|key|secret|password|signature)"
+            r"(?i)(\b(?:(?:access[_-]?|refresh[_-]?)?token|api[_-]?key|key|secret|password|signature|sig)"
             r"(?:\\?[\"'])?\s*[:=]\s*)"
             r"(?:" + _QUOTED_VALUE + r"|" + _BARE_VALUE + r")",
             lambda match: match.group(1) + "***", text,
@@ -279,7 +280,7 @@ def redact_display_data(value: object, *secrets: str) -> object:
                             keep = child is None or type(child) in (int, float, bool)
                             labelled = (
                                 any(part in normalized for part in sensitive)
-                                or normalized.endswith("key")
+                                or normalized.endswith(("key", "sig"))
                             )
                             result[name] = (
                                 "***" if labelled and not keep

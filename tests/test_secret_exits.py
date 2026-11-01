@@ -561,3 +561,57 @@ def test_activation_backend_comparison_log_redacts_both_urls(caplog, assert_no_s
         assert activate._read_existing_user_id(config, base_url="https://example.invalid/other?" + SECRET["query"]) == ""
     assert "different backend" in caplog.text
     assert_no_secrets(caplog=caplog)
+
+
+SHORT_SIG = "ps" + "g10"
+
+
+def test_short_signature_values_are_hidden_in_text_and_structures(assert_no_secrets):
+    text = api.redact_display_text("https://example.invalid/file?sig=" + SHORT_SIG + "&x=1")
+    data = api.redact_display_data({"sig": SHORT_SIG, "x-sig": SHORT_SIG, "nested": [{"sig": SHORT_SIG}]})
+    assert data["sig"] == "***" and data["nested"][0]["sig"] == "***"
+    assert_no_secrets(text, data, secrets=(SHORT_SIG,))
+
+
+def test_short_signature_never_reaches_audit_or_snapshot(tmp_path, assert_no_secrets):
+    import sqlite3
+    from pathlib import Path
+    from clawchat_gateway.llm_context_debug import ClawChatLlmContextDebug
+    from clawchat_gateway.storage import ClawChatStore
+
+    store = ClawChatStore(tmp_path / "audit.db")
+    assert store.record_tool_call(platform="hermes", account_id="default", tool_name="placeholder_tool",
+                                  args={"sig": SHORT_SIG, "url": "https://example.invalid/?sig=" + SHORT_SIG},
+                                  result={"sig": SHORT_SIG}, error="failed sig=" + SHORT_SIG)
+    with sqlite3.connect(store.db_path) as db:
+        row = db.execute("SELECT args_json, result_json, error FROM tool_calls").fetchone()
+    debug = ClawChatLlmContextDebug(env={"CLAWCHAT_LLM_CONTEXT_DEBUG": "1"},
+                                   default_snapshot_root=tmp_path)
+    run = Path(debug.write_snapshot(
+        visibility="request", trace={"messageId": "placeholder-message"},
+        input={"requestMessages": [{"sig": SHORT_SIG, "text": "?sig=" + SHORT_SIG}]},
+        output={}, warnings=[]))
+    assert_no_secrets(row, run.read_text(), secrets=(SHORT_SIG,))
+
+
+@pytest.mark.parametrize("source", [
+    "token: *" + SHORT_SIG + "\n",          # undefined alias quotes the alias name
+    "token: !" + SHORT_SIG + " value\n",    # unknown tag quotes the tag
+    "access_token=" + SHORT_SIG + ": [oops\n",
+])
+def test_yaml_errors_show_only_class_and_position(source, tmp_path, monkeypatch, assert_no_secrets):
+    import traceback
+    import yaml
+    from clawchat_gateway import profile
+
+    with pytest.raises(yaml.YAMLError) as raised:
+        yaml.safe_load(source)
+    shown = api.redact_display_text(raised.value)
+    assert "(line " in shown
+    path = tmp_path / "config.yaml"
+    path.write_text(source)
+    monkeypatch.setattr(profile, "_hermes_home", lambda: tmp_path)
+    with pytest.raises(profile.ProfileConfigError) as profile_error:
+        profile.load_profile_config()
+    assert_no_secrets(shown, str(profile_error.value),
+                      "".join(traceback.format_exception(profile_error.value)), secrets=(SHORT_SIG,))

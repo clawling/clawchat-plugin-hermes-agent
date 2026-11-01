@@ -220,6 +220,7 @@ def test_mutators_propagate_lock_failure(tmp_path, monkeypatch, operation):
     def unavailable(*args, **kwargs):
         raise OSError(errno.EIO, 'locking unavailable')
 
+    monkeypatch.setattr(skill_update, 'fetch_skill_markdown', lambda *a, **k: 'fetched')
     actions = {
         'memory_write': lambda: clawchat_memory.write_clawchat_memory_body(
             tmp_path, 'group', 'test_group', 'append', 'new'),
@@ -231,7 +232,8 @@ def test_mutators_propagate_lock_failure(tmp_path, monkeypatch, operation):
             tmp_path, 'group', 'test_group'),
         'manifest_set': lambda: skill_update._set_local_version('test-skill', '1.0.0'),
         'skill_seed': lambda: skill_update.seed_managed_skill('test-skill', tmp_path / 'bundled.md'),
-        'skill_update': lambda: skill_update.apply_skill_update([]),
+        'skill_update': lambda: skill_update.apply_skill_update([skill_update.PendingSkillUpdate(
+            'test-skill', None, '1.0.0', 'test-skill/SKILL.md', 'placeholder-sha', 1)]),
         'skill_removal': lambda: skill_update.apply_skill_removal([]),
         'tombstones': skill_update.apply_bundled_tombstones,
         'env_defaults': runtime_defaults.configure_clawchat_allow_all,
@@ -296,3 +298,118 @@ def test_logout_clear_checks_and_clears_under_one_lock(tmp_path, monkeypatch):
     assert held[0] == ('check', True)
     assert [item[0] for item in held[1:]] == ['write', 'write']
     assert entered[0] == env
+
+
+def test_skill_download_runs_outside_manifest_lock(tmp_path, monkeypatch):
+    from clawchat_gateway import skill_update
+
+    monkeypatch.setattr(skill_update, 'managed_skills_dir', lambda: tmp_path / 'clawchat-skills')
+    update = skill_update.PendingSkillUpdate(
+        'test-skill', None, '1.0.0', 'test-skill/SKILL.md', 'placeholder-sha', 1)
+    seen = []
+
+    def fetch(*args, **kwargs):
+        # A competing writer on another thread must get the manifest lock
+        # while this download is in flight.
+        def probe():
+            with state_file_lock(skill_update.managed_manifest_path(), timeout=0.2):
+                seen.append('locked-by-other')
+
+        competitor = threading.Thread(target=probe)
+        competitor.start()
+        competitor.join(2)
+        return 'fetched'
+
+    monkeypatch.setattr(skill_update, 'fetch_skill_markdown', fetch)
+    assert skill_update.apply_skill_update([update]) == ['test-skill']
+    assert seen == ['locked-by-other']
+    assert skill_update.read_local_manifest() == {'test-skill': '1.0.0'}
+
+
+def _racing_env(tmp_path, monkeypatch, *, race_on_call):
+    """A fake host .env whose ownership check lets a re-pair race the caller.
+
+    The check returns the answer computed before the competing re-pair starts,
+    as a real read would; the re-pair then tries to store new credentials. With
+    the caller holding the .env lock across check and write, the re-pair waits
+    and lands last.
+    """
+    from clawchat_gateway import activate
+
+    env = {'CLAWCHAT_TOKEN': 'old-access', 'CLAWCHAT_REFRESH_TOKEN': 'old-refresh'}
+    monkeypatch.setattr(activate, 'get_env_path', lambda: tmp_path / '.env')
+    monkeypatch.setattr(activate, 'save_env_value', lambda key, value: env.__setitem__(key, value))
+    monkeypatch.setattr(activate, 'remove_env_value', lambda key: env.pop(key, None))
+    competitors = []
+    calls = []
+
+    def match(access, refresh):
+        calls.append(1)
+        answer = (env.get('CLAWCHAT_TOKEN'), env.get('CLAWCHAT_REFRESH_TOKEN')) == (access, refresh)
+        if len(calls) == race_on_call:
+            competitor = threading.Thread(target=lambda: activate._write_env_values(
+                {'CLAWCHAT_TOKEN': 'new-access', 'CLAWCHAT_REFRESH_TOKEN': 'new-refresh'}))
+            competitor.start()
+            competitor.join(0.3)
+            competitors.append(competitor)
+        return answer
+
+    monkeypatch.setattr(activate, '_persisted_env_credentials_match', match)
+    return env, competitors
+
+
+def _finish_competitors(competitors):
+    assert competitors, 'the re-pair race never started'
+    for competitor in competitors:
+        competitor.join(5)
+        assert not competitor.is_alive()
+
+
+def test_stale_logout_never_wipes_concurrent_repair(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from clawchat_gateway import activate
+
+    env, competitors = _racing_env(tmp_path, monkeypatch, race_on_call=1)
+    monkeypatch.setattr(activate, 'get_clawchat_store', lambda: SimpleNamespace(
+        clear_activation_credentials=lambda **kwargs: False))
+    result = activate.clear_persisted_credentials(
+        expected_access_token='old-access', expected_refresh_token='old-refresh')
+    _finish_competitors(competitors)
+    assert result.env_matched is True and result.env_cleared is True
+    assert env == {'CLAWCHAT_TOKEN': 'new-access', 'CLAWCHAT_REFRESH_TOKEN': 'new-refresh'}
+
+
+def test_connection_logout_helper_marks_and_clears_under_one_lock(tmp_path, monkeypatch):
+    from clawchat_gateway import activate
+
+    env, competitors = _racing_env(tmp_path, monkeypatch, race_on_call=1)
+    marked = []
+    matched, cleared = activate._match_and_clear_env_credentials(
+        'old-access', 'old-refresh', on_match=lambda: marked.append(dict(env)))
+    _finish_competitors(competitors)
+    assert (matched, cleared) == (True, True)
+    assert marked == [{'CLAWCHAT_TOKEN': 'old-access', 'CLAWCHAT_REFRESH_TOKEN': 'old-refresh'}]
+    assert env == {'CLAWCHAT_TOKEN': 'new-access', 'CLAWCHAT_REFRESH_TOKEN': 'new-refresh'}
+
+
+def test_connection_logout_uses_locked_helper():
+    source = (REPO / 'clawchat_gateway' / 'connection.py').read_text(encoding='utf-8')
+    assert '_match_and_clear_env_credentials(' in source
+    assert '_clear_persisted_env_credentials()' not in source
+
+
+def test_bootstrap_refresh_never_overwrites_concurrent_repair(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from clawchat_gateway import activate
+
+    # Call 1 is the pre-SQLite check; call 2 is the check guarding the .env write.
+    env, competitors = _racing_env(tmp_path, monkeypatch, race_on_call=2)
+    monkeypatch.setattr(activate, 'get_clawchat_store', lambda: SimpleNamespace(
+        update_activation_tokens=lambda **kwargs: True))
+    assert activate.persist_rotated_tokens(
+        access_token='rotated-access', refresh_token='rotated-refresh',
+        expected_access_token='old-access', expected_refresh_token='old-refresh',
+        seed_if_missing=True,
+    ) is True
+    _finish_competitors(competitors)
+    assert env == {'CLAWCHAT_TOKEN': 'new-access', 'CLAWCHAT_REFRESH_TOKEN': 'new-refresh'}

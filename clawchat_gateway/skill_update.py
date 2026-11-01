@@ -660,12 +660,21 @@ def apply_skill_update(
     the local manifest. Idempotent: an update whose target is already the local
     version is skipped. Returns the list of applied skill ids.
     """
-    with _manifest_lock():
-        if not updates:
-            return []
-        local = read_local_manifest()
+    if not updates:
+        return []
 
-        # Phase 1: fetch + validate everything up front.
+    # Phase 1: fetch + validate everything up front, outside the manifest lock
+    # so a slow download never makes other processes time out on it.
+    fetched: dict[str, str] = {}
+    for update in updates:
+        if local_skill_sha(update.skill_id) == update.sha256:
+            continue
+        fetched[update.skill_id] = fetch_skill_markdown(update, fetcher=fetcher, ref=ref)
+
+    # Phase 2: re-read state under the lock, then publish files + manifest.
+    with _manifest_lock():
+        local = read_local_manifest()
+        manifest_changed = False
         staged: list[tuple[PendingSkillUpdate, str]] = []
         for update in updates:
             if local_skill_sha(update.skill_id) == update.sha256:
@@ -673,22 +682,25 @@ def apply_skill_update(
                 # Keep the local manifest's version in sync anyway.
                 if local.get(update.skill_id) != update.target:
                     local[update.skill_id] = update.target
-                    write_local_manifest(local)
+                    manifest_changed = True
                 continue
-            content = fetch_skill_markdown(update, fetcher=fetcher, ref=ref)
+            content = fetched.get(update.skill_id)
+            if content is None:
+                # Converged before the fetch but changed since; the next update
+                # check retries it rather than downloading under the lock.
+                logger.warning("clawchat skill %s changed during update; retry later", update.skill_id)
+                continue
             staged.append((update, content))
 
-        if not staged:
-            return []
-
-        # Phase 2: atomic writes + manifest update.
         applied: list[str] = []
         for update, content in staged:
             atomic_write_text(managed_skill_path(update.skill_id), content)
             local[update.skill_id] = update.target
             applied.append(update.skill_id)
-        write_local_manifest(local)
-        logger.info("clawchat applied skill updates: %s", applied)
+        if applied or manifest_changed:
+            write_local_manifest(local)
+        if applied:
+            logger.info("clawchat applied skill updates: %s", applied)
         return applied
 
 
