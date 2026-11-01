@@ -5,7 +5,7 @@ import os
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse, urlunparse
 
 try:
@@ -44,7 +44,7 @@ from clawchat_gateway.api_client import (
     ClawChatApiClient,
     ClawChatApiError,
     agents_connect_with_retry,
-    strip_url_userinfo,
+    redact_display_text,
     url_has_userinfo,
 )
 from clawchat_gateway.hermes_home import hermes_home
@@ -134,12 +134,16 @@ def _write_config(_config_path: Path, config: dict[str, Any]) -> None:
 
 
 def _write_env_values(values: dict[str, str | None]) -> Path:
-    for key, value in values.items():
-        if value is None:
-            remove_env_value(key)
-        else:
-            save_env_value(key, str(value))
-    return Path(get_env_path())
+    from clawchat_gateway.state_lock import state_file_lock
+
+    env_path = Path(get_env_path())
+    with state_file_lock(env_path):
+        for key, value in values.items():
+            if value is None:
+                remove_env_value(key)
+            else:
+                save_env_value(key, str(value))
+        return env_path
 
 
 def _read_existing_user_id(config: dict[str, Any], *, base_url: str = "") -> str:
@@ -174,8 +178,8 @@ def _read_existing_user_id(config: dict[str, Any], *, base_url: str = "") -> str
             logger.info(
                 "clawchat activation ignoring stored user_id from a different backend "
                 "(stored=%s current=%s)",
-                stored_base_url,
-                base_url,
+                redact_display_text(stored_base_url),
+                redact_display_text(base_url),
             )
             return ""
     stored_profile = extra.get("profile")
@@ -373,11 +377,12 @@ def _identity_is_this_profiles_own(user_id: str) -> bool:
         if reader is None:
             return True
         credentials = reader(platform="hermes", account_id="default")
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         logger.warning(
             "clawchat activation: repair provenance check could not read the local "
-            "activation row; allowing the re-pair",
-            exc_info=True,
+            "activation row; allowing the re-pair: %s: %s",
+            type(exc).__name__,
+            redact_display_text(exc),
         )
         return True
     stored = str(getattr(credentials, "user_id", "") or "").strip()
@@ -522,7 +527,7 @@ def ensure_clawchat_host_defaults_on_load() -> None:
             _write_config(config_path, config)
             logger.info("clawchat: filled missing ClawChat host defaults in config.yaml")
     except Exception as exc:  # noqa: BLE001
-        logger.warning("clawchat: could not ensure host defaults at load: %s", exc)
+        logger.warning("clawchat: could not ensure host defaults at load: %s: %s", type(exc).__name__, redact_display_text(exc))
 
 
 def _read_optional_bool(value: Any) -> bool | None:
@@ -615,8 +620,8 @@ def persist_activation(
         "user_id": user_id,
         "agent_id": agent_id,
         "owner_user_id": owner_user_id,
-        "base_url": extra["base_url"],
-        "websocket_url": extra["websocket_url"],
+        "base_url": redact_display_text(extra["base_url"]),
+        "websocket_url": redact_display_text(extra["websocket_url"]),
         "token": "***",
         "refresh_token": "***" if refresh_token else None,
         "home_channel_id": home_channel_id or None,
@@ -656,8 +661,8 @@ def migrate_legacy_config_tokens() -> dict[str, Any]:
     summary = {"migrated_token": False, "migrated_refresh": False, "stripped": False}
     try:
         config_path, config = _load_config()
-    except Exception:  # noqa: BLE001
-        logger.warning("clawchat legacy-token migration: failed to load config", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("clawchat legacy-token migration: failed to load config: %s: %s", type(exc).__name__, redact_display_text(exc))
         return summary
 
     try:
@@ -721,8 +726,8 @@ def migrate_legacy_config_tokens() -> dict[str, Any]:
             _mask_token(refresh),
             summary["migrated_refresh"],
         )
-    except Exception:  # noqa: BLE001
-        logger.warning("clawchat legacy-token migration failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("clawchat legacy-token migration failed: %s: %s", type(exc).__name__, redact_display_text(exc))
     return summary
 
 
@@ -766,18 +771,23 @@ def persist_rotated_tokens(
         ) is True
 
     def write_env() -> bool:
-        if not bootstrap_env_matches():
-            return False
+        from clawchat_gateway.state_lock import state_file_lock
+
         try:
-            _write_env_values(
-                {
-                    "CLAWCHAT_TOKEN": access_token,
-                    "CLAWCHAT_REFRESH_TOKEN": refresh_token or None,
-                }
-            )
-            return True
-        except Exception:  # noqa: BLE001
-            logger.warning("clawchat rotated-token .env persistence failed", exc_info=True)
+            # The bootstrap ownership check and the write share one .env lock,
+            # so a re-pair landing in between is never overwritten.
+            with state_file_lock(Path(get_env_path())):
+                if not bootstrap_env_matches():
+                    return False
+                _write_env_values(
+                    {
+                        "CLAWCHAT_TOKEN": access_token,
+                        "CLAWCHAT_REFRESH_TOKEN": refresh_token or None,
+                    }
+                )
+                return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("clawchat rotated-token .env persistence failed: %s: %s", type(exc).__name__, redact_display_text(exc))
             return False
 
     def write_db() -> bool:
@@ -795,8 +805,8 @@ def persist_rotated_tokens(
                 expected_refresh_token=expected_refresh_token,
                 seed_if_missing=seed_if_missing,
             ))
-        except Exception:  # noqa: BLE001
-            logger.warning("clawchat rotated-token database persistence failed", exc_info=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("clawchat rotated-token database persistence failed: %s: %s", type(exc).__name__, redact_display_text(exc))
             return False
 
     # Check bootstrap .env before seeding as well as after the SQLite commit.
@@ -837,19 +847,54 @@ def _persisted_env_credentials_match(
 def _clear_persisted_env_credentials(
     *, expected_access_token: str | None = None, expected_refresh_token: str | None = None,
 ) -> bool:
-    if expected_access_token is not None or expected_refresh_token is not None:
-        if _persisted_env_credentials_match(expected_access_token, expected_refresh_token) is not True:
-            return False
+    from clawchat_gateway.state_lock import StateLockError, state_file_lock
+
     try:
-        cleared = bool(_write_env_values({
-            "CLAWCHAT_TOKEN": "", "CLAWCHAT_REFRESH_TOKEN": "",
-        }))
-        if not cleared:
-            logger.warning("clawchat logout .env clear returned false")
-        return cleared
+        # Compare and clear under one lock so a concurrent re-pair that just
+        # stored new credentials is never wiped by a stale logout.
+        with state_file_lock(Path(get_env_path())):
+            if expected_access_token is not None or expected_refresh_token is not None:
+                if _persisted_env_credentials_match(
+                    expected_access_token, expected_refresh_token,
+                ) is not True:
+                    return False
+            cleared = bool(_write_env_values({
+                "CLAWCHAT_TOKEN": "", "CLAWCHAT_REFRESH_TOKEN": "",
+            }))
+    except StateLockError as exc:
+        logger.warning("clawchat logout .env clear skipped: %s", exc)
+        return False
     except Exception:  # noqa: BLE001
         logger.warning("clawchat logout .env clear failed")
         return False
+    if not cleared:
+        logger.warning("clawchat logout .env clear returned false")
+    return cleared
+
+
+def _match_and_clear_env_credentials(
+    expected_access_token: str | None, expected_refresh_token: str | None,
+    *, on_match: Callable[[], None] | None = None,
+) -> tuple[bool | None, bool]:
+    """Compare the persisted .env pair and clear it inside one .env lock.
+
+    Returns ``(env_matched, env_cleared)``. ``on_match`` runs under the lock
+    after a confirmed match and before the clear. A lock failure reports an
+    unknown match and clears nothing.
+    """
+    from clawchat_gateway.state_lock import StateLockError, state_file_lock
+
+    try:
+        with state_file_lock(Path(get_env_path())):
+            matched = _persisted_env_credentials_match(expected_access_token, expected_refresh_token)
+            if matched is not True:
+                return matched, False
+            if on_match is not None:
+                on_match()
+            return True, _clear_persisted_env_credentials()
+    except StateLockError as exc:
+        logger.warning("clawchat logout .env clear skipped: %s", exc)
+        return None, False
 
 
 def clear_persisted_credentials(
@@ -876,9 +921,10 @@ def clear_persisted_credentials(
     env_matched = None
     conditional = expected_access_token is not None or expected_refresh_token is not None
     if conditional:
-        env_matched = _persisted_env_credentials_match(expected_access_token, expected_refresh_token)
-    env_cleared = False
-    if not conditional or env_matched is True:
+        env_matched, env_cleared = _match_and_clear_env_credentials(
+            expected_access_token, expected_refresh_token,
+        )
+    else:
         env_cleared = _clear_persisted_env_credentials()
     sqlite_cleared = False
     try:
@@ -996,7 +1042,7 @@ async def activate(
             "retrying as a fresh pairing",
             existing_user_id,
             "(base URL withheld: contains credentials)" if url_has_userinfo(base_url)
-            else strip_url_userinfo(base_url),
+            else redact_display_text(base_url),
         )
         # The replayed identity doesn't exist on this backend: this IS a
         # brand-new agent (rule 5), so it must get its own per-profile
@@ -1074,10 +1120,10 @@ async def activate_and_maybe_restart(
     payload["ok"] = True
     try:
         plan = plan_gateway_restart()
-    except Exception:  # noqa: BLE001 - the code is already spent; never hide success
+    except Exception as exc:  # noqa: BLE001 - the code is already spent; never hide success
         if restart:
             raise
-        logger.warning("clawchat restart plan detection failed", exc_info=True)
+        logger.warning("clawchat restart plan detection failed: %s: %s", type(exc).__name__, redact_display_text(exc))
         try:
             profile = _active_profile_name()
         except Exception:  # noqa: BLE001

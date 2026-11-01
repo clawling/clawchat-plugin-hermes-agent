@@ -209,10 +209,28 @@ _QUOTED_VALUE = (
 _BARE_VALUE = r"[^\s&#\"'<>`,;}\]]+"
 
 
+def _marked_parse_error_text(exc: BaseException) -> str | None:
+    """Describe a YAML-style parse error by position only.
+
+    Such errors quote a truncated snippet of the source; truncation can cut a
+    ``key=`` label off a credential value, so the snippet is never shown.
+    """
+    mark = getattr(exc, "problem_mark", None) or getattr(exc, "context_mark", None)
+    if mark is None or not hasattr(mark, "line"):
+        return None
+    # The problem text can quote source too (undefined aliases, unknown tags),
+    # so only the error class and position are shown.
+    return (
+        f"{type(exc).__name__} "
+        f"(line {int(mark.line) + 1}, column {int(getattr(mark, 'column', 0)) + 1})"
+    )
+
+
 def redact_display_text(value: object, *secrets: str) -> str:
     """Redact credentials before diagnostics become logs or caller-visible text."""
     try:
-        text = strip_url_userinfo(str(value or ""))
+        marked = _marked_parse_error_text(value) if isinstance(value, BaseException) else None
+        text = strip_url_userinfo(marked if marked is not None else str(value or ""))
         for secret in sorted((s for s in secrets if s), key=len, reverse=True):
             text = text.replace(secret, "***")
         text = re.sub(
@@ -222,7 +240,7 @@ def redact_display_text(value: object, *secrets: str) -> str:
         )
         text = re.sub(r"(?i)\bBearer\s+" + _BARE_VALUE, "Bearer ***", text)
         text = re.sub(
-            r"(?i)(\b(?:(?:access[_-]?|refresh[_-]?)?token|api[_-]?key|key|secret|password|signature)"
+            r"(?i)(\b(?:(?:access[_-]?|refresh[_-]?)?token|api[_-]?key|key|secret|password|signature|sig)"
             r"(?:\\?[\"'])?\s*[:=]\s*)"
             r"(?:" + _QUOTED_VALUE + r"|" + _BARE_VALUE + r")",
             lambda match: match.group(1) + "***", text,
@@ -231,6 +249,55 @@ def redact_display_text(value: object, *secrets: str) -> str:
         # hosts in ordinary API errors stay readable.
         return re.sub(r"eyJ[A-Za-z0-9_=-]*\.[A-Za-z0-9_=-]+\.[A-Za-z0-9_=-]+", "***", text)
     except Exception:  # noqa: BLE001 - diagnostics must fail closed
+        return DIAGNOSTIC_REDACTION_FAILED
+
+
+def redact_display_data(value: object, *secrets: str) -> object:
+    """Copy diagnostic data with credentials hidden; never return unsafe input."""
+    try:
+        active: set[int] = set()
+        sensitive = (
+            "token", "secret", "password", "passwd", "authorization", "apikey",
+            "refresh", "cookie", "credential", "signature",
+        )
+
+        def copy(item: object, depth: int) -> object:
+            if depth > 32:
+                return "[redacted]"
+            if isinstance(item, (dict, list, tuple)):
+                identity = id(item)
+                if identity in active:
+                    return "[redacted]"
+                active.add(identity)
+                try:
+                    if isinstance(item, dict):
+                        result = {}
+                        for key, child in item.items():
+                            name = redact_display_text(key, *secrets)
+                            normalized = re.sub(r"[-_ ]", "", str(key).lower())
+                            # Counters such as max_tokens / prompt_tokens stay
+                            # readable; any text or structure under the key is hidden.
+                            keep = child is None or type(child) in (int, float, bool)
+                            labelled = (
+                                any(part in normalized for part in sensitive)
+                                or normalized.endswith(("key", "sig"))
+                            )
+                            result[name] = (
+                                "***" if labelled and not keep
+                                else copy(child, depth + 1)
+                            )
+                        return result
+                    return [copy(child, depth + 1) for child in item]
+                finally:
+                    active.remove(identity)
+            if isinstance(item, str):
+                return redact_display_text(item, *secrets)
+            if item is None or type(item) in (int, float, bool):
+                return item
+            return redact_display_text(repr(item), *secrets)
+
+        return copy(value, 0)
+    except Exception:  # noqa: BLE001 - diagnostic conversion must fail closed
         return DIAGNOSTIC_REDACTION_FAILED
 
 
@@ -263,13 +330,13 @@ class ClawChatApiError(Exception):
     wait_retried: bool = False
 
     def __str__(self) -> str:
-        return self.message
+        return redact_display_text(self.message)
 
     @property
     def hint(self) -> str | None:
         """``data.hint`` — the server's guidance sentence, if present."""
         value = (self.data or {}).get("hint")
-        return value if isinstance(value, str) and value.strip() else None
+        return redact_display_text(value) if isinstance(value, str) and value.strip() else None
 
     @property
     def next_action(self) -> str | None:
@@ -299,12 +366,12 @@ def format_connect_guidance(exc: ClawChatApiError) -> list[str]:
     """
     lines: list[str] = []
     if exc.next_action:
-        line = f"clawchat: next_action={exc.next_action}"
+        line = f"clawchat: next_action={redact_display_text(exc.next_action)}"
         if exc.retry_after_seconds is not None:
             line = f"{line} retry_after_seconds={exc.retry_after_seconds}"
         lines.append(line)
     if exc.hint:
-        lines.append(f"clawchat: hint: {exc.hint}")
+        lines.append(f"clawchat: hint: {redact_display_text(exc.hint)}")
     if exc.wait_retried and exc.next_action == NEXT_ACTION_WAIT_RETRY:
         lines.append(
             "clawchat: the plugin already waited and retried once automatically; "

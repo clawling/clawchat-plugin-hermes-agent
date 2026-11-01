@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from clawchat_gateway.api_client import redact_display_data, redact_display_text
+
 Visibility = str
 
 
@@ -15,7 +17,7 @@ def _enabled(value: str | None) -> bool:
 
 
 def _safe_id(value: Any) -> str:
-    text = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value or "unknown"))
+    text = re.sub(r"[^A-Za-z0-9_.-]+", "-", redact_display_text(value or "unknown"))
     return (text or "unknown")[:80]
 
 
@@ -68,9 +70,9 @@ class ClawChatLlmContextDebug:
                 "skills": list((context or {}).get("skills") or []),
             },
             "input": {
-                "injectedPrompt": str(input.get("injectedPrompt") or ""),
-                "channelContext": str(input.get("channelContext") or ""),
-                "eventText": str(input.get("eventText") or ""),
+                "injectedPrompt": redact_display_text(input.get("injectedPrompt") or ""),
+                "channelContext": redact_display_text(input.get("channelContext") or ""),
+                "eventText": redact_display_text(input.get("eventText") or ""),
                 "fullLlmInput": input.get("fullLlmInput"),
                 "requestMessages": list(input.get("requestMessages") or []),
                 "requestTools": list(input.get("requestTools") or []),
@@ -90,7 +92,7 @@ class ClawChatLlmContextDebug:
             },
             "warnings": warnings or [],
         }
-        text = json.dumps(body, ensure_ascii=False, indent=2) + "\n"
+        text = json.dumps(redact_display_data(body), ensure_ascii=False, indent=2) + "\n"
         file_path.write_text(text, encoding="utf-8")
         (target_root / "latest.json").write_text(text, encoding="utf-8")
         return str(file_path)

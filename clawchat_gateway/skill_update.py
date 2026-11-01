@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from clawchat_gateway import atomic_file
+from clawchat_gateway.state_lock import StateLockError, state_file_lock
 from clawchat_gateway.hermes_home import hermes_home
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,14 @@ def bundled_skill_ids() -> tuple[str, ...]:
 
 class SkillUpdateError(Exception):
     """Raised on any manifest/skill validation or fetch failure."""
+
+
+class SkillUpdateIncomplete(SkillUpdateError):
+    """Local skills kept changing during the update; nothing was published."""
+
+    def __init__(self, skill_ids: list[str]) -> None:
+        super().__init__(f"skills changed during update: {', '.join(skill_ids)}")
+        self.skill_ids = list(skill_ids)
 
 
 # --- Version comparison (mirrors install-cli parseComparableVersion) --------
@@ -265,8 +274,12 @@ def atomic_write_text(path: Path, text: str) -> None:
 # --- Local managed manifest -------------------------------------------------
 
 
+def _manifest_lock():
+    return state_file_lock(managed_manifest_path())
+
+
 def read_local_manifest() -> dict[str, str]:
-    """Return ``{"<skill_id>": "<version>"}`` from the managed manifest."""
+    """Return ``{"<skill_id>": "<version>"}``; callers must hold _manifest_lock()."""
     try:
         text = managed_manifest_path().read_text(encoding="utf-8")
         data = json.loads(text)
@@ -281,6 +294,7 @@ def read_local_manifest() -> dict[str, str]:
 
 
 def write_local_manifest(manifest: dict[str, str]) -> None:
+    """Publish the manifest; callers must hold _manifest_lock()."""
     atomic_write_text(
         managed_manifest_path(),
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -288,9 +302,10 @@ def write_local_manifest(manifest: dict[str, str]) -> None:
 
 
 def _set_local_version(skill_id: str, version: str) -> None:
-    manifest = read_local_manifest()
-    manifest[skill_id] = version
-    write_local_manifest(manifest)
+    with _manifest_lock():
+        manifest = read_local_manifest()
+        manifest[skill_id] = version
+        write_local_manifest(manifest)
 
 
 def local_skill_sha(skill_id: str) -> str | None:
@@ -311,50 +326,53 @@ def seed_managed_skill(skill_id: str, bundled_path: Path) -> Path:
     Seeds the managed copy from the bundled snapshot when the managed file is
     missing, corrupt (no parseable version), or older than the bundled version.
     A managed file that is equal-or-newer is kept (it may already hold a
-    hot-update). On ANY error, falls back to the read-only bundled path so the
-    skill mechanism can never crash plugin load.
+    hot-update). Errors other than lock failures fall back to the read-only
+    bundled path. Lock failures propagate and prevent publication.
     """
-    bundled_path = Path(bundled_path)
-    try:
-        managed = managed_skill_path(skill_id)
-        bundled_version = skill_version(bundled_path)
-        managed_version = skill_version(managed) if managed.exists() else None
+    with _manifest_lock():
+        bundled_path = Path(bundled_path)
+        try:
+            managed = managed_skill_path(skill_id)
+            bundled_version = skill_version(bundled_path)
+            managed_version = skill_version(managed) if managed.exists() else None
 
-        need_seed = False
-        if not managed.exists():
-            need_seed = True
-        elif managed_version is None:
-            # Corrupt/unversioned managed file — reseed from bundled.
-            need_seed = True
-        elif bundled_version is not None and is_version_older(
-            managed_version, bundled_version
-        ):
-            need_seed = True
+            need_seed = False
+            if not managed.exists():
+                need_seed = True
+            elif managed_version is None:
+                # Corrupt/unversioned managed file — reseed from bundled.
+                need_seed = True
+            elif bundled_version is not None and is_version_older(
+                managed_version, bundled_version
+            ):
+                need_seed = True
 
-        if need_seed:
-            content = bundled_path.read_text(encoding="utf-8")
-            atomic_write_text(managed, content)
-            seeded_version = skill_version(managed) or bundled_version
-            if seeded_version:
-                _set_local_version(skill_id, seeded_version)
-            logger.info(
-                "clawchat seeded managed skill %s -> %s (version=%s)",
+            if need_seed:
+                content = bundled_path.read_text(encoding="utf-8")
+                atomic_write_text(managed, content)
+                seeded_version = skill_version(managed) or bundled_version
+                if seeded_version:
+                    _set_local_version(skill_id, seeded_version)
+                logger.info(
+                    "clawchat seeded managed skill %s -> %s (version=%s)",
+                    skill_id,
+                    managed,
+                    seeded_version,
+                )
+            else:
+                # Managed kept; make sure the manifest reflects what is on disk.
+                if managed_version and read_local_manifest().get(skill_id) != managed_version:
+                    _set_local_version(skill_id, managed_version)
+            return managed
+        except StateLockError:
+            raise
+        except Exception:  # noqa: BLE001 — never let seeding break plugin load
+            logger.warning(
+                "clawchat managed-skill seeding failed for %s; using bundled path",
                 skill_id,
-                managed,
-                seeded_version,
+                exc_info=True,
             )
-        else:
-            # Managed kept; make sure the manifest reflects what is on disk.
-            if managed_version and read_local_manifest().get(skill_id) != managed_version:
-                _set_local_version(skill_id, managed_version)
-        return managed
-    except Exception:  # noqa: BLE001 — never let seeding break plugin load
-        logger.warning(
-            "clawchat managed-skill seeding failed for %s; using bundled path",
-            skill_id,
-            exc_info=True,
-        )
-        return bundled_path
+            return bundled_path
 
 
 # --- Remote source ----------------------------------------------------------
@@ -652,33 +670,54 @@ def apply_skill_update(
     """
     if not updates:
         return []
-    local = read_local_manifest()
 
-    # Phase 1: fetch + validate everything up front.
-    staged: list[tuple[PendingSkillUpdate, str]] = []
-    for update in updates:
-        if local_skill_sha(update.skill_id) == update.sha256:
-            # Idempotent: on-disk bytes already converged to the manifest.
-            # Keep the local manifest's version in sync anyway.
-            if local.get(update.skill_id) != update.target:
+    # Downloads and validation run outside the manifest lock so a slow fetch
+    # never makes other processes time out on it. Under the lock the local
+    # state is re-read before publishing; a skill that diverged after the
+    # unlocked check gets one more unlocked fetch. If it still is not covered,
+    # nothing is published and the caller sees SkillUpdateIncomplete.
+    fetched: dict[str, str] = {}
+    missing: list[str] = []
+    for _round in range(2):
+        for update in updates:
+            if update.skill_id in fetched or local_skill_sha(update.skill_id) == update.sha256:
+                continue
+            fetched[update.skill_id] = fetch_skill_markdown(update, fetcher=fetcher, ref=ref)
+
+        with _manifest_lock():
+            local = read_local_manifest()
+            manifest_changed = False
+            staged: list[tuple[PendingSkillUpdate, str]] = []
+            missing = []
+            for update in updates:
+                if local_skill_sha(update.skill_id) == update.sha256:
+                    # Idempotent: on-disk bytes already converged to the manifest.
+                    # Keep the local manifest's version in sync anyway.
+                    if local.get(update.skill_id) != update.target:
+                        local[update.skill_id] = update.target
+                        manifest_changed = True
+                    continue
+                content = fetched.get(update.skill_id)
+                if content is None:
+                    missing.append(update.skill_id)
+                    continue
+                staged.append((update, content))
+            if missing:
+                continue  # Publish nothing; fetch the diverged skills unlocked.
+
+            applied: list[str] = []
+            for update, content in staged:
+                atomic_write_text(managed_skill_path(update.skill_id), content)
                 local[update.skill_id] = update.target
+                applied.append(update.skill_id)
+            if applied or manifest_changed:
                 write_local_manifest(local)
-            continue
-        content = fetch_skill_markdown(update, fetcher=fetcher, ref=ref)
-        staged.append((update, content))
+            if applied:
+                logger.info("clawchat applied skill updates: %s", applied)
+            return applied
 
-    if not staged:
-        return []
-
-    # Phase 2: atomic writes + manifest update.
-    applied: list[str] = []
-    for update, content in staged:
-        atomic_write_text(managed_skill_path(update.skill_id), content)
-        local[update.skill_id] = update.target
-        applied.append(update.skill_id)
-    write_local_manifest(local)
-    logger.info("clawchat applied skill updates: %s", applied)
-    return applied
+    logger.warning("clawchat skill update incomplete; skills changed during update: %s", missing)
+    raise SkillUpdateIncomplete(missing)
 
 
 def apply_skill_removal(removals: list[PendingSkillRemoval]) -> list[str]:
@@ -690,35 +729,36 @@ def apply_skill_removal(removals: list[PendingSkillRemoval]) -> list[str]:
     them would only trigger a reseed). Idempotent: an already-absent file
     still clears the manifest entry. Returns the removed skill ids.
     """
-    if not removals:
-        return []
-    local = read_local_manifest()
-    removed: list[str] = []
-    for removal in removals:
-        skill_id = removal.skill_id
-        if skill_id in bundled_skill_ids():
-            logger.warning("clawchat refusing to remove bundled skill %s", skill_id)
-            continue
-        skill_path = managed_skill_path(skill_id)
-        try:
-            skill_path.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError:
-            logger.warning(
-                "clawchat could not delete managed skill %s", skill_id, exc_info=True
-            )
-            continue
-        try:
-            skill_path.parent.rmdir()
-        except OSError:
-            pass  # non-empty or already gone — best-effort
-        local.pop(skill_id, None)
-        removed.append(skill_id)
-    if removed:
-        write_local_manifest(local)
-        logger.info("clawchat removed tombstoned skills: %s", removed)
-    return removed
+    with _manifest_lock():
+        if not removals:
+            return []
+        local = read_local_manifest()
+        removed: list[str] = []
+        for removal in removals:
+            skill_id = removal.skill_id
+            if skill_id in bundled_skill_ids():
+                logger.warning("clawchat refusing to remove bundled skill %s", skill_id)
+                continue
+            skill_path = managed_skill_path(skill_id)
+            try:
+                skill_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.warning(
+                    "clawchat could not delete managed skill %s", skill_id, exc_info=True
+                )
+                continue
+            try:
+                skill_path.parent.rmdir()
+            except OSError:
+                pass  # non-empty or already gone — best-effort
+            local.pop(skill_id, None)
+            removed.append(skill_id)
+        if removed:
+            write_local_manifest(local)
+            logger.info("clawchat removed tombstoned skills: %s", removed)
+        return removed
 
 
 def apply_bundled_tombstones() -> list[str]:
@@ -727,29 +767,30 @@ def apply_bundled_tombstones() -> list[str]:
     Load-time counterpart of the dynamic removal path: stale ids left in the
     managed dir from before a rename must not be re-registered on every load.
     """
-    manifest_path = bundled_skills_dir() / "manifest.json"
-    try:
-        data = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return []
-    except Exception:  # noqa: BLE001 — a bad snapshot must never break load
-        logger.warning("clawchat bundled manifest snapshot unreadable; skipping tombstones")
-        return []
-    if not isinstance(data, dict):
-        logger.warning("clawchat bundled manifest snapshot is not an object; skipping tombstones")
-        return []
-    removed_raw = data.get("removed", {})
-    ids = removed_raw.get(TARGET, []) if isinstance(removed_raw, dict) else []
-    bundled = set(bundled_skill_ids())
-    local = read_local_manifest()
-    removals = [
-        PendingSkillRemoval(skill_id=str(skill_id), current=local.get(str(skill_id)))
-        for skill_id in ids
-        if isinstance(skill_id, str)
-        and skill_id not in bundled
-        and (skill_id in local or managed_skill_path(skill_id).exists())
-    ]
-    return apply_skill_removal(removals)
+    with _manifest_lock():
+        manifest_path = bundled_skills_dir() / "manifest.json"
+        try:
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return []
+        except Exception:  # noqa: BLE001 — a bad snapshot must never break load
+            logger.warning("clawchat bundled manifest snapshot unreadable; skipping tombstones")
+            return []
+        if not isinstance(data, dict):
+            logger.warning("clawchat bundled manifest snapshot is not an object; skipping tombstones")
+            return []
+        removed_raw = data.get("removed", {})
+        ids = removed_raw.get(TARGET, []) if isinstance(removed_raw, dict) else []
+        bundled = set(bundled_skill_ids())
+        local = read_local_manifest()
+        removals = [
+            PendingSkillRemoval(skill_id=str(skill_id), current=local.get(str(skill_id)))
+            for skill_id in ids
+            if isinstance(skill_id, str)
+            and skill_id not in bundled
+            and (skill_id in local or managed_skill_path(skill_id).exists())
+        ]
+        return apply_skill_removal(removals)
 
 
 # --- Host hot-registration ---------------------------------------------------

@@ -21,6 +21,8 @@ _PLUGIN_ROOT = str(_plugin_dir())
 if _PLUGIN_ROOT not in sys.path:
     sys.path.insert(0, _PLUGIN_ROOT)
 
+from clawchat_gateway.api_client import redact_display_text
+
 
 def _setup_clawchat_platform() -> None:
     from clawchat_gateway.setup import setup_clawchat_platform
@@ -45,7 +47,7 @@ def _clawchat_home_extra() -> dict:
     except Exception as exc:
         logger.debug(
             "ClawChat could not read Hermes config.yaml for registry check: %s",
-            exc,
+            redact_display_text(exc),
         )
         return {}
 
@@ -408,7 +410,7 @@ def _migrate_legacy_config_tokens() -> None:
 
         migrate_legacy_config_tokens()
     except Exception as exc:  # noqa: BLE001
-        logger.warning("ClawChat legacy-token migration skipped: %s", exc)
+        logger.warning("ClawChat legacy-token migration skipped: %s", redact_display_text(exc))
 
 
 def _warn_on_shared_identity() -> None:
@@ -450,7 +452,7 @@ def _ensure_host_defaults() -> None:
 
         activate.ensure_clawchat_host_defaults_on_load()
     except Exception as exc:  # noqa: BLE001
-        logger.warning("ClawChat host defaults skipped: %s", exc)
+        logger.warning("ClawChat host defaults skipped: %s", redact_display_text(exc))
 
 
 def _register_platform(ctx) -> bool:
@@ -536,7 +538,7 @@ def _configure_runtime_defaults() -> None:
 
         configure_clawchat_allow_all()
     except Exception as exc:
-        logger.warning("ClawChat could not configure runtime defaults: %s", exc)
+        logger.warning("ClawChat could not configure runtime defaults: %s", redact_display_text(exc))
 
 
 def _managed_skills_dir() -> Path:
@@ -737,7 +739,7 @@ def _resolve_clawchat_bot_user_id(gateway, source=None) -> str | None:
         from clawchat_gateway.config import ClawChatConfig
         cfg = ClawChatConfig.from_platform_config(platform_config)
     except Exception as exc:
-        logger.debug("clawchat self-echo: ClawChatConfig load failed: %s", exc)
+        logger.debug("clawchat self-echo: ClawChatConfig load failed: %s", redact_display_text(exc))
         return None
     user_id = cfg.user_id or None
     return user_id if isinstance(user_id, str) and user_id else None

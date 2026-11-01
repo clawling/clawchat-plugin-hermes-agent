@@ -23,6 +23,8 @@ class Finding:
 
 # (path, qualified function, call text, count, category, concrete reason)
 ALLOWLIST: list[tuple[str, str, str, int, str, str]] = [
+    ("clawchat_gateway/state_lock.py", "state_file_lock", "os.open", 1, "C",
+     "C: state lock file"),
     ("clawchat_gateway/install_identity.py", "_publish_seed", "os.fdopen", 1, "C",
      "C: same-directory seed staging file, flushed and fsynced before create-only publication"),
     ("clawchat_gateway/install_identity.py", "_publish_seed", "tempfile.mkstemp", 1, "C",
