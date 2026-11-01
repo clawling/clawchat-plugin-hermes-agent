@@ -66,11 +66,11 @@ PERMISSION_RECEIPT_RULE = PERMISSION_RECEIPT_RULE_TEXT
 
 
 def _config_error(message: str) -> dict[str, Any]:
-    return {"error": "config", "message": message}
+    return {"error": "config", "message": redact_display_text(message)}
 
 
 def _validation_error(message: str, *, code: str | None = None) -> dict[str, Any]:
-    result: dict[str, Any] = {"error": "validation", "message": message}
+    result: dict[str, Any] = {"error": "validation", "message": redact_display_text(message)}
     if code:
         result["code"] = code
     return result
@@ -86,7 +86,7 @@ def _invalid_chat_id_error(chat_id: Any) -> dict[str, Any]:
     """
     return _validation_error(
         "chatId must be a ClawChat conversation id "
-        f"({CHAT_ID_PREFIX} + 26 Crockford base32 chars), got {chat_id!r} — "
+        f"({CHAT_ID_PREFIX} + 26 Crockford base32 chars), got {redact_display_text(chat_id)!r} — "
         "use the chatId of the conversation you are in, not a user id or a name",
         code="invalid_chat_id",
     )
@@ -111,7 +111,7 @@ def _tool_chat_id(value: Any) -> str:
 
 
 def _validation_error_from_exception(exc: ValueError) -> dict[str, Any]:
-    message = str(exc)
+    message = redact_display_text(exc)
     if message.startswith("missing_metadata_field:"):
         return _validation_error(message, code="missing_metadata_field")
     return _validation_error(message)
@@ -122,14 +122,14 @@ def _api_error(err: ClawChatApiError) -> dict[str, Any]:
     if err.status is not None:
         meta["status"] = err.status
     if err.path is not None:
-        meta["path"] = err.path
+        meta["path"] = redact_display_text(err.path)
     if err.code is not None:
         meta["code"] = err.code
 
     if err.code in (CODE_PENDING_APPROVAL, CODE_POLICY_FORBIDDEN):
         return _permission_gate_result(err, meta)
 
-    out: dict[str, Any] = {"error": err.kind, "message": err.message}
+    out: dict[str, Any] = {"error": err.kind, "message": redact_display_text(err.message)}
     if meta:
         out["meta"] = meta
     return out
@@ -161,7 +161,7 @@ def _permission_gate_result(err: ClawChatApiError, meta: dict[str, Any]) -> dict
 
     result: dict[str, Any] = {
         "error": "permission",
-        "message": message,
+        "message": redact_display_text(message),
         "retryable": False,
         "status": status,
     }
@@ -191,8 +191,8 @@ def _extract_request_id(err: ClawChatApiError) -> str | None:
 def _unknown_error(exc: BaseException) -> dict[str, Any]:
     if isinstance(exc, OSError):
         # str(OSError) carries the file name; keep only the reason.
-        return {"error": "unknown", "message": exc.strerror or type(exc).__name__}
-    return {"error": "unknown", "message": str(exc)}
+        return {"error": "unknown", "message": redact_display_text(exc.strerror or type(exc).__name__)}
+    return {"error": "unknown", "message": redact_display_text(exc)}
 
 
 def _resolve_tool_device_id(token: str) -> str:

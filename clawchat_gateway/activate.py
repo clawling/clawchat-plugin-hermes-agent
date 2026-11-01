@@ -44,7 +44,7 @@ from clawchat_gateway.api_client import (
     ClawChatApiClient,
     ClawChatApiError,
     agents_connect_with_retry,
-    strip_url_userinfo,
+    redact_display_text,
     url_has_userinfo,
 )
 from clawchat_gateway.hermes_home import hermes_home
@@ -178,8 +178,8 @@ def _read_existing_user_id(config: dict[str, Any], *, base_url: str = "") -> str
             logger.info(
                 "clawchat activation ignoring stored user_id from a different backend "
                 "(stored=%s current=%s)",
-                stored_base_url,
-                base_url,
+                redact_display_text(stored_base_url),
+                redact_display_text(base_url),
             )
             return ""
     stored_profile = extra.get("profile")
@@ -377,11 +377,12 @@ def _identity_is_this_profiles_own(user_id: str) -> bool:
         if reader is None:
             return True
         credentials = reader(platform="hermes", account_id="default")
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         logger.warning(
             "clawchat activation: repair provenance check could not read the local "
-            "activation row; allowing the re-pair",
-            exc_info=True,
+            "activation row; allowing the re-pair: %s: %s",
+            type(exc).__name__,
+            redact_display_text(exc),
         )
         return True
     stored = str(getattr(credentials, "user_id", "") or "").strip()
@@ -526,7 +527,7 @@ def ensure_clawchat_host_defaults_on_load() -> None:
             _write_config(config_path, config)
             logger.info("clawchat: filled missing ClawChat host defaults in config.yaml")
     except Exception as exc:  # noqa: BLE001
-        logger.warning("clawchat: could not ensure host defaults at load: %s", exc)
+        logger.warning("clawchat: could not ensure host defaults at load: %s: %s", type(exc).__name__, redact_display_text(exc))
 
 
 def _read_optional_bool(value: Any) -> bool | None:
@@ -619,8 +620,8 @@ def persist_activation(
         "user_id": user_id,
         "agent_id": agent_id,
         "owner_user_id": owner_user_id,
-        "base_url": extra["base_url"],
-        "websocket_url": extra["websocket_url"],
+        "base_url": redact_display_text(extra["base_url"]),
+        "websocket_url": redact_display_text(extra["websocket_url"]),
         "token": "***",
         "refresh_token": "***" if refresh_token else None,
         "home_channel_id": home_channel_id or None,
@@ -660,8 +661,8 @@ def migrate_legacy_config_tokens() -> dict[str, Any]:
     summary = {"migrated_token": False, "migrated_refresh": False, "stripped": False}
     try:
         config_path, config = _load_config()
-    except Exception:  # noqa: BLE001
-        logger.warning("clawchat legacy-token migration: failed to load config", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("clawchat legacy-token migration: failed to load config: %s: %s", type(exc).__name__, redact_display_text(exc))
         return summary
 
     try:
@@ -725,8 +726,8 @@ def migrate_legacy_config_tokens() -> dict[str, Any]:
             _mask_token(refresh),
             summary["migrated_refresh"],
         )
-    except Exception:  # noqa: BLE001
-        logger.warning("clawchat legacy-token migration failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("clawchat legacy-token migration failed: %s: %s", type(exc).__name__, redact_display_text(exc))
     return summary
 
 
@@ -780,8 +781,8 @@ def persist_rotated_tokens(
                 }
             )
             return True
-        except Exception:  # noqa: BLE001
-            logger.warning("clawchat rotated-token .env persistence failed", exc_info=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("clawchat rotated-token .env persistence failed: %s: %s", type(exc).__name__, redact_display_text(exc))
             return False
 
     def write_db() -> bool:
@@ -799,8 +800,8 @@ def persist_rotated_tokens(
                 expected_refresh_token=expected_refresh_token,
                 seed_if_missing=seed_if_missing,
             ))
-        except Exception:  # noqa: BLE001
-            logger.warning("clawchat rotated-token database persistence failed", exc_info=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("clawchat rotated-token database persistence failed: %s: %s", type(exc).__name__, redact_display_text(exc))
             return False
 
     # Check bootstrap .env before seeding as well as after the SQLite commit.
@@ -1010,7 +1011,7 @@ async def activate(
             "retrying as a fresh pairing",
             existing_user_id,
             "(base URL withheld: contains credentials)" if url_has_userinfo(base_url)
-            else strip_url_userinfo(base_url),
+            else redact_display_text(base_url),
         )
         # The replayed identity doesn't exist on this backend: this IS a
         # brand-new agent (rule 5), so it must get its own per-profile
@@ -1088,10 +1089,10 @@ async def activate_and_maybe_restart(
     payload["ok"] = True
     try:
         plan = plan_gateway_restart()
-    except Exception:  # noqa: BLE001 - the code is already spent; never hide success
+    except Exception as exc:  # noqa: BLE001 - the code is already spent; never hide success
         if restart:
             raise
-        logger.warning("clawchat restart plan detection failed", exc_info=True)
+        logger.warning("clawchat restart plan detection failed: %s: %s", type(exc).__name__, redact_display_text(exc))
         try:
             profile = _active_profile_name()
         except Exception:  # noqa: BLE001

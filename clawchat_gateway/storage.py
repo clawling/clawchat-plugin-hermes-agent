@@ -2139,6 +2139,8 @@ class ClawChatStore:
         started_at: int | None = None,
         ended_at: int | None = None,
     ) -> int | None:
+        from clawchat_gateway.api_client import redact_display_data, redact_display_text
+
         started = started_at if started_at is not None else _now_ms()
         duration_ms = ended_at - started if ended_at is not None else None
 
@@ -2154,9 +2156,9 @@ class ClawChatStore:
                     platform,
                     account_id,
                     tool_name,
-                    json_dumps(args),
-                    json_dumps(result),
-                    error,
+                    json_dumps(redact_display_data(args)),
+                    json_dumps(redact_display_data(result)),
+                    redact_display_text(error) if error is not None else None,
                     started,
                     ended_at,
                     duration_ms,

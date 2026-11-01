@@ -97,7 +97,9 @@ specific reason. Import aliases are outside the static scanner's coverage.
 
 Credential exit tests use `assert_no_secrets` from `tests/conftest.py` to check
 caller results, exceptions, logs and report payloads against obvious fake values.
-Redact credentials where values first become display text.
+Redact credentials where values first become display text. Debug snapshots and
+tool audits pass through `redact_display_data` before being written to disk;
+message bodies are omitted from routing logs (only their lengths are recorded).
 
 ## Live debugging against a Hermes process
 

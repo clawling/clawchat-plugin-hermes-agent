@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from clawchat_gateway._yaml import safe_load
-from clawchat_gateway.api_client import DEFAULT_BASE_URL, DEFAULT_WEBSOCKET_URL
+from clawchat_gateway.api_client import DEFAULT_BASE_URL, DEFAULT_WEBSOCKET_URL, redact_display_data, redact_display_text
 from clawchat_gateway.config import _get_env, _jwt_claim
 from clawchat_gateway.hermes_home import hermes_home
 
@@ -53,7 +53,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     try:
         loaded = safe_load(path.read_text(encoding="utf-8")) or {}
     except Exception as exc:
-        raise ProfileConfigError(f"failed to read {path}: {exc}") from exc
+        raise ProfileConfigError(f"failed to read {redact_display_text(path)}: {redact_display_text(exc)}") from None
     if not isinstance(loaded, dict):
         raise ProfileConfigError(f"invalid config.yaml at {path}: expected object")
     return loaded
@@ -175,7 +175,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"unknown command: {args.command}")
 
     if payload.get("error"):
-        print(json.dumps(payload, ensure_ascii=False, indent=2), file=sys.stderr)
+        print(json.dumps(redact_display_data(payload), ensure_ascii=False, indent=2), file=sys.stderr)
         return 1
 
     print(json.dumps(payload, ensure_ascii=False, indent=2))
