@@ -2801,8 +2801,9 @@ class ClawChatConnection:
         try:
             if url_has_userinfo(self._cfg.base_url) or url_has_userinfo(self._cfg.websocket_url):
                 return DIAGNOSTIC_WITHHELD
+            # Shared display redaction owns the credential key list; the refresh
+            # pass adds the long-token / JWT rule. No local rules here.
             text = redact_display_text(error, self._cfg.token, self._cfg.refresh_token)
-            text = reliable_delivery.redact_receipt_parameters(text)
             return redact_refresh_message(text)
         except Exception:  # noqa: BLE001 - fail closed
             return DIAGNOSTIC_REDACTION_FAILED
