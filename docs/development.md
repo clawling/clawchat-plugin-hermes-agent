@@ -174,10 +174,13 @@ contract first, then this subset and the peer client implementations.
    reactions/recall/system messages, fragments, legacy replay, heartbeat/errors
    and media. Keep §9.2, §9.7, §11.4, §11.6 and §14.4 as stubs; §11.7 keeps only
    legacy dedup plus defensive truncation, §16 has no examples, §17 is Hermes-only.
+   Exception: retain the Hermes: optional reliable_delivery_v2 subsection in §11.7.
    Do not restore full unsupported-frame semantics elsewhere in the guide.
 5. Compare `connection.py:build_connect_capabilities` with the OpenClaw peer,
    honoring its “keep in sync with OpenClaw” comment; an upstream feature does
    not authorize adding its capability to either plugin.
+   `reliable_delivery_v2` is an approved Hermes-only, opt-in exception;
+   OpenClaw does not declare it.
 6. Diff heading text, resolve all § references and verify constants/error names
    against both implementations. Update provenance without exposing private paths.
 

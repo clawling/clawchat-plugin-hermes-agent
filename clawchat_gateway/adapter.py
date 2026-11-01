@@ -68,6 +68,7 @@ from clawchat_gateway.connection import (
     ConnectionState,
     is_valid_chat_id,
 )
+from clawchat_gateway.reliable_delivery import INBOUND_RETRYABLE
 from clawchat_gateway.group_message_coalescer import (
     GroupMessageCoalescer,
     format_coalesced_group_text,
@@ -3460,7 +3461,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 INBOUND_RATE_WINDOW_SECONDS,
             )
 
-    async def _on_message(self, frame: dict[str, Any]) -> None:
+    async def _on_message(self, frame: dict[str, Any]) -> object | None:
         # ANY inbound frame naming this chat is authoritative proof the server
         # can still route into it — stronger evidence than the error frame that
         # put it under gate. Cleared BEFORE the self-echo drop below on purpose:
@@ -3611,7 +3612,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                     event_name,
                     claimed,
                 )
-                return
+                return INBOUND_RETRYABLE
             self._note_inbound_rate(inbound.chat_id)
             self._remember_reply_preview(
                 message_id=protocol_message_id, inbound=inbound

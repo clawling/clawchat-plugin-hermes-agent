@@ -40,6 +40,36 @@ Automatic refresh, permanent-failure markers, empty credential tombstones and ac
 | `CLAWCHAT_WEBSOCKET_URL` (or `CLAWCHAT_WS_URL`) | `websocket_url` | `wss://app.clawling.com/ws` | Activation records the env value when set, else derives one from `base_url` (`activate._derive_websocket_url`). |
 | `CLAWCHAT_DEVICE_ID` | — | derived (below) | Pin per agent in container deployments; used verbatim with `hermes-` prefix, otherwise sanitized to `[A-Za-z0-9_.:-]` and prefixed. |
 | `CLAWCHAT_WIKI_VERSION` | — | empty | Optional install-page stamp for connect/connect-check onboarding telemetry; profile-first, trimmed to 40 characters (`onboarding.wiki_version`), never gates activation. |
+| `CLAWCHAT_RELIABLE_DELIVERY_V2` | `reliable_delivery_v2` | `false` | Profile opt-in to durable inbound receipts and negotiated dseq acknowledgements (§11.7). |
+
+`platforms.clawchat.extra.reliable_delivery_v2` is a YAML bool.
+Env overrides accept case-insensitive `true/false`, `1/0`, `yes/no`,
+`on/off`. Invalid values warn and disable it. For rollback, [drain pending receipts first](#reliable-delivery-rollback).
+Off: legacy, no receipts or sync acks.
+Each v2 grant registers a durable connection sequence before READY; registration or receipt-write failure closes without ack/dispatch, using normal reconnect/backoff.
+Each opt-in connection recovers pending even without a v2 grant, skipping dispatched work only.
+Gate waiters can recover. Old lane work precedes new business; controls bypass the gate.
+Recovery failure/10 s timeout opens only the gate. Unavailable claims stay pending;
+recovery retries every 30 s through failures until success. Turns require a claim.
+Lane work (including recall) finishes done/failed; inline unknown/transit becomes done on return. See
+[delivery behavior](client-integration.md#hermes-optional-reliable_delivery_v2).
+
+### Reliable delivery rollback
+
+Treat `pending` receipts as already-acked work awaiting Hermes handoff or completion.
+Disabling v2 stops reading this table, so drain it before rollback:
+
+1. Stop the profile's gateway.
+2. **While the gateway is stopped**, choose that profile's SQLite file from [Database location](#database-location) and count pending receipts:
+
+   ```sh
+   sqlite3 "<profile-clawchat-sqlite>" "SELECT count(*) FROM inbound_receipts WHERE status='pending'"
+   ```
+
+3. If the stopped count is `0`, set `reliable_delivery_v2: false`, remove or disable any enabling env override, and start the gateway.
+4. If the count is nonzero, keep the switch enabled and start one recovery cycle. After recovery processes the pending work, **stop the gateway again and return to step 2**.
+
+A zero count while running is insufficient: new frames can arrive and be acked before shutdown. Only a stopped count of `0` permits disabling the switch.
 
 ### Device id durability (deployment requirement)
 

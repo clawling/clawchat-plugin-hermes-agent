@@ -11,7 +11,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Literal, TypeVar
 
 from clawchat_gateway.hermes_home import hermes_home
 from clawchat_gateway.tool_grants import (
@@ -539,6 +539,16 @@ def _select_conversation_rows(
         return conn.execute(
             _CONVERSATION_ROWS_SQL.format(columns=columns, mode_filter=""), params
         ).fetchall()
+
+
+@dataclass(frozen=True)
+class InboundReceiptWriteResult:
+    status: Literal["ok", "stale", "error"]
+    conn_seq: int | None = None
+
+
+class _InboundReceiptRegistrationCancelled(Exception):
+    """Abort a registration transaction without reporting a storage failure."""
 
 
 class ClawChatStore:
@@ -1562,6 +1572,154 @@ class ClawChatStore:
             return int(cursor.lastrowid)
 
         return self._write("insert_message", write)
+
+    def _inbound_receipt_transaction(self, callback: Callable[[sqlite3.Connection], _T]) -> _T:
+        """Opt-in only; callers run these synchronous APIs on a storage thread."""
+        self.initialize()
+        if self._disabled:
+            raise RuntimeError("clawchat sqlite database is unavailable")
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS inbound_receipt_connections (
+                    account_id TEXT PRIMARY KEY, seq INTEGER NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS inbound_receipts (
+                    account_id TEXT NOT NULL, kind TEXT NOT NULL, key TEXT NOT NULL,
+                    dseq INTEGER NOT NULL, epoch TEXT NOT NULL, event TEXT NOT NULL,
+                    raw_json TEXT NOT NULL, status TEXT NOT NULL, error TEXT,
+                    provisional INTEGER NOT NULL DEFAULT 0, conn_seq INTEGER NOT NULL,
+                    received_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (account_id, kind, key)
+                )
+            """)
+            result = callback(conn)
+            conn.commit()
+            return result
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def register_inbound_receipt_connection(
+        self, *, account_id: str, still_current: Callable[[], bool],
+    ) -> int | Literal["cancelled"] | None:
+        """Fence older connections before this connection can receive work."""
+        def register(conn: sqlite3.Connection) -> int:
+            # BEGIN IMMEDIATE already serializes writers. Stop sets _stopping
+            # (reconnect advances generation) before a replacement registers.
+            # Once this check passes, that replacement cannot interleave before
+            # commit; if it fails, roll back without changing any sequence.
+            try:
+                current = still_current()
+            except Exception:
+                current = False
+            if not current:
+                raise _InboundReceiptRegistrationCancelled
+            conn.execute("""
+                INSERT INTO inbound_receipt_connections(account_id, seq) VALUES (?, 1)
+                ON CONFLICT(account_id) DO UPDATE SET seq = seq + 1
+            """, (account_id,))
+            return conn.execute(
+                "SELECT seq FROM inbound_receipt_connections WHERE account_id = ?", (account_id,),
+            ).fetchone()[0]
+        try:
+            return self._inbound_receipt_transaction(register)
+        except _InboundReceiptRegistrationCancelled:
+            return "cancelled"
+        except Exception:
+            logger.error("clawchat inbound receipt connection registration failed")
+            return None
+
+    def upsert_inbound_receipt(
+        self, *, account_id: str, kind: str, key: str, dseq: int,
+        epoch: str, event: str, raw: dict[str, Any], conn_seq: int,
+    ) -> InboundReceiptWriteResult:
+        payload = raw.get("payload")
+        provisional = int(isinstance(payload, dict) and payload.get("stream_merged") is True)
+        def write(conn: sqlite3.Connection) -> InboundReceiptWriteResult:
+            current = conn.execute(
+                "SELECT seq FROM inbound_receipt_connections WHERE account_id = ?", (account_id,),
+            ).fetchone()
+            if current is None or current[0] != conn_seq:
+                return InboundReceiptWriteResult("stale", conn_seq)
+            now = _now_ms()
+            conn.execute("""
+                INSERT INTO inbound_receipts
+                    (account_id, kind, key, dseq, epoch, event, raw_json, provisional, conn_seq,
+                     status, error, received_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, ?)
+                ON CONFLICT(account_id, kind, key) DO UPDATE SET
+                    raw_json = CASE WHEN inbound_receipts.provisional = 0 AND excluded.provisional = 1
+                                    THEN inbound_receipts.raw_json ELSE excluded.raw_json END,
+                    provisional = CASE WHEN inbound_receipts.provisional = 0 AND excluded.provisional = 1
+                                       THEN 0 ELSE excluded.provisional END,
+                    dseq = excluded.dseq,
+                    epoch = excluded.epoch, event = excluded.event,
+                    conn_seq = excluded.conn_seq, updated_at = excluded.updated_at, error = NULL,
+                    status = CASE WHEN inbound_receipts.status = 'done'
+                                  THEN 'done' ELSE 'pending' END
+                WHERE (excluded.conn_seq, excluded.dseq) > (inbound_receipts.conn_seq, inbound_receipts.dseq)
+            """, (account_id, kind, key, dseq, epoch, event, json_dumps(raw),
+                  provisional, conn_seq, now, now))
+            stored = conn.execute("""
+                SELECT conn_seq, dseq FROM inbound_receipts
+                WHERE account_id = ? AND kind = ? AND key = ?
+            """, (account_id, kind, key)).fetchone()
+            return InboundReceiptWriteResult("ok" if stored == (conn_seq, dseq) else "stale", conn_seq)
+        try:
+            return self._inbound_receipt_transaction(write)
+        except Exception:  # Do not pass potentially credential-bearing client errors to logs.
+            logger.error("clawchat inbound receipt upsert failed")
+            return InboundReceiptWriteResult("error")
+
+    def finish_inbound_receipt(
+        self, *, account_id: str, kind: str, key: str, dseq: int,
+        epoch: str, error: str | None = None,
+    ) -> bool:
+        def write(conn: sqlite3.Connection) -> None:
+            # A late handler must not finish a newer replay's pending receipt.
+            # Recovery can read the replay's new dseq/epoch while that replay waits
+            # at the order gate. Both finishes then match; the first marks done,
+            # and the duplicate finish is a no-op because status is already done.
+            conn.execute("""
+                UPDATE inbound_receipts SET status = ?, error = ?, updated_at = ?
+                WHERE account_id = ? AND kind = ? AND key = ?
+                    AND dseq = ? AND epoch = ? AND status != 'done'
+            """, ("failed" if error is not None else "done",
+                  error[:500] if error is not None else None, _now_ms(),
+                  account_id, kind, key, dseq, epoch))
+        try:
+            self._inbound_receipt_transaction(write)
+            return True
+        except Exception:
+            logger.error("clawchat inbound receipt status write failed")
+            return False
+
+    def recover_inbound_receipts(
+        self, *, account_id: str,
+    ) -> list[dict[str, Any]] | None:
+        """Prune terminal receipts after eight days and load all pending work."""
+        def read(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            conn.execute("""
+                DELETE FROM inbound_receipts WHERE account_id = ?
+                    AND status IN ('done', 'failed') AND updated_at < ?
+            """, (account_id, _now_ms() - 8 * 24 * 60 * 60 * 1000))
+            cursor = conn.execute("""
+                SELECT kind, key, dseq, epoch, event, raw_json FROM inbound_receipts
+                WHERE account_id = ? AND status = 'pending'
+                ORDER BY received_at, rowid
+            """, (account_id,))
+            return [dict(zip((col[0] for col in cursor.description), row)) for row in cursor]
+        try:
+            return self._inbound_receipt_transaction(read)
+        except Exception:
+            logger.error("clawchat inbound receipt recovery failed")
+            return None
 
     def claim_message_once(
         self,

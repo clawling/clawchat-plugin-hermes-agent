@@ -29,6 +29,7 @@ from clawchat_gateway.api_client import (
     DIAGNOSTIC_REDACTION_FAILED,
     DIAGNOSTIC_WITHHELD,
     redact_display_text,
+    redact_refresh_message,
     url_has_userinfo,
 )
 from clawchat_gateway.config import ClawChatConfig
@@ -57,11 +58,14 @@ from clawchat_gateway.device_id import (
     resolve_paired_device_id,
     warn_if_device_id_unpinned,
 )
-from clawchat_gateway.storage import ActivationCredentials, get_clawchat_store, refresh_token_fingerprint
+from clawchat_gateway.storage import (
+    ActivationCredentials, InboundReceiptWriteResult, get_clawchat_store, refresh_token_fingerprint,
+)
 from clawchat_gateway.notify_signal import NotifySignalObserver
 from clawchat_gateway.onboarding import RECONNECT_GUIDE_URL
 from clawchat_gateway.ws_log import format_ws_log
 from clawchat_gateway.ws_state import ReconnectTracker
+from clawchat_gateway import reliable_delivery
 
 logger = logging.getLogger("clawchat_gateway.connection")
 
@@ -178,15 +182,18 @@ _TRANSIENT_AUTH_FAILURE_MARKERS = (
 )
 
 
-def build_connect_capabilities(*, install_conflict: bool = False) -> dict[str, bool]:
+def build_connect_capabilities(
+    *, install_conflict: bool = False, reliable_delivery_v2: bool = False,
+) -> dict[str, bool]:
     """Return the capability flags advertised in the connect handshake.
 
     Extracted so tests can assert on the capability set without wiring up a
-    full WebSocket session.  Keep every field in sync with the OpenClaw plugin
-    (``clawchat-plugin-openclaw``).
+    full WebSocket session. Keep the default set in sync with OpenClaw;
+    reliable_delivery_v2 is an approved Hermes-only opt-in exception.
     """
     return {
         **({"install_conflict": True} if install_conflict else {}),
+        **({"reliable_delivery_v2": True} if reliable_delivery_v2 else {}),
         # Agent runtime is single-device: multi_device stays off so the
         # server never self-fans-out this connection's own messages.
         "multi_device": False,
@@ -317,7 +324,7 @@ class ConnectionState(str, enum.Enum):
     CLOSED = "closed"
 
 
-OnMessage = Callable[[dict[str, Any]], Awaitable[None]]
+OnMessage = Callable[[dict[str, Any]], Awaitable[object | None]]
 OnStateChange = Callable[[ConnectionState], Awaitable[None]]
 OnSignal = Callable[[dict[str, Any]], Awaitable[None]]
 # Called once on permanent refresh failure (auto-logout) so the adapter can emit
@@ -418,6 +425,20 @@ class ClawChatConnection:
         self._instance_lock_waited = False
         self._state = ConnectionState.DISCONNECTED
         self._ws: Any = None
+        self._delivery_generation = 0
+        self._v2_declared = False
+        self._delivery_tracker: reliable_delivery.DseqAckTracker | None = None
+        self.dseq_density_violations = 0
+        self.receipt_write_failures = 0
+        self.receipt_stale_writes = 0
+        # Keep receipt metadata outside frames: adapters may retain raw frames.
+        self._inbound_receipts: dict[int, dict[str, Any]] = {}
+        # New instances start empty and can recover stop-cancelled work. Existing
+        # message claims dedupe a turn if an old handler survived cancellation.
+        self._receipts_in_flight: set[tuple[str, str]] = set()
+        self._receipt_recovery_ready: asyncio.Event | None = None
+        self._receipt_retry_task: asyncio.Task[None] | None = None
+        self._receipt_retry_requested = False
         self._stopping = False
         self._auth_failed = False
         self._proactive_token: str | None = None
@@ -1322,6 +1343,11 @@ class ClawChatConnection:
             await self._set_state(ConnectionState.CLOSED)
             self._reject_pending_acks(RuntimeError("connection stopped"))
             self._reject_queued_ack_waiters(RuntimeError("connection stopped"), clear_queue=True)
+            if self._cfg.reliable_delivery_v2:
+                self._cancel_receipt_retry()
+                # Flush before cancelling the reader: its teardown disposes the tracker.
+                await self._flush_delivery_ack()
+                self._dispose_delivery_tracker()
             if self._read_task is not None:
                 self._read_task.cancel()
             if self._credential_watch_task is not None:
@@ -1345,6 +1371,9 @@ class ClawChatConnection:
                     pass
                 self._supervisor_task = None
         finally:
+            if self._cfg.reliable_delivery_v2:
+                self._cancel_receipt_retry()
+                self._dispose_delivery_tracker()
             # Also on cancellation (a host disconnect budget or an abandoned
             # supersede): never strand the OS locks. ``_stopping`` already gates
             # every connect / refresh path, and the supervisor is cancelled here
@@ -2411,6 +2440,12 @@ class ClawChatConnection:
             if not self._connection_credentials_current():
                 return False
             self._ws = ws
+            if self._cfg.reliable_delivery_v2:
+                self._dispose_delivery_tracker()
+                self._delivery_generation += 1
+                self._v2_declared = False
+                self._receipt_recovery_ready = asyncio.Event()
+                generation = self._delivery_generation
             self._pending_connect_id = None
             self._hello_resolved_device_id = None
             self._hello_delivery_mode = None
@@ -2429,6 +2464,12 @@ class ClawChatConnection:
             await self._set_state(ConnectionState.READY)
             if not self._connection_credentials_current():
                 return False
+            if self._cfg.reliable_delivery_v2:
+                recovered = await self._recover_inbound_receipts(ws, generation)
+                if not recovered and self._receipt_connection_current(ws, generation):
+                    self._schedule_receipt_retry()
+                if not self._connection_credentials_current():
+                    return False
             self._record_connection(
                 "mark_connection_ready",
                 self._connection_row_id,
@@ -2459,6 +2500,9 @@ class ClawChatConnection:
             )
             await self._read_task
         finally:
+            if self._cfg.reliable_delivery_v2:
+                self._cancel_receipt_retry()
+                self._dispose_delivery_tracker()
             self._cancel_stable_ready_reset()
             credential_watch_task = self._credential_watch_task
             if credential_watch_task is not None:
@@ -2577,12 +2621,31 @@ class ClawChatConnection:
                     self._hello_wait.set_result(False)
 
     async def _read_frames(self, ws: Any) -> None:
+        generation = self._delivery_generation
         async for raw in ws:
+            if self._cfg.reliable_delivery_v2 and (self._ws is not ws or self._stopping):
+                return
             try:
                 frame = decode_frame(raw)
             except (TypeError, ValueError) as exc:
                 logger.warning("clawchat dropped malformed frame: %s", exc)
                 continue
+            tracker = self._delivery_tracker
+            dseq = frame.get("dseq")
+            sequenced = (tracker is not None and tracker.current()
+                         and frame.get("event") != "history.truncated"
+                         and isinstance(dseq, int) and not isinstance(dseq, bool))
+            if sequenced:
+                # Density is checked before the first asynchronous hop.
+                if dseq != tracker.last_read_dseq + 1:
+                    logger.error("clawchat dseq density violation expected=%d actual=%d",
+                                 tracker.last_read_dseq + 1, dseq)
+                    self.dseq_density_violations += 1
+                    self._dispose_delivery_tracker()
+                    await ws.close()
+                    return
+                tracker.last_read_dseq = dseq
+                tracker.received()
             logger.info(
                 "clawchat ws recv event=%s type=%s id=%s state=%s bytes=%d",
                 frame.get("event"),
@@ -2591,7 +2654,296 @@ class ClawChatConnection:
                 self._state.value,
                 len(raw) if isinstance(raw, (str, bytes, bytearray)) else 0,
             )
+            if sequenced:
+                payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+                event = frame.get("event")
+                if (event == "replay.done" and "ack_epoch" in payload
+                        and payload["ack_epoch"] != tracker.epoch):
+                    tracker.record(dseq)
+                    logger.warning("clawchat replay.done ack_epoch mismatch; recording dseq=%d without replay completion", dseq)
+                    continue
+                if event in ("sync.mark", "replay.done"):
+                    tracker.record(dseq)
+                    if event == "replay.done":
+                        await tracker.flush_now()
+                else:
+                    receipt = self._receipt_identity(frame, tracker.epoch, dseq)
+                    written = await self._upsert_inbound_receipt(frame, receipt, tracker.receipt_conn_seq)
+                    if not tracker.current() or self._ws is not ws or self._stopping:
+                        return
+                    if written.status == "ok":
+                        # Waiting at the order gate is durable receipt, not active processing.
+                        self._inbound_receipts[id(frame)] = receipt
+                        tracker.record(dseq)
+                    else:
+                        logger.error("clawchat durable receipt unavailable; closing socket with dseq=%d unacked", dseq)
+                        self.receipt_write_failures += 1
+                        if written.status == "stale":
+                            self.receipt_stale_writes += 1
+                            logger.error("clawchat stale receipt write rejected; closing socket dseq=%d", dseq)
+                        self._dispose_delivery_tracker()
+                        await ws.close()
+                        return
+                if not tracker.current() or self._ws is not ws or self._stopping:
+                    return
+            if self._cfg.reliable_delivery_v2 and self._is_business_frame(frame):
+                try:
+                    await self._wait_for_receipt_recovery(ws, generation)
+                except asyncio.CancelledError:
+                    self._release_inbound_receipt(frame)
+                    raise
+                if not self._receipt_connection_current(ws, generation):
+                    self._release_inbound_receipt(frame)
+                    return
+            if sequenced:
+                receipt = self._inbound_receipts.get(id(frame))
+                if receipt is not None:
+                    self._track_inbound_receipt(frame, receipt)
+                await self._dispatch_with_receipt(frame)
+            else:
+                await self._dispatch_inbound(frame)
+            if self._cfg.reliable_delivery_v2:
+                if not self._receipt_connection_current(ws, generation):
+                    return
+                if self._hello_wait is not None and self._hello_wait.done() and not self._hello_wait.result():
+                    return
+
+    @staticmethod
+    def _uses_inbound_lane(frame: dict[str, Any]) -> bool:
+        return (frame.get("type") in (None, "event")
+                and frame.get("event") in ("message.send", "message.reply", "message.recall"))
+
+    @staticmethod
+    def _is_business_frame(frame: dict[str, Any]) -> bool:
+        return (frame.get("type") in (None, "event") and frame.get("event") not in (
+            "connect.challenge", "hello-ok", "hello-fail", "message.ack", "message.error",
+            "pong", "replay.done", "sync.mark", "history.truncated", "typing.update",
+            "presence.snapshot", "presence.update",
+        ))
+
+    async def _wait_for_receipt_recovery(self, ws: Any, generation: int) -> None:
+        gate = self._receipt_recovery_ready
+        if gate is None or gate.is_set():
+            return
+        try:
+            await asyncio.wait_for(gate.wait(), reliable_delivery.RECEIPT_RECOVERY_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            if self._receipt_connection_current(ws, generation):
+                logger.error("clawchat receipt recovery order gate timed out; allowing business dispatch")
+                gate.set()
+
+    def _track_inbound_receipt(self, frame: dict[str, Any], receipt: dict[str, Any]) -> None:
+        self._inbound_receipts[id(frame)] = receipt
+        receipt["processing"] = True
+        self._receipts_in_flight.add((receipt["kind"], receipt["key"]))
+
+    def _release_inbound_receipt(self, frame: dict[str, Any]) -> None:
+        receipt = self._inbound_receipts.pop(id(frame), None)
+        if receipt is not None and receipt.get("processing"):
+            key = (receipt["kind"], receipt["key"])
+            # Coalesced live/replay frames may share a key while both are queued.
+            if not any(r.get("processing") and (r["kind"], r["key"]) == key
+                       for r in self._inbound_receipts.values()):
+                self._receipts_in_flight.discard(key)
+
+    @staticmethod
+    def _receipt_identity(frame: dict[str, Any], epoch: str, dseq: int) -> dict[str, Any]:
+        event = frame.get("event")
+        payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+        fallback = f"{epoch}:{dseq}"
+        if event in ("message.send", "message.reply"):
+            kind, key = "message", payload.get("message_id")
+        elif event == "notify.signal":
+            kind, key = "signal", payload.get("event_id")
+        else:
+            kind, key = "other", fallback
+        return {"kind": kind, "key": key if isinstance(key, str) and key else fallback,
+                "dseq": dseq, "epoch": epoch}
+
+    async def _upsert_inbound_receipt(
+        self, frame: dict[str, Any], receipt: dict[str, Any], conn_seq: int | None,
+    ) -> InboundReceiptWriteResult:
+        if self._store is None or type(conn_seq) is not int or conn_seq <= 0:
+            return InboundReceiptWriteResult("error")
+        try:
+            result = await asyncio.to_thread(
+                self._store.upsert_inbound_receipt, account_id=self._account_id,
+                event=str(frame.get("event") or ""), raw=frame, conn_seq=conn_seq, **receipt,
+            )
+            if isinstance(result, InboundReceiptWriteResult):
+                if result.status != "ok" or (type(result.conn_seq) is int and result.conn_seq > 0):
+                    return result
+            return InboundReceiptWriteResult("error")
+        except Exception:
+            logger.error("clawchat inbound receipt upsert raised")
+            return InboundReceiptWriteResult("error")
+
+    async def _finish_inbound_receipt(self, frame: dict[str, Any], error: Exception | None = None) -> None:
+        receipt = self._inbound_receipts.get(id(frame))
+        if receipt is None:
+            return
+        try:
+            if self._store is None:
+                return
+            success = await asyncio.to_thread(
+                self._store.finish_inbound_receipt, account_id=self._account_id,
+                error=self._receipt_error_text(error) if error is not None else None,
+                **{key: receipt[key] for key in ("kind", "key", "dseq", "epoch")},
+            )
+            if success is not True:
+                logger.error("clawchat inbound receipt status unavailable")
+        except Exception:
+            logger.error("clawchat inbound receipt status write raised")
+        finally:
+            self._release_inbound_receipt(frame)
+
+    def _receipt_error_text(self, error: Exception) -> str:
+        try:
+            if url_has_userinfo(self._cfg.base_url) or url_has_userinfo(self._cfg.websocket_url):
+                return DIAGNOSTIC_WITHHELD
+            # Shared display redaction owns the credential key list; the refresh
+            # pass adds the long-token / JWT rule. No local rules here.
+            text = redact_display_text(error, self._cfg.token, self._cfg.refresh_token)
+            return redact_refresh_message(text)
+        except Exception:  # noqa: BLE001 - fail closed
+            return DIAGNOSTIC_REDACTION_FAILED
+
+    async def _dispatch_with_receipt(self, frame: dict[str, Any]) -> None:
+        try:
             await self._dispatch_inbound(frame)
+        except asyncio.CancelledError:
+            # Keep durable pending work, but never leave a reusable frame-id association.
+            if not self._inbound_receipts.get(id(frame), {}).get("queued"):
+                self._release_inbound_receipt(frame)
+            raise
+        except Exception as exc:
+            if not self._inbound_receipts.get(id(frame), {}).get("queued"):
+                await self._finish_inbound_receipt(frame, exc)
+            logger.error("clawchat receipted inbound dispatch failed")
+        else:
+            receipt = self._inbound_receipts.get(id(frame), {})
+            # Completion follows lane ownership for every kind, including recalls.
+            if not receipt.get("queued"):
+                await self._finish_inbound_receipt(frame)
+
+    async def _recover_inbound_receipts(self, ws: Any, generation: int) -> bool:
+        if not self._receipt_connection_current(ws, generation):
+            return True
+        gate = self._receipt_recovery_ready
+        deferred: list[dict[str, Any]] = []
+        recovered = False
+        try:
+            try:
+                recovered = await asyncio.wait_for(
+                    self._queue_pending_receipts(ws, generation, deferred),
+                    reliable_delivery.RECEIPT_RECOVERY_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.error("clawchat receipt recovery timed out; allowing business dispatch")
+            except Exception:
+                logger.error("clawchat inbound receipt recovery raised")
+            finally:
+                # Only the ordering gate fails open; durable receipts remain pending.
+                if gate is not None:
+                    gate.set()
+            # Inline handlers can wait for message.ack, so release the reader first.
+            for frame in deferred:
+                if not self._receipt_connection_current(ws, generation):
+                    return True
+                self._track_inbound_receipt(frame, self._inbound_receipts[id(frame)])
+                await self._dispatch_with_receipt(frame)
+            return recovered if self._receipt_connection_current(ws, generation) else True
+        except Exception:
+            logger.error("clawchat inbound receipt recovery raised")
+            return not self._receipt_connection_current(ws, generation)
+        finally:
+            for frame in deferred:
+                if not self._inbound_receipts.get(id(frame), {}).get("queued"):
+                    self._release_inbound_receipt(frame)
+
+    def _receipt_connection_current(self, ws: Any, generation: int) -> bool:
+        return (self._ws is ws and self._delivery_generation == generation
+                and not self._stopping)
+
+    async def _queue_pending_receipts(
+        self, ws: Any, generation: int, deferred: list[dict[str, Any]],
+    ) -> bool:
+        if not self._receipt_connection_current(ws, generation):
+            return True
+        if self._store is None:
+            return False
+        rows = await asyncio.to_thread(
+            self._store.recover_inbound_receipts, account_id=self._account_id,
+        )
+        if not self._receipt_connection_current(ws, generation):
+            return True
+        if rows is None:
+            return False
+        for row in rows:
+            if not self._receipt_connection_current(ws, generation):
+                return True
+            if (row["kind"], row["key"]) in self._receipts_in_flight:
+                continue
+            try:
+                frame = decode_frame(row["raw_json"])
+            except (TypeError, ValueError):
+                logger.error("clawchat pending receipt contains malformed JSON")
+                continue
+            receipt = {
+                key: row[key] for key in ("kind", "key", "dseq", "epoch")
+            }
+            self._inbound_receipts[id(frame)] = receipt
+            # Recovery uses ordinary dispatch, never the dseq tracker.
+            if self._uses_inbound_lane(frame):
+                self._track_inbound_receipt(frame, receipt)
+                await self._dispatch_with_receipt(frame)
+            else:
+                deferred.append(frame)
+        return True
+
+    def _schedule_receipt_retry(self) -> None:
+        if self._stopping or self._ws is None:
+            return
+        if self._receipt_retry_task is not None and not self._receipt_retry_task.done():
+            self._receipt_retry_requested = True
+            return
+        self._receipt_retry_task = asyncio.create_task(
+            self._retry_inbound_receipts(self._ws, self._delivery_generation),
+            name="clawchat-receipt-retry",
+        )
+
+    async def _retry_inbound_receipts(self, ws: Any, generation: int) -> None:
+        try:
+            while self._receipt_connection_current(ws, generation):
+                await asyncio.sleep(reliable_delivery.RECEIPT_RETRY_SECONDS)
+                if not self._receipt_connection_current(ws, generation):
+                    return
+                self._receipt_retry_requested = False
+                recovered = await self._recover_inbound_receipts(ws, generation)
+                if recovered and not self._receipt_retry_requested:
+                    return
+        finally:
+            if self._receipt_retry_task is asyncio.current_task():
+                self._receipt_retry_task = None
+
+    def _cancel_receipt_retry(self) -> None:
+        task = self._receipt_retry_task
+        self._receipt_retry_task = None
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+
+    def _dispose_delivery_tracker(self) -> None:
+        if self._delivery_tracker is not None:
+            self._delivery_tracker.dispose()
+            self._delivery_tracker = None
+
+    async def _flush_delivery_ack(self) -> None:
+        tracker = self._delivery_tracker
+        if tracker is not None:
+            try:
+                await asyncio.wait_for(tracker.flush_now(), reliable_delivery.ACK_FLUSH_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                logger.warning("clawchat sync_ack graceful flush timed out")
 
     async def _dispatch_inbound(self, frame: dict[str, Any]) -> None:
         ftype = frame.get("type")
@@ -2675,8 +3027,12 @@ class ClawChatConnection:
             if outcome == "observed" and self._on_notify_signal is not None:
                 try:
                     await self._on_notify_signal(frame)
-                except Exception:  # noqa: BLE001
-                    logger.exception("on_notify_signal raised")
+                except Exception as exc:  # noqa: BLE001
+                    if self._cfg.reliable_delivery_v2:
+                        await self._finish_inbound_receipt(frame, exc)
+                        logger.error("on_notify_signal raised: %s", self._receipt_error_text(exc))
+                    else:
+                        logger.exception("on_notify_signal raised")
             return
         if self._state == ConnectionState.READY and ftype in (None, "event") and frame.get("event") == "replay.done":
             # §11.5 terminal control frame: device replay drained, live begins.
@@ -2700,9 +3056,8 @@ class ClawChatConnection:
             return
         if self._state == ConnectionState.READY and ftype in (None, "event") and frame.get("event") == "history.truncated":
             # §11.7 replay-start boundary frame: part of the retained history
-            # will not be replayed to this device. This plugin advertises no
-            # reliable-delivery flag, so the server does not send it today; if
-            # one arrives it is logged explicitly. It carries no seq/dseq, so it
+            # will not be replayed to this device. It is expected on granted-v2
+            # connections and logged defensively on legacy. It carries no seq/dseq, so it
             # is never acked, and it is never dispatched to the agent. An absent
             # or unrecognised `reason` means "pruned"; `oldest_seq` is opaque.
             payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
@@ -2889,6 +3244,8 @@ class ClawChatConnection:
         one at a time, while acks and other chats keep flowing.
         """
         chat_id = str(frame.get("chat_id") or "")
+        if self._cfg.reliable_delivery_v2 and id(frame) in self._inbound_receipts:
+            self._inbound_receipts[id(frame)]["queued"] = True
         lane = self._inbound_lanes.get(chat_id)
         if lane is None:
             lane = _InboundLane(frames=deque())
@@ -2904,15 +3261,29 @@ class ClawChatConnection:
             while lane.frames:
                 frame = lane.frames.popleft()
                 try:
-                    await self._on_message(frame)
-                except Exception:  # noqa: BLE001
+                    outcome = await self._on_message(frame)
+                except Exception as exc:  # noqa: BLE001
                     # One bad frame must not stop this chat's later frames.
-                    logger.exception(
-                        "clawchat inbound handling raised event=%s chat_id=%s trace_id=%s",
-                        frame.get("event"),
-                        chat_id,
-                        frame.get("trace_id") or frame.get("id"),
-                    )
+                    if self._cfg.reliable_delivery_v2:
+                        await self._finish_inbound_receipt(frame, exc)
+                        logger.error("clawchat inbound handling raised: %s", self._receipt_error_text(exc))
+                    else:
+                        logger.exception(
+                            "clawchat inbound handling raised event=%s chat_id=%s trace_id=%s",
+                            frame.get("event"),
+                            chat_id,
+                            frame.get("trace_id") or frame.get("id"),
+                        )
+                else:
+                    if self._cfg.reliable_delivery_v2:
+                        if outcome is reliable_delivery.INBOUND_RETRYABLE:
+                            self._release_inbound_receipt(frame)
+                            self._schedule_receipt_retry()
+                        else:
+                            await self._finish_inbound_receipt(frame)
+                finally:
+                    if self._cfg.reliable_delivery_v2:
+                        self._release_inbound_receipt(frame)
         finally:
             lane.task = None
             if not lane.frames and self._inbound_lanes.get(chat_id) is lane:
@@ -2930,6 +3301,9 @@ class ClawChatConnection:
         self._inbound_lanes.clear()
         tasks = []
         for lane in lanes:
+            if self._cfg.reliable_delivery_v2:
+                for frame in lane.frames:
+                    self._release_inbound_receipt(frame)
             lane.frames.clear()
             if lane.task is not None and lane.task is not current and not lane.task.done():
                 lane.task.cancel()
@@ -2985,9 +3359,12 @@ class ClawChatConnection:
             nonce=nonce,
             device_id=device_id,
             install_id=install_id,
-            capabilities=build_connect_capabilities(install_conflict=bool(install_id)),
+            capabilities=build_connect_capabilities(
+                install_conflict=bool(install_id), reliable_delivery_v2=self._cfg.reliable_delivery_v2,
+            ),
             client_version=__version__,
         )
+        self._v2_declared = self._cfg.reliable_delivery_v2
         await self._ws.send(encode_frame(connect_req))
         self._record_connection(
             "mark_connect_sent",
@@ -3015,6 +3392,44 @@ class ClawChatConnection:
                     await self._close_stale_connection(self._ws)
                 return
             payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+            if self._cfg.reliable_delivery_v2:
+                self._dispose_delivery_tracker()
+                epoch = payload.get("ack_epoch")
+                if self._v2_declared and payload.get("ack_mode") == "dseq" and isinstance(epoch, str) and epoch:
+                    ws, generation = self._ws, self._delivery_generation
+                    tracker = reliable_delivery.DseqAckTracker(
+                        ws, epoch, lambda: (self._delivery_tracker is tracker
+                                            and self._delivery_generation == generation and self._ws is ws),
+                    )
+                    self._delivery_tracker = tracker
+                    def still_current() -> bool:
+                        # The storage thread only reads Python attributes under
+                        # the GIL; it never awaits or accesses event-loop APIs.
+                        return (not self._stopping and self._delivery_generation == generation
+                                and self._ws is ws and self._delivery_tracker is tracker)
+                    # This reader awaits registration before READY or reading the
+                    # next frame. Even a delayed first write carries its hello's
+                    # sequence, so a newer connection fences it transactionally.
+                    try:
+                        seq = (await asyncio.to_thread(
+                            self._store.register_inbound_receipt_connection, account_id=self._account_id,
+                            still_current=still_current,
+                        )) if self._store is not None else None
+                    except Exception:
+                        seq = None
+                    if seq == "cancelled" or not tracker.current() or self._stopping:
+                        return
+                    if type(seq) is not int or seq <= 0:
+                        logger.error("clawchat inbound receipt connection registration unavailable; closing socket")
+                        self.receipt_write_failures += 1
+                        self._dispose_delivery_tracker()
+                        if self._hello_wait is not None and not self._hello_wait.done():
+                            self._hello_wait.set_result(False)
+                        await ws.close()
+                        return
+                    tracker.receipt_conn_seq = seq
+                else:
+                    logger.info("clawchat reliable_delivery_v2 not granted; using legacy delivery")
             device_id = payload.get("device_id")
             delivery_mode = payload.get("delivery_mode")
             self._hello_resolved_device_id = device_id if isinstance(device_id, str) else None

@@ -15,6 +15,8 @@ This is not a new full sync. The legacy-delivery correction (not at-most-once),
 (including unstreamed group replies), and server-controlled recall-marker
 retention were applied separately. This subset also aligns the §14.3 error
 catalogue with the server implementation inspected at `dd7eafc`.
+Hermes' optional v2 negotiation, durable receipts and ack rhythm are applied
+as a separate subset addition in §11.7.
 
 Known upstream changes after that full sync **not yet incorporated in full**:
 
@@ -25,7 +27,7 @@ Known upstream changes after that full sync **not yet incorporated in full**:
 - Compatible versus strict ack-silence clocks and the `ack_progress_clock` capability.
 - JWT `nbf`, session revocation, and revocation-check failure modes.
 - Server stamping of `history.transit.origin_device_id`.
-- Agent guidance for v2-only capability negotiation and continued legacy support.
+- Full agent guidance beyond the optional Hermes v2 subset in §11.7.
 - Full handshake attempt-limit guidance and transient cursor-initialization
   failures that close without either hello frame. The `4002` table below already
   acknowledges handshake limiting, but the detailed upstream guidance is pending.
@@ -184,10 +186,10 @@ unsupported features are not invitations to enable a flag without implementing i
 | `history_sync` | omitted | Hermes does not declare it; full sibling-history semantics belong to the upstream server contract (§11.4). |
 | `e2ee` | omitted | Hermes does not declare it; full ciphertext semantics belong to the upstream server contract. |
 | `reliable_delivery` | omitted | Hermes does not declare it; full v1 cursor semantics belong to the upstream server contract (§11.7). |
-| `reliable_delivery_v2` | omitted | Hermes does not declare it; full v2 cursor semantics belong to the upstream server contract (§11.7). |
+| `reliable_delivery_v2` | omitted by default | Hermes declares `true` only with profile opt-in; OpenClaw does not declare it (§11.7). |
 
 **Hermes:** `ack_progress_clock` is also omitted; it applies only to granted v2
-reliable delivery. The subset does not implement any reliable cursor ack.
+reliable delivery. Hermes implements only the opt-in v2 sync ack (§11.7).
 Send `connect` within the server handshake deadline (default about 10 s);
 timeout closes the socket without `hello-fail`.
 
@@ -205,9 +207,8 @@ A successful response echoes the connect `trace_id` and resolved `device_id`
 `delivery_mode` is `"device_replay"`; tolerate future values. No field returns
 your own user identity (§2). Replay begins after this frame (§11).
 
-**Hermes:** No reliability capability is advertised, so this connection uses
-legacy replay. Reliable-only hello fields and negotiation belong to the upstream
-server contract; do not add cursor acks to this adapter based on unknown fields.
+**Hermes:** Defaults to legacy replay. Only an opted-in connection that declared
+v2 accepts `ack_mode:"dseq"` with a non-empty string `ack_epoch` (§11.7).
 
 ### 3.5 `hello-fail` (S → C)
 
@@ -387,8 +388,8 @@ wire. **Clients must use `"direct"` / `"group"` only.**
 ## 6. Event catalogue
 
 Event names are retained for dispatch and tolerance checks, including unsupported
-surfaces. **Hermes:** Unknown events are ignored without closing the socket;
-this legacy connection sends no reliable-delivery ack. C = client, S = server.
+surfaces. **Hermes:** Unknown events are ignored by business dispatch; granted-v2
+connections still persist and ack their `dseq` (§11.7). C = client, S = server.
 
 | `event` | Direction | Hermes handling / reference |
 |---------|-----------|-----------------------------|
@@ -420,8 +421,8 @@ this legacy connection sends no reliable-delivery ack. C = client, S = server.
 | `permission.resolved` | S → C | Owner-targeted ephemeral signal (§9.5). |
 | `replay.done` | S → C | Log replay boundary; no ack (§11.5). |
 | `message.cursor_ack` | C → S | Not emitted; v1 (§11.7). |
-| `message.sync_ack` | C → S | Not emitted; v2 (§11.7). |
-| `sync.mark` | S → C | Not negotiated; ignored (§11.7). |
+| `message.sync_ack` | C → S | Emitted only on granted-v2 connections (§11.7). |
+| `sync.mark` | S → C | Record dseq on granted v2; no persistence (§11.7). |
 | `history.truncated` | S → C | Defensive log only; no ack or dispatch (§11.7). |
 | `device.cursor.reset` | C → S | Not emitted (§11.6). |
 | `offline.batch` | S → C | Deprecated (§11.3). |
@@ -490,7 +491,7 @@ receiver obligations differ:
 A mention parse failure must not abort processing of an otherwise usable frame.
 
 **Hermes:** `inbound.py` accepts object and string mentions and skips unknown
-shapes; this connection has no reliable-delivery ack to send.
+shapes; opt-in delivery acks follow durable receipt, independently of parsing (§11.7).
 
 **U+0000 is silently removed.** The server's JSON document store cannot hold
 U+0000, so the
@@ -1138,7 +1139,8 @@ server contract.
 Lifecycle notices (member joined / left, group renamed, announcements,
 permission results, owner-facing service notices…) are injected by the
 deployment's own services and delivered as ordinary **durable `message.send`**
-downlinks: persisted and replayed on reconnect. Hermes sends no cursor ack. They
+downlinks: persisted and replayed on reconnect. Hermes defaults to legacy;
+granted v2 follows §11.7. They
 differ from a user message in exactly one envelope field — `sender` is the
 fixed system identity — plus a flat `payload.metadata` block:
 
@@ -1351,7 +1353,8 @@ connection does not request this exchange. Full legacy semantics belong upstream
 `history.transit` transfers history between sibling devices, including E2EE history.
 
 **Hermes:** Does not declare `history_sync` or `e2ee`, emits no transfer and
-ignores unexpected transfers; full semantics belong to the upstream server contract.
+ignores unexpected transfers in business dispatch. Granted v2 still durably
+stores an unexpected dseq-bearing transfer before acking (§11.7).
 
 ### 11.5 End-of-replay marker — `replay.done`
 
@@ -1364,13 +1367,13 @@ drains, before live traffic, on **every reconnect**, including zero backlog:
 ```
 
 For Hermes' legacy connection the payload is empty; there is no `chat_id`, `to`,
-`sender`, `seq` or `dseq`. Reliable-only payload fields belong to the upstream
-server contract. This ephemeral marker is never stored or itself replayed;
+`sender`, `seq` or `dseq`. Granted v2 adds dseq and optional epoch checking (§11.7).
+This ephemeral marker is never stored or itself replayed;
 a disconnect during replay starts another replay on the next connection.
 It is distinct from the deprecated `offline.done` (§11.3).
 
-**Hermes:** `connection.py` logs `action=replay_done` and returns. It sends no ack
-and dispatches no agent turn. Replay messages already use the same chat lanes as
+**Hermes:** `connection.py` logs `action=replay_done` and returns; granted v2 first
+records dseq and flushes (§11.7). It dispatches no agent turn. Replay messages use the same chat lanes as
 live messages, so this marker does not release an adapter replay gate.
 
 ### 11.6 Client-requested full re-pull — `device.cursor.reset`
@@ -1386,9 +1389,8 @@ Legacy, v1 and v2 here name delivery mechanisms, not the envelope version:
 all use Protocol v2 envelopes. Full reliable-delivery semantics belong to the
 upstream server contract.
 
-**Hermes:** Declares neither `reliable_delivery` nor `reliable_delivery_v2` and
-uses legacy advance-on-socket-write. It emits neither `message.cursor_ack` nor
-`message.sync_ack`; it does not negotiate `sync.mark` or a dense `dseq` stream.
+**Hermes:** Defaults to legacy advance-on-socket-write. It never declares v1
+`reliable_delivery` or emits `message.cursor_ack`. Optional v2 is described below.
 
 Legacy is **not at-most-once**. A crash before local persistence can lose a frame;
 a cursor write failure or a connection served through another server instance
@@ -1398,7 +1400,7 @@ restart**. An in-memory cache is insufficient (§11).
 
 **Hermes:** Defensively handles an unexpected `history.truncated` in `connection.py`:
 
-- Normally it reaches v1 or granted-v2 connections only, never this legacy client.
+- Normally it reaches v1 or granted-v2 connections only, never a legacy connection.
 - It denotes retained history that will not be replayed to this device.
 - The only recognized `reason` values are `pruned` and `cursor_started_above_zero`.
 - An absent or unknown reason is treated as **`pruned`**; a non-empty unknown
@@ -1407,6 +1409,45 @@ restart**. An in-memory cache is insufficient (§11).
   never compare it with a local sequence or interpret it as a message count.
 - The frame carries **no `seq` or `dseq`**: **never ack it**.
 - Log `action=history_truncated`, return, and **never dispatch it to the agent**.
+
+#### Hermes: optional reliable_delivery_v2
+
+`platforms.clawchat.extra.reliable_delivery_v2` defaults to `false`; [configuration](configuration.md#connection) covers overrides and rollback.
+Only opt-in Hermes connections advertise `reliable_delivery_v2:true`;
+OpenClaw does not declare this capability. Every hello independently requires
+`ack_mode:"dseq"` and a non-empty string `ack_epoch`; otherwise delivery is legacy.
+Each grant resets the read sequence and contiguous ack watermark to zero.
+
+On granted v2, check every integer top-level dseq (excluding booleans) before
+async work. A gap logs ERROR, increments a counter and closes the socket for
+ordinary reconnect. `history.truncated` is excluded even if it carries dseq.
+Persist each raw frame in profile SQLite `inbound_receipts` before recording
+its dseq, including unknown events and `history.transit`. Message keys use
+`payload.message_id`, signals use `payload.event_id`, with epoch:dseq fallback;
+other events always use epoch:dseq. `provisional` (`payload.stream_merged:true`) never replaces an unflagged final.
+`inbound_receipt_connections` registers `conn_seq` transactionally at each v2 grant before READY; only greater `(conn_seq,dseq)` updates a receipt, preserving done.
+Failed/stale writes log ERROR, increment `receipt_write_failures`, dispose the tracker and close without ack/dispatch, using normal reconnect/backoff.
+Stale also increments `receipt_stale_writes`; account-scoped connection registration is independent of clocks.
+
+`sync.mark` and `replay.done` need no receipt. A replay.done with a mismatching
+payload ack_epoch logs a warning and records dseq, without replay completion,
+immediate flush or dispatch. Send `message.sync_ack` with `{dseq,epoch}` after
+200 ms debounce; further progress keeps the first deadline. Flush for matching replay.done and before
+graceful shutdown, and unconditionally resend a nonzero watermark every 30 s.
+Trackers belong to one socket generation and are disposed on teardown.
+
+Ack means durable receipt, not a completed turn; lanes (including recall) and inline handlers mark done/failed on completion/error.
+Errors use display redaction plus long-secret/JWT filtering, at most 500 characters. Unavailable claims stay pending;
+no turn starts, and one timer retries after 30 s, continuing after recovery failures until success.
+At every READY, even without a v2 grant, recover all pending kinds in received_at,
+rowid order, skipping only dispatched work; frames waiting at the gate remain recoverable, with no startup cutoff.
+Enqueue recovered lane work before admitting new business frames; then release
+the ordering gate before awaiting inline handlers. Control frames bypass the gate;
+dseq persistence/acks precede it. Recovery failure or a 10 s timeout releases only this gate.
+Recovery never records dseq. A new instance can take over stop-cancelled work;
+message claims dedupe surviving old handlers but can suppress an already-claimed interrupted turn.
+In the recovery transaction, delete done/failed receipts older than eight days.
+Disabled profiles create/access neither receipt table and send no sync acks. [Stop and drain pending receipts before rollback](configuration.md#reliable-delivery-rollback).
 
 ---
 
@@ -1461,8 +1502,8 @@ history semantics are outside this subset (§11.4).
   messages and metadata invalidation carry it; ack/error and many controls do not.
 - Tolerate object/string/null mentions, absent/empty media URLs, and unknown
   events, fragment kinds and system-message kinds (§7.1, §9.9, §10).
-- Unsupported receipt/history/reliable-delivery obligations are not activated
-  by this plugin's capability set (§3.3).
+- Unsupported receipt/history obligations are not activated by this plugin's
+  capability set (§3.3); reliable delivery requires the explicit opt-in (§11.7).
 
 ### 13.2 Limits and fair use
 
@@ -1817,7 +1858,7 @@ numbers remain stable for code, tests and external references.
 
 ### E2EE / history sync (if supported)
 
-- [ ] Keep unsupported history/E2EE/reliable capabilities omitted and their sections as stubs (§3.3).
+- [ ] Keep unsupported history/E2EE/v1 capabilities omitted; v2 requires opt-in (§3.3, §11.7).
 
 ### Heartbeat
 
