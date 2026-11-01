@@ -209,6 +209,66 @@ async def test_owner_hold_rechecked_after_media_preparation(harness, monkeypatch
     await asyncio.gather(*a._owner_input_tasks.values())
 
 
+@pytest.mark.parametrize('kind', ['awareness', 'foreign_sender'])
+@pytest.mark.parametrize('ending', ['released', 'deadline', 'idle'])
+async def test_queued_owner_media_rechecks_with_original_deadline(harness, monkeypatch, kind, ending):
+    a = harness.adapter
+    monkeypatch.setenv('HERMES_GATEWAY_BUSY_INPUT_MODE', 'steer')
+    a._owner_input_poll_seconds = 0.005
+    entered, proceed, downloaded = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    media_calls = []
+    async def download(inbound):
+        if inbound.text == 'held owner media':
+            media_calls.append(inbound)
+            entered.set()
+            await proceed.wait()
+            downloaded.set()
+        return []
+    monkeypatch.setattr(a, '_download_inbound_media', download)
+    await a._handle_inbound(notice(a, 'awareness'))
+    first = harness.events[0]
+    incoming = message('usr_owner', 'held owner media', chat=OWNER_CHAT)
+    await a._handle_inbound(incoming)
+    key = a._grant_session_key(incoming)
+    # Keep time deterministic while exercising the real queue and download.
+    monotonic, offset = time.monotonic, [0.0]
+    monkeypatch.setattr(adapter_mod.time, 'monotonic', lambda: monotonic() + offset[0])
+    deadline = a._owner_input_pending[key][0][1]
+    await finish(harness, first)
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    assert a._owner_input_deadlines[id(media_calls[0])] == deadline
+    other = notice(a, 'awareness') if kind == 'awareness' else message('usr_other', chat=OWNER_CHAT)
+    await a._handle_inbound(other)
+    second = harness.events[1]
+    second_nonce = second.source.message_id
+    proceed.set()
+    await downloaded.wait()
+    await asyncio.sleep(0.02)
+    assert len(harness.events) == 2
+    assert a._owner_input_deadlines[id(media_calls[0])] == deadline
+    assert turns.get_snapshot(second_nonce) is not None
+    if ending == 'released':
+        await finish(harness, second)
+    elif ending == 'idle':
+        a._active_sessions.clear()
+    else:
+        offset[0] = deadline - monotonic() + 0.001
+    await wait_for_events(harness, 3)
+    event = harness.events[-1]
+    snapshot = turns.get_snapshot(event.source.message_id)
+    assert event.text == 'held owner media'
+    assert len(media_calls) == 1
+    assert snapshot.nonce not in (first.source.message_id, second_nonce)
+    if ending == 'deadline':
+        assert turns.get_snapshot(second_nonce) is not None
+        assert not snapshot.owner_verified
+        assert snapshot.owner_side is (kind == 'awareness')
+    else:
+        assert snapshot.owner_side and snapshot.owner_verified and not snapshot.non_owner_speakers
+    await asyncio.gather(*a._owner_input_tasks.values())
+    assert not a._owner_input_deadlines
+
+
 @pytest.mark.parametrize('mode', ['queue', 'interrupt'])
 async def test_explicit_steer_waits_in_other_busy_modes(harness, monkeypatch, mode):
     a = harness.adapter
@@ -288,6 +348,10 @@ def test_busy_mode_env_config_and_host_default(monkeypatch):
 
 @pytest.mark.parametrize('success_on', [1, 3, None])
 def test_restart_retries_log_attempts_and_stop_at_deadline(monkeypatch, capsys, success_on):
+    monkeypatch.setitem(sys.modules, 'gateway.status', SimpleNamespace(
+        live_gateway_pid_for_home=lambda _: 11001, get_process_start_time=lambda _: 100))
+    monkeypatch.setitem(sys.modules, 'psutil', SimpleNamespace(
+        Process=lambda _: SimpleNamespace(create_time=lambda: 1.0)))
     spawned = []
     monkeypatch.setattr(restart.subprocess, 'Popen', lambda argv, **kw: spawned.append((argv, kw)))
     command = restart.schedule_gateway_restart(delay_seconds=0, retry_timeout_seconds=200)
@@ -306,7 +370,7 @@ def test_restart_retries_log_attempts_and_stop_at_deadline(monkeypatch, capsys, 
         return 0 if len(calls) == success_on else 1
     monkeypatch.setattr(time, 'monotonic', lambda: elapsed[0])
     monkeypatch.setattr(time, 'sleep', sleep)
-    monkeypatch.setattr(subprocess, 'call', call)
+    monkeypatch.setattr(subprocess, 'Popen', lambda argv, **kw: SimpleNamespace(wait=lambda: call(argv, **kw)))
     exec(argv[2], {})
     output = capsys.readouterr().out
     assert all(call[-2:] == ['gateway', 'restart'] and '--yes' not in call and '--interrupt' not in call for call in calls)

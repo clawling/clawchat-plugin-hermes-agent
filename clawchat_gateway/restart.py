@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +17,7 @@ from typing import Any
 
 from clawchat_gateway._yaml import safe_load
 from clawchat_gateway.hermes_home import hermes_home
+from clawchat_gateway.instance_lock import WINDOWS_LOCK_OFFSET, _lock
 
 
 def _hermes_home() -> Path:
@@ -235,9 +237,8 @@ def _gateway_identity(home):
         pid = status.live_gateway_pid_for_home(Path(home))
         if pid is not None:
             start = status.get_process_start_time(pid)
-            # Host fingerprints are boot-relative ticks on Linux. Use an
-            # optional epoch reading only to detect startup after the request
-            # when no initial identity was available.
+            # Host fingerprints are boot-relative ticks on Linux. An optional
+            # epoch reading also detects startup after the request.
             created_at = None
             try:
                 import psutil
@@ -246,16 +247,45 @@ def _gateway_identity(home):
             except Exception:
                 pass
             return [pid, start, created_at]
-    except Exception:  # unavailable on older hosts: retain token protection
+    except Exception:  # older hosts still get one attempt, without retries
         pass
     return None
+
+
+@contextmanager
+def _restart_guard(path):
+    """Serialize token publication and command spawn, never the command's wait."""
+    import errno
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    backend = 'windows' if os.name == 'nt' else 'posix'
+    locked = False
+    try:
+        while True:
+            try:
+                _lock(fd, backend)
+                locked = True
+                break
+            except OSError as exc:
+                if exc.errno not in {errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES, errno.EDEADLK}:
+                    raise
+                time.sleep(0.05)
+        yield
+    finally:
+        try:
+            if locked:
+                _lock(fd, backend, release=True)
+        finally:
+            os.close(fd)
+    # Never unlink: all publishers and launchers must lock the same inode.
 
 
 def _write_restart_token(path: Path, token: str) -> None:
     from clawchat_gateway.atomic_file import atomic_write_text
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, token)
+    with _restart_guard(path.with_name('gateway-restart.lock')):
+        atomic_write_text(path, token)
 
 
 def schedule_gateway_restart(
@@ -300,7 +330,13 @@ def schedule_gateway_restart(
     }
     # The launcher's stdout/stderr ARE the log file, so the restart's own output
     # lands there, followed by an explicit exit_code for each attempt.
-    launcher = inspect.getsource(_gateway_identity) + """
+    launcher = (
+        "from contextlib import contextmanager\nimport os\nimport time\nfrom pathlib import Path\n"
+        + f"WINDOWS_LOCK_OFFSET = {WINDOWS_LOCK_OFFSET}\n"
+        + inspect.getsource(_lock)
+        + inspect.getsource(_restart_guard)
+        + inspect.getsource(_gateway_identity)
+    ) + """
 import datetime
 import json
 import os
@@ -319,7 +355,7 @@ def request_is_current():
         return False
     return current_token == os.environ['CLAWCHAT_GATEWAY_RESTART_TOKEN']
 
-def stop_reason():
+def stop_reason(attempt):
     if not request_is_current():
         return 'superseded by a newer restart request; stopping'
     previous = json.loads(os.environ['CLAWCHAT_GATEWAY_RESTART_IDENTITY'])
@@ -330,10 +366,21 @@ def stop_reason():
     if current is not None and current[2] is not None and current[2] > float(os.environ['CLAWCHAT_GATEWAY_RESTART_REQUESTED_AT']):
         return 'gateway already restarted; stopping'
     if previous is not None and current is not None:
-        if current[0] != previous[0] or (
-            current[1] is not None and previous[1] is not None and current[1] != previous[1]
-        ):
+        if current[0] != previous[0]:
             return 'gateway already restarted; stopping'
+        # A PID alone cannot distinguish process reuse. Host start fingerprints
+        # must be present and comparable before any retry can be admitted.
+        before, after = previous[1], current[1]
+        import math
+        numeric = (type(before) in (int, float) and type(after) in (int, float)
+                   and math.isfinite(before) and math.isfinite(after))
+        textual = isinstance(before, str) and isinstance(after, str) and bool(before and after)
+        if numeric or textual:
+            if before != after:
+                return 'gateway already restarted; stopping'
+            return None
+    if attempt:
+        return 'gateway identity unavailable; stopping'
     return None
 
 now = lambda: datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')
@@ -345,17 +392,21 @@ time.sleep(min(max(0, int(os.environ['CLAWCHAT_GATEWAY_RESTART_DELAY'])),
 argv = [os.environ['CLAWCHAT_HERMES_BIN'], 'gateway', 'restart']
 attempt = 0
 while time.monotonic() < deadline:
-    reason = stop_reason()
-    if reason:
-        print(f'[{now()}] {reason}', flush=True)
-        break
-    attempt += 1
-    print(f'[{now()}] attempt={attempt} running: {argv}', flush=True)
     rc = 127
     try:
+        with _restart_guard(Path(os.environ['CLAWCHAT_GATEWAY_RESTART_TOKEN_PATH']).with_name('gateway-restart.lock')):
+            reason = stop_reason(attempt)
+            if reason:
+                print(f'[{now()}] {reason}', flush=True)
+                break
+            if time.monotonic() >= deadline:
+                break
+            attempt += 1
+            print(f'[{now()}] attempt={attempt} running: {argv}', flush=True)
+            process = subprocess.Popen(argv, env=os.environ, stdin=subprocess.DEVNULL)
         # No timeout: without a service manager the restart runs the new
         # gateway in the foreground, so a successful attempt never returns.
-        rc = subprocess.call(argv, env=os.environ, stdin=subprocess.DEVNULL)
+        rc = process.wait()
     except OSError as exc:
         print(f'[{now()}] could not start: {exc}', flush=True)
     print(f'[{now()}] attempt={attempt} exit_code={rc}', flush=True)

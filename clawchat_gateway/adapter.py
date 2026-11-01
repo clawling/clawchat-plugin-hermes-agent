@@ -1273,6 +1273,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._grant_reply_anchors: OrderedDict[str, str] = OrderedDict()
         self._owner_input_pending: dict[str, list[tuple[InboundMessage, float]]] = {}
         self._owner_input_tasks: dict[str, asyncio.Task] = {}
+        self._owner_input_deadlines: dict[int, float] = {}
         self._owner_input_hold_seconds = OWNER_INPUT_HOLD_SECONDS
         self._owner_input_poll_seconds = 0.5
         self._grant_admission_queue = GroupMessageCoalescer(
@@ -1423,6 +1424,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         if owner_tasks:
             await asyncio.gather(*owner_tasks, return_exceptions=True)
         self._owner_input_pending.clear()
+        self._owner_input_deadlines.clear()
         from clawchat_gateway.turn_grants import release_session
 
         for key in list(self._grant_sessions):
@@ -4774,8 +4776,8 @@ class ClawChatAdapter(BasePlatformAdapter):
     def _hold_owner_inbound(self, inbound: InboundMessage) -> bool:
         if not self._verified_owner_inbound(inbound):
             return False
-        # This worker must dispatch even at its deadline, retaining all existing
-        # overlap restrictions instead of releasing another execution's nonce.
+        # Worker preparation rechecks asynchronously after media download using
+        # the original deadline; it must not enqueue this input again.
         if self._owner_input_tasks.get(self._grant_session_key(inbound)) is asyncio.current_task():
             return False
         text = inbound.text.strip()
@@ -4813,25 +4815,34 @@ class ClawChatAdapter(BasePlatformAdapter):
         except Exception:  # noqa: BLE001 - no known confirmation exempts ordinary text
             return False
 
-    async def _dispatch_held_owner_inputs(self, key: str) -> None:
+    async def _wait_held_owner_input(self, key: str, deadline: float, task: asyncio.Task,
+                                     *, ignore_dispatch: bool = False) -> bool:
         from clawchat_gateway.turn_grants import has_non_owner_turn
 
+        # The busy check also expires snapshots the idle host left behind.
+        while self._owner_input_tasks.get(key) is task:
+            if not (time.monotonic() < deadline and self._grant_session_busy(key, ignore_dispatch=ignore_dispatch)
+                    and has_non_owner_turn(self._account_id(), key)):
+                return True
+            await asyncio.sleep(self._owner_input_poll_seconds)
+        return False
+
+    async def _dispatch_held_owner_inputs(self, key: str) -> None:
         task = asyncio.current_task()
         try:
             pending = self._owner_input_pending[key]
             while pending and self._owner_input_tasks.get(key) is task:
                 inbound, deadline = pending[0]
-                # The busy check also expires snapshots the idle host left behind.
-                while (time.monotonic() < deadline and self._grant_session_busy(key)
-                       and has_non_owner_turn(self._account_id(), key)):
-                    await asyncio.sleep(self._owner_input_poll_seconds)
-                    if self._owner_input_tasks.get(key) is not task:
-                        return
+                if not await self._wait_held_owner_input(key, deadline, task):
+                    return
                 pending.pop(0)
+                self._owner_input_deadlines[id(inbound)] = deadline
                 try:
                     await self._route_inbound(inbound)
                 except Exception:  # noqa: BLE001 - keep later held inputs
                     logger.warning('clawchat held owner input dispatch failed', exc_info=True)
+                finally:
+                    self._owner_input_deadlines.pop(id(inbound), None)
         finally:
             if self._owner_input_tasks.get(key) is task:
                 self._owner_input_tasks.pop(key, None)
@@ -5142,7 +5153,13 @@ class ClawChatAdapter(BasePlatformAdapter):
         chat_name, user_name = self._session_names(inbound)
         downloaded_media = await self._download_inbound_media(inbound)
         # A non-owner execution may have started during media preparation.
-        # Reuse the owner queue before registering a turn or reaching steer.
+        # Queued inputs retain their deadline through media preparation. Ignore
+        # this input's own dispatch counter when checking for a busy session.
+        deadline = self._owner_input_deadlines.get(id(inbound))
+        if deadline is not None:
+            key = self._grant_session_key(inbound)
+            if not await self._wait_held_owner_input(key, deadline, asyncio.current_task(), ignore_dispatch=True):
+                return
         if self._hold_owner_inbound(inbound):
             return
         speakers, grants, any_tools = self._turn_grant_values(inbound)

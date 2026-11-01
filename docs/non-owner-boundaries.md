@@ -237,8 +237,11 @@ is `steer`, or when the text starts with `/steer`. The mode follows
 `interrupt`. Approval replies and control commands still pass immediately;
 groups and ordinary input in `queue` / `interrupt` keep their existing paths.
 Held inputs dispatch in order with fresh nonces after release, retaining owner
-tools when no third-party restrictions remain. The wait is capped at 120
-seconds; at timeout it dispatches with the existing
+tools when no third-party restrictions remain. Queued redispatch rechecks after
+media download: if the session is busy with a non-owner execution again, it waits
+within that message's original deadline, polling both session busy state and live
+non-owner executions. The hold deadline stays 120 seconds from enqueue; media
+preparation does not reset it. After the deadline, a prepared input dispatches with the existing
 overlap and unverified-input restrictions, without releasing the running nonce.
 The hold logs `owner_input_held reason=active_notice_turn`, without message text.
 
