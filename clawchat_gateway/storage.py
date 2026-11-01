@@ -547,6 +547,10 @@ class InboundReceiptWriteResult:
     conn_seq: int | None = None
 
 
+class _InboundReceiptRegistrationCancelled(Exception):
+    """Abort a registration transaction without reporting a storage failure."""
+
+
 class ClawChatStore:
     def __init__(self, db_path: Path | str | None = None) -> None:
         self.db_path = Path(db_path) if db_path is not None else default_db_path()
@@ -1601,9 +1605,21 @@ class ClawChatStore:
         finally:
             conn.close()
 
-    def register_inbound_receipt_connection(self, *, account_id: str) -> int | None:
+    def register_inbound_receipt_connection(
+        self, *, account_id: str, still_current: Callable[[], bool],
+    ) -> int | Literal["cancelled"] | None:
         """Fence older connections before this connection can receive work."""
         def register(conn: sqlite3.Connection) -> int:
+            # BEGIN IMMEDIATE already serializes writers. Stop sets _stopping
+            # (reconnect advances generation) before a replacement registers.
+            # Once this check passes, that replacement cannot interleave before
+            # commit; if it fails, roll back without changing any sequence.
+            try:
+                current = still_current()
+            except Exception:
+                current = False
+            if not current:
+                raise _InboundReceiptRegistrationCancelled
             conn.execute("""
                 INSERT INTO inbound_receipt_connections(account_id, seq) VALUES (?, 1)
                 ON CONFLICT(account_id) DO UPDATE SET seq = seq + 1
@@ -1613,6 +1629,8 @@ class ClawChatStore:
             ).fetchone()[0]
         try:
             return self._inbound_receipt_transaction(register)
+        except _InboundReceiptRegistrationCancelled:
+            return "cancelled"
         except Exception:
             logger.error("clawchat inbound receipt connection registration failed")
             return None

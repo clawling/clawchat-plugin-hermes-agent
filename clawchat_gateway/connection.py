@@ -3402,16 +3402,22 @@ class ClawChatConnection:
                                             and self._delivery_generation == generation and self._ws is ws),
                     )
                     self._delivery_tracker = tracker
+                    def still_current() -> bool:
+                        # The storage thread only reads Python attributes under
+                        # the GIL; it never awaits or accesses event-loop APIs.
+                        return (not self._stopping and self._delivery_generation == generation
+                                and self._ws is ws and self._delivery_tracker is tracker)
                     # This reader awaits registration before READY or reading the
                     # next frame. Even a delayed first write carries its hello's
                     # sequence, so a newer connection fences it transactionally.
                     try:
                         seq = (await asyncio.to_thread(
                             self._store.register_inbound_receipt_connection, account_id=self._account_id,
+                            still_current=still_current,
                         )) if self._store is not None else None
                     except Exception:
                         seq = None
-                    if not tracker.current() or self._stopping:
+                    if seq == "cancelled" or not tracker.current() or self._stopping:
                         return
                     if type(seq) is not int or seq <= 0:
                         logger.error("clawchat inbound receipt connection registration unavailable; closing socket")
