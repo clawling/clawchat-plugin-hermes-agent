@@ -227,6 +227,7 @@ def download_liveware_sample(
         # A crash between the two swap renames left only the retained old app:
         # restore it so its user data files are preserved by this install.
         old_dir.replace(app_dir)
+        atomic_file.fsync_dir(sample_root)
     if _local_install_matches(app_dir, manifest):
         return manifest.version, app_dir
     tmp_dir = sample_root / ".app.tmp"

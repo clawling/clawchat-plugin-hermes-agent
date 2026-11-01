@@ -25,6 +25,8 @@ class Finding:
 ALLOWLIST: list[tuple[str, str, str, int, str, str]] = [
     ("clawchat_gateway/install_identity.py", "_publish_seed", "os.fdopen", 1, "C",
      "C: same-directory seed staging file, flushed and fsynced before create-only publication"),
+    ("clawchat_gateway/install_identity.py", "_publish_seed", "tempfile.mkstemp", 1, "C",
+     "C: same-directory seed staging file created for the create-only link publish"),
     ("clawchat_gateway/install_identity.py", "_publish_seed", "os.link", 1, "B",
      "B: create-only link publish + fsync_dir, never replaces a concurrent seed"),
     ("clawchat_gateway/install_identity.py", "_state_guard", "os.open", 1, "C",
@@ -35,6 +37,8 @@ ALLOWLIST: list[tuple[str, str, str, int, str, str]] = [
      "C: lock holder diagnostics; ownership comes from the kernel lock"),
     ("clawchat_gateway/liveware_cli.py", "_stream_download", "os.fdopen", 1, "C",
      "C: binary staging file, verified and fsynced before publication"),
+    ("clawchat_gateway/liveware_cli.py", "_download", "tempfile.mkstemp", 1, "C",
+     "C: same-directory binary staging file, verified and fsynced before publication"),
     ("clawchat_gateway/liveware_cli.py", "_download", "os.replace", 1, "B",
      "B: verified liveware binary; file fsync after chmod, then fsync_dir"),
     ("clawchat_gateway/liveware_cli.py", "ensure_liveware_cli", "os.open", 1, "C",
@@ -65,6 +69,9 @@ _WRITE_FLAGS = {"O_CREAT", "O_WRONLY", "O_RDWR", "O_TRUNC", "O_APPEND"}
 _DIRECT = {
     "os.replace", "os.rename", "os.link", "os.symlink", "shutil.move",
     "shutil.copy", "shutil.copy2", "shutil.copyfile", "shutil.copytree",
+    # Named temp files are written through the returned fd / object, so the
+    # creation call is the only place the gate can see the write.
+    "tempfile.mkstemp", "tempfile.NamedTemporaryFile", "mkstemp", "NamedTemporaryFile",
 }
 
 

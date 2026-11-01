@@ -378,3 +378,46 @@ def test_sample_restores_retained_app_after_crash_between_swaps(tmp_path, monkey
     assert (app / "demo.js").read_bytes() == b"new app"
     assert (app / "state.json").read_bytes() == b"user data"
     assert not retained.exists()
+
+
+def test_sample_restore_syncs_parent_before_matching_short_circuit(tmp_path, monkeypatch):
+    from clawchat_gateway import liveware_sample as sample
+
+    retained = tmp_path / ".app.old"
+    retained.mkdir()
+    (retained / "state.json").write_bytes(b"user data")
+    events = []
+    monkeypatch.setattr(sample, "_fetch_verified", lambda *a: b"manifest")
+    monkeypatch.setattr(sample, "parse_livewares_manifest", lambda raw: SimpleNamespace(version="same", files=[]))
+
+    def matches(app_dir, manifest):
+        events.append("match")
+        return True
+
+    def sync_dir(path):
+        events.append(("dir", path))
+
+    monkeypatch.setattr(sample, "_local_install_matches", matches)
+    monkeypatch.setattr(sample, "_fetch_sample_files", lambda *a: pytest.fail("matching install must not fetch"))
+    monkeypatch.setattr(af, "fsync_dir", sync_dir)
+    app = tmp_path / "app"
+    assert sample.download_liveware_sample(fetch=lambda url: b"", sample_root=tmp_path) == ("same", app)
+    assert (app / "state.json").read_bytes() == b"user data"
+    assert not retained.exists()
+    assert events == [("dir", tmp_path), "match"]
+
+
+def test_sample_restore_directory_sync_failure_propagates(tmp_path, monkeypatch):
+    from clawchat_gateway import liveware_sample as sample
+
+    (tmp_path / ".app.old").mkdir()
+    monkeypatch.setattr(sample, "_fetch_verified", lambda *a: b"manifest")
+    monkeypatch.setattr(sample, "parse_livewares_manifest", lambda raw: SimpleNamespace(version="same", files=[]))
+    monkeypatch.setattr(sample, "_local_install_matches", lambda *a: True)
+
+    def failing(path):
+        raise OSError(errno.EIO, "placeholder directory sync failure")
+
+    monkeypatch.setattr(af, "fsync_dir", failing)
+    with pytest.raises(OSError):
+        sample.download_liveware_sample(fetch=lambda url: b"", sample_root=tmp_path)

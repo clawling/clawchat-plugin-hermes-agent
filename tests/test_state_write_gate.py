@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "tests" / "check_state_writes.py"
@@ -88,8 +90,20 @@ class Store:
         tempfile.mkdtemp()
 ''')
     findings = gate.scan(root)
-    assert len(findings) == 20
+    assert len(findings) == 22
     assert {f.qualname for f in findings} == {"Store.save"}
+    assert {"tempfile.mkstemp", "tempfile.NamedTemporaryFile"} <= {f.func_text for f in findings}
+    assert "tempfile.mkdtemp" not in {f.func_text for f in findings}
+
+
+@pytest.mark.parametrize("source", [
+    "import tempfile\nfd, name = tempfile.mkstemp()\n",
+    "import tempfile\nwith tempfile.NamedTemporaryFile('w', delete=False) as f:\n    f.write('y')\n",
+    "from tempfile import mkstemp\nfd, name = mkstemp()\n",
+])
+def test_temp_file_writes_are_rejected(tmp_path, source):
+    errors = gate.check(tree(tmp_path, source), allowlist=[])
+    assert len(errors) == 1 and "unregistered state write" in errors[0]
 
 
 def test_only_production_paths_are_scanned(tmp_path):
