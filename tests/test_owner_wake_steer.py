@@ -171,6 +171,44 @@ async def test_owner_steer_waits_for_release_then_has_owner_tools(harness, host,
     await asyncio.gather(*a._owner_input_tasks.values())
 
 
+@pytest.mark.parametrize('kind', ['awareness', 'foreign_sender'])
+async def test_owner_hold_rechecked_after_media_preparation(harness, monkeypatch, kind):
+    a = harness.adapter
+    monkeypatch.setenv('HERMES_GATEWAY_BUSY_INPUT_MODE', 'steer')
+    a._owner_input_poll_seconds = 0.005
+    entered, proceed = asyncio.Event(), asyncio.Event()
+    async def download(inbound):
+        if inbound.text == 'first owner input' and not proceed.is_set():
+            entered.set()
+            await proceed.wait()
+        return []
+    monkeypatch.setattr(a, '_download_inbound_media', download)
+    preparing = asyncio.create_task(a._handle_inbound(
+        message('usr_owner', 'first owner input', chat=OWNER_CHAT)))
+    await entered.wait()
+    assert not harness.events and not a._owner_input_pending
+    incoming = notice(a, 'awareness') if kind == 'awareness' else message('usr_other', chat=OWNER_CHAT)
+    await a._handle_inbound(incoming)
+    original = harness.events[0]
+    nonce = original.source.message_id
+    proceed.set()
+    await preparing
+    await a._handle_inbound(message('usr_owner', 'second owner input', chat=OWNER_CHAT))
+    assert len(harness.events) == 1
+    key = a._grant_session_key(incoming)
+    assert [inbound.text for inbound, _ in a._owner_input_pending[key]] == [
+        'first owner input', 'second owner input']
+    assert turns.get_snapshot(nonce) is not None
+    await finish(harness, original)
+    await wait_for_events(harness, 3)
+    assert [event.text for event in harness.events[1:]] == ['first owner input', 'second owner input']
+    for event in harness.events[1:]:
+        snapshot = turns.get_snapshot(event.source.message_id)
+        assert snapshot.owner_side and snapshot.owner_verified and not snapshot.non_owner_speakers
+        assert snapshot.nonce != nonce
+    await asyncio.gather(*a._owner_input_tasks.values())
+
+
 @pytest.mark.parametrize('mode', ['queue', 'interrupt'])
 async def test_explicit_steer_waits_in_other_busy_modes(harness, monkeypatch, mode):
     a = harness.adapter

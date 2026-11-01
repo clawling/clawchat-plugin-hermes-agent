@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -333,3 +335,151 @@ def test_launcher_records_spawn_failure(
     log = restart_mod.restart_log_path().read_text(encoding="utf-8")
     assert "could not start" in log
     assert "exit_code=127" in log
+
+
+@pytest.mark.parametrize('change,expected_calls,reason', [
+    ('token-after-failure', 1, 'superseded by a newer restart request; stopping'),
+    ('missing-token', 1, 'superseded by a newer restart request; stopping'),
+    ('unreadable-token', 1, 'superseded by a newer restart request; stopping'),
+    ('token-before-first', 0, 'superseded by a newer restart request; stopping'),
+    ('token-during-identity-read', 0, 'superseded by a newer restart request; stopping'),
+    ('pid', 1, 'gateway already restarted; stopping'),
+    ('start-time', 1, 'gateway already restarted; stopping'),
+    ('started-after-request', 1, 'gateway already restarted; stopping'),
+    ('unchanged', 3, None),
+    ('unknown-identity', 3, None),
+])
+def test_launcher_stops_obsolete_waiters(
+    profile_home, monkeypatch, capsys, change, expected_calls, reason,
+):
+    pid, start, created_at = [None if change == 'started-after-request' else 11001], [100], [1.0]
+    reads = []
+    def live_pid(home):
+        assert home == profile_home
+        reads.append(home)
+        if change == 'token-during-identity-read' and len(reads) == 2:
+            token_path.write_text('replacement', encoding='utf-8')
+        if change == 'unknown-identity':
+            raise OSError('identity unavailable')
+        return pid[0]
+    monkeypatch.setitem(sys.modules, 'gateway.status', SimpleNamespace(
+        live_gateway_pid_for_home=live_pid, get_process_start_time=lambda _: start[0]))
+    monkeypatch.setitem(sys.modules, 'psutil', SimpleNamespace(
+        Process=lambda _: SimpleNamespace(create_time=lambda: created_at[0])))
+    spawned = []
+    monkeypatch.setattr(restart_mod.subprocess, 'Popen', lambda argv, **kw: spawned.append((argv, kw)))
+    restart_mod.schedule_gateway_restart(delay_seconds=0)
+    argv, kwargs = spawned[0]
+    for key, value in kwargs['env'].items():
+        monkeypatch.setenv(key, value)
+    token_path = restart_mod.restart_log_path().with_name('gateway-restart.token')
+    if change == 'token-before-first':
+        token_path.write_text('replacement', encoding='utf-8')
+    elapsed, calls, sleeps = [0.0], [], []
+    def sleep(seconds):
+        sleeps.append(seconds)
+        elapsed[0] += seconds
+    def call(args, **kw):
+        assert args[-2:] == ['gateway', 'restart']
+        assert '--yes' not in args and '--interrupt' not in args and 'timeout' not in kw
+        calls.append(args)
+        return 0 if len(calls) == 3 else 1
+    def wake(seconds):
+        sleep(seconds)
+        if not calls:
+            return
+        # Change runtime state during backoff, after the first refusal.
+        if change == 'token-after-failure':
+            token_path.write_text('replacement', encoding='utf-8')
+        elif change == 'missing-token':
+            token_path.unlink()
+        elif change == 'unreadable-token':
+            token_path.write_bytes(b'\xff')
+        elif change == 'pid':
+            pid[0] += 1
+        elif change == 'start-time':
+            start[0] += 100
+        elif change == 'started-after-request':
+            pid[0] = 11002
+            created_at[0] = float(kwargs['env']['CLAWCHAT_GATEWAY_RESTART_REQUESTED_AT']) + 1
+    monkeypatch.setattr(time, 'monotonic', lambda: elapsed[0])
+    monkeypatch.setattr(time, 'sleep', wake)
+    monkeypatch.setattr(subprocess, 'call', call)
+    exec(argv[2], {})
+    output = capsys.readouterr().out
+    assert len(calls) == expected_calls
+    if reason:
+        assert output.rstrip().endswith(reason)
+        assert sleeps == ([0] if expected_calls == 0 else [0, 5])
+    else:
+        assert sleeps == [0, 5, 10]
+        assert output.rstrip().endswith('attempt=3 exit_code=0')
+
+
+def test_new_restart_request_replaces_previous_token(profile_home, monkeypatch):
+    spawned = []
+    monkeypatch.setattr(restart_mod.subprocess, 'Popen', lambda argv, **kw: spawned.append(kw))
+    restart_mod.schedule_gateway_restart()
+    token_path = restart_mod.restart_log_path().with_name('gateway-restart.token')
+    first = token_path.read_text(encoding='utf-8')
+    restart_mod.schedule_gateway_restart()
+    second = token_path.read_text(encoding='utf-8')
+    assert first != second
+    assert [kw['env']['CLAWCHAT_GATEWAY_RESTART_TOKEN'] for kw in spawned] == [first, second]
+    assert list(token_path.parent.glob('.gateway-restart-*')) == []
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='fake hermes uses a POSIX shebang')
+def test_detached_launcher_reads_host_identity_outside_checkout(profile_home, tmp_path, monkeypatch):
+    source = tmp_path / 'host-source'
+    package = source / 'gateway'
+    package.mkdir(parents=True)
+    (package / '__init__.py').write_text('', encoding='utf-8')
+    status_file = package / 'status.py'
+    status_file.write_text(
+        "def live_gateway_pid_for_home(home):\n"
+        "    return int((home / 'current-pid').read_text())\n"
+        "def get_process_start_time(pid):\n"
+        "    return 100\n", encoding='utf-8')
+    (profile_home / 'current-pid').write_text('11001', encoding='utf-8')
+    monkeypatch.setitem(sys.modules, 'gateway.status', SimpleNamespace(
+        __file__=str(status_file), live_gateway_pid_for_home=lambda _: 11001,
+        get_process_start_time=lambda _: 100))
+    fake_bin = tmp_path / 'hermes'
+    fake_bin.write_text(
+        f'#!{sys.executable}\n'
+        'from pathlib import Path\n'
+        "print('manual restart simulated', flush=True)\n"
+        "Path('current-pid').write_text('11002')\n"
+        'raise SystemExit(1)\n', encoding='utf-8')
+    fake_bin.chmod(0o755)
+    monkeypatch.setattr(restart_mod, '_hermes_binary', lambda _: fake_bin)
+    # A launcher's injected sys.path need not match the configured fallback.
+    monkeypatch.setenv('HERMES_DIR', str(tmp_path / 'absent-source'))
+    real_popen = subprocess.Popen
+    def popen(argv, **kwargs):
+        proc = real_popen(argv, **kwargs)
+        proc.wait(timeout=30)
+        return proc
+    monkeypatch.setattr(restart_mod.subprocess, 'Popen', popen)
+    restart_mod.schedule_gateway_restart(delay_seconds=0, retry_initial_seconds=0.01)
+    log = restart_mod.restart_log_path().read_text(encoding='utf-8')
+    assert log.count('manual restart simulated') == 1
+    assert 'attempt=1 exit_code=1' in log
+    assert log.rstrip().endswith('gateway already restarted; stopping')
+
+
+@pytest.mark.parametrize('failure', ['fsync', 'replace'])
+def test_token_publish_failure_does_not_launch_or_damage_previous_token(
+    profile_home, monkeypatch, forbid_spawn, failure,
+):
+    token_path = restart_mod.restart_log_path().with_name('gateway-restart.token')
+    token_path.parent.mkdir(parents=True)
+    token_path.write_text('previous', encoding='utf-8')
+    def fail(*_args):
+        raise OSError('token publish failed')
+    monkeypatch.setattr(restart_mod.os, failure, fail)
+    with pytest.raises(OSError, match='token publish failed'):
+        restart_mod.schedule_gateway_restart()
+    assert token_path.read_text(encoding='utf-8') == 'previous'
+    assert list(token_path.parent.glob('.gateway-restart-*')) == []

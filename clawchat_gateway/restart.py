@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import errno
+import inspect
+import json
 import math
 import os
 import shlex
 import subprocess
 import sys
+import tempfile
+import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -218,6 +224,58 @@ def restart_next_steps(plan: RestartPlan) -> list[str]:
     return []
 
 
+def _gateway_identity(home):
+    # Kept self-contained so the detached launcher can use the same reader
+    # without importing the plugin from its installation directory.
+    from pathlib import Path
+
+    try:
+        from gateway import status
+
+        # The host verifies liveness and PID reuse, reading gateway.pid / the
+        # runtime lock, then gateway_state.json for service-managed gateways.
+        pid = status.live_gateway_pid_for_home(Path(home))
+        if pid is not None:
+            start = status.get_process_start_time(pid)
+            # Host fingerprints are boot-relative ticks on Linux. Use an
+            # optional epoch reading only to detect startup after the request
+            # when no initial identity was available.
+            created_at = None
+            try:
+                import psutil
+
+                created_at = psutil.Process(pid).create_time()
+            except Exception:
+                pass
+            return [pid, start, created_at]
+    except Exception:  # unavailable on older hosts: retain token protection
+        pass
+    return None
+
+
+def _write_restart_token(path: Path, token: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".gateway-restart-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(token)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        if os.name != "nt":
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                try:
+                    os.fsync(directory)
+                except OSError as exc:
+                    if exc.errno not in (errno.EINVAL, errno.ENOTSUP):
+                        raise
+            finally:
+                os.close(directory)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
 def schedule_gateway_restart(
     delay_seconds: int = 2, *, retry_initial_seconds: float = 5,
     retry_max_seconds: float = 60, retry_timeout_seconds: float = 1800,
@@ -229,6 +287,15 @@ def schedule_gateway_restart(
     hermes_home = _hermes_home()
     hermes_bin = _hermes_binary(hermes_dir)
     log_path = restart_log_path()
+    requested_at = time.time()
+    identity = _gateway_identity(hermes_home)
+    # Published Hermes launchers may add their checkout to sys.path without
+    # exporting HERMES_DIR. Preserve the actual status module's source root.
+    status_file = getattr(sys.modules.get("gateway.status"), "__file__", None)
+    host_dir = Path(status_file).resolve().parent.parent if status_file else hermes_dir
+    token = uuid.uuid4().hex
+    token_path = log_path.with_name("gateway-restart.token")
+    _write_restart_token(token_path, token)
     # Run from the Hermes home, never from the caller's cwd: a process whose cwd
     # sits inside plugins/clawchat keeps that folder locked on Windows, which
     # breaks a later plugin update or removal.
@@ -243,14 +310,49 @@ def schedule_gateway_restart(
         "CLAWCHAT_GATEWAY_RESTART_RETRY_INITIAL": str(retry_initial_seconds),
         "CLAWCHAT_GATEWAY_RESTART_RETRY_MAX": str(retry_max_seconds),
         "CLAWCHAT_GATEWAY_RESTART_RETRY_TIMEOUT": str(retry_timeout_seconds),
+        "CLAWCHAT_GATEWAY_RESTART_TOKEN": token,
+        "CLAWCHAT_GATEWAY_RESTART_TOKEN_PATH": str(token_path),
+        "CLAWCHAT_GATEWAY_RESTART_IDENTITY": json.dumps(identity),
+        "CLAWCHAT_GATEWAY_RESTART_REQUESTED_AT": str(requested_at),
+        "CLAWCHAT_GATEWAY_RESTART_HOST_DIR": str(host_dir),
     }
     # The launcher's stdout/stderr ARE the log file, so the restart's own output
     # lands there, followed by an explicit exit_code for each attempt.
-    launcher = """
+    launcher = inspect.getsource(_gateway_identity) + """
 import datetime
+import json
 import os
 import subprocess
+import sys
 import time
+from pathlib import Path
+
+# The launcher runs from HERMES_HOME, outside the source checkout.
+sys.path.insert(0, os.environ['CLAWCHAT_GATEWAY_RESTART_HOST_DIR'])
+
+def request_is_current():
+    try:
+        current_token = Path(os.environ['CLAWCHAT_GATEWAY_RESTART_TOKEN_PATH']).read_text(encoding='utf-8')
+    except (OSError, UnicodeError):
+        return False
+    return current_token == os.environ['CLAWCHAT_GATEWAY_RESTART_TOKEN']
+
+def stop_reason():
+    if not request_is_current():
+        return 'superseded by a newer restart request; stopping'
+    previous = json.loads(os.environ['CLAWCHAT_GATEWAY_RESTART_IDENTITY'])
+    current = _gateway_identity(os.environ['HERMES_HOME'])
+    # Identity reads can take time; recheck the generation before restarting.
+    if not request_is_current():
+        return 'superseded by a newer restart request; stopping'
+    if current is not None and current[2] is not None and current[2] > float(os.environ['CLAWCHAT_GATEWAY_RESTART_REQUESTED_AT']):
+        return 'gateway already restarted; stopping'
+    if previous is not None and current is not None:
+        if current[0] != previous[0] or (
+            current[1] is not None and previous[1] is not None and current[1] != previous[1]
+        ):
+            return 'gateway already restarted; stopping'
+    return None
 
 now = lambda: datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')
 deadline = time.monotonic() + float(os.environ['CLAWCHAT_GATEWAY_RESTART_RETRY_TIMEOUT'])
@@ -261,6 +363,10 @@ time.sleep(min(max(0, int(os.environ['CLAWCHAT_GATEWAY_RESTART_DELAY'])),
 argv = [os.environ['CLAWCHAT_HERMES_BIN'], 'gateway', 'restart']
 attempt = 0
 while time.monotonic() < deadline:
+    reason = stop_reason()
+    if reason:
+        print(f'[{now()}] {reason}', flush=True)
+        break
     attempt += 1
     print(f'[{now()}] attempt={attempt} running: {argv}', flush=True)
     rc = 127

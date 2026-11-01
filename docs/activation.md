@@ -406,6 +406,9 @@ line `attempt=<n> exit_code=<n>` for every attempt to
 `$HERMES_HOME/clawchat/gateway-restart.log`, overwritten on each request.
 The restarter waits for current sessions to become idle by retrying non-zero
 exits, starting at 5 seconds and doubling up to 60 seconds, for at most 30 minutes.
+Each request atomically replaces `clawchat/gateway-restart.token`; a newer request
+or a detected completed restart stops older waiters. An unreadable token stops
+the waiter; unavailable gateway identity leaves token protection in place.
 It never forces an interrupt. The first successful restart ends the retries;
 older hosts that succeed immediately keep that behavior. If it has not restarted
 at the deadline, the owner must run the printed restart command manually. To verify:

@@ -251,7 +251,8 @@ For protocol-level checks (WebSocket handshake, ack flow), see
   online** — read `$HERMES_HOME/clawchat/gateway-restart.log`: it holds the
   output of `hermes gateway restart` and `attempt=<n> exit_code=<n>` for every
   attempt. It waits for current sessions to become idle, retrying non-zero exits
-  with backoff for up to 30 minutes. No exit code can mean an attempt is running
+  with backoff for up to 30 minutes. A newer restart request or a detected completed
+  restart stops older waiters. No exit code can mean an attempt is running
   or the launcher stopped. If no new `clawchat state -> ready` line appears by
   the deadline, the owner must run the printed restart command manually in a
   terminal outside Hermes. See [Restart Or Reload](./activation.md#restart-or-reload).

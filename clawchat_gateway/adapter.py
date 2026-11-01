@@ -5142,6 +5142,10 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
         chat_name, user_name = self._session_names(inbound)
         downloaded_media = await self._download_inbound_media(inbound)
+        # A non-owner execution may have started during media preparation.
+        # Reuse the owner queue before registering a turn or reaching steer.
+        if self._hold_owner_inbound(inbound):
+            return
         speakers, grants, any_tools = self._turn_grant_values(inbound)
         # Recheck after all preparation awaits, using exactly the grants that
         # will enter the snapshot. A grant added during download must not get
