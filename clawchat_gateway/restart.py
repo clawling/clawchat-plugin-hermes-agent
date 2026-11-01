@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import errno
 import inspect
 import json
 import math
@@ -8,7 +7,6 @@ import os
 import shlex
 import subprocess
 import sys
-import tempfile
 import time
 import uuid
 from dataclasses import dataclass
@@ -254,26 +252,10 @@ def _gateway_identity(home):
 
 
 def _write_restart_token(path: Path, token: str) -> None:
+    from clawchat_gateway.atomic_file import atomic_write_text
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=".gateway-restart-", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            stream.write(token)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        if os.name != "nt":
-            directory = os.open(path.parent, os.O_RDONLY)
-            try:
-                try:
-                    os.fsync(directory)
-                except OSError as exc:
-                    if exc.errno not in (errno.EINVAL, errno.ENOTSUP):
-                        raise
-            finally:
-                os.close(directory)
-    finally:
-        Path(temporary).unlink(missing_ok=True)
+    atomic_write_text(path, token)
 
 
 def schedule_gateway_restart(
