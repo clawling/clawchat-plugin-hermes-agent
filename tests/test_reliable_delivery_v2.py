@@ -20,7 +20,7 @@ from conftest import FAKE_SECRETS
 from clawchat_gateway import connection, config as config_module, reliable_delivery as delivery
 from clawchat_gateway.config import ClawChatConfig
 from clawchat_gateway.connection import ClawChatConnection, ConnectionState, build_connect_capabilities
-from clawchat_gateway.storage import ClawChatStore
+from clawchat_gateway.storage import ClawChatStore, InboundReceiptWriteResult
 
 
 BASE_CAPS = {"multi_device": False, "device_replay": True, "chat_meta_events": True,
@@ -112,24 +112,25 @@ def rows(store):
 
 def has_receipts_table(store):
     with sqlite3.connect(store.db_path) as db:
-        return bool(db.execute("SELECT 1 FROM sqlite_master WHERE name = 'inbound_receipts'").fetchone())
+        return bool(db.execute("SELECT 1 FROM sqlite_master WHERE name IN "
+                               "('inbound_receipts', 'inbound_receipt_connections')").fetchone())
 
 
 def seed_pending(store, frame, *, epoch="old-epoch"):
     receipt = ClawChatConnection._receipt_identity(frame, epoch, frame.get("dseq", 1))
     assert store.upsert_inbound_receipt(
         account_id="default", event=frame["event"], raw=frame,
-        write_order=delivery.next_write_order(), **receipt,
-    )
+        conn_seq=store.register_inbound_receipt_connection(account_id="default"), **receipt,
+    ).status == "ok"
 
 
 @asynccontextmanager
 async def peer(monkeypatch, store, *, enabled=True, hello=None, hello_form="event", on_message=None,
-               on_signal=None, wait_for_recovery=True, cleanup_workers=True):
+               on_signal=None, wait_for_recovery=True, cleanup_workers=True, expect_ready=True):
     ws = FakeWS(GRANT if hello is None else hello, hello_form)
     monkeypatch.setattr(connection, "_ws_connect", AsyncMock(return_value=ws))
-    cfg = ClawChatConfig(websocket_url="wss://example.invalid/ws", token="t",
-                        refresh_token="r", user_id="usr_test_agent",
+    cfg = ClawChatConfig(websocket_url="wss://example.invalid/ws", token=FAKE_SECRETS["access"],
+                        refresh_token=FAKE_SECRETS["refresh"], user_id="usr_test_agent",
                         owner_user_id="usr_test_owner", reliable_delivery_v2=enabled)
     conn = ClawChatConnection(cfg, on_message=on_message or AsyncMock(), on_notify_signal=on_signal)
     async def watch():
@@ -140,8 +141,13 @@ async def peer(monkeypatch, store, *, enabled=True, hello=None, hello_form="even
         await until(lambda: conn._supervisor_task.done() or (
             conn._credential_watch_task is not None if wait_for_recovery else
             conn._hello_wait is not None and conn._hello_wait.done()))
-        assert not conn._supervisor_task.done(), conn._supervisor_task.exception()
-        assert conn._state == ConnectionState.READY
+        if expect_ready:
+            assert not conn._supervisor_task.done(), conn._supervisor_task.exception()
+            assert conn._state == ConnectionState.READY
+        else:
+            assert conn._supervisor_task.done()
+            assert conn._supervisor_task.result() is False
+            assert conn._state != ConnectionState.READY
         yield SimpleNamespace(conn=conn, ws=ws)
     finally:
         await asyncio.wait_for(conn.stop(), 3)
@@ -165,7 +171,8 @@ def test_disabled_capabilities_exact_baseline(conflict):
 async def test_disabled_dseq_ignored_no_table_or_ack(monkeypatch, store):
     handler = AsyncMock()
     forbidden = lambda **kwargs: pytest.fail("disabled profile accessed receipts")
-    for name in ("upsert_inbound_receipt", "finish_inbound_receipt", "recover_inbound_receipts"):
+    for name in ("register_inbound_receipt_connection", "upsert_inbound_receipt",
+                 "finish_inbound_receipt", "recover_inbound_receipts"):
         monkeypatch.setattr(store, name, forbidden)
     async with peer(monkeypatch, store, enabled=False, on_message=handler) as h:
         h.ws.feed(message(99))
@@ -192,6 +199,67 @@ async def test_missing_grant_stays_legacy(monkeypatch, store, hello, hello_form,
             assert h.conn._delivery_tracker is None
             assert "using legacy delivery" in caplog.text
             assert not h.ws.acks
+
+
+@pytest.mark.parametrize("hello_form", ["event", "res"])
+@pytest.mark.parametrize("failure", ["none", "raised", "missing_store"])
+async def test_registration_failure_closes_before_ready_without_ack(
+    monkeypatch, store, hello_form, failure, caplog,
+):
+    def register(**kwargs):
+        if failure == "raised":
+            raise OSError("placeholder-registration-secret")
+        return None
+    monkeypatch.setattr(store, "register_inbound_receipt_connection", register)
+    if failure == "missing_store":
+        monkeypatch.setattr(connection, "get_clawchat_store", lambda: None)
+    monkeypatch.setattr(store, "upsert_inbound_receipt",
+                        lambda **kwargs: pytest.fail("receipt written after registration failure"))
+    handler = AsyncMock()
+    async with peer(monkeypatch, store, hello_form=hello_form,
+                    on_message=handler, expect_ready=False) as h:
+        assert h.ws.closed and not h.ws.acks
+        assert h.conn.receipt_write_failures == 1
+        assert h.conn._delivery_tracker is None
+        assert handler.await_count == 0
+    assert "placeholder-registration-secret" not in caplog.text
+
+
+async def test_registration_finishes_before_ready_and_first_receipt(monkeypatch, store):
+    entered, release = threading.Event(), threading.Event()
+    register = store.register_inbound_receipt_connection
+    upsert = store.upsert_inbound_receipt
+    main_thread = threading.get_ident()
+    writes = []
+    def blocked_registration(**kwargs):
+        assert threading.get_ident() != main_thread
+        entered.set()
+        assert release.wait(4)
+        return register(**kwargs)
+    def write(**kwargs):
+        assert release.is_set() and kwargs["conn_seq"] == 1
+        writes.append(kwargs)
+        return upsert(**kwargs)
+    monkeypatch.setattr(store, "register_inbound_receipt_connection", blocked_registration)
+    monkeypatch.setattr(store, "upsert_inbound_receipt", write)
+    handler = AsyncMock()
+    async def run():
+        async with peer(monkeypatch, store, on_message=handler) as h:
+            # Recovery may also pick up the newly persisted pending row; this
+            # transport-only callback deliberately does not claim message IDs.
+            await until(lambda: handler.await_count >= 1 and not h.conn._inbound_lanes)
+            assert h.conn._delivery_tracker.receipt_conn_seq == 1
+    task = asyncio.create_task(run())
+    try:
+        await until(entered.is_set)
+        ws = connection._ws_connect.return_value
+        ws.feed(message())
+        await asyncio.sleep(0.02)
+        assert not task.done() and not writes and not ws.acks
+        assert handler.await_count == 0
+    finally:
+        release.set()
+        await task
 
 
 @pytest.mark.parametrize("hello_form", ["event", "res"])
@@ -324,7 +392,7 @@ async def test_receipt_failure_closes_and_reconnects_with_new_epoch(monkeypatch,
         if kwargs["dseq"] == failed_dseq:
             if raises:
                 raise OSError("placeholder-access-secret")
-            return False
+            return InboundReceiptWriteResult("error")
         return original(**kwargs)
     monkeypatch.setattr(store, "upsert_inbound_receipt", upsert)
     handler = AsyncMock()
@@ -359,9 +427,23 @@ async def test_receipt_failure_closes_and_reconnects_with_new_epoch(monkeypatch,
         assert h.conn.receipt_write_failures == 1 and h.conn.dseq_density_violations == 0
 
 
+async def test_stale_receipt_result_closes_without_ack_or_dispatch(monkeypatch, store, caplog):
+    handler = AsyncMock()
+    async with peer(monkeypatch, store, on_message=handler) as h:
+        monkeypatch.setattr(store, "upsert_inbound_receipt", lambda **kwargs: InboundReceiptWriteResult("stale", 1))
+        tracker = h.conn._delivery_tracker
+        h.ws.feed(message(text="placeholder-stale-frame-content"))
+        await until(lambda: h.conn._supervisor_task.done())
+        assert h.ws.closed and tracker.disposed and tracker.acked == 0
+        assert not h.ws.acks and handler.await_count == 0
+        assert h.conn.receipt_stale_writes == h.conn.receipt_write_failures == 1
+        assert "stale receipt write rejected" in caplog.text
+        assert "placeholder-stale-frame-content" not in caplog.text
+
+
 @pytest.mark.parametrize("event", ["message.send", "notify.signal"])
 async def test_poison_acked_and_failed_error_redacted(monkeypatch, store, event, caplog):
-    error = "placeholder-access-secret placeholder-refresh-secret " + "bad " * 200
+    error = " ".join((FAKE_SECRETS["access"], FAKE_SECRETS["refresh"])) + "bad " * 200
     handler = AsyncMock(side_effect=ValueError(error))
     async with peer(monkeypatch, store, on_message=handler, on_signal=handler) as h:
         frame = message()
@@ -373,15 +455,16 @@ async def test_poison_acked_and_failed_error_redacted(monkeypatch, store, event,
         row = rows(store)[0]
         assert row["error"] and len(row["error"]) <= 500
         assert h.ws.acks[0]["payload"]["dseq"] == 1
-        for secret in ("placeholder-access-secret", "placeholder-refresh-secret"):
+        for secret in (FAKE_SECRETS["access"], FAKE_SECRETS["refresh"]):
             assert secret not in row["error"] and secret not in caplog.text
 
 
 @pytest.mark.parametrize("event", ["message.send", "notify.signal"])
 async def test_receipt_errors_redact_display_credentials_and_unconfigured_long_secret(monkeypatch, store, event, caplog):
     opaque = secrets.token_hex(20)
-    error = ("Authorization: Bearer abc123short https://h/x?access_token=shortq&sig=zz "
-             "password=hunter2 " + opaque)
+    error = ("message_id=msg-1 chat_id=c1 Authorization: Bearer abc123short "
+             "https://h/x?access_token=shortq&sig=zz X-Amz-Signature=shortsig1 "
+             "X-Amz-Credential=shortcred1 auth=shortauth1 password=hunter2 " + opaque)
     handler = AsyncMock(side_effect=ValueError(error))
     async with peer(monkeypatch, store, on_message=handler, on_signal=handler) as h:
         h.conn._cfg = replace(h.conn.config, token=FAKE_SECRETS["access"],
@@ -393,10 +476,25 @@ async def test_receipt_errors_redact_display_credentials_and_unconfigured_long_s
         h.ws.feed(frame)
         await until(lambda: bool(rows(store)) and rows(store)[0]["status"] == "failed")
         await until(lambda: bool(h.ws.acks))
-        for secret in ("abc123short", "shortq", "hunter2", opaque):
+        for secret in ("abc123short", "shortq", "zz", "shortsig1", "shortcred1", "shortauth1", "hunter2", opaque):
             assert secret not in rows(store)[0]["error"]
             assert secret not in caplog.text
         assert "raised" in caplog.text and "***" in rows(store)[0]["error"]
+        for visible in ("message_id=msg-1", "chat_id=c1"):
+            assert visible in rows(store)[0]["error"] and visible in caplog.text
+
+
+@pytest.mark.parametrize("key", ["sig", "signature", "x-amz-signature", "x-amz-credential",
+    "x-amz-security-token", "x-goog-signature", "x-goog-credential", "token", "access_token",
+    "refresh_token", "id_token", "auth", "apikey", "api_key", "client_secret", "session", "sessionid"])
+@pytest.mark.parametrize("separator", ["=", ": ", '=\"'])
+def test_receipt_parameter_redaction_preserves_nonsecret_text_and_boundaries(key, separator):
+    ending = '\"' if separator.endswith('\"') else ""
+    text = f"message_id=msg-1 chat_id=c1 ?{key.upper()}{separator}shortvalue{ending}&safe=readable#fragment"
+    redacted = delivery.redact_receipt_parameters(text)
+    assert "shortvalue" not in redacted and "***" in redacted
+    assert "message_id=msg-1 chat_id=c1" in redacted
+    assert "&safe=readable#fragment" in redacted
 
 
 @pytest.mark.parametrize("field", ["base_url", "websocket_url"])
@@ -461,7 +559,7 @@ async def test_ready_recovers_all_pending_kinds_and_ages_without_ack(monkeypatch
     def insert(frame, kind, key):
         assert store.upsert_inbound_receipt(account_id="default", kind=kind, key=key,
                                             dseq=1, epoch="old-epoch", event=frame["event"], raw=frame,
-                                            write_order=delivery.next_write_order())
+                                            conn_seq=store.register_inbound_receipt_connection(account_id="default")).status == "ok"
     insert(message(), "message", "test-message")
     signal = {"event": "notify.signal", "dseq": 2, "payload": {"event_id": "test-signal", "type": "test.changed"}}
     insert(signal, "signal", "test-signal")
@@ -923,13 +1021,14 @@ async def test_old_receipt_completion_cannot_record_after_dispose(monkeypatch, s
 async def test_old_instance_blocked_write_cannot_replace_new_instance_finished_receipt(monkeypatch, store):
     entered, release, finished = threading.Event(), threading.Event(), threading.Event()
     original = store.upsert_inbound_receipt
-    old_orders = []
+    old_sequences, old_results = [], []
     def write(**kwargs):
-        if kwargs["epoch"] == "test-epoch":
-            old_orders.append(kwargs["write_order"])
+        if kwargs["epoch"] == "test-epoch" and kwargs["dseq"] == 1:
+            old_sequences.append(kwargs["conn_seq"])
             entered.set()
             assert release.wait(4)
             result = original(**kwargs)
+            old_results.append(result)
             finished.set()
             return result
         return original(**kwargs)
@@ -937,7 +1036,10 @@ async def test_old_instance_blocked_write_cannot_replace_new_instance_finished_r
     old_handler, new_handler = AsyncMock(), AsyncMock()
     try:
         async with peer(monkeypatch, store, on_message=old_handler, cleanup_workers=False) as old:
-            old.ws.feed(message(text="old connection"))
+            # Hello has already registered the old connection, even though its
+            # first receipt write has not yet entered the transaction.
+            assert old.conn._delivery_tracker.receipt_conn_seq == 1
+            old.ws.feed(message(1, text="old connection"))
             await until(entered.is_set)
             old_tracker = old.conn._delivery_tracker
             await old.conn.stop()
@@ -946,16 +1048,18 @@ async def test_old_instance_blocked_write_cannot_replace_new_instance_finished_r
                 new.ws.feed(message(text="new connection"))
                 new.ws.feed({"event": "replay.done", "dseq": 2, "payload": {"ack_epoch": "new-epoch"}})
                 await until(lambda: new_handler.await_count == 1 and not new.conn._inbound_lanes and bool(new.ws.acks))
-                snapshot = rows(store)[0]
+                snapshot = next(r for r in rows(store) if r["key"] == "test-message")
                 assert snapshot["epoch"] == "new-epoch" and snapshot["dseq"] == 1
-                assert snapshot["write_order"] > old_orders[0] and snapshot["status"] == "done"
+                assert snapshot["conn_seq"] > old_sequences[0] and snapshot["status"] == "done"
                 assert "new connection" in snapshot["raw_json"]
                 release.set()
                 await until(finished.is_set)
-                assert rows(store)[0] == snapshot
+                assert next(r for r in rows(store) if r["key"] == "test-message") == snapshot
+                assert old_results[0].status == "stale"
                 assert new.ws.acks[-1]["payload"] == {"dseq": 2, "epoch": "new-epoch"}
                 assert old_tracker.disposed and old_tracker.acked == 0
-                assert old_handler.await_count == 0 and not old.ws.acks
+                assert old_handler.await_count == 0
+                assert not old.ws.acks
     finally:
         release.set()
         shutdown = asyncio.create_task(asyncio.get_running_loop().shutdown_default_executor())
@@ -1069,25 +1173,29 @@ async def test_missing_identity_falls_back_to_epoch_dseq(monkeypatch, store, eve
 def test_storage_preserves_done_upserts_pending_and_isolates_accounts(store):
     kwargs = dict(account_id="default", kind="message", key="test-message", dseq=1,
                   epoch="test-epoch", event="message.send", raw=message(),
-                  write_order=delivery.next_write_order())
-    assert store.upsert_inbound_receipt(**kwargs) is True
+                  conn_seq=store.register_inbound_receipt_connection(account_id="default"))
+    result = store.upsert_inbound_receipt(**kwargs)
+    assert result.status == "ok" and result.conn_seq == 1
+    kwargs["conn_seq"] = result.conn_seq
     finish = {k: kwargs[k] for k in ("account_id", "kind", "key", "dseq", "epoch")}
     assert store.finish_inbound_receipt(**finish, error="failed") is True
-    kwargs.update(dseq=2, epoch="replay-epoch", raw=message(2, text="new"),
-                  write_order=delivery.next_write_order())
-    assert store.upsert_inbound_receipt(**kwargs) is True
+    kwargs.update(dseq=2, epoch="replay-epoch", raw=message(2, text="new"), conn_seq=store.register_inbound_receipt_connection(account_id="default"))
+    result = store.upsert_inbound_receipt(**kwargs)
+    assert result.status == "ok" and result.conn_seq == 2
+    kwargs["conn_seq"] = result.conn_seq
     assert rows(store)[0]["status"] == "pending" and rows(store)[0]["error"] is None
     # Finishing an old generation cannot finish the refreshed pending row.
     assert store.finish_inbound_receipt(**finish) is True
     assert rows(store)[0]["status"] == "pending"
     finish.update(dseq=2, epoch="replay-epoch")
     assert store.finish_inbound_receipt(**finish) is True
-    kwargs.update(dseq=3, raw=message(3, text="latest"), write_order=delivery.next_write_order())
-    assert store.upsert_inbound_receipt(**kwargs) is True
+    kwargs.update(dseq=3, raw=message(3, text="latest"))
+    assert store.upsert_inbound_receipt(**kwargs).status == "ok"
     assert rows(store)[0]["status"] == "done"
     assert "latest" in rows(store)[0]["raw_json"]
     kwargs["account_id"] = "test-other-account"
-    assert store.upsert_inbound_receipt(**kwargs) is True
+    kwargs["conn_seq"] = store.register_inbound_receipt_connection(account_id="test-other-account")
+    assert store.upsert_inbound_receipt(**kwargs) == InboundReceiptWriteResult("ok", 1)
     assert len(rows(store)) == 2
 
 
@@ -1097,31 +1205,79 @@ def test_storage_reports_real_failure_without_exception_text(monkeypatch, store,
     monkeypatch.setattr(store, "_inbound_receipt_transaction", fail)
     assert store.upsert_inbound_receipt(account_id="default", kind="message", key="test-message",
         dseq=1, epoch="test-epoch", event="message.send", raw=message(),
-        write_order=delivery.next_write_order()) is False
+        conn_seq=1).status == "error"
+    assert store.register_inbound_receipt_connection(account_id="default") is None
     assert "placeholder-storage-secret" not in caplog.text
 
 
-@pytest.mark.parametrize("equal_order", [False, True])
-def test_stale_receipt_upsert_preserves_every_newer_column(store, equal_order):
-    old_order, new_order = delivery.next_write_order(), delivery.next_write_order()
-    newer = dict(account_id="default", kind="message", key="test-message", dseq=9,
-                 epoch="new-epoch", event="message.reply", raw=message(9, text="newer", event="message.reply"),
-                 write_order=new_order)
-    assert store.upsert_inbound_receipt(**newer) is True
+@pytest.mark.parametrize("independent_store", [False, True])
+@pytest.mark.parametrize("old_write_before_replacement", [False, True])
+def test_stale_registered_connection_is_rejected_without_changing_any_row(
+    store, independent_store, old_write_before_replacement,
+):
+    old = dict(account_id="default", kind="message", key="test-message", dseq=1,
+               epoch="old-epoch", event="message.send", raw=message(text="older"), conn_seq=store.register_inbound_receipt_connection(account_id="default"))
+    assert old["conn_seq"] == 1
+    if old_write_before_replacement:
+        assert store.upsert_inbound_receipt(**old) == InboundReceiptWriteResult("ok", 1)
+    newer_store = ClawChatStore(store.db_path) if independent_store else store
+    newer = {**old, "epoch": "new-epoch", "raw": message(text="newer"),
+             "conn_seq": newer_store.register_inbound_receipt_connection(account_id="default")}
+    assert newer_store.upsert_inbound_receipt(**newer) == InboundReceiptWriteResult("ok", 2)
     finish = {k: newer[k] for k in ("account_id", "kind", "key", "dseq", "epoch")}
-    assert store.finish_inbound_receipt(**finish, error="test newer failure") is True
+    assert newer_store.finish_inbound_receipt(**finish, error="test newer failure") is True
     snapshot = rows(store)[0]
-    assert store.upsert_inbound_receipt(
-        account_id="default", kind="message", key="test-message", dseq=1, epoch="old-epoch",
-        event="message.send", raw=message(text="older"), write_order=new_order if equal_order else old_order,
-    ) is True
+    if old_write_before_replacement:
+        old["dseq"] = 2
+    assert store.upsert_inbound_receipt(**old) == InboundReceiptWriteResult("stale", 1)
     assert rows(store)[0] == snapshot
+    old["key"] = "test-unseen-key"
+    assert store.upsert_inbound_receipt(**old).status == "stale"
+    assert rows(store) == [snapshot]
+    with sqlite3.connect(store.db_path) as db:
+        assert db.execute("SELECT seq FROM inbound_receipt_connections WHERE account_id = 'default'").fetchone() == (2,)
 
 
-def test_receipt_write_order_is_process_wide_monotonic_when_clock_moves_back(monkeypatch):
-    from concurrent.futures import ThreadPoolExecutor
-    monkeypatch.setattr(delivery.time, "time_ns", lambda: 1)
-    start = delivery.next_write_order()
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        orders = list(pool.map(lambda _: delivery.next_write_order(), range(64)))
-    assert sorted(orders) == list(range(start + 1, start + 65))
+def test_upsert_without_registered_connection_is_stale_and_does_not_allocate(store):
+    result = store.upsert_inbound_receipt(
+        account_id="default", kind="message", key="test-message", dseq=1,
+        epoch="test-epoch", event="message.send", raw=message(), conn_seq=1,
+    )
+    assert result == InboundReceiptWriteResult("stale", 1)
+    assert not rows(store)
+    with sqlite3.connect(store.db_path) as db:
+        assert db.execute("SELECT seq FROM inbound_receipt_connections").fetchall() == []
+
+
+def test_receipt_connection_sequence_ignores_clock_rollback(monkeypatch, store):
+    clock = [2000.0]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    monkeypatch.setattr(time, "time_ns", lambda: int(clock[0] * 1_000_000_000))
+    kwargs = dict(account_id="default", kind="message", key="test-message", dseq=1,
+                  epoch="old-epoch", event="message.send", raw=message(text="older"), conn_seq=store.register_inbound_receipt_connection(account_id="default"))
+    assert store.upsert_inbound_receipt(**kwargs) == InboundReceiptWriteResult("ok", 1)
+    clock[0] = 1000.0
+    newer_store = ClawChatStore(store.db_path)
+    newer = {**kwargs, "epoch": "new-epoch", "raw": message(text="newer"),
+             "conn_seq": newer_store.register_inbound_receipt_connection(account_id="default")}
+    assert newer_store.upsert_inbound_receipt(**newer) == InboundReceiptWriteResult("ok", 2)
+    kwargs.update(conn_seq=1, dseq=2)
+    assert store.upsert_inbound_receipt(**kwargs).status == "stale"
+    assert rows(store)[0]["epoch"] == "new-epoch" and "newer" in rows(store)[0]["raw_json"]
+
+
+def test_same_connection_updates_only_increasing_dseq(store):
+    kwargs = dict(account_id="default", kind="message", key="test-message", dseq=2,
+                  epoch="test-epoch", event="message.send", raw=message(2, text="second"), conn_seq=store.register_inbound_receipt_connection(account_id="default"))
+    result = store.upsert_inbound_receipt(**kwargs)
+    assert result == InboundReceiptWriteResult("ok", 1)
+    kwargs.update(conn_seq=result.conn_seq, dseq=1, raw=message(1, text="older"))
+    assert store.upsert_inbound_receipt(**kwargs) == InboundReceiptWriteResult("stale", 1)
+    snapshot = rows(store)[0]
+    kwargs.update(dseq=2)
+    assert store.upsert_inbound_receipt(**kwargs) == InboundReceiptWriteResult("ok", 1)
+    assert rows(store)[0] == snapshot  # Matching read-back is an idempotent success.
+    kwargs.update(dseq=3, raw=message(3, text="latest"))
+    assert store.upsert_inbound_receipt(**kwargs) == InboundReceiptWriteResult("ok", 1)
+    assert rows(store)[0]["conn_seq"] == 1 and rows(store)[0]["dseq"] == 3
+    assert "latest" in rows(store)[0]["raw_json"]

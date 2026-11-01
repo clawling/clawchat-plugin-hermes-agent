@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import threading
-import time
+import re
 from typing import Any, Callable
 
 from clawchat_gateway.protocol import encode_frame
@@ -18,21 +17,24 @@ ACK_FLUSH_TIMEOUT_SECONDS = 1.0
 RECEIPT_RETRY_SECONDS = 30.0
 RECEIPT_RECOVERY_TIMEOUT_SECONDS = 10.0
 INBOUND_RETRYABLE = object()
-_last_write_order = 0
-_write_order_lock = threading.Lock()
+_RECEIPT_CREDENTIAL_VALUE = re.compile(
+    r"(?<![\w-])((?:sig|signature|x-amz-signature|x-amz-credential|x-amz-security-token|"
+    r"x-goog-signature|x-goog-credential|token|access_token|refresh_token|id_token|auth|"
+    r"apikey|api_key|client_secret|session|sessionid)[\"']?\s*[:=]\s*)"
+    r"(?:\"(?:[^\"\\\r\n]|\\.)*\"|'(?:[^'\\\r\n]|\\.)*'|[^\s&#\"'<>`,;}\]]+)",
+    re.IGNORECASE,
+)
 
 
-def next_write_order() -> int:
-    """Order receipt attempts across all connection instances and owner loops."""
-    global _last_write_order
-    with _write_order_lock:
-        _last_write_order = max(time.time_ns(), _last_write_order + 1)
-        return _last_write_order
+def redact_receipt_parameters(text: str) -> str:
+    """Remove short credential parameter values before receipt diagnostics are displayed."""
+    return _RECEIPT_CREDENTIAL_VALUE.sub(lambda match: match.group(1) + "***", text)
 
 
 class DseqAckTracker:
     def __init__(self, ws: Any, epoch: str, is_current: Callable[[], bool]) -> None:
         self.epoch = epoch
+        self.receipt_conn_seq: int | None = None
         self.last_read_dseq = 0
         self.acked = 0
         self.disposed = False

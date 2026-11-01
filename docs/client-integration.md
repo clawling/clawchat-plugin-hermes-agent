@@ -1425,9 +1425,9 @@ Persist each raw frame in profile SQLite `inbound_receipts` before recording
 its dseq, including unknown events and `history.transit`. Message keys use
 `payload.message_id`, signals use `payload.event_id`, with epoch:dseq fallback;
 other events always use epoch:dseq. `provisional` (`payload.stream_merged:true`) never replaces an unflagged final.
-Only greater `write_order` (a process-wide monotonic timestamp) updates a receipt, preserving done; stale writes succeed unchanged.
-Failed writes log ERROR, increment `receipt_write_failures`, dispose the tracker
-and close the socket for ordinary reconnect/backoff; the failed frame is not acked or dispatched.
+`inbound_receipt_connections` registers `conn_seq` transactionally at each v2 grant before READY; only greater `(conn_seq,dseq)` updates a receipt, preserving done.
+Failed/stale writes log ERROR, increment `receipt_write_failures`, dispose the tracker and close without ack/dispatch, using normal reconnect/backoff.
+Stale also increments `receipt_stale_writes`; account-scoped connection registration is independent of clocks.
 
 `sync.mark` and `replay.done` need no receipt. A replay.done with a mismatching
 payload ack_epoch logs a warning and records dseq, without replay completion,
@@ -1447,7 +1447,7 @@ dseq persistence/acks precede it. Recovery failure or a 10 s timeout releases on
 Recovery never records dseq. A new instance can take over stop-cancelled work;
 message claims dedupe surviving old handlers but can suppress an already-claimed interrupted turn.
 In the recovery transaction, delete done/failed receipts older than eight days.
-Disabled profiles neither create nor access this table and send no sync acks. [Drain pending receipts before rollback](configuration.md#reliable-delivery-rollback).
+Disabled profiles create/access neither receipt table and send no sync acks. [Stop and drain pending receipts before rollback](configuration.md#reliable-delivery-rollback).
 
 ---
 

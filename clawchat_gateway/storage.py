@@ -11,7 +11,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Literal, TypeVar
 
 from clawchat_gateway.hermes_home import hermes_home
 from clawchat_gateway.tool_grants import (
@@ -538,6 +538,12 @@ def _select_conversation_rows(
         return conn.execute(
             _CONVERSATION_ROWS_SQL.format(columns=columns, mode_filter=""), params
         ).fetchall()
+
+
+@dataclass(frozen=True)
+class InboundReceiptWriteResult:
+    status: Literal["ok", "stale", "error"]
+    conn_seq: int | None = None
 
 
 class ClawChatStore:
@@ -1527,11 +1533,16 @@ class ClawChatStore:
         try:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute("""
+                CREATE TABLE IF NOT EXISTS inbound_receipt_connections (
+                    account_id TEXT PRIMARY KEY, seq INTEGER NOT NULL
+                )
+            """)
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS inbound_receipts (
                     account_id TEXT NOT NULL, kind TEXT NOT NULL, key TEXT NOT NULL,
                     dseq INTEGER NOT NULL, epoch TEXT NOT NULL, event TEXT NOT NULL,
                     raw_json TEXT NOT NULL, status TEXT NOT NULL, error TEXT,
-                    provisional INTEGER NOT NULL DEFAULT 0, write_order INTEGER NOT NULL,
+                    provisional INTEGER NOT NULL DEFAULT 0, conn_seq INTEGER NOT NULL,
                     received_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
                     PRIMARY KEY (account_id, kind, key)
                 )
@@ -1545,17 +1556,38 @@ class ClawChatStore:
         finally:
             conn.close()
 
+    def register_inbound_receipt_connection(self, *, account_id: str) -> int | None:
+        """Fence older connections before this connection can receive work."""
+        def register(conn: sqlite3.Connection) -> int:
+            conn.execute("""
+                INSERT INTO inbound_receipt_connections(account_id, seq) VALUES (?, 1)
+                ON CONFLICT(account_id) DO UPDATE SET seq = seq + 1
+            """, (account_id,))
+            return conn.execute(
+                "SELECT seq FROM inbound_receipt_connections WHERE account_id = ?", (account_id,),
+            ).fetchone()[0]
+        try:
+            return self._inbound_receipt_transaction(register)
+        except Exception:
+            logger.error("clawchat inbound receipt connection registration failed")
+            return None
+
     def upsert_inbound_receipt(
         self, *, account_id: str, kind: str, key: str, dseq: int,
-        epoch: str, event: str, raw: dict[str, Any], write_order: int,
-    ) -> bool:
+        epoch: str, event: str, raw: dict[str, Any], conn_seq: int,
+    ) -> InboundReceiptWriteResult:
         payload = raw.get("payload")
         provisional = int(isinstance(payload, dict) and payload.get("stream_merged") is True)
-        def write(conn: sqlite3.Connection) -> None:
+        def write(conn: sqlite3.Connection) -> InboundReceiptWriteResult:
+            current = conn.execute(
+                "SELECT seq FROM inbound_receipt_connections WHERE account_id = ?", (account_id,),
+            ).fetchone()
+            if current is None or current[0] != conn_seq:
+                return InboundReceiptWriteResult("stale", conn_seq)
             now = _now_ms()
             conn.execute("""
                 INSERT INTO inbound_receipts
-                    (account_id, kind, key, dseq, epoch, event, raw_json, provisional, write_order,
+                    (account_id, kind, key, dseq, epoch, event, raw_json, provisional, conn_seq,
                      status, error, received_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, ?)
                 ON CONFLICT(account_id, kind, key) DO UPDATE SET
@@ -1565,18 +1597,22 @@ class ClawChatStore:
                                        THEN 0 ELSE excluded.provisional END,
                     dseq = excluded.dseq,
                     epoch = excluded.epoch, event = excluded.event,
-                    write_order = excluded.write_order, updated_at = excluded.updated_at, error = NULL,
+                    conn_seq = excluded.conn_seq, updated_at = excluded.updated_at, error = NULL,
                     status = CASE WHEN inbound_receipts.status = 'done'
                                   THEN 'done' ELSE 'pending' END
-                WHERE excluded.write_order > inbound_receipts.write_order
+                WHERE (excluded.conn_seq, excluded.dseq) > (inbound_receipts.conn_seq, inbound_receipts.dseq)
             """, (account_id, kind, key, dseq, epoch, event, json_dumps(raw),
-                  provisional, write_order, now, now))
+                  provisional, conn_seq, now, now))
+            stored = conn.execute("""
+                SELECT conn_seq, dseq FROM inbound_receipts
+                WHERE account_id = ? AND kind = ? AND key = ?
+            """, (account_id, kind, key)).fetchone()
+            return InboundReceiptWriteResult("ok" if stored == (conn_seq, dseq) else "stale", conn_seq)
         try:
-            self._inbound_receipt_transaction(write)
-            return True
+            return self._inbound_receipt_transaction(write)
         except Exception:  # Do not pass potentially credential-bearing client errors to logs.
             logger.error("clawchat inbound receipt upsert failed")
-            return False
+            return InboundReceiptWriteResult("error")
 
     def finish_inbound_receipt(
         self, *, account_id: str, kind: str, key: str, dseq: int,

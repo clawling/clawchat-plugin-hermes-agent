@@ -46,7 +46,7 @@ Automatic refresh, permanent-failure markers, empty credential tombstones and ac
 Env overrides accept case-insensitive `true/false`, `1/0`, `yes/no`,
 `on/off`. Invalid values warn and disable it. For rollback, [drain pending receipts first](#reliable-delivery-rollback).
 Off: legacy, no receipts or sync acks.
-Granted-v2 receipt-write failure closes without ack/dispatch, using normal reconnect/backoff.
+Each v2 grant registers a durable connection sequence before READY; registration or receipt-write failure closes without ack/dispatch, using normal reconnect/backoff.
 Each opt-in connection recovers pending even without a v2 grant, skipping dispatched work only.
 Gate waiters can recover. Old lane work precedes new business; controls bypass the gate.
 Recovery failure/10 s timeout opens only the gate. Unavailable claims stay pending;
@@ -60,14 +60,16 @@ Treat `pending` receipts as already-acked work awaiting Hermes handoff or comple
 Disabling v2 stops reading this table, so drain it before rollback:
 
 1. Stop the profile's gateway.
-2. Choose that profile's SQLite file from [Database location](#database-location) and count pending receipts:
+2. **While the gateway is stopped**, choose that profile's SQLite file from [Database location](#database-location) and count pending receipts:
 
    ```sh
    sqlite3 "<profile-clawchat-sqlite>" "SELECT count(*) FROM inbound_receipts WHERE status='pending'"
    ```
 
-3. If the count is nonzero, start once with the switch still enabled. Wait for recovery to drain pending work (repeat the query until it returns `0`), then stop again.
-4. Set `reliable_delivery_v2: false`, remove or disable any enabling env override, and start the gateway.
+3. If the stopped count is `0`, set `reliable_delivery_v2: false`, remove or disable any enabling env override, and start the gateway.
+4. If the count is nonzero, keep the switch enabled and start one recovery cycle. After recovery processes the pending work, **stop the gateway again and return to step 2**.
+
+A zero count while running is insufficient: new frames can arrive and be acked before shutdown. Only a stopped count of `0` permits disabling the switch.
 
 ### Device id durability (deployment requirement)
 

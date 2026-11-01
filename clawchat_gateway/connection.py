@@ -58,7 +58,9 @@ from clawchat_gateway.device_id import (
     resolve_paired_device_id,
     warn_if_device_id_unpinned,
 )
-from clawchat_gateway.storage import ActivationCredentials, get_clawchat_store, refresh_token_fingerprint
+from clawchat_gateway.storage import (
+    ActivationCredentials, InboundReceiptWriteResult, get_clawchat_store, refresh_token_fingerprint,
+)
 from clawchat_gateway.notify_signal import NotifySignalObserver
 from clawchat_gateway.onboarding import RECONNECT_GUIDE_URL
 from clawchat_gateway.ws_log import format_ws_log
@@ -428,6 +430,7 @@ class ClawChatConnection:
         self._delivery_tracker: reliable_delivery.DseqAckTracker | None = None
         self.dseq_density_violations = 0
         self.receipt_write_failures = 0
+        self.receipt_stale_writes = 0
         # Keep receipt metadata outside frames: adapters may retain raw frames.
         self._inbound_receipts: dict[int, dict[str, Any]] = {}
         # New instances start empty and can recover stop-cancelled work. Existing
@@ -2665,17 +2668,19 @@ class ClawChatConnection:
                         await tracker.flush_now()
                 else:
                     receipt = self._receipt_identity(frame, tracker.epoch, dseq)
-                    write_order = reliable_delivery.next_write_order()
-                    written = await self._upsert_inbound_receipt(frame, receipt, write_order)
+                    written = await self._upsert_inbound_receipt(frame, receipt, tracker.receipt_conn_seq)
                     if not tracker.current() or self._ws is not ws or self._stopping:
                         return
-                    if written:
+                    if written.status == "ok":
                         # Waiting at the order gate is durable receipt, not active processing.
                         self._inbound_receipts[id(frame)] = receipt
                         tracker.record(dseq)
                     else:
                         logger.error("clawchat durable receipt unavailable; closing socket with dseq=%d unacked", dseq)
                         self.receipt_write_failures += 1
+                        if written.status == "stale":
+                            self.receipt_stale_writes += 1
+                            logger.error("clawchat stale receipt write rejected; closing socket dseq=%d", dseq)
                         self._dispose_delivery_tracker()
                         await ws.close()
                         return
@@ -2697,6 +2702,11 @@ class ClawChatConnection:
                 await self._dispatch_with_receipt(frame)
             else:
                 await self._dispatch_inbound(frame)
+            if self._cfg.reliable_delivery_v2:
+                if not self._receipt_connection_current(ws, generation):
+                    return
+                if self._hello_wait is not None and self._hello_wait.done() and not self._hello_wait.result():
+                    return
 
     @staticmethod
     def _uses_inbound_lane(frame: dict[str, Any]) -> bool:
@@ -2751,18 +2761,22 @@ class ClawChatConnection:
                 "dseq": dseq, "epoch": epoch}
 
     async def _upsert_inbound_receipt(
-        self, frame: dict[str, Any], receipt: dict[str, Any], write_order: int,
-    ) -> bool:
-        if self._store is None:
-            return False
+        self, frame: dict[str, Any], receipt: dict[str, Any], conn_seq: int | None,
+    ) -> InboundReceiptWriteResult:
+        if self._store is None or type(conn_seq) is not int or conn_seq <= 0:
+            return InboundReceiptWriteResult("error")
         try:
-            return await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 self._store.upsert_inbound_receipt, account_id=self._account_id,
-                event=str(frame.get("event") or ""), raw=frame, write_order=write_order, **receipt,
-            ) is True
+                event=str(frame.get("event") or ""), raw=frame, conn_seq=conn_seq, **receipt,
+            )
+            if isinstance(result, InboundReceiptWriteResult):
+                if result.status != "ok" or (type(result.conn_seq) is int and result.conn_seq > 0):
+                    return result
+            return InboundReceiptWriteResult("error")
         except Exception:
             logger.error("clawchat inbound receipt upsert raised")
-            return False
+            return InboundReceiptWriteResult("error")
 
     async def _finish_inbound_receipt(self, frame: dict[str, Any], error: Exception | None = None) -> None:
         receipt = self._inbound_receipts.get(id(frame))
@@ -2788,6 +2802,7 @@ class ClawChatConnection:
             if url_has_userinfo(self._cfg.base_url) or url_has_userinfo(self._cfg.websocket_url):
                 return DIAGNOSTIC_WITHHELD
             text = redact_display_text(error, self._cfg.token, self._cfg.refresh_token)
+            text = reliable_delivery.redact_receipt_parameters(text)
             return redact_refresh_message(text)
         except Exception:  # noqa: BLE001 - fail closed
             return DIAGNOSTIC_REDACTION_FAILED
@@ -3386,6 +3401,26 @@ class ClawChatConnection:
                                             and self._delivery_generation == generation and self._ws is ws),
                     )
                     self._delivery_tracker = tracker
+                    # This reader awaits registration before READY or reading the
+                    # next frame. Even a delayed first write carries its hello's
+                    # sequence, so a newer connection fences it transactionally.
+                    try:
+                        seq = (await asyncio.to_thread(
+                            self._store.register_inbound_receipt_connection, account_id=self._account_id,
+                        )) if self._store is not None else None
+                    except Exception:
+                        seq = None
+                    if not tracker.current() or self._stopping:
+                        return
+                    if type(seq) is not int or seq <= 0:
+                        logger.error("clawchat inbound receipt connection registration unavailable; closing socket")
+                        self.receipt_write_failures += 1
+                        self._dispose_delivery_tracker()
+                        if self._hello_wait is not None and not self._hello_wait.done():
+                            self._hello_wait.set_result(False)
+                        await ws.close()
+                        return
+                    tracker.receipt_conn_seq = seq
                 else:
                     logger.info("clawchat reliable_delivery_v2 not granted; using legacy delivery")
             device_id = payload.get("device_id")
