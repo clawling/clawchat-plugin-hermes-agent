@@ -202,7 +202,8 @@ async def test_api_error_with_escaped_quote_in_credential_stays_redacted(monkeyp
 
 def test_display_data_redactor_copies_sensitive_keys_and_values(assert_no_secrets):
     keys = ("access-token", "client Secret", "PASSWORD", "passwd", "Authorization",
-            "api_key", "refresh", "Cookie", "credential_store")
+            "api_key", "refresh", "Cookie", "credential_store", "key", "private-key",
+            "Signature", "x_signature")
     source = {key: {"unlabelled": SECRET["access"]} for key in keys}
     source.update({diagnostic(): (diagnostic(),), "plain": [7, 1.5, True, None],
                    "bytes": diagnostic().encode(), "tuple": (diagnostic(),)})
@@ -250,7 +251,7 @@ def test_debug_snapshot_redacts_both_files_without_changing_request(tmp_path, as
         "eventText": diagnostic(),
         "requestMessages": [{"id": "placeholder-message", "text": diagnostic(),
                              "authorization": SECRET["access"]}],
-        "fullLlmInput": {"messages": [{"refresh_token": SECRET["refresh"]}]},
+        "fullLlmInput": {"messages": [{"refresh_token": SECRET["refresh"]}], "key": SECRET["access"], "signature": SECRET["refresh"]},
     }
     output = {"toolResults": [{"result": {"authorization": SECRET["bearer"]},
                                "text": diagnostic()}]}
@@ -304,7 +305,8 @@ def test_tool_audit_direct_writer_redacts_all_columns(tmp_path, assert_no_secret
 
     store = ClawChatStore(tmp_path / "audit.db")
     assert store.record_tool_call(platform="hermes", account_id="default", tool_name="placeholder_tool",
-                                  args={"cookie": SECRET["access"]},
+                                  args={"cookie": SECRET["access"], "key": SECRET["access"],
+                                        "signature": SECRET["refresh"]},
                                   result={"credential": SECRET["refresh"]}, error=diagnostic())
     with sqlite3.connect(store.db_path) as db:
         row = db.execute("SELECT args_json, result_json, error FROM tool_calls").fetchone()

@@ -257,7 +257,7 @@ def redact_display_data(value: object, *secrets: str) -> object:
         active: set[int] = set()
         sensitive = (
             "token", "secret", "password", "passwd", "authorization", "apikey",
-            "refresh", "cookie", "credential",
+            "refresh", "cookie", "credential", "signature",
         )
 
         def copy(item: object, depth: int) -> object:
@@ -277,8 +277,12 @@ def redact_display_data(value: object, *secrets: str) -> object:
                             # Counters such as max_tokens / prompt_tokens stay
                             # readable; any text or structure under the key is hidden.
                             keep = child is None or type(child) in (int, float, bool)
+                            labelled = (
+                                any(part in normalized for part in sensitive)
+                                or normalized.endswith("key")
+                            )
                             result[name] = (
-                                "***" if any(part in normalized for part in sensitive) and not keep
+                                "***" if labelled and not keep
                                 else copy(child, depth + 1)
                             )
                         return result
