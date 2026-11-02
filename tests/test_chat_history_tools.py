@@ -106,7 +106,7 @@ def test_chat_account_platform_isolation_and_injected_arguments(ledger):
         assert h.search(query="group", **args) == 'No message in this conversation matches "group". Try other words, or chat_history_read a time range.'
     assert ids(h.run(chat="cnv_b")) == ["group"]
     assert ids(h.run(account="work")) == ["other-account"]
-    with pytest.raises(ValueError, match="INVALID: no message with id group in this conversation."):
+    with pytest.raises(ValueError, match=r"INVALID: no message with that id in this conversation; use an id from chat_history_search\."):
         h.read(around="group")
 
 
@@ -131,7 +131,7 @@ def test_trigger_excluded_from_every_query_including_protocol_id(ledger):
     h.add("trigger", "2026-10-02")
     for output in (h.read(), h.search(), h.read(**{"from": "2026-10-01"})):
         assert ids(output) == ["prev"]
-    with pytest.raises(ValueError, match="INVALID: no message with id trigger"):
+    with pytest.raises(ValueError, match="INVALID: no message with that id"):
         h.read(around="trigger")
     rows = h.store.list_chat_history_messages("default", "cnv_a")
     rows.append({**rows[0], "message_id": "client-trigger", "protocol_message_id": "trigger"})
@@ -251,7 +251,7 @@ def test_around_center_edges_and_range_precedence(ledger):
     assert ids(h.read(around="m1", limit=5)) == [f"m{i}" for i in range(1, 6)]
     assert ids(h.read(around="m30", limit=5)) == [f"m{i}" for i in range(26, 31)]
     assert len(ids(h.read(around="m1", limit=60))) == 30
-    with pytest.raises(ValueError, match="INVALID: no message with id ghost"):
+    with pytest.raises(ValueError, match="INVALID: no message with that id"):
         h.read(around="ghost")
 
 
@@ -439,6 +439,8 @@ async def test_database_failure_and_error_redaction(session_ledger, monkeypatch,
         output = await plugin_tools.handle_chat_history_read({"around": "https://example.com/?token=" + redacted_probe})
         assert "error" in json.loads(output)
         assert redacted_probe not in output and redacted_probe not in caplog.text
+        output = await plugin_tools.handle_chat_history_read({"around": "Bearer OBVIOUS_PLACEHOLDER_CREDENTIAL"})  # redact-allow:bearer-literal
+        assert json.loads(output) == {"error": "INVALID: no message with that id in this conversation; use an id from chat_history_search."}
         query = Mock(return_value=None)
         monkeypatch.setattr(h.store, "list_chat_history_messages", query)
         output = await plugin_tools.handle_chat_history_read({})
@@ -671,6 +673,8 @@ def test_history_url_origin_path_matches_media_source_contract(source, expected)
     ('Authorization: Bearer OBVIOUS_PLACEHOLDER_CREDENTIAL', 'Authorization: "[redacted]"'),  # redact-allow:bearer-literal
     ('Bearer OBVIOUS_PLACEHOLDER_CREDENTIAL', 'Bearer [redacted]'),  # redact-allow:bearer-literal
     ('Basic T0JWSU9VU19QTEFDRUhPTERFUg==', 'Basic [redacted]'),
+    ('basic T0JWSU9VU19QTEFDRUhPTERFUg==', 'basic [redacted]'),
+    ('BASIC UGxj', 'BASIC [redacted]'),
     ('{"token": "OBVIOUS_PLACEHOLDER_CREDENTIAL with spaces"}', '{"token": "[redacted]"}'),
     ('"api_key"="OBVIOUS_PLACEHOLDER_CREDENTIAL"', '"api_key"="[redacted]"'),
     ("'password': 'OBVIOUS_PLACEHOLDER_CREDENTIAL with spaces'", "'password': \"[redacted]\""),
@@ -696,7 +700,7 @@ def test_credential_shapes_redacted_before_matching_and_display(ledger, input_te
     assert f"[file {display_safe}]" in output
     assert f"{display_safe} (id metadata)" in output
     for rendered in (output, h.search(query="needle"), h.search(query=input_text + "\nneedle")):
-        for removed in ("OBVIOUS_PLACEHOLDER_CREDENTIAL", "T0JWSU9VU19QTEFDRUhPTERFUg==",
+        for removed in ("OBVIOUS_PLACEHOLDER_CREDENTIAL", "T0JWSU9VU19QTEFDRUhPTERFUg==", "UGxj",
                         "eyJObviousPlaceholderHeader.cGF5bG9hZA.c2lnbmF0dXJl"):  # redact-allow:bearer-literal
             assert removed not in rendered
             assert ids(h.search(query=removed)) == []
@@ -712,7 +716,7 @@ def test_every_reference_credential_key_is_masked(key):
 
 
 def test_plain_prose_and_noncredential_ids_are_preserved(ledger):
-    normal = ("Please review the report tomorrow. usr_example msg_example msg-example "
+    normal = ("A basic question, basic idea. Please review the report tomorrow. usr_example msg_example msg-example "
               "usr_eyJObviousPlaceholderHeader msg_eyJObviousPlaceholderHeader")
     ledger.add("msg_example", "2026-10-01T10:00:00Z", normal, raw_extra={"sender": {"id": "usr_example", "nick_name": "Ada"}})
     assert ledger.read() == f"1 message(s), oldest first:\n[2026-10-01T10:00:00Z] Ada (id msg_example): {normal}"

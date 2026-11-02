@@ -270,7 +270,9 @@ Before matching/truncation, bodies, attachment/display names and echoed queries
 undergo URL then credential redaction. URLs keep origin + path or `[redacted URL]`
 on failure; full inbound URLs are replaced first, including malformed/spaced ones.
 `_redact_history_text` / `_CREDENTIAL_KEYS` in `clawchat_gateway/chat_history.py`
-port the reference key list, keyed/quoted values, Bearer/Basic and JWT rules.
+port the reference key list, keyed/quoted values, Bearer/Basic and JWT rules
+(Basic: any-case scheme, any-length value; an all-lowercase word after "basic" is prose and kept).
+An unknown `around` id is a validation error that does not echo the id.
 Values become `"[redacted]"`; ambiguous/deep/unterminated quotes or failure withhold
 the whole string as `[redacted]`. Removed values cannot match; ledger data stays
 unchanged. Redaction alone changes verbatim reads.

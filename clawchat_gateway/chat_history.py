@@ -229,7 +229,8 @@ def _redact_history_text(value):
         safe = _mask_history_credentials(_strip_history_userinfo(_redact_history_urls(value)))
         safe = re.sub(r"\b(bearer)[" + _WHITESPACE + r"]+[A-Za-z0-9._~+/=-]+",
                       lambda m: m[1] + " [redacted]", safe, flags=re.IGNORECASE | re.ASCII)
-        safe = re.sub(r"\b(Basic)[" + _WHITESPACE + r"]+[A-Za-z0-9+/=]{8,}",
+        safe = re.sub(r"\b([Bb][Aa][Ss][Ii][Cc])[" + _WHITESPACE
+                      + r"]+(?=[A-Za-z0-9+/]*[A-Z0-9+/=])[A-Za-z0-9+/]+={0,2}(?![A-Za-z0-9+/=])",
                       lambda m: m[1] + " [redacted]", safe, flags=re.ASCII)
         safe = re.sub(r"\beyJ[A-Za-z0-9._~+/=-]{10,}", "[redacted]", safe, flags=re.ASCII)
         if safe in {"(diagnostic text withheld: base URL contains credentials)",
@@ -500,7 +501,7 @@ def run_chat_history_tool(tool: str, args: dict, rows: list[dict], scope: dict) 
     if around:
         at = next((i for i, e in enumerate(all_entries) if e.id == around), -1)
         if at < 0:
-            raise ValueError(f"INVALID: no message with id {around} in this conversation.")
+            raise ValueError("INVALID: no message with that id in this conversation; use an id from chat_history_search.")
         continuation = start is not None and start == all_entries[at].chronological_at
         if continuation:
             entries = [e for e in all_entries[at:] if end is None or e.chronological_at <= end][:cap + 1]
