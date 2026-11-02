@@ -16,6 +16,14 @@ from test_tool_grants_ask import approval
 from test_channel_prompt_split import split_env, prompt_env, harness, incoming, dispatch
 
 
+@pytest.fixture(autouse=True)
+def isolated_turn_registry(monkeypatch):
+    """Turns left open by earlier test modules must not decide this module's turns."""
+    for name in ("_snapshots", "_bindings", "_active", "_session_nonces", "_unverified_inputs",
+                 "_execution_nonces", "_context_execution", "_approvals", "_released_turns", "_consumed_batches"):
+        monkeypatch.setattr(turns, name, type(getattr(turns, name))())
+
+
 @pytest.fixture
 def stable(host, monkeypatch):
     monkeypatch.setattr(guard, "_host_supports_stable_schema", lambda: True)
