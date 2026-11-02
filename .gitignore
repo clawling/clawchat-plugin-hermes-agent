@@ -254,6 +254,8 @@ tests/fixtures/*
 !tests/test_atomic_file.py
 # state_lock serializes state mutations across threads and processes.
 !tests/test_state_lock.py
+# env_lock keeps plugin and Hermes environment locks independent and ordered.
+!tests/test_env_lock.py
 # state_write_gate requires every production write call to have a counted classification.
 !tests/test_state_write_gate.py
 # check_state_writes is the gate itself (`python tests/check_state_writes.py`).
@@ -263,6 +265,8 @@ tests/fixtures/*
 !tests/conftest.py
 !tests/hermes_source.py
 !tests/test_host_version.py
+# Compression diagnostics expose effective caps and provenance without writing config.
+!tests/test_compression_status.py
 !tests/test_instance_lock.py
 !tests/test_install_conflict.py
 !tests/test_takeover_close_backoff.py

@@ -134,10 +134,10 @@ def _write_config(_config_path: Path, config: dict[str, Any]) -> None:
 
 
 def _write_env_values(values: dict[str, str | None]) -> Path:
-    from clawchat_gateway.state_lock import state_file_lock
+    from clawchat_gateway.state_lock import env_file_lock
 
     env_path = Path(get_env_path())
-    with state_file_lock(env_path):
+    with env_file_lock(env_path):
         for key, value in values.items():
             if value is None:
                 remove_env_value(key)
@@ -771,12 +771,12 @@ def persist_rotated_tokens(
         ) is True
 
     def write_env() -> bool:
-        from clawchat_gateway.state_lock import state_file_lock
+        from clawchat_gateway.state_lock import env_file_lock
 
         try:
             # The bootstrap ownership check and the write share one .env lock,
             # so a re-pair landing in between is never overwritten.
-            with state_file_lock(Path(get_env_path())):
+            with env_file_lock(Path(get_env_path())):
                 if not bootstrap_env_matches():
                     return False
                 _write_env_values(
@@ -847,12 +847,12 @@ def _persisted_env_credentials_match(
 def _clear_persisted_env_credentials(
     *, expected_access_token: str | None = None, expected_refresh_token: str | None = None,
 ) -> bool:
-    from clawchat_gateway.state_lock import StateLockError, state_file_lock
+    from clawchat_gateway.state_lock import StateLockError, env_file_lock
 
     try:
         # Compare and clear under one lock so a concurrent re-pair that just
         # stored new credentials is never wiped by a stale logout.
-        with state_file_lock(Path(get_env_path())):
+        with env_file_lock(Path(get_env_path())):
             if expected_access_token is not None or expected_refresh_token is not None:
                 if _persisted_env_credentials_match(
                     expected_access_token, expected_refresh_token,
@@ -882,10 +882,10 @@ def _match_and_clear_env_credentials(
     after a confirmed match and before the clear. A lock failure reports an
     unknown match and clears nothing.
     """
-    from clawchat_gateway.state_lock import StateLockError, state_file_lock
+    from clawchat_gateway.state_lock import StateLockError, env_file_lock
 
     try:
-        with state_file_lock(Path(get_env_path())):
+        with env_file_lock(Path(get_env_path())):
             matched = _persisted_env_credentials_match(expected_access_token, expected_refresh_token)
             if matched is not True:
                 return matched, False

@@ -189,15 +189,20 @@ permission bits by default and creates new files with private permissions.
 Create-only seed publication and directory installation retain their specialized
 publish steps and use the shared directory-sync helper.
 
-Memory, managed skill manifest/publication, and plugin `.env` read-modify-write
-operations hold `state_lock.state_file_lock` for the complete mutation.
+Memory and managed skill manifest/publication operations hold
+`state_lock.state_file_lock` for the complete mutation. Plugin `.env`
+read-modify-write operations use `state_lock.env_file_lock`, holding
+`<HERMES_HOME>/.clawchat-env.lock` separately from Hermes' own `.env.lock`.
 Locks are reentrant within a thread and serialize cooperating threads and processes;
 timeouts or unavailable locking fail closed by raising `StateLockError` before mutation.
 Credential compare-and-write steps (logout clears, bootstrap token rotation) check the
 persisted `.env` pair and write it inside one lock, so a concurrent re-pair is never
 overwritten. Managed skill downloads happen before taking the manifest lock; state is
 re-read under the lock before publishing.
-Hermes' own `.env` writers do not acquire this plugin lock and remain outside its protection.
+Hermes' `save_env_value` acquires its own lock inside the plugin lock: the order
+is always plugin outside, Hermes inside. Hermes never acquires the plugin lock.
+Raw writes (the allow-all default) also acquire Hermes' `.env` lock when available;
+a host lock timeout fails closed before reading or writing the file.
 
 `tests/check_state_writes.py` scans production filesystem write calls.
 `tests/test_state_write_gate.py` runs this gate. New writes either use the atomic

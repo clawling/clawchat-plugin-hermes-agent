@@ -15,6 +15,7 @@ rest of the plugin tree into `$HERMES_HOME/plugins/clawchat/prompts/`.
 | `prompts/default-group-bio.md`         | Optional, present in this repo.                           | Returned by `default_group_bio_prompt()`; used as the default `group_description` placeholder for groups that have not set one. |
 
 `platform.md` also tells the agent to keep each memory note a compact profile rather than an append-only log (rewrite it once it passes about 1,000 characters).
+It also requires registered `clawchat_*` tools for ClawChat actions, checking results before claiming success, reporting missing tools or errors rather than using HTTP or scripts, and never inventing ids, paths or URLs.
 
 The `PromptName` literal in
 `clawchat_gateway/plugin_prompts.py:15` is the canonical list of
