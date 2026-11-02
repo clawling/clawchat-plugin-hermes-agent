@@ -12,6 +12,8 @@ provides_hooks:
   - post_tool_call
   - pre_llm_call
 provides_tools:
+  - chat_history_search
+  - chat_history_read
   - clawchat_widget_send
   - clawchat_tool_request
   - clawchat_tool_grant
