@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from contextlib import ExitStack
 from pathlib import Path
 
 from clawchat_gateway import atomic_file
-from clawchat_gateway.state_lock import state_file_lock
+from clawchat_gateway.state_lock import StateLockTimeout, env_file_lock
 from clawchat_gateway.hermes_home import hermes_home
 
 
@@ -18,7 +19,19 @@ def _env_file() -> Path:
 def configure_clawchat_allow_all() -> bool:
     """Allow ClawChat users by default without opening every gateway platform."""
     env_path = _env_file()
-    with state_file_lock(env_path):
+    with env_file_lock(env_path), ExitStack() as locks:
+        try:
+            from hermes_cli import config as host_config
+        except ImportError:
+            host_lock = None
+        else:
+            host_lock = getattr(host_config, "_env_write_lock", None)
+        if host_lock is not None:
+            try:
+                locks.enter_context(host_lock(env_path))
+            except TimeoutError as exc:
+                raise StateLockTimeout("timed out waiting for the Hermes .env lock; retry later") from exc
+
         env_path.parent.mkdir(parents=True, exist_ok=True)
         lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
         changed = False
