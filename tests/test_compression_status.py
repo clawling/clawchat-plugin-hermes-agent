@@ -273,3 +273,15 @@ def test_status_diagnostic_failure_is_json_and_silent(status_profile, monkeypatc
     assert json.loads(captured.out)["compression"] == {"error": "RuntimeError"}
     assert captured.err == ""
     assert_no_secrets(captured.out, captured.err, secrets=("placeholder-compression-secret",))
+
+
+def test_platform_prompt_carries_the_per_turn_tool_rule():
+    """Skill text can be pruned when Hermes compresses a session; platform.md
+    is in every turn, so the general tool rule from clawchat-core lives there."""
+    from clawchat_gateway.plugin_prompts import platform_prompt
+
+    prompt = platform_prompt()
+    assert "use the registered clawchat_* tools" in prompt
+    assert "say so instead of reaching ClawChat over HTTP or a script" in prompt
+    assert "check a tool's result before saying it worked" in prompt
+    assert "Never invent ids, paths or URLs." in prompt
