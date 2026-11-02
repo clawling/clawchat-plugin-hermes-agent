@@ -102,7 +102,22 @@ def handle_clawchat_cli(args: argparse.Namespace) -> int:
             message = unsupported_host_message()
             if message is not None:
                 print(message, file=sys.stderr)
-            print(json.dumps(install_status(home, _status_user_id()), indent=2, ensure_ascii=False))
+            status = install_status(home, _status_user_id())
+            try:
+                from clawchat_gateway.compression_status import describe_compression, read_host_config
+                from clawchat_gateway.config import operator_clawchat_extra
+                from clawchat_gateway.host_version import resolve_host_agent_version
+
+                status["compression"] = describe_compression(
+                    read_host_config(), operator_clawchat_extra() or {},
+                    host_version=resolve_host_agent_version(),
+                )
+                for note in status["compression"]["notes"]:
+                    if note.startswith("Host compression.threshold_tokens ("):
+                        print(f"clawchat: {note}", file=sys.stderr)
+            except Exception as exc:  # noqa: BLE001 — diagnostics must not break status
+                status["compression"] = {"error": type(exc).__name__}
+            print(json.dumps(status, indent=2, ensure_ascii=False))
             return 0
         try:
             cleared = clear_superseded(home)
