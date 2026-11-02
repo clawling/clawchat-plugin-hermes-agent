@@ -533,7 +533,7 @@ def _read_session_keys(extra: dict[str, Any]) -> dict[str, Any]:
     return values
 
 
-# These settings have no runtime reader until history maintenance is wired in.
+# Conversation-local history maintenance settings.
 HISTORY_INT_KEYS = {
     "history-budget-dm": ("history_budget_dm", 25000, 5000, 200000),
     "history-budget-group": ("history_budget_group", 15000, 5000, 200000),
@@ -755,6 +755,7 @@ class ClawChatConfig:
     idle_reset_dm: timedelta | None = HISTORY_SPAN_KEYS["idle-reset-dm"][1]
     idle_reset_group: timedelta | None = HISTORY_SPAN_KEYS["idle-reset-group"][1]
     budget_compaction: bool = True
+    history_sources: dict[str, str] = field(default_factory=dict)
     chats: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @classmethod
@@ -934,6 +935,8 @@ class ClawChatConfig:
             is True,
             **_read_session_keys(extra if isinstance(extra, dict) else {}),
             **_read_history_keys(extra if isinstance(extra, dict) else {}),
+            history_sources={key: "account" if key in extra else "factory" for key in HISTORY_KEYS}
+            if isinstance(extra, dict) else {},
             chats=_read_chats(_get_config_value(extra, "chats", {})),
         )
 

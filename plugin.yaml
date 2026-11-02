@@ -7,6 +7,7 @@ author: CLAWLING PTE. LTD.
 provides_hooks:
   - pre_api_request
   - post_api_request
+  - on_session_reset
   - pre_gateway_dispatch
   - pre_tool_call
   - post_tool_call

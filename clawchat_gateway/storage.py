@@ -761,6 +761,53 @@ class ClawChatStore:
             (to_state, account_id, conv_key, message_id, from_state),
         ).rowcount == 1)
 
+    def update_held_payload(self, account_id: str, conv_key: str,
+                            message_id: str, payload: dict) -> None:
+        """Merge journal fields under the same immediate transaction as the read."""
+        def write(conn):
+            row = conn.execute(
+                "SELECT payload FROM clawchat_held_inbound WHERE account_id=? "
+                "AND conv_key=? AND message_id=? AND state != 'dispatched'",
+                (account_id, conv_key, message_id)).fetchone()
+            if row is None:
+                raise RuntimeError("held dispatch snapshot no longer current")
+            encoded = json.dumps(json.loads(row[0]) | payload, ensure_ascii=False, allow_nan=False)
+            cursor = conn.execute(
+                "UPDATE clawchat_held_inbound SET payload=? WHERE account_id=? "
+                "AND conv_key=? AND message_id=? AND state != 'dispatched'",
+                (encoded, account_id, conv_key, message_id))
+            if cursor.rowcount != 1:
+                raise RuntimeError("held dispatch snapshot no longer current")
+        self._tool_grants_transaction(write)
+
+    def snapshot_held_batch(self, account_id: str, conv_key: str, primary: str,
+                            message_ids: set[str], snapshot: dict) -> None:
+        """Publish a whole batch snapshot and its replay grouping atomically."""
+        def write(conn):
+            for mid in message_ids:
+                row = conn.execute(
+                    "SELECT payload FROM clawchat_held_inbound WHERE account_id=? "
+                    "AND conv_key=? AND message_id=? AND state != 'dispatched'",
+                    (account_id, conv_key, mid)).fetchone()
+                if row is None:
+                    raise RuntimeError("batch member has no live durable claim")
+                payload = json.loads(row[0]) | {"batch_primary": primary}
+                if mid == primary:
+                    payload["snapshot"] = snapshot
+                conn.execute(
+                    "UPDATE clawchat_held_inbound SET payload=? WHERE account_id=? "
+                    "AND conv_key=? AND message_id=?",
+                    (json.dumps(payload, ensure_ascii=False, allow_nan=False), account_id, conv_key, mid))
+        self._tool_grants_transaction(write)
+
+    def finish_held_batch(self, account_id: str, conv_key: str, message_ids: set[str]) -> None:
+        if not message_ids:
+            return
+        self._tool_grants_transaction(lambda conn: conn.execute(
+            "UPDATE clawchat_held_inbound SET state='dispatched' WHERE account_id=? "
+            "AND conv_key=? AND message_id IN (" + ",".join("?" for _ in message_ids) + ")",
+            [account_id, conv_key, *message_ids]))
+
     def purge_dispatched(self, older_than_s: float) -> int:
         cutoff = _now_ms() - older_than_s * 1000
         return self._tool_grants_transaction(lambda conn: conn.execute(
@@ -1890,6 +1937,9 @@ class ClawChatStore:
         text: str | None = None,
         raw: Any = None,
         created_at: int | None = None,
+        held_key: str | None = None,
+        held_payload: Any = None,
+        held_account_id: str | None = None,
     ) -> bool | None:
         if not message_id:
             return None
@@ -1914,7 +1964,7 @@ class ClawChatStore:
                 if recalled is not None:
                     conn.rollback()
                     return False
-                conn.execute(
+                cursor = conn.execute(
                     """
                     INSERT INTO clawchat_messages(
                       platform, account_id, kind, direction, event_type, trace_id,
@@ -1935,6 +1985,14 @@ class ClawChatStore:
                         created,
                     ),
                 )
+                if held_key is not None:
+                    conn.execute(
+                        "INSERT INTO clawchat_held_inbound "
+                        "(account_id,conv_key,message_id,seq,payload,state,created_at) "
+                        "VALUES (?,?,?,?,?,'held',?)",
+                        (held_account_id or account_id, held_key, message_id, cursor.lastrowid,
+                         json.dumps(held_payload, ensure_ascii=False, allow_nan=False), created),
+                    )
                 conn.commit()
                 return True
             except sqlite3.IntegrityError:

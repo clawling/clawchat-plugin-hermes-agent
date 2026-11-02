@@ -33,7 +33,7 @@ NO_REPLY = "<clawchat:no-reply/>"
 
 _REASON_TEXT = {
     "reset": "is about to be cleared (/new)",
-    "compact": "is about to be compressed, which drops detail",
+    "compact": "has a published rolling summary and is about to be renewed (or is near the host compression backstop)",
 }
 
 # chat_id -> (hermes session id, prompt tokens of the latest request, monotonic time)

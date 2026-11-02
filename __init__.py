@@ -838,6 +838,9 @@ def _register_session_usage_hook(ctx) -> None:
     try:
         from clawchat_gateway.sediment import clawchat_post_api_request, clawchat_pre_api_request
 
+        from clawchat_gateway.history_maintenance import post_api_request, on_session_reset
+        register_hook("post_api_request", post_api_request)
+        register_hook("on_session_reset", on_session_reset)
         register_hook("post_api_request", clawchat_post_api_request)
         register_hook("pre_api_request", clawchat_pre_api_request)
     except Exception as exc:  # noqa: BLE001
@@ -865,6 +868,11 @@ def _start_liveware_cli_download() -> None:
 
 
 def register(ctx) -> None:
+    from clawchat_gateway import history_maintenance
+    try:
+        history_maintenance.configure(ctx.llm)
+    except Exception:
+        history_maintenance.configure(None)
     _register_platform(ctx)
     _configure_runtime_defaults()
     _start_liveware_cli_download()

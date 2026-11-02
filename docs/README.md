@@ -21,6 +21,7 @@ and exposes all `clawchat_*` tools listed in `plugin.yaml`'s `provides_tools`.
 | Configure ClawChat output visibility                         | [`./output-visibility.md`](./output-visibility.md)      |
 | Understand the Liveware Sample auto-boot demo app             | [`./liveware-sample.md`](./liveware-sample.md)          |
 | Look up an env var or `platforms.clawchat.extra` field       | [`./configuration.md`](./configuration.md)              |
+| Understand history budget, rolling summary and compaction    | [`./history-budget.md`](./history-budget.md)            |
 | Set per-person direct / ask / deny rules, capabilities or all tools | [Tool grants](./configuration.md#per-person-tool-grants) |
 | Check cross-session execution limits and cross-chat messaging | [Routing limits](./configuration.md#cross-session-routing-and-known-limits) |
 | Upgrade the grant database safely | [Storage upgrade](./configuration.md#storage-upgrade) |
