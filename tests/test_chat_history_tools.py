@@ -435,10 +435,10 @@ async def test_database_failure_and_error_redaction(session_ledger, monkeypatch,
     h = session_ledger
     bind = install_host_context(monkeypatch)
     with bind(HERMES_SESSION_PLATFORM="clawchat", HERMES_SESSION_CHAT_ID="cnv_A"):
-        fake_secret = "obvious-placeholder-secret"
-        output = await plugin_tools.handle_chat_history_read({"around": "https://example.com/?token=" + fake_secret})
+        redacted_probe = "obvious-placeholder-secret"
+        output = await plugin_tools.handle_chat_history_read({"around": "https://example.com/?token=" + redacted_probe})
         assert "error" in json.loads(output)
-        assert fake_secret not in output and fake_secret not in caplog.text
+        assert redacted_probe not in output and redacted_probe not in caplog.text
         query = Mock(return_value=None)
         monkeypatch.setattr(h.store, "list_chat_history_messages", query)
         output = await plugin_tools.handle_chat_history_read({})
