@@ -3,7 +3,9 @@ import json
 import logging
 import math
 import os
+import re
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Optional
 
@@ -531,6 +533,129 @@ def _read_session_keys(extra: dict[str, Any]) -> dict[str, Any]:
     return values
 
 
+# These settings have no runtime reader until history maintenance is wired in.
+HISTORY_INT_KEYS = {
+    "history-budget-dm": ("history_budget_dm", 25000, 5000, 200000),
+    "history-budget-group": ("history_budget_group", 15000, 5000, 200000),
+    "keep-recent-turns": ("keep_recent_turns", 8, 1, 50),
+}
+HISTORY_SPAN_KEYS = {
+    "recent-window": ("recent_window", timedelta(days=3), False),
+    "idle-reset-dm": ("idle_reset_dm", timedelta(hours=24), True),
+    "idle-reset-group": ("idle_reset_group", timedelta(hours=6), True),
+}
+HISTORY_KEYS = frozenset((*HISTORY_INT_KEYS, *HISTORY_SPAN_KEYS, "budget-compaction"))
+
+
+def _parse_history_duration(raw: Any) -> timedelta | None:
+    """Dart _parseDuration grammar and rounding to the nearest whole minute."""
+    text = re.sub(r"\s", "", str(raw).strip().lower())
+    match = re.fullmatch(
+        r"([0-9]+(?:\.[0-9]+)?)(m|min|mins|minutes?|分钟|分|h|hr|hrs|hours?|小时|时|d|days?|天)",
+        text,
+    )
+    if match is None:
+        return None
+    amount = float(match[1])
+    unit = match[2]
+    if unit in {"m", "min", "mins", "minute", "minutes", "分钟", "分"}:
+        multiplier = 1
+    elif unit in {"h", "hr", "hrs", "hour", "hours", "小时", "时"}:
+        multiplier = 60
+    else:
+        multiplier = 1440
+    # Use the same double arithmetic as Dart, rounding halves away from zero.
+    # Cap before constructing timedelta so even a very large valid span clamps.
+    minutes = min(amount * multiplier, 30 * 24 * 60 + 1)
+    whole = math.floor(minutes)
+    return timedelta(minutes=whole + (minutes - whole >= 0.5))
+
+
+def _read_history_value(key: str, value: Any) -> Any:
+    bad = False
+    clamped = False
+    if key in HISTORY_INT_KEYS:
+        _, default, minimum, maximum = HISTORY_INT_KEYS[key]
+        try:
+            if isinstance(value, bool) or not re.fullmatch(r"[+-]?[0-9]+", str(value).strip()):
+                raise ValueError
+            parsed = int(str(value).strip())
+        except (ValueError, TypeError):
+            bad, parsed = True, default
+        result = max(minimum, min(maximum, parsed))
+        clamped = result != parsed
+    elif key in HISTORY_SPAN_KEYS:
+        _, default, allow_off = HISTORY_SPAN_KEYS[key]
+        if allow_off and (value is False or isinstance(value, str) and value.strip().lower() == "off"):
+            return None
+        parsed = _parse_history_duration(value)
+        if parsed is None:
+            bad, parsed = True, default
+        result = max(timedelta(hours=1), min(timedelta(days=30), parsed))
+        clamped = result != parsed
+    else:
+        parsed = _read_optional_bool(value)
+        bad = parsed is None
+        result = True if bad else parsed
+    if bad or clamped:
+        effective = (f"{int(result.total_seconds())}s" if isinstance(result, timedelta)
+                     else "on" if result is True else "off" if result is False else str(result))
+        logger.warning("clawchat history setting %s %s; using %s", key,
+                       "invalid" if bad else "clamped", effective)
+    return result
+
+
+def _read_history_keys(extra: dict[str, Any]) -> dict[str, Any]:
+    result = {}
+    for key, (name, default, *_) in (*HISTORY_INT_KEYS.items(), *HISTORY_SPAN_KEYS.items()):
+        result[name] = _read_history_value(key, extra[key]) if key in extra else default
+    result["budget_compaction"] = (
+        _read_history_value("budget-compaction", extra["budget-compaction"])
+        if "budget-compaction" in extra else True
+    )
+    return result
+
+
+def _read_chats(value: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, dict):
+        return {}
+    return {chat_id: {key: raw[key] for key in HISTORY_KEYS if key in raw}
+            for chat_id, raw in value.items()
+            if isinstance(chat_id, str) and chat_id and isinstance(raw, dict)}
+
+
+@dataclass(frozen=True)
+class HistorySettings:
+    recent_window: timedelta
+    history_budget_dm: int
+    history_budget_group: int
+    keep_recent_turns: int
+    idle_reset_dm: timedelta | None
+    idle_reset_group: timedelta | None
+    budget_compaction: bool
+    history_budget_tokens: int
+    idle_reset: timedelta | None
+
+
+def effective_history_settings(
+    config: "ClawChatConfig", chat_id: str, is_group: bool,
+) -> HistorySettings:
+    values = {key: getattr(config, key) for key in _read_history_keys({})}
+    conversations = config.groups if is_group else config.chats
+    # Match the established group wildcard convention; a DM override is exact.
+    scopes = ([conversations.get("*", {}), conversations.get(chat_id, {})]
+              if is_group else [conversations.get(chat_id, {})])
+    for scope in scopes:
+        for key in HISTORY_KEYS:
+            if key in scope:
+                values[key.replace("-", "_")] = _read_history_value(key, scope[key])
+    return HistorySettings(
+        **values,
+        history_budget_tokens=values["history_budget_group" if is_group else "history_budget_dm"],
+        idle_reset=values["idle_reset_group" if is_group else "idle_reset_dm"],
+    )
+
+
 def _read_groups(value: Any) -> dict[str, dict[str, Any]]:
     if not isinstance(value, dict):
         return {}
@@ -540,6 +665,7 @@ def _read_groups(value: Any) -> dict[str, dict[str, Any]]:
             continue
         group = raw_group if isinstance(raw_group, dict) else {}
         parsed_group: dict[str, Any] = {}
+        parsed_group.update({key: group[key] for key in HISTORY_KEYS if key in group})
         if "group_mode" in group:
             parsed_group["group_mode"] = _read_group_mode(group.get("group_mode"))
         if "group_command_mode" in group:
@@ -622,6 +748,14 @@ class ClawChatConfig:
     sediment_margin_tokens: int = 10000
     sediment_on_compact: bool = True
     sediment_on_reset: bool = True
+    recent_window: timedelta = HISTORY_SPAN_KEYS["recent-window"][1]
+    history_budget_dm: int = HISTORY_INT_KEYS["history-budget-dm"][1]
+    history_budget_group: int = HISTORY_INT_KEYS["history-budget-group"][1]
+    keep_recent_turns: int = HISTORY_INT_KEYS["keep-recent-turns"][1]
+    idle_reset_dm: timedelta | None = HISTORY_SPAN_KEYS["idle-reset-dm"][1]
+    idle_reset_group: timedelta | None = HISTORY_SPAN_KEYS["idle-reset-group"][1]
+    budget_compaction: bool = True
+    chats: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @classmethod
     def from_platform_config(
@@ -799,6 +933,8 @@ class ClawChatConfig:
             )
             is True,
             **_read_session_keys(extra if isinstance(extra, dict) else {}),
+            **_read_history_keys(extra if isinstance(extra, dict) else {}),
+            chats=_read_chats(_get_config_value(extra, "chats", {})),
         )
 
 
