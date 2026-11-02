@@ -78,6 +78,26 @@ or recorded server.
 
 ## State files and the write gate
 
+`history_budget.py` and `rolling_summary.py` provide desktop history estimates,
+cuts, blocks and immutable summaries, with no runtime callers yet. Parsed history
+settings do not change session behavior. Conversation overrides (group wildcard
+then exact group, or exact DM), account values and factory defaults resolve in
+that order; invalid settings use factory defaults. Durations use the desktop
+grammar and minute rounding, clamped to 1h–30d. Only idle resets accept off.
+Portable vectors are in `tests/fixtures/history_budget_vectors.json`; ISO dates
+use Dart's grammar and overflow normalization within Python's years 1–9999.
+
+Migration 17 adds history state with `BEGIN IMMEDIATE` generation CAS (first
+insert advances 0 to 1), and held inbound rows with caller-supplied ledger `seq`.
+JSON pending/payload values are decoded on read; replays preserve the original
+payload/state. Held reads include held and dispatching; purging uses dispatched
+creation time. Errors propagate. Older versions ignore the additive tables.
+Summary roots include any caller profile prefix, then escaped account/conversation
+segments. A directory lock protects existence checks and atomic publication;
+state CAS makes a ref authoritative. Cleanup protects caller-supplied current
+and previous refs, deleting other versions only after one hour. Oversized entries
+reserve room for their retrieval marker; tiny caps can be smaller than the marker.
+
 State files use `clawchat_gateway/atomic_file.py`, the repository's single
 implementation of synced, atomic file publication. It preserves existing
 permission bits by default and creates new files with private permissions.
