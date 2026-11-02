@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Iterator
 
 DEFAULT_TIMEOUT = 10.0
+_ENV_LOCK_TARGET = "clawchat-env"
+ENV_LOCK_FILENAME = f".{_ENV_LOCK_TARGET}.lock"
 _RETRY_SECONDS = 0.02
 _WINDOWS_LOCK_OFFSET = 1024 * 1024
 
@@ -36,6 +38,24 @@ class _Entry:
 
 _registry: dict[tuple[int, Path], _Entry] = {}
 _registry_guard = threading.Lock()
+
+
+def env_lock_path(env_path: Path) -> Path:
+    """Return the plugin's persistent lock file beside the host environment."""
+    return Path(env_path).parent / ENV_LOCK_FILENAME
+
+
+@contextmanager
+def env_file_lock(env_path: Path, *, timeout: float = DEFAULT_TIMEOUT) -> Iterator[None]:
+    """Serialize plugin .env mutations independently of the Hermes lock.
+
+    Never use Hermes' ``env_path.name + ".lock"`` as the plugin lock file:
+    a second descriptor can conflict even in the same process. Lock order is
+    plugin outside, Hermes inside; Hermes never acquires the plugin lock.
+    The synthetic state target yields .clawchat-env.lock in the same directory.
+    """
+    with state_file_lock(Path(env_path).with_name(_ENV_LOCK_TARGET), timeout=timeout):
+        yield
 
 
 def _lock(fd: int, *, release: bool = False) -> None:

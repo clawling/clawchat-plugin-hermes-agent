@@ -139,7 +139,7 @@ from clawchat_gateway import atomic_file, clawchat_memory, skill_update
 from clawchat_gateway.clawchat_memory import write_clawchat_memory_body
 from clawchat_gateway.skill_update import _set_local_version
 from clawchat_gateway.runtime_defaults import configure_clawchat_allow_all
-from clawchat_gateway.state_lock import state_file_lock
+from clawchat_gateway.state_lock import env_file_lock
 root, kind, worker = Path(sys.argv[1]), sys.argv[2], int(sys.argv[3])
 # Widen the lost-update window so this fails reliably without serialization.
 def delayed(reader):
@@ -162,7 +162,7 @@ for i in range(12):
         configure_clawchat_allow_all()
     else:
         path = root / '.env'
-        with state_file_lock(path):
+        with env_file_lock(path):
             text = path.read_text(encoding='utf-8') if path.exists() else ''
             atomic_file.atomic_write_text(path, text + label + '=present\\n')
 '''
@@ -276,7 +276,7 @@ def test_logout_clear_checks_and_clears_under_one_lock(tmp_path, monkeypatch):
     env = tmp_path / '.env'
     monkeypatch.setattr(activate, 'get_env_path', lambda: env)
     held = []
-    lock_path = tmp_path / '.env.lock'
+    lock_path = state_lock.env_lock_path(env)
 
     def match(*args):
         held.append(('check', lock_path.exists()))
@@ -286,13 +286,13 @@ def test_logout_clear_checks_and_clears_under_one_lock(tmp_path, monkeypatch):
     monkeypatch.setattr(activate, 'save_env_value', lambda *args: held.append(('write', args)))
     monkeypatch.setattr(activate, 'remove_env_value', lambda *args: None)
     entered = []
-    real = state_lock.state_file_lock
+    real = state_lock.env_file_lock
 
     def spy(target, **kwargs):
         entered.append(Path(target))
         return real(target, **kwargs)
 
-    monkeypatch.setattr(state_lock, 'state_file_lock', spy)
+    monkeypatch.setattr(state_lock, 'env_file_lock', spy)
     assert activate._clear_persisted_env_credentials(
         expected_access_token='a', expected_refresh_token='r') is True
     assert held[0] == ('check', True)
