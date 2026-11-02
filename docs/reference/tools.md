@@ -2,10 +2,10 @@
 
 `plugin.yaml` is the authoritative tool list (`provides_tools`). Schemas
 and `description` strings live in `clawchat_gateway/plugin_tools.py`
-inside `register_tools(...)`. This page is the human-readable index and
+inside `register_tools(...)`, with history specs in `clawchat_gateway/chat_history.py`. This page is the human-readable index and
 must stay aligned with both.
 
-There are **53** tools, grouped by purpose.
+There are **55** tools, grouped by purpose.
 
 ## Account and identity
 
@@ -247,6 +247,43 @@ errors that carry a machine-readable discriminator, and `retryable` / `status` /
 | `clawchat_create_moment_comment`    | Create a top-level comment on a moment.                                       |
 | `clawchat_reply_moment_comment`     | Reply to an existing comment on a moment.                                     |
 | `clawchat_delete_moment_comment`    | Delete a moment comment.                                                      |
+
+## Current conversation history
+
+| Tool | Parameters | What it does |
+|------|------------|--------------|
+| `chat_history_search` | `query` (required), `from`, `to`, `speaker`, `limit` | Search original messages; any query word matches, ranked by distinct words matched, then newest first. Default 10 hits, clamped to 1–30. |
+| `chat_history_read` | `around`, `from`, `to`, `limit` | Read verbatim, oldest first: around an id, a time range, or latest messages. Default 20, clamped to 1–60; `around` takes precedence. |
+
+Both tools are public, like `clawchat_memory_search`. They read the current
+ClawChat conversation from local SQLite `clawchat_messages`, across session resets.
+No chat/account selector is accepted; extras cannot widen scope.
+Missing or failed host session context returns an error without querying messages.
+Task session context precedes the older-host environment fallback.
+Ambiguous stored chat identities return an error.
+Hermes stores messages under ledger account `default`, independently of the
+paired-user account used by tool grants. Other platforms/accounts/chats, recalled
+messages (including tombstones), failed/suppressed sends and non-message rows
+are excluded. Each turn snapshot retains the trigger and coalesced batch ids to
+exclude from both tools; older/unbound host calls exclude the available session
+message id and any unique running batch available from the adapter.
+Synthetic turns have no original trigger to exclude.
+
+`from`/`to` accept YYYY-MM-DD or ISO 8601, with inclusive endpoints; bare dates
+and times without offsets use the machine's local timezone, and `to` includes
+the whole bare-date day. Frame `emitted_at`, then `timestamp`, precedes insertion
+time. Invalid stored times sort by insertion time for reading and last for
+search, and never match a time range. `speaker` accepts `owner`, `you`/`me`/`self`,
+a `usr_` id, or a partial name. Attachment names are searchable; output includes
+file markers without attachment URLs. No attachment content is fetched.
+
+Each hit includes time, speaker and message id. Search snippets are capped at
+280 UTF-16 units, read bodies at 4,000, and the whole plain-text result at 12,000.
+Truncation leaves a final narrowing or continuation line; range pagination gives
+the first omitted timestamp. `prompts/platform.md` instructs the agent to search
+before answering a reference to earlier messages it cannot see. These local reads add no protocol behavior. Hermes'
+`session_search` still requires its existing non-owner authorization because it
+can read across conversations.
 
 ## Local memory (Markdown files under `$HERMES_HOME/memories`)
 

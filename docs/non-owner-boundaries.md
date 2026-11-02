@@ -70,6 +70,12 @@ Two layers (`clawchat_gateway/host_tools_guard.py`):
   by their `connectors__` prefix (the `tool_call` bridge hands the hook the
   underlying tool's name).
 
+`chat_history_search` and `chat_history_read` are public plugin tools, like
+`clawchat_memory_search`; their own scope check reads only the current
+conversation's original messages in the local ledger. They do not expose other
+chats or accounts. Hermes' cross-conversation `session_search` remains guarded.
+See the [history tool reference](reference/tools.md#current-conversation-history).
+
 Without an applicable per-person grant, the hook also limits a few tools
 those turns keep, by what a call asks for. Legacy toolset narrowing can leave
 these tools in the schema, while the current catalog filter can omit them;

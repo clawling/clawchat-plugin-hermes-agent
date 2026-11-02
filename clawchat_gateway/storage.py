@@ -1833,6 +1833,37 @@ class ClawChatStore:
 
         self._write("update_message_by_identity", write)
 
+    def list_chat_history_messages(self, account_id: str, chat_id: str) -> list[dict] | None:
+        """Original messages in exactly one ledger account/chat; None on read failure."""
+        self.initialize()
+        if self._disabled:
+            return None
+        try:
+            uri = self.db_path.expanduser().resolve().as_uri() + "?mode=ro"
+            conn = sqlite3.connect(uri, uri=True)
+            try:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    """
+                    SELECT m.* FROM clawchat_messages m
+                    WHERE m.platform = 'hermes' AND m.account_id = ?
+                      AND m.chat_id = ? COLLATE NOCASE
+                      AND m.kind = 'message' AND m.message_id IS NOT NULL AND m.message_id <> ''
+                      AND m.direction IN ('inbound', 'outbound')
+                      AND m.event_type IN ('message.send', 'message.reply')
+                      AND NOT EXISTS (SELECT 1 FROM recalled_messages r
+                        WHERE r.account_id = m.account_id AND r.message_id = m.message_id)
+                    ORDER BY m.created_at, m.id
+                    """,
+                    (account_id, chat_id),
+                ).fetchall()
+                return [dict(row) for row in rows]
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001 - never report a failed read as empty history
+            logger.warning("clawchat database read failed operation=list_chat_history_messages")
+            return None
+
     def recent_outbound_messages(
         self,
         *,
