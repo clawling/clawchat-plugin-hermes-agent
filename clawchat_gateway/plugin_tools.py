@@ -601,6 +601,29 @@ async def handle_clawchat_memory_read(args, **kw):
     return _tool_result(result)
 
 
+async def _handle_chat_history(tool_name, args, **kw):
+    from clawchat_gateway.chat_history import HISTORY_UNAVAILABLE, history_for_session
+
+    async def run():
+        try:
+            return history_for_session(tool_name, args, session_id=kw.get("session_id", ""),
+                                       turn_id=kw.get("turn_id", ""))
+        except ValueError as exc:
+            return _tool_result({"error": redact_display_text(str(exc))})
+        except Exception:  # noqa: BLE001 - database/host errors reveal no local details
+            return _tool_result({"error": HISTORY_UNAVAILABLE})
+
+    return await _recorded_tool_call(tool_name, args, "default", run)
+
+
+async def handle_chat_history_search(args, **kw):
+    return await _handle_chat_history("chat_history_search", args, **kw)
+
+
+async def handle_chat_history_read(args, **kw):
+    return await _handle_chat_history("chat_history_read", args, **kw)
+
+
 async def handle_clawchat_memory_search(args, **kw):
     task_id = kw.get("task_id") or "default"
     logger.info("clawchat_memory_search start task_id=%s", task_id)
@@ -883,6 +906,13 @@ async def handle_clawchat_tool_grants_list(args, **kw):
     return _tool_result(await manage_tool_grants("list", args, session_id=kw.get("session_id", "")))
 
 def register_tools(ctx) -> None:
+    from clawchat_gateway.chat_history import CHAT_HISTORY_TOOLS
+
+    history_handlers = (handle_chat_history_search, handle_chat_history_read)
+    for schema, handler in zip(CHAT_HISTORY_TOOLS, history_handlers):
+        ctx.register_tool(schema["name"], "clawchat", schema, handler, is_async=True,
+                          description=schema["name"], emoji="M")
+
     from clawchat_gateway.widget_send import WIDGET_DESCRIPTION
     ctx.register_tool(
         "clawchat_widget_send", "clawchat",

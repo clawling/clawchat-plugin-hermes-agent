@@ -51,6 +51,7 @@ class TurnSnapshot:
     downgrade_trigger: str = ""
     input_trigger: str = "unknown_sender"
     plugin_notification: bool = False
+    history_exclude_ids: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -100,7 +101,8 @@ def register_turn(*, account_id: str, chat_id: str, speakers: tuple[str, ...],
                   legacy_owner_tools: bool = False, request_origin: RequestOrigin | None = None,
                   approve_eligible: bool = True, orchestrate_retry: bool = False,
                   trusted_notification: bool = False, trigger: str = "unknown_sender",
-                  unverified_token: str = "", arrival_restriction: InputRestriction | None = None) -> TurnSnapshot:
+                  unverified_token: str = "", arrival_restriction: InputRestriction | None = None,
+                  history_exclude_ids: frozenset[str] = frozenset()) -> TurnSnapshot:
     with _lock:
         nonce = NONCE_PREFIX + secrets.token_urlsafe(24)
         originally_owner_side = bool(owner_side)
@@ -152,7 +154,7 @@ def register_turn(*, account_id: str, chat_id: str, speakers: tuple[str, ...],
             and not any(item.plugin_notification for item in all_overlaps),
             ids, owner_side and all(item.owner_side for item in overlaps),
             legacy_owner_tools, request_origin if not owner_side else None, bool(approve_eligible), new_orch,
-            originally_owner_side, "", "", trigger, trusted_notification,
+            originally_owner_side, "", "", trigger, trusted_notification, frozenset(history_exclude_ids),
         )
         if originally_owner_side and not snapshot.owner_side:
             reason = "unverified_input" if notices or arrival_restriction else "overlap"

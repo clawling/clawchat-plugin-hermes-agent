@@ -1833,6 +1833,76 @@ class ClawChatStore:
 
         self._write("update_message_by_identity", write)
 
+    def list_chat_history_messages(self, account_id: str, chat_id: str, query: dict | None = None) -> list[dict] | None:
+        """Bound numeric latest/range payloads; retain exact full reads otherwise."""
+        self.initialize()
+        if self._disabled:
+            return None
+        # Legacy malformed metadata is treated as absent, as in the time plan.
+        safe_raw = "CASE WHEN json_valid(m.raw_json) THEN m.raw_json ELSE '{}' END"
+        mode_filter = _NORMAL_MODE_FILTER_SQL.replace("raw_json", safe_raw)
+        scope = f"""
+            FROM clawchat_messages m
+            WHERE m.platform = 'hermes' AND m.account_id = ?
+              AND m.chat_id = ? COLLATE NOCASE
+              AND m.kind = 'message' AND m.message_id IS NOT NULL AND m.message_id <> ''
+              AND m.direction IN ('inbound', 'outbound')
+              AND m.event_type IN ('message.send', 'message.reply')
+              {mode_filter}
+              AND NOT EXISTS (SELECT 1 FROM recalled_messages r
+                WHERE r.account_id = m.account_id AND r.message_id = m.message_id)
+        """
+        try:
+            uri = self.db_path.expanduser().resolve().as_uri() + "?mode=ro"
+            conn = sqlite3.connect(uri, uri=True)
+            try:
+                conn.row_factory = sqlite3.Row
+                if query is None:
+                    rows = conn.execute(f"SELECT m.* {scope} ORDER BY m.created_at, m.id",
+                                        (account_id, chat_id)).fetchall()
+                else:
+                    raw = "CASE WHEN json_valid(m.raw_json) THEN m.raw_json ELSE '{}' END"
+                    ranged = query.get("from") is not None or query.get("to") is not None
+                    cap = max(1, min(60, int(query["limit"])))
+                    excluded = sorted(set(query.get("exclude_ids", ())))
+                    placeholders = ",".join("?" for _ in excluded)
+                    exclusion = f"message_id NOT IN ({placeholders})" if excluded else "1"
+                    order = "ASC" if ranged else "DESC"
+                    # One statement shares a SQLite snapshot between eligibility
+                    # and selection, including the whole coalesced trigger set.
+                    # Delayed frames prohibit any created_at cutoff.
+                    rows = conn.execute(f"""
+                        WITH scoped AS (
+                            SELECT m.*,
+                              COALESCE(json_extract({raw}, '$.emitted_at'),
+                                json_extract({raw}, '$.timestamp'), m.created_at) AS history_time,
+                              COALESCE(NULLIF(json_type({raw}, '$.emitted_at'), 'null'),
+                                NULLIF(json_type({raw}, '$.timestamp'), 'null'), 'integer') AS history_time_kind
+                            {scope}
+                        ), stats AS (
+                            SELECT COALESCE(MAX(CASE WHEN history_time_kind NOT IN ('integer', 'real')
+                              OR history_time < -8640000000000000 OR history_time > 8640000000000000
+                              THEN 1 ELSE 0 END), 0) OR COUNT(DISTINCT chat_id) > 1 AS full_scan FROM scoped
+                        ), eligible AS (
+                            SELECT id, CAST(history_time AS INTEGER) AS history_order FROM scoped, stats
+                            WHERE stats.full_scan OR ({exclusion}
+                              AND (? IS NULL OR CAST(history_time AS INTEGER) >= ?)
+                              AND (? IS NULL OR CAST(history_time AS INTEGER) <= ?))
+                        ), chosen AS (
+                            SELECT id FROM eligible ORDER BY history_order {order}, id {order}
+                            LIMIT CASE WHEN (SELECT full_scan FROM stats) THEN -1 ELSE ? END
+                        ) SELECT m.* FROM clawchat_messages m JOIN chosen ON chosen.id = m.id
+                        ORDER BY m.created_at, m.id
+                    """, (account_id, chat_id, *excluded,
+                          query.get("from"), query.get("from"), query.get("to"), query.get("to"),
+                          cap + int(ranged))).fetchall()
+                return [dict(row) for row in rows]
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001 - never report a failed read as empty history
+            logger.warning("clawchat database read failed operation=list_chat_history_messages")
+            return None
+
     def recent_outbound_messages(
         self,
         *,

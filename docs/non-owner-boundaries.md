@@ -85,6 +85,12 @@ Plugin synthetic DMs reuse the real peer's last session names (cached metadata
 before the first real turn); the notification text and sender attribution remain.
 Platform/configuration or installed-tool changes can still rebuild the host catalog.
 
+`chat_history_search` and `chat_history_read` are public plugin tools, like
+`clawchat_memory_search`; their own scope check reads only the current
+conversation's original messages in the local ledger. They do not expose other
+chats or accounts. Hermes' cross-conversation `session_search` remains guarded.
+See the [history tool reference](reference/tools.md#current-conversation-history).
+
 Without an applicable per-person grant, the hook also limits a few tools
 those turns keep, by what a call asks for. Legacy toolset narrowing can leave
 these tools in the schema, while the legacy catalog filter can omit them;

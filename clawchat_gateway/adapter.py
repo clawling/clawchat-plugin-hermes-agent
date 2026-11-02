@@ -5196,6 +5196,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             snapshot = register_turn(
                 account_id=self._account_id(), chat_id=inbound.chat_id,
                 speakers=speakers, grants=grants, any_granted_tools=any_tools, session_key=key,
+                history_exclude_ids=frozenset(self._batch_message_ids(inbound)),
                 request_origin=(RequestOrigin(requester, inbound.chat_id, inbound.chat_type, key,
                     self._inbound_trigger_id(inbound.raw_message), inbound.text)
                     if not inbound.is_internal_synthetic and requester else None),
