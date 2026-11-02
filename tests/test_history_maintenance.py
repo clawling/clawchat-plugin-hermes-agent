@@ -202,6 +202,15 @@ async def test_capability_failure_retains_legacy(rig, monkeypatch, missing, capl
     assert 'host compaction and legacy notes retained' in caplog.text
 
 
+async def test_dict_like_queue_view_is_accepted(rig):
+    class QueueView:  # newer hosts expose a Mapping-like view, not a dict
+        def __init__(self): self._d = {}
+        def get(self, key, default=None): return self._d.get(key, default)
+    rig.host._queued_events = QueueView()
+    rig.m.connect()
+    assert rig.m.enabled(inbound())
+
+
 async def test_switch_and_conversation_override(rig):
     msg = inbound()
     rig.a._clawchat_config = replace(rig.a._clawchat_config, budget_compaction=False)

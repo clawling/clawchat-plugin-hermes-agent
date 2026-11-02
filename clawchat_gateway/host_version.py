@@ -16,7 +16,11 @@ def resolve_host_agent_version() -> str:
         from importlib.metadata import PackageNotFoundError, version
 
         try:
-            return version("hermes-agent")
+            installed = version("hermes-agent")
+            # Source / container installs can carry a 0.0.0 placeholder in the
+            # package metadata; the CLI module then has the real version.
+            if installed and parse_version(installed) != (0, 0, 0):
+                return installed
         except PackageNotFoundError:
             pass
     except Exception:  # noqa: BLE001 — best-effort, must never break import

@@ -189,9 +189,11 @@ class HistoryMaintenance:
             missing.append("canonical key / persistent routing")
         if not callable(getattr(self.gateway, "_is_session_running", None)):
             missing.append("host running predicate")
-        for name, kind in (("_queued_events", dict), ("_startup_restore_queue", list)):
-            if not isinstance(getattr(self.gateway, name, None), kind):
-                missing.append(name)
+        # Newer hosts expose _queued_events as a dict-like view, not a dict.
+        if not callable(getattr(getattr(self.gateway, "_queued_events", None), "get", None)):
+            missing.append("_queued_events")
+        if not isinstance(getattr(self.gateway, "_startup_restore_queue", None), list):
+            missing.append("_startup_restore_queue")
         for name in ("_pending_messages", "_text_debounce"):
             if not isinstance(getattr(self.adapter, name, None), dict):
                 missing.append(name)
@@ -886,7 +888,7 @@ class HistoryMaintenance:
             return False
         queues = getattr(g, "_queued_events", None)
         startup = getattr(g, "_startup_restore_queue", None)
-        if not isinstance(queues, dict) or not isinstance(startup, list):
+        if not callable(getattr(queues, "get", None)) or not isinstance(startup, list):
             return False
         if queues.get(key) or any(getattr(getattr(e, "source", None), "chat_id", None) == chat for e in startup):
             return False
