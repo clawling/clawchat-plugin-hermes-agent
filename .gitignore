@@ -263,6 +263,8 @@ tests/fixtures/*
 !tests/conftest.py
 !tests/hermes_source.py
 !tests/test_host_version.py
+# Compression diagnostics expose effective caps and provenance without writing config.
+!tests/test_compression_status.py
 !tests/test_instance_lock.py
 !tests/test_install_conflict.py
 !tests/test_takeover_close_backoff.py

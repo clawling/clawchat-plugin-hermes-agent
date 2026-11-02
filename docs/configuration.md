@@ -269,10 +269,58 @@ Hermes has no pre-compression/reset memory flush; its periodic single-user revie
 - Compression: after a turn reaches the trigger, run when idle, once per Hermes session id. The compression point is the lower of the absolute cap and Hermes' ratio threshold (default 0.5; 0.75 below 512 K, accounting for output reservation). Plugin load/activation **fill only missing** `compression.threshold_tokens` from `session-cap-tokens`; this host key is global across platforms (Hermes 0.20.1+).
 
 Trigger example without output reservation: `0.75 × 128000 − 10000 = 86000`, rather than `150000 − 10000 = 140000`. Computation uses `post_api_request` usage/context length, `pre_api_request` max tokens and Hermes `ContextCompressor` math when importable (same fallback rule). Per-model ratio overrides are unseen; until the first request supplies a window, the cap alone decides.
+See [Effective compression point](#effective-compression-point) for read-only status diagnostics.
 
 The prompt targets only this DM peer's note (`owner.md` for owner) or this group's note, up to 10 recent speakers' notes and owner facts said in-group. Shared groups also receive unseen context within `delta-budget-chars`. It asks the model to read then append, omit facts people asked it not to remember/asked to forget, avoid Hermes `memory`, send no messages and return the no-reply token.
 
 **The plugin does not filter what a sediment turn writes**: prompt compliance is the model's judgement; memory-tool read scope remains enforced. Text, edits, media and typing to this chat are dropped until `on_processing_complete`; other chats work, the next group batch waits, and the synthetic exchange stays in history. With `display.busy_input_mode: interrupt`, newer hosts may fold a DM into sediment and drop its answer; default `queue` avoids this. See [prompt injection](reference/prompt-injection.md).
+
+### Effective compression point
+
+A valid host `compression.threshold_tokens` takes precedence over the plugin's
+`platforms.clawchat.extra.session-cap-tokens`. This host key is global across
+every Hermes platform. Plugin load/activation fills it only when the key is
+absent; an existing value, including an invalid one, is never overwritten.
+Hermes compresses at the lower of the absolute cap and the active model's ratio
+threshold (default ratio 0.5, at least 0.75 below a 512K window, accounting for
+output reservation). Status does not calculate the model-dependent ratio point.
+
+`hermes clawchat status` reads configuration without changing it. Its
+`compression` object describes the configured cap and the plugin's sediment
+calculation; restart the gateway after changing settings to align a running
+adapter with the configuration on disk.
+
+| Field | Meaning |
+| --- | --- |
+| `host_version` | Hermes version; empty, unparseable or `0.0.0` versions display `unknown (local build)` |
+| `host_compression_enabled` | False only for `compression.enabled: false`; a disabled host does not use the compression point |
+| `threshold_tokens` | Effective absolute cap used for the plugin's sediment calculation |
+| `threshold_tokens_source` | `host`: valid host cap; `plugin_fill`: missing host key, to be filled at next load/activation; `plugin_fallback`: invalid existing host key, plugin uses its own cap for sediment while Hermes controls its own compression behavior |
+| `host_threshold_tokens` | Valid numeric, non-boolean, positive host cap converted to an integer, otherwise null |
+| `plugin_session_cap_tokens` | Plugin cap after defaulting and clamping (50000–1000000) |
+| `plugin_session_cap_set` | Whether the plugin cap key is explicitly present in raw extra settings |
+| `host_threshold_ratio` | Valid host ratio in (0, 1], otherwise null; booleans are invalid |
+| `ratio_applies` | Explanation of the model-dependent ratio limit |
+| `sediment_margin_tokens` | Plugin margin after defaulting and clamping (2000–50000) |
+| `sediment_point_tokens` | `max(1, threshold_tokens - sediment_margin_tokens)`, an upper bound; the model's ratio limit can trigger sediment earlier |
+| `notes` | Override, invalid-host-key and disabled-compression explanations; empty when none apply |
+
+An override note appears only when the plugin cap was explicitly set and differs
+from the valid host cap; the CLI also prints that note once to stderr. A
+diagnostic failure produces `compression: {"error": "<exception class>"}` while
+status still succeeds. Unreadable host configuration is represented as empty
+configuration, so the displayed values are defaults rather than a runtime probe.
+
+### Operator advice: compression failures
+
+Summary failures and whether the original context is retained are Hermes host
+behavior. Use Hermes ≥0.21.5 for retention of the untrimmed original on truncation
+failure and increasing cooldowns. Route summaries through a model with a large
+enough output limit (configure a separate model with `auxiliary.compression`),
+or lower `compression.threshold_tokens` so the summary target fits within the
+model's output limit. The plugin does not implement compression; status changes
+no host compression settings, and plugin load/activation only fills a missing
+absolute cap as described above.
 
 ## Allowlist / home channel (read by Hermes platform registry)
 
