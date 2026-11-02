@@ -127,6 +127,7 @@ async def test_original_document_is_sent_verbatim():
     send = AsyncMock(return_value={'sent': True})
     padded = '\n' + DOC + '  '
     assert (await run_widget_tool(padded, send))['message'] == WIDGET_SENT
+    assert WIDGET_SENT == 'Sent. It updates in its home-screen slot; a new one waits in ClawChat until they put it in one.'
     send.assert_awaited_once_with(padded, 'todo')
 
 

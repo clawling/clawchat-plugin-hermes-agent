@@ -493,7 +493,7 @@ A timed flush consumes its minute even if it fails, and only logs the widget id,
 and error type, never the document. Queued results include `HH:MM:SS UTC`;
 successful immediate sends return:
 
-> Sent. It shows on their home screen once their phone has it.
+> Sent. It updates in its home-screen slot; a new one waits in ClawChat until they put it in one.
 
 Before admission and again immediately before sending, owner, activation and
 connection are checked. A changed target or failed resolution at flush drops

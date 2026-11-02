@@ -11,7 +11,7 @@ from typing import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
-WIDGET_SENT = "Sent. It shows on their home screen once their phone has it."
+WIDGET_SENT = "Sent. It updates in its home-screen slot; a new one waits in ClawChat until they put it in one."
 WIDGET_OWNER_ONLY_MESSAGE = "Owner-only: only your owner can update their widgets."
 WIDGET_DESCRIPTION = (
     "Update a widget on your partner's phone home screen (ClawChat widget/v1). "
