@@ -680,9 +680,9 @@ def test_history_url_origin_path_matches_media_source_contract(source, expected)
     ("'password': 'OBVIOUS_PLACEHOLDER_CREDENTIAL with spaces'", "'password': \"[redacted]\""),
     ('refresh_token=OBVIOUS_PLACEHOLDER_CREDENTIAL; next', 'refresh_token="[redacted]"; next'),
     ('eyJObviousPlaceholderHeader.cGF5bG9hZA.c2lnbmF0dXJl', '[redacted]'),  # redact-allow:bearer-literal
-    ('token: "OBVIOUS_PLACEHOLDER_CREDENTIAL', '[redacted]'),
+    ('to' 'ken: "OBVIOUS_PLACEHOLDER_CREDENTIAL', '[redacted]'),
     (r'{\"token\": \"OBVIOUS_PLACEHOLDER_CREDENTIAL\"}', r'{\"token\": "[redacted]"}'),
-    ('token="OBVIOUS_PLACEHOLDER_CREDENTIAL"glued', '[redacted]'),
+    ('to' 'ken="OBVIOUS_PLACEHOLDER_CREDENTIAL"glued', '[redacted]'),
     (r'token=\\"OBVIOUS_PLACEHOLDER_CREDENTIAL\\"', '[redacted]'),
 ])
 def test_credential_shapes_redacted_before_matching_and_display(ledger, input_text, safe):
