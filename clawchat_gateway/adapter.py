@@ -1189,6 +1189,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         # Direct chat -> the user on the other side (the last sender seen), so
         # a host callback that only carries chat_id can tell owner from friend.
         self._direct_chat_peers: dict[str, str] = {}
+        self._direct_chat_session_names: dict[str, tuple[str, str | None]] = {}
         # Direct chat -> the slash-confirm Hermes asked a NON-owner to answer.
         self._non_owner_slash_confirms: dict[str, _NonOwnerSlashConfirm] = {}
         # Keyed by the owner's direct chat id.
@@ -2855,13 +2856,18 @@ class ClawChatAdapter(BasePlatformAdapter):
     def _non_owner_turn_section(self, inbound: InboundMessage) -> str | None:
         """What a turn the owner did not start cannot do, for the model."""
         from clawchat_gateway.turn_grants import active_snapshot
+        from clawchat_gateway.host_tools_guard import stable_tool_schema
+        stable = stable_tool_schema(inbound.chat_id, inbound.chat_type,
+                                    owner_direct_chat_id=self._owner_direct_chat_id)
         snapshot = active_snapshot(self._account_id(), self._grant_session_key(inbound))
         if ((snapshot is not None and (snapshot.owner_side or snapshot.legacy_owner_tools))
                 or (snapshot is None and self._is_owner_turn(inbound))):
-            return None
+            return "Tools this turn: ordinary owner tools; authorization requires verified ownership." if stable else None
         from clawchat_gateway.host_tools_guard import blocked_tools_hint, limited_tools_hint
 
         lines: list[str] = []
+        if stable:
+            lines.append("Tools this turn: public defaults and current grants only; owner-only tools are blocked.")
         from clawchat_gateway.tool_grants import NON_OWNER_GRANTS_HINT, build_non_owner_grants_hint
         from clawchat_gateway.host_tools_guard import host_tool_catalog, public_tool_names
         grants_hint = None
@@ -2891,7 +2897,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         return "\n".join(lines) or None
 
     def toolsets_for_source(self, source):
-        """Host tools only in the owner's own direct chat (``host_tools_guard``)."""
+        """Session-wide schemas where guarded; legacy narrowing elsewhere."""
         from clawchat_gateway.host_tools_guard import toolsets_for_source
 
         return toolsets_for_source(
@@ -5917,10 +5923,25 @@ class ClawChatAdapter(BasePlatformAdapter):
                 speaker = self._resolve_sender_name(inbound)
                 user_name = speaker if speaker and speaker != inbound.sender_id else None
             return title or inbound.chat_id, user_name
+        if inbound.is_internal_synthetic:
+            cached = self._direct_chat_session_names.get(inbound.chat_id)
+            if cached is not None:
+                return cached
+            peer_id = self._direct_chat_peers.get(inbound.chat_id)
+            if not peer_id and inbound.chat_id == self._owner_direct_chat_id():
+                peer_id = self._owner_user_id()
+            if not peer_id:
+                return inbound.chat_id, None
+            # Resolve the peer's metadata without changing notification text
+            # or the sender attribution used by per-turn context.
+            inbound = replace(inbound, sender_id=peer_id, sender_name="")
         peer = self._resolve_sender_name(inbound)
         if peer and peer != inbound.sender_id:
-            return peer, peer
-        return inbound.chat_id, None
+            names = peer, peer
+        else:
+            names = inbound.chat_id, None
+        self._direct_chat_session_names[inbound.chat_id] = names
+        return names
 
     async def _ensure_group_participants_metadata(self, group_id: str) -> None:
         if not group_id:
