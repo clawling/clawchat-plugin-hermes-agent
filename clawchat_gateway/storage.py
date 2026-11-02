@@ -315,6 +315,46 @@ ALTER TABLE tool_grant_requests ADD COLUMN notice_claimed_at INTEGER;
 CREATE INDEX tool_request_notice_claim ON tool_grant_requests(account_id, notice_claim_key);
 """
 
+HISTORY_STATE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS clawchat_history_state (
+  account_id TEXT NOT NULL,
+  conv_key TEXT NOT NULL,
+  summary_ref TEXT,
+  summary_through TEXT,
+  boundary TEXT,
+  host_session TEXT,
+  inject_next INTEGER NOT NULL DEFAULT 0,
+  injected_for TEXT,
+  open_context INTEGER,
+  open_history INTEGER,
+  pending TEXT,
+  failures INTEGER NOT NULL DEFAULT 0,
+  retry_after_msgs INTEGER NOT NULL DEFAULT 0,
+  gen INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (account_id, conv_key)
+);
+CREATE TABLE IF NOT EXISTS clawchat_held_inbound (
+  account_id TEXT NOT NULL,
+  conv_key TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  payload TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('held', 'dispatching', 'dispatched')),
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (account_id, conv_key, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_clawchat_held_inbound_sequence
+  ON clawchat_held_inbound(account_id, seq);
+"""
+
+_HISTORY_FIELDS = frozenset({
+    "summary_ref", "summary_through", "boundary", "host_session", "inject_next",
+    "injected_for", "open_context", "open_history", "pending", "failures",
+    "retry_after_msgs",
+})
+_HELD_STATES = frozenset({"held", "dispatching", "dispatched"})
+
 
 def refresh_token_fingerprint(refresh_token: str) -> str:
     """Fingerprint the credential as submitted to the refresh endpoint."""
@@ -338,6 +378,7 @@ MIGRATIONS = [
     (14, "tool_grants_v2", TOOL_GRANTS_V2_SCHEMA),
     (15, "tool_grant_requests", TOOL_GRANT_REQUESTS_SCHEMA),
     (16, "tool_request_notice_claims", TOOL_REQUEST_NOTICE_CLAIMS_SCHEMA),
+    (17, "history_state", HISTORY_STATE_SCHEMA),
 ]
 
 # Lookup behind ClawChatStore.find_seen_message_in_chat: a real chat message
@@ -612,6 +653,120 @@ class ClawChatStore:
             raise
         finally:
             conn.close()
+
+    def get_history_state(self, account_id: str, conv_key: str) -> dict | None:
+        conn = self._tool_grants_connection()
+        try:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM clawchat_history_state WHERE account_id=? AND conv_key=?",
+                (account_id, conv_key),
+            ).fetchone()
+            if row is None:
+                return None
+            result = dict(row)
+            if result["pending"] is not None:
+                result["pending"] = json.loads(result["pending"])
+            return result
+        finally:
+            conn.close()
+
+    def cas_history_state(
+        self, account_id: str, conv_key: str, expected_gen: int, **fields: Any,
+    ) -> bool:
+        """A successful insert or update advances gen, including the first insert.
+
+        JSON pending values are encoded on write and decoded on read. Database
+        failures propagate; False means only that another generation won.
+        """
+        if type(expected_gen) is not int or expected_gen < 0:
+            raise ValueError("expected_gen must be a nonnegative integer")
+        if fields.keys() - _HISTORY_FIELDS:
+            raise ValueError("unsupported history state field")
+        fields = dict(fields)
+        if fields.get("pending") is not None:
+            fields["pending"] = json.dumps(fields["pending"], ensure_ascii=False, allow_nan=False)
+        fields["updated_at"] = _now_ms()
+
+        def write(conn: sqlite3.Connection) -> bool:
+            if expected_gen == 0:
+                keys = ["account_id", "conv_key", "gen", *fields]
+                inserted = conn.execute(
+                    "INSERT INTO clawchat_history_state (" + ",".join(keys) + ") "
+                    "VALUES (" + ",".join("?" for _ in keys) + ") "
+                    "ON CONFLICT(account_id, conv_key) DO NOTHING",
+                    [account_id, conv_key, 1, *fields.values()],
+                )
+                if inserted.rowcount == 1:
+                    return True
+            cursor = conn.execute(
+                "UPDATE clawchat_history_state SET "
+                + ",".join(f"{key}=?" for key in fields)
+                + ",gen=gen+1 WHERE account_id=? AND conv_key=? AND gen=?",
+                [*fields.values(), account_id, conv_key, expected_gen],
+            )
+            return cursor.rowcount == 1
+
+        return self._tool_grants_transaction(write)
+
+    def hold_inbound(
+        self, account_id: str, conv_key: str, message_id: str, seq: int, payload: Any,
+    ) -> bool:
+        """Persist once as held; a replay never replaces its payload or state.
+
+        seq is supplied from the caller's durable ledger ordering. Payload is a
+        JSON value, returned decoded by list_held. Timestamps use milliseconds.
+        """
+        encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False)
+        return self._tool_grants_transaction(lambda conn: conn.execute(
+            "INSERT INTO clawchat_held_inbound "
+            "(account_id,conv_key,message_id,seq,payload,state,created_at) "
+            "VALUES (?,?,?,?,?,'held',?) "
+            "ON CONFLICT(account_id,conv_key,message_id) DO NOTHING",
+            (account_id, conv_key, message_id, seq, encoded, _now_ms()),
+        ).rowcount == 1)
+
+    def list_held(
+        self, account_id: str, conv_key: str | None = None,
+        states: tuple[str, ...] = ("held", "dispatching"),
+    ) -> list[dict]:
+        if not set(states) <= _HELD_STATES:
+            raise ValueError("invalid held inbound state")
+        if not states:
+            return []
+        conn = self._tool_grants_connection()
+        try:
+            conn.row_factory = sqlite3.Row
+            sql = "SELECT * FROM clawchat_held_inbound WHERE account_id=?"
+            args: list[Any] = [account_id]
+            if conv_key is not None:
+                sql += " AND conv_key=?"
+                args.append(conv_key)
+            sql += " AND state IN (" + ",".join("?" for _ in states) + ")"
+            sql += " ORDER BY seq,conv_key,message_id"
+            rows = conn.execute(sql, [*args, *states]).fetchall()
+            return [dict(row) | {"payload": json.loads(row["payload"])} for row in rows]
+        finally:
+            conn.close()
+
+    def mark_held_state(
+        self, account_id: str, conv_key: str, message_id: str,
+        from_state: str, to_state: str,
+    ) -> bool:
+        if from_state not in _HELD_STATES or to_state not in _HELD_STATES:
+            raise ValueError("invalid held inbound state")
+        return self._tool_grants_transaction(lambda conn: conn.execute(
+            "UPDATE clawchat_held_inbound SET state=? "
+            "WHERE account_id=? AND conv_key=? AND message_id=? AND state=?",
+            (to_state, account_id, conv_key, message_id, from_state),
+        ).rowcount == 1)
+
+    def purge_dispatched(self, older_than_s: float) -> int:
+        cutoff = _now_ms() - older_than_s * 1000
+        return self._tool_grants_transaction(lambda conn: conn.execute(
+            "DELETE FROM clawchat_held_inbound WHERE state='dispatched' AND created_at<?",
+            (cutoff,),
+        ).rowcount)
 
     @staticmethod
     def _request_row(conn, account_id, request_id):

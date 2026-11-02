@@ -1,0 +1,823 @@
+{
+  "compaction": [
+    {
+      "name": "three_day_threshold_inclusive",
+      "now": "2026-10-31T00:00:00Z",
+      "recent_window_s": 259200,
+      "keep_recent_turns": 1,
+      "window_cap_tokens": 1000,
+      "fold_all": false,
+      "entries": [
+        {
+          "id": "old",
+          "ts": "2026-10-27T23:59:59Z",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "edge",
+          "ts": "2026-10-28T00:00:00Z",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "new",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        }
+      ],
+      "expect_fold_ids": [
+        "old"
+      ],
+      "expect_window_ids": [
+        "edge",
+        "new"
+      ]
+    },
+    {
+      "name": "backfill_eight_non_self",
+      "now": "2026-10-31T00:00:00Z",
+      "recent_window_s": 259200,
+      "keep_recent_turns": 8,
+      "window_cap_tokens": 1000,
+      "fold_all": false,
+      "entries": [
+        {
+          "id": "m1",
+          "ts": "2026-10-20T00:00:00Z",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "m2",
+          "ts": "2026-10-20T00:00:00Z",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "m3",
+          "ts": "2026-10-20T00:00:00Z",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "m4",
+          "ts": "2026-10-20T00:00:00Z",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "m5",
+          "ts": "2026-10-20T00:00:00Z",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "m6",
+          "ts": "2026-10-20T00:00:00Z",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "m7",
+          "ts": "2026-10-20T00:00:00Z",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "m8",
+          "ts": "2026-10-20T00:00:00Z",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "m9",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "owner",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "m10",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        }
+      ],
+      "expect_fold_ids": [
+        "m1",
+        "m2"
+      ],
+      "expect_window_ids": [
+        "m3",
+        "m4",
+        "m5",
+        "m6",
+        "m7",
+        "m8",
+        "m9",
+        "m10"
+      ]
+    },
+    {
+      "name": "budget_overrides_turn_count",
+      "now": "2026-10-31T00:00:00Z",
+      "recent_window_s": 259200,
+      "keep_recent_turns": 8,
+      "window_cap_tokens": 18,
+      "fold_all": false,
+      "entries": [
+        {
+          "id": "m1",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "m2",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "m3",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "m4",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "m5",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        }
+      ],
+      "expect_fold_ids": [
+        "m1",
+        "m2",
+        "m3"
+      ],
+      "expect_window_ids": [
+        "m4",
+        "m5"
+      ]
+    },
+    {
+      "name": "never_pass_last_non_self",
+      "now": "2026-10-31T00:00:00Z",
+      "recent_window_s": 259200,
+      "keep_recent_turns": 1,
+      "window_cap_tokens": 1,
+      "fold_all": false,
+      "entries": [
+        {
+          "id": "q1",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "owner",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "s1",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "self",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "q2",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "s2",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "self",
+          "name": "n",
+          "text": "x"
+        }
+      ],
+      "expect_fold_ids": [
+        "q1",
+        "s1"
+      ],
+      "expect_window_ids": [
+        "q2",
+        "s2"
+      ]
+    },
+    {
+      "name": "leading_self_moves_to_fold",
+      "now": "2026-10-31T00:00:00Z",
+      "recent_window_s": 259200,
+      "keep_recent_turns": 1,
+      "window_cap_tokens": 1000,
+      "fold_all": false,
+      "entries": [
+        {
+          "id": "q",
+          "ts": "2026-10-20T00:00:00Z",
+          "role": "owner",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "s",
+          "ts": "2026-10-28T00:00:00Z",
+          "role": "self",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "q2",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        }
+      ],
+      "expect_fold_ids": [
+        "q",
+        "s"
+      ],
+      "expect_window_ids": [
+        "q2"
+      ]
+    },
+    {
+      "name": "consecutive_leading_self_moves_to_fold",
+      "now": "2026-10-31T00:00:00Z",
+      "recent_window_s": 259200,
+      "keep_recent_turns": 1,
+      "window_cap_tokens": 1000,
+      "fold_all": false,
+      "entries": [
+        {
+          "id": "q",
+          "ts": "2026-10-20T00:00:00Z",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "s1",
+          "ts": "2026-10-28T00:00:00Z",
+          "role": "self",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "s2",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "self",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "q2",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        }
+      ],
+      "expect_fold_ids": [
+        "q",
+        "s1",
+        "s2"
+      ],
+      "expect_window_ids": [
+        "q2"
+      ]
+    },
+    {
+      "name": "fold_all",
+      "now": "2026-10-31T00:00:00Z",
+      "recent_window_s": 259200,
+      "keep_recent_turns": 1,
+      "window_cap_tokens": 1000,
+      "fold_all": true,
+      "entries": [
+        {
+          "id": "q",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "owner",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "s",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "self",
+          "name": "n",
+          "text": "x"
+        }
+      ],
+      "expect_fold_ids": [
+        "q",
+        "s"
+      ],
+      "expect_window_ids": []
+    },
+    {
+      "name": "empty",
+      "now": "2026-10-31T00:00:00Z",
+      "recent_window_s": 259200,
+      "keep_recent_turns": 8,
+      "window_cap_tokens": 1000,
+      "fold_all": false,
+      "entries": [],
+      "expect_fold_ids": [],
+      "expect_window_ids": []
+    },
+    {
+      "name": "all_within_window",
+      "now": "2026-10-31T00:00:00Z",
+      "recent_window_s": 259200,
+      "keep_recent_turns": 1,
+      "window_cap_tokens": 1000,
+      "fold_all": false,
+      "entries": [
+        {
+          "id": "q1",
+          "ts": "2026-10-28T00:00:00Z",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "q2",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "owner",
+          "name": "n",
+          "text": "x"
+        }
+      ],
+      "expect_fold_ids": [],
+      "expect_window_ids": [
+        "q1",
+        "q2"
+      ]
+    },
+    {
+      "name": "mixed_cjk_english_exact_budget",
+      "now": "2026-10-31T00:00:00Z",
+      "recent_window_s": 259200,
+      "keep_recent_turns": 1,
+      "window_cap_tokens": 19,
+      "fold_all": false,
+      "entries": [
+        {
+          "id": "cjk",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "other",
+          "name": "n",
+          "text": "中文ab"
+        },
+        {
+          "id": "english",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "other",
+          "name": "n",
+          "text": "abcde"
+        },
+        {
+          "id": "short",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        }
+      ],
+      "expect_fold_ids": [
+        "cjk"
+      ],
+      "expect_window_ids": [
+        "english",
+        "short"
+      ]
+    },
+    {
+      "name": "invalid_timestamp_before_recent",
+      "now": "2026-10-31T00:00:00Z",
+      "recent_window_s": 259200,
+      "keep_recent_turns": 1,
+      "window_cap_tokens": 1000,
+      "fold_all": false,
+      "entries": [
+        {
+          "id": "bad",
+          "ts": "not-a-timestamp",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "new",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        }
+      ],
+      "expect_fold_ids": [
+        "bad"
+      ],
+      "expect_window_ids": [
+        "new"
+      ]
+    },
+    {
+      "name": "invalid_timestamps_still_backfill",
+      "now": "2026-10-31T00:00:00Z",
+      "recent_window_s": 259200,
+      "keep_recent_turns": 2,
+      "window_cap_tokens": 1000,
+      "fold_all": false,
+      "entries": [
+        {
+          "id": "q1",
+          "ts": "bad",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "s",
+          "ts": "bad",
+          "role": "self",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "q2",
+          "ts": "bad",
+          "role": "owner",
+          "name": "n",
+          "text": "x"
+        }
+      ],
+      "expect_fold_ids": [],
+      "expect_window_ids": [
+        "q1",
+        "s",
+        "q2"
+      ]
+    },
+    {
+      "name": "only_self_budget_and_leading_rule",
+      "now": "2026-10-31T00:00:00Z",
+      "recent_window_s": 259200,
+      "keep_recent_turns": 1,
+      "window_cap_tokens": 9,
+      "fold_all": false,
+      "entries": [
+        {
+          "id": "s1",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "self",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "s2",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "self",
+          "name": "n",
+          "text": "x"
+        }
+      ],
+      "expect_fold_ids": [
+        "s1",
+        "s2"
+      ],
+      "expect_window_ids": []
+    },
+    {
+      "name": "no_recent_backfill_question_and_reply",
+      "now": "2026-10-31T00:00:00Z",
+      "recent_window_s": 259200,
+      "keep_recent_turns": 1,
+      "window_cap_tokens": 1000,
+      "fold_all": false,
+      "entries": [
+        {
+          "id": "q1",
+          "ts": "2026-10-20T00:00:00Z",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "s1",
+          "ts": "2026-10-20T00:00:00Z",
+          "role": "self",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "q2",
+          "ts": "2026-10-20T00:00:00Z",
+          "role": "owner",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "s2",
+          "ts": "2026-10-20T00:00:00Z",
+          "role": "self",
+          "name": "n",
+          "text": "x"
+        }
+      ],
+      "expect_fold_ids": [
+        "q1",
+        "s1"
+      ],
+      "expect_window_ids": [
+        "q2",
+        "s2"
+      ]
+    },
+    {
+      "name": "zero_cap_preserves_only_question",
+      "now": "2026-10-31T00:00:00Z",
+      "recent_window_s": 259200,
+      "keep_recent_turns": 1,
+      "window_cap_tokens": 0,
+      "fold_all": false,
+      "entries": [
+        {
+          "id": "q",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "owner",
+          "name": "n",
+          "text": "x"
+        }
+      ],
+      "expect_fold_ids": [],
+      "expect_window_ids": [
+        "q"
+      ]
+    },
+    {
+      "name": "self_prefix_with_no_inbound",
+      "now": "2026-10-31T00:00:00Z",
+      "recent_window_s": 259200,
+      "keep_recent_turns": 1,
+      "window_cap_tokens": 1000,
+      "fold_all": false,
+      "entries": [
+        {
+          "id": "s1",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "self",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "s2",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "self",
+          "name": "n",
+          "text": "x"
+        }
+      ],
+      "expect_fold_ids": [
+        "s1",
+        "s2"
+      ],
+      "expect_window_ids": []
+    },
+    {
+      "name": "dart_overflow_day_normalizes",
+      "now": "2026-10-31T00:00:00Z",
+      "recent_window_s": 259200,
+      "keep_recent_turns": 1,
+      "window_cap_tokens": 1000,
+      "fold_all": false,
+      "entries": [
+        {
+          "id": "edge",
+          "ts": "2026-09-58T00:00:00Z",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "new",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "owner",
+          "name": "n",
+          "text": "x"
+        }
+      ],
+      "expect_fold_ids": [],
+      "expect_window_ids": [
+        "edge",
+        "new"
+      ]
+    },
+    {
+      "name": "dart_lowercase_z",
+      "now": "2026-10-31T00:00:00Z",
+      "recent_window_s": 259200,
+      "keep_recent_turns": 1,
+      "window_cap_tokens": 1000,
+      "fold_all": false,
+      "entries": [
+        {
+          "id": "edge",
+          "ts": "2026-10-28T00:00:00z",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "new",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "owner",
+          "name": "n",
+          "text": "x"
+        }
+      ],
+      "expect_fold_ids": [],
+      "expect_window_ids": [
+        "edge",
+        "new"
+      ]
+    },
+    {
+      "name": "dart_rejects_iso_week_date",
+      "now": "2026-10-31T00:00:00Z",
+      "recent_window_s": 259200,
+      "keep_recent_turns": 1,
+      "window_cap_tokens": 1000,
+      "fold_all": false,
+      "entries": [
+        {
+          "id": "edge",
+          "ts": "2026-W44-3",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "new",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "owner",
+          "name": "n",
+          "text": "x"
+        }
+      ],
+      "expect_fold_ids": [
+        "edge"
+      ],
+      "expect_window_ids": [
+        "new"
+      ]
+    },
+    {
+      "name": "offset_reaches_threshold_exactly",
+      "now": "2026-10-31T00:00:00Z",
+      "recent_window_s": 259200,
+      "keep_recent_turns": 1,
+      "window_cap_tokens": 1000,
+      "fold_all": false,
+      "entries": [
+        {
+          "id": "edge",
+          "ts": "2026-10-27T20:00:00-04:00",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "new",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "owner",
+          "name": "n",
+          "text": "x"
+        }
+      ],
+      "expect_fold_ids": [],
+      "expect_window_ids": [
+        "edge",
+        "new"
+      ]
+    },
+    {
+      "name": "offset_before_threshold",
+      "now": "2026-10-31T00:00:00Z",
+      "recent_window_s": 259200,
+      "keep_recent_turns": 1,
+      "window_cap_tokens": 1000,
+      "fold_all": false,
+      "entries": [
+        {
+          "id": "edge",
+          "ts": "2026-10-28T00:00:00+01:00",
+          "role": "other",
+          "name": "n",
+          "text": "x"
+        },
+        {
+          "id": "new",
+          "ts": "2026-10-30T00:00:00Z",
+          "role": "owner",
+          "name": "n",
+          "text": "x"
+        }
+      ],
+      "expect_fold_ids": [
+        "edge"
+      ],
+      "expect_window_ids": [
+        "new"
+      ]
+    }
+  ],
+  "estimate_tokens": [
+    {
+      "name": "empty",
+      "text": "",
+      "tokens": 0
+    },
+    {
+      "name": "four_ascii",
+      "text": "abcd",
+      "tokens": 1
+    },
+    {
+      "name": "five_ascii",
+      "text": "abcde",
+      "tokens": 2
+    },
+    {
+      "name": "one_emoji",
+      "text": "😀",
+      "tokens": 1
+    },
+    {
+      "name": "two_emoji",
+      "text": "😀😀",
+      "tokens": 1
+    },
+    {
+      "name": "three_emoji",
+      "text": "😀😀😀",
+      "tokens": 2
+    },
+    {
+      "name": "korean",
+      "text": "한글",
+      "tokens": 2
+    },
+    {
+      "name": "full_width",
+      "text": "ＡＢ，",
+      "tokens": 3
+    },
+    {
+      "name": "mixed",
+      "text": "中文abcd",
+      "tokens": 3
+    },
+    {
+      "name": "supplementary_cjk",
+      "text": "𠀀",
+      "tokens": 1
+    },
+    {
+      "name": "cjk_lower_boundary",
+      "text": "⹿⺀",
+      "tokens": 2
+    }
+  ]
+}

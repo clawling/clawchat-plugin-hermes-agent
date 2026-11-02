@@ -243,6 +243,13 @@ tmp
 #     with HERMES_HOME, the OS home and CLAWCHAT_* env pointed away from the
 #     developer's real Hermes install (.env credentials, SQLite).
 tests/*
+# History budgeting, immutable summaries, state CAS and portable desktop vectors.
+!tests/test_history_budget.py
+!tests/test_rolling_summary.py
+!tests/test_history_state_store.py
+!tests/fixtures/
+tests/fixtures/*
+!tests/fixtures/history_budget_vectors.json
 # atomic_file pins sync ordering, private permissions and rollback-safe publication.
 !tests/test_atomic_file.py
 # state_lock serializes state mutations across threads and processes.
