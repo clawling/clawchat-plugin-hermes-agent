@@ -1821,8 +1821,13 @@ def _clawchat_pre_tool_decision_raw(*, tool_name: str = "", args: Any = None, **
         if session_turn != "other":
             return None
         stable = stable_tool_schema(chat_id, session_context_value("HERMES_SESSION_CHAT_TYPE"))
+        # Judge exclusions by the execution's own turn: a queued follow-up runs
+        # under the previous input's context nonce but binds a newer snapshot.
+        # A bindable call that resolved no snapshot gets the unattributed
+        # (narrowest) selection rather than the inherited turn's.
+        schema_nonce = snapshot.nonce if snapshot is not None else ("" if can_bind_call else nonce)
         schema_hidden = stable and _legacy_schema_hides(
-            tool_name, nonce, chat_id, session_context_value("HERMES_SESSION_CHAT_TYPE"))
+            tool_name, schema_nonce, chat_id, session_context_value("HERMES_SESSION_CHAT_TYPE"))
         try:
             _, available = host_tool_catalog()
         except Exception:  # noqa: BLE001 - old hosts retain ordinary defaults

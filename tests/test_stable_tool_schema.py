@@ -113,6 +113,51 @@ def test_grants_and_explicit_deny_are_enforced_at_dispatch(stable, grants, tool,
         turns.release_turn(s.nonce)
 
 
+def test_schema_exclusion_uses_the_bound_follow_up_snapshot(stable):
+    token = turns.mark_unverified_input("usr_agent", "cnv_owner")
+    first = turns.register_turn(account_id="usr_agent", chat_id="cnv_owner", session_key="cnv_owner",
+                                speakers=("usr_a",), grants={}, unverified_token=token)
+    queued = None
+    try:
+        # The follow-up executes under the first input's context nonce.
+        with stable(**context(first)):
+            guard.clawchat_pre_llm_call(session_id="s", turn_id="t1")
+            assert call(TOOL, turn_id="t1")["action"] == "block"
+            # Register only after the first input is consumed: these are
+            # separate batches, so their grants must not be intersected.
+            queued = turn(grants={TOOL: "direct"}, chat=first.chat_id)
+            assert queued.grants.get(TOOL) == "direct"
+            guard.clawchat_pre_llm_call(session_id="s", turn_id="t2")
+            assert turns.lookup_snapshot_for_call(first.nonce, first.chat_id, "s", "t2").nonce == queued.nonce
+            assert guard._legacy_schema_hides(TOOL, first.nonce, first.chat_id, "dm")
+            assert not guard._legacy_schema_hides(TOOL, queued.nonce, queued.chat_id, "dm")
+            assert call(TOOL, turn_id="t2") is None
+    finally:
+        turns.release_turn(first.nonce)
+        if queued is not None:
+            turns.release_turn(queued.nonce)
+
+
+def test_schema_exclusion_does_not_bypass_overlapping_batch_grants(stable, monkeypatch):
+    first = turn()
+    queued = turn(grants={TOOL: "direct"})
+    try:
+        with stable(**context(first, group=True)):
+            guard.clawchat_pre_llm_call(session_id="s", turn_id="t1")
+            guard.clawchat_pre_llm_call(session_id="s", turn_id="t2")
+            bound = turns.lookup_snapshot_for_call(first.nonce, first.chat_id, "s", "t2")
+            assert bound.nonce == queued.nonce
+            assert TOOL in bound.grants.candidates and bound.grants.get(TOOL) is None
+            assert guard._legacy_schema_hides(TOOL, bound.nonce, bound.chat_id, "group")
+            assert call(TOOL, turn_id="t2")["reasonCode"] == "not-granted"
+            # The grant path must also refuse independently of schema filtering.
+            monkeypatch.setattr(guard, "_legacy_schema_hides", lambda *args: False)
+            assert call(TOOL, turn_id="t2")["reasonCode"] == "not-granted"
+    finally:
+        turns.release_turn(first.nonce)
+        turns.release_turn(queued.nonce)
+
+
 @pytest.mark.parametrize("tool,toolset", [("terminal", "terminal"), (TOOL, "docs")])
 def test_schema_exclusion_preserves_explicit_denial_reason(stable, monkeypatch, tool, toolset):
     monkeypatch.setattr(guard, "_platform_toolsets", lambda: {"clawchat", toolset})
