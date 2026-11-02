@@ -119,6 +119,8 @@ def describe_compression(
         "budget_role": (
             "ClawChat conversations compact at the history budget; "
             "threshold_tokens is the backstop only"
+            if history["budget_compaction"] else
+            "ClawChat budget compaction is disabled; the host compression point applies"
         ),
         "notes": notes,
     }

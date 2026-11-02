@@ -1036,16 +1036,25 @@ class HistoryMaintenance:
         except Exception:
             logger.warning("clawchat history injection confirmation failed conv=%s", key)
 
+    def _event_budget_enabled(self, event):
+        source = getattr(event, "source", None)
+        chat = str(getattr(source, "chat_id", "") or "")
+        raw = getattr(event, "raw_message", {}) or {}
+        group = raw.get("clawchat_chat_type") == "group" or getattr(source, "chat_type", None) == "group"
+        return bool(self.available and not self.closed and chat and effective_history_settings(
+            self.adapter._clawchat_config, chat, group).budget_compaction)
+
+    def finish_failed_turn(self, event):
+        """Discard turn tracking without advancing backoff or starting maintenance."""
+        mid = self.adapter._turn_trigger_message_id(event)
+        turn = self.turns.pop(mid, None)
+        return self.enabled(turn[0]) if turn else self._event_budget_enabled(event)
+
     def after_turn(self, event):
         mid = self.adapter._turn_trigger_message_id(event)
         turn = self.turns.pop(mid, None)
         if not turn:
-            source = getattr(event, "source", None)
-            chat = str(getattr(source, "chat_id", "") or "")
-            raw = getattr(event, "raw_message", {}) or {}
-            group = raw.get("clawchat_chat_type") == "group" or getattr(source, "chat_type", None) == "group"
-            return bool(self.available and not self.closed and chat and effective_history_settings(
-                self.adapter._clawchat_config, chat, group).budget_compaction)
+            return self._event_budget_enabled(event)
         if not self.enabled(turn[0]):
             return False
         inbound, previous, *started = turn

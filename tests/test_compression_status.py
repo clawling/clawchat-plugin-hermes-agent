@@ -296,7 +296,9 @@ def test_status_history_budget_compaction_off(status_profile, monkeypatch, capsy
     assert result["budget_compaction"] == "off"
     assert result["history_budget_dm"] == 25000
     assert result["history_budget_group"] == 15000
-    assert result["budget_role"] == describe_compression({}, {}, host_version=None)["budget_role"]
+    assert result["budget_role"] == (
+        "ClawChat budget compaction is disabled; the host compression point applies"
+    )
 
 
 @pytest.mark.parametrize("extra,notes", [({}, []), ({"session-cap-tokens": 150000}, []),

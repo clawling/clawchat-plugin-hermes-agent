@@ -372,6 +372,117 @@ async def test_idle_is_after_answer_and_uses_original_timestamp(rig):
     assert rig.host.reset_calls
 
 
+@pytest.mark.parametrize('why', ['budget', 'idle'])
+@pytest.mark.parametrize('outcome,failed', [
+    pytest.param('FAILURE', True, id='failure-string'),
+    pytest.param(NS(name='FAILURE'), True, id='failure-enum'),
+    pytest.param(NS(name='SUCCESS'), False, id='success'),
+    pytest.param(None, False, id='legacy-completion'),
+])
+async def test_processing_outcome_gates_budget_and_idle_maintenance(rig, monkeypatch, why, outcome, failed):
+    ledger(rig, text='中' * 5000 if why == 'budget' else 'old agreement')
+    message = inbound('completed-question')
+    claim(rig, message)
+    key = initialize(rig, message)
+    await rig.m.before(message)
+    previous = rig.m.state(key)
+    scheduled, legacy, after_calls = [], [], []
+    after_turn = rig.m.after_turn
+    def record_after(ev):
+        after_calls.append(ev)
+        return after_turn(ev)
+    monkeypatch.setattr(rig.m, 'after_turn', record_after)
+    monkeypatch.setattr(rig.m, 'schedule', scheduled.append)
+    monkeypatch.setattr(rig.a, '_maybe_schedule_compact_sediment', lambda *a: legacy.append(a))
+    ev = event(rig, message)
+    await rig.a.on_processing_complete(ev, outcome)
+    if failed:
+        assert rig.m.state(key) == previous
+        assert not scheduled and not after_calls
+    else:
+        assert rig.m.state(key)['pending']['why'] == why
+        assert scheduled == [message] and after_calls == [ev]
+    assert 'completed-question' not in rig.m.turns
+    assert not legacy and not rig.m.tasks and not rig.llm.calls and not rig.host.reset_calls
+
+
+async def test_failed_processing_preserves_backoff_until_successful_turns(rig, monkeypatch):
+    ledger(rig)
+    message = inbound('retry-question')
+    claim(rig, message)
+    key = initialize(rig, message)
+    state = rig.m.queue_pending(message, rig.m.state(key), 'budget')
+    rig.m.cas(key, state, failures=2, retry_after_msgs=2)
+    scheduled, legacy = [], []
+    monkeypatch.setattr(rig.m, 'schedule', scheduled.append)
+    monkeypatch.setattr(rig.a, '_maybe_schedule_compact_sediment', lambda *a: legacy.append(a))
+    for outcome, remaining in (('FAILURE', 2), ('SUCCESS', 1), ('SUCCESS', 0)):
+        await rig.m.before(message)
+        await rig.a.on_processing_complete(event(rig, message), outcome)
+        assert rig.m.state(key)['retry_after_msgs'] == remaining
+        assert rig.m.state(key)['failures'] == 2
+        assert len(scheduled) == (1 if remaining == 0 else 0)
+    assert scheduled == [message] and not legacy and not rig.host.reset_calls
+
+
+@pytest.mark.parametrize('tracked', [False, True])
+async def test_failed_processing_suppresses_legacy_for_budget_conversation(rig, monkeypatch, tracked):
+    message = inbound('failed-question')
+    claim(rig, message)
+    key = initialize(rig, message)
+    if tracked:
+        await rig.m.before(message)
+    previous = rig.m.state(key)
+    after_calls, legacy = [], []
+    monkeypatch.setattr(rig.m, 'after_turn', lambda ev: after_calls.append(ev))
+    monkeypatch.setattr(rig.a, '_maybe_schedule_compact_sediment', lambda *a: legacy.append(a))
+    await rig.a.on_processing_complete(event(rig, message), NS(name='FAILURE'))
+    assert not after_calls and not legacy and not rig.m.turns
+    assert rig.m.state(key) == previous and not rig.m.tasks
+
+
+@pytest.mark.parametrize('disabled', ['unavailable', 'account-off', 'chat-off', 'group-off', 'no-manager'])
+async def test_failed_processing_keeps_legacy_when_budget_disabled(rig, monkeypatch, disabled):
+    message = inbound('legacy-failed-question', group=disabled == 'group-off')
+    claim(rig, message)
+    initialize(rig, message)
+    await rig.m.before(message)
+    if disabled == 'unavailable':
+        rig.m.available = False
+    elif disabled == 'account-off':
+        rig.a._clawchat_config = replace(rig.a._clawchat_config, budget_compaction=False)
+    elif disabled == 'chat-off':
+        rig.a._clawchat_config = replace(rig.a._clawchat_config,
+            chats={message.chat_id: {'budget-compaction': 'off'}})
+    elif disabled == 'group-off':
+        rig.a._clawchat_config = replace(rig.a._clawchat_config,
+            groups={'*': {'budget-compaction': 'off'}})
+    else:
+        rig.a._history = None
+    after_calls, legacy = [], []
+    monkeypatch.setattr(rig.m, 'after_turn', lambda ev: after_calls.append(ev))
+    monkeypatch.setattr(rig.a, '_maybe_schedule_compact_sediment', lambda *a: legacy.append(a))
+    ev = event(rig, message)
+    await rig.a.on_processing_complete(ev, 'FAILURE')
+    assert legacy == [(message.chat_id, ev)] and not after_calls
+    assert not rig.m.tasks and not rig.llm.calls and not rig.host.reset_calls
+
+
+async def test_failed_sediment_completion_still_sets_done(rig, monkeypatch):
+    message = inbound('notes-question')
+    initialize(rig, message)
+    done = asyncio.Event()
+    rig.a._sediment_done[message.chat_id] = ('notes-operation', done)
+    ev = event(rig, message)
+    ev.raw_message = {'clawchat_raw': {'clawchat_sediment': True,
+        'conversation_id': message.chat_id, 'sediment_id': 'notes-operation'}}
+    after_calls, legacy = [], []
+    monkeypatch.setattr(rig.m, 'after_turn', lambda ev: after_calls.append(ev))
+    monkeypatch.setattr(rig.a, '_maybe_schedule_compact_sediment', lambda *a: legacy.append(a))
+    await rig.a.on_processing_complete(ev, NS(name='FAILURE'))
+    assert done.is_set() and not after_calls and not legacy and not rig.m.tasks
+
+
 async def test_strict_budget_and_ledger_fallback(rig):
     ledger(rig, text='brief')
     msg = inbound()

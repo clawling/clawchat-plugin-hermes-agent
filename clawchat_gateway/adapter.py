@@ -5848,7 +5848,10 @@ class ClawChatAdapter(BasePlatformAdapter):
         try:
             if self._history and self._history.available:
                 self._history.completed(event, outcome)
-            self._after_host_turn(event)
+            if getattr(outcome, "name", str(outcome)).upper() == "FAILURE":
+                self._after_host_turn(event, failed=True)
+            else:
+                self._after_host_turn(event)
         except Exception:  # noqa: BLE001
             logger.warning("clawchat post-turn maintenance failed", exc_info=True)
         chat_id = str(getattr(getattr(event, "source", None), "chat_id", "") or "")
@@ -5861,7 +5864,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 if key.split(":", 1)[0] == chat_id:
                     self._grant_session_busy(key)
 
-    def _after_host_turn(self, event: Any) -> None:
+    def _after_host_turn(self, event: Any, *, failed: bool = False) -> None:
         raw = getattr(event, "raw_message", None)
         inner = raw.get("clawchat_raw") if isinstance(raw, dict) else None
         source = getattr(event, "source", None)
@@ -5872,8 +5875,12 @@ class ClawChatAdapter(BasePlatformAdapter):
                 pending[1].set()
             return
         if chat_id and not _slash_command_name(str(getattr(event, "text", "") or "")):
-            if not (self._history and self._history.after_turn(event)):
-                self._maybe_schedule_compact_sediment(chat_id, event)
+            if self._history:
+                handled = (self._history.finish_failed_turn(event) if failed
+                           else self._history.after_turn(event))
+                if handled:
+                    return
+            self._maybe_schedule_compact_sediment(chat_id, event)
 
     def _maybe_schedule_compact_sediment(self, chat_id: str, event: Any) -> None:
         if not self._clawchat_config.sediment_on_compact:

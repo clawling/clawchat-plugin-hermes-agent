@@ -54,7 +54,10 @@ withdrawal never moves a fixed interval. Each pass handles at most three blocks;
 After publication, optional notes run in the old session, then a completely idle
 host session is renewed. The plugin rereads the **persistent route** to verify
 that the session ID changed. Failures retain the original history and pending
-work; retries back off by 1/2/4/8 completed real messages. Published blocks remain
+work; retries back off by 1/2/4/8 completed real messages. A host `FAILURE` outcome
+does not advance that backoff or trigger budget/idle maintenance. Budget-enabled
+conversations also skip legacy notes on that failure; disabled or unavailable
+budget maintenance retains the legacy behavior. Published blocks remain
 available when a later block fails. No summary text or credentials enter the
 maintenance diagnostic line (conversation, reason, result, blocks, duration and
 prompt tokens before/after).
