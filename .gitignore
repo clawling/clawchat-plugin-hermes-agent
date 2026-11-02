@@ -404,6 +404,8 @@ CLAUDE.md
 
 # Proactive grants wake original requests; owner steer waits; restart retries are bounded.
 !tests/test_owner_wake_steer.py
+# Session schemas stay stable while execution authority remains per turn.
+!tests/test_stable_tool_schema.py
 
 # Current-conversation history schemas, ledger isolation, formatting and public access.
 !tests/test_chat_history_tools.py
