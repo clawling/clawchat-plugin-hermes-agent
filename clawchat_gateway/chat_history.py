@@ -124,6 +124,8 @@ def _redact_history_url(source):
 
 
 def _redact_history_urls(value):
+    if "://" not in value:
+        return value
     def replace(match):
         source = match.group(0)
         closing = re.search(r"[)\]}]+$", source)
@@ -144,6 +146,8 @@ _USERINFO_SCHEME = re.compile(r"(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*://", re.IGNORE
 
 
 def _strip_history_userinfo(value):
+    if "://" not in value:
+        return value
     parts = []
     copied = 0
     for match in _USERINFO_SCHEME.finditer(value):

@@ -1,6 +1,6 @@
 """Pure history budgeting rules shared with the ClawChat desktop agent.
 
-Inputs are in ledger order, oldest first. No caller is wired to these helpers yet.
+Inputs are in ledger order, oldest first; history_maintenance orchestrates them.
 """
 
 from __future__ import annotations

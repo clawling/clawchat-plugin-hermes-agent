@@ -102,9 +102,17 @@ def register_turn(*, account_id: str, chat_id: str, speakers: tuple[str, ...],
                   approve_eligible: bool = True, orchestrate_retry: bool = False,
                   trusted_notification: bool = False, trigger: str = "unknown_sender",
                   unverified_token: str = "", arrival_restriction: InputRestriction | None = None,
-                  history_exclude_ids: frozenset[str] = frozenset()) -> TurnSnapshot:
+                  history_exclude_ids: frozenset[str] = frozenset(),
+                  replay_nonce: str | None = None) -> TurnSnapshot:
     with _lock:
-        nonce = NONCE_PREFIX + secrets.token_urlsafe(24)
+        # Only the adapter's durable dispatch journal supplies this value;
+        # all authorization below is recomputed, never restored from disk.
+        if replay_nonce is not None and (not replay_nonce.startswith(NONCE_PREFIX)
+                                         or len(replay_nonce) > 128):
+            raise ValueError("invalid replay nonce")
+        nonce = replay_nonce or NONCE_PREFIX + secrets.token_urlsafe(24)
+        if nonce in _snapshots:
+            raise ValueError("replay nonce is still active")
         originally_owner_side = bool(owner_side)
         owner_side = bool(owner_side and speakers and all(isinstance(id_, str) and id_.strip() for id_ in speakers))
         if owner_side and ((account_id, session_key) in _unverified_inputs or arrival_restriction):

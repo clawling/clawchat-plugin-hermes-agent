@@ -351,9 +351,32 @@ CREATE INDEX IF NOT EXISTS idx_clawchat_held_inbound_sequence
 _HISTORY_FIELDS = frozenset({
     "summary_ref", "summary_through", "boundary", "host_session", "inject_next",
     "injected_for", "open_context", "open_history", "pending", "failures",
-    "retry_after_msgs",
+    "retry_after_msgs", "summary_through_seq", "boundary_seq",
 })
 _HELD_STATES = frozenset({"held", "dispatching", "dispatched"})
+
+# Separate from SQLite rowids: deleting the last ledger row must not allow its
+# position to be reused. The trigger also covers inserts by an older plugin.
+HISTORY_POSITIONS_SCHEMA = """
+ALTER TABLE clawchat_history_state ADD COLUMN summary_through_seq INTEGER;
+ALTER TABLE clawchat_history_state ADD COLUMN boundary_seq INTEGER;
+CREATE TABLE clawchat_history_positions (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id TEXT NOT NULL, kind TEXT NOT NULL, direction TEXT NOT NULL,
+  message_id TEXT NOT NULL, chat_id TEXT,
+  UNIQUE(account_id, kind, direction, message_id)
+);
+INSERT OR IGNORE INTO clawchat_history_positions(account_id,kind,direction,message_id,chat_id)
+  SELECT account_id,kind,direction,message_id,chat_id FROM clawchat_messages
+  WHERE kind='message' AND message_id IS NOT NULL AND message_id<>'' ORDER BY id;
+CREATE TRIGGER clawchat_history_position_insert AFTER INSERT ON clawchat_messages
+WHEN NEW.kind='message' AND NEW.message_id IS NOT NULL AND NEW.message_id<>''
+BEGIN
+  INSERT OR IGNORE INTO clawchat_history_positions(account_id,kind,direction,message_id,chat_id)
+    VALUES(NEW.account_id,NEW.kind,NEW.direction,NEW.message_id,NEW.chat_id);
+END;
+CREATE INDEX clawchat_history_position_chat ON clawchat_history_positions(account_id,chat_id);
+"""
 
 
 def refresh_token_fingerprint(refresh_token: str) -> str:
@@ -379,6 +402,7 @@ MIGRATIONS = [
     (15, "tool_grant_requests", TOOL_GRANT_REQUESTS_SCHEMA),
     (16, "tool_request_notice_claims", TOOL_REQUEST_NOTICE_CLAIMS_SCHEMA),
     (17, "history_state", HISTORY_STATE_SCHEMA),
+    (18, "history_positions", HISTORY_POSITIONS_SCHEMA),
 ]
 
 # Lookup behind ClawChatStore.find_seen_message_in_chat: a real chat message
@@ -671,6 +695,50 @@ class ClawChatStore:
         finally:
             conn.close()
 
+    def history_positions(self, account_id: str, chat_id: str | None = None) -> dict[str, int]:
+        """Immutable positions, including messages removed by a recall."""
+        conn = self._tool_grants_connection()
+        try:
+            sql = "SELECT message_id,seq FROM clawchat_history_positions WHERE account_id=?"
+            args = [account_id]
+            if chat_id is not None:
+                sql += " AND chat_id=? COLLATE NOCASE"
+                args.append(chat_id)
+            return dict(conn.execute(sql + " ORDER BY seq", args))
+        finally:
+            conn.close()
+
+    def retire_recalled_held(self, account_id: str, conv_key: str,
+                             message_ids: set[str], *, ledger_account: str = "default") -> set[str]:
+        """Check authority and retire recalled work in one immediate transaction.
+
+        A saved batch containing a recalled member cannot be replayed verbatim.
+        Survivors return to held with their original frames and fresh authorization.
+        Database errors propagate instead of pretending that no recall exists.
+        """
+        def write(conn):
+            recalled = {mid for mid in message_ids if conn.execute(
+                "SELECT 1 FROM recalled_messages WHERE account_id=? AND message_id=?",
+                (ledger_account, mid)).fetchone() is not None}
+            if not recalled:
+                return recalled
+            for mid in message_ids:
+                row = conn.execute(
+                    "SELECT payload,state FROM clawchat_held_inbound WHERE account_id=? "
+                    "AND conv_key=? AND message_id=?", (account_id, conv_key, mid)).fetchone()
+                if row is None or row[1] == "dispatched":
+                    continue
+                payload = json.loads(row[0])
+                payload.pop("snapshot", None)
+                payload.pop("batch_primary", None)
+                conn.execute(
+                    "UPDATE clawchat_held_inbound SET state=?,payload=? WHERE account_id=? "
+                    "AND conv_key=? AND message_id=?",
+                    ("dispatched" if mid in recalled else "held", json.dumps(payload, ensure_ascii=False),
+                     account_id, conv_key, mid))
+            return recalled
+        return self._tool_grants_transaction(write)
+
     def cas_history_state(
         self, account_id: str, conv_key: str, expected_gen: int, **fields: Any,
     ) -> bool:
@@ -760,6 +828,53 @@ class ClawChatStore:
             "WHERE account_id=? AND conv_key=? AND message_id=? AND state=?",
             (to_state, account_id, conv_key, message_id, from_state),
         ).rowcount == 1)
+
+    def update_held_payload(self, account_id: str, conv_key: str,
+                            message_id: str, payload: dict) -> None:
+        """Merge journal fields under the same immediate transaction as the read."""
+        def write(conn):
+            row = conn.execute(
+                "SELECT payload FROM clawchat_held_inbound WHERE account_id=? "
+                "AND conv_key=? AND message_id=? AND state != 'dispatched'",
+                (account_id, conv_key, message_id)).fetchone()
+            if row is None:
+                raise RuntimeError("held dispatch snapshot no longer current")
+            encoded = json.dumps(json.loads(row[0]) | payload, ensure_ascii=False, allow_nan=False)
+            cursor = conn.execute(
+                "UPDATE clawchat_held_inbound SET payload=? WHERE account_id=? "
+                "AND conv_key=? AND message_id=? AND state != 'dispatched'",
+                (encoded, account_id, conv_key, message_id))
+            if cursor.rowcount != 1:
+                raise RuntimeError("held dispatch snapshot no longer current")
+        self._tool_grants_transaction(write)
+
+    def snapshot_held_batch(self, account_id: str, conv_key: str, primary: str,
+                            message_ids: set[str], snapshot: dict) -> None:
+        """Publish a whole batch snapshot and its replay grouping atomically."""
+        def write(conn):
+            for mid in message_ids:
+                row = conn.execute(
+                    "SELECT payload FROM clawchat_held_inbound WHERE account_id=? "
+                    "AND conv_key=? AND message_id=? AND state != 'dispatched'",
+                    (account_id, conv_key, mid)).fetchone()
+                if row is None:
+                    raise RuntimeError("batch member has no live durable claim")
+                payload = json.loads(row[0]) | {"batch_primary": primary}
+                if mid == primary:
+                    payload["snapshot"] = snapshot
+                conn.execute(
+                    "UPDATE clawchat_held_inbound SET payload=? WHERE account_id=? "
+                    "AND conv_key=? AND message_id=?",
+                    (json.dumps(payload, ensure_ascii=False, allow_nan=False), account_id, conv_key, mid))
+        self._tool_grants_transaction(write)
+
+    def finish_held_batch(self, account_id: str, conv_key: str, message_ids: set[str]) -> None:
+        if not message_ids:
+            return
+        self._tool_grants_transaction(lambda conn: conn.execute(
+            "UPDATE clawchat_held_inbound SET state='dispatched' WHERE account_id=? "
+            "AND conv_key=? AND message_id IN (" + ",".join("?" for _ in message_ids) + ")",
+            [account_id, conv_key, *message_ids]))
 
     def purge_dispatched(self, older_than_s: float) -> int:
         cutoff = _now_ms() - older_than_s * 1000
@@ -1890,6 +2005,9 @@ class ClawChatStore:
         text: str | None = None,
         raw: Any = None,
         created_at: int | None = None,
+        held_key: str | None = None,
+        held_payload: Any = None,
+        held_account_id: str | None = None,
     ) -> bool | None:
         if not message_id:
             return None
@@ -1914,7 +2032,7 @@ class ClawChatStore:
                 if recalled is not None:
                     conn.rollback()
                     return False
-                conn.execute(
+                cursor = conn.execute(
                     """
                     INSERT INTO clawchat_messages(
                       platform, account_id, kind, direction, event_type, trace_id,
@@ -1935,6 +2053,14 @@ class ClawChatStore:
                         created,
                     ),
                 )
+                if held_key is not None:
+                    conn.execute(
+                        "INSERT INTO clawchat_held_inbound "
+                        "(account_id,conv_key,message_id,seq,payload,state,created_at) "
+                        "VALUES (?,?,?,?,?,'held',?)",
+                        (held_account_id or account_id, held_key, message_id, cursor.lastrowid,
+                         json.dumps(held_payload, ensure_ascii=False, allow_nan=False), created),
+                    )
                 conn.commit()
                 return True
             except sqlite3.IntegrityError:

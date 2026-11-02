@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from clawchat_gateway.config import SESSION_INT_KEYS, _read_clamped_int
+from clawchat_gateway.config import SESSION_INT_KEYS, _read_clamped_int, _read_history_keys
 from clawchat_gateway.host_version import parse_version
 
 
@@ -55,6 +55,12 @@ def describe_compression(
     """Describe raw settings without changing them or predicting host-version behavior."""
     host_config = host_config if isinstance(host_config, Mapping) else {}
     extra = extra if isinstance(extra, Mapping) else {}
+    # Share runtime parsing, but exclude conversation overrides and unrelated settings.
+    history = _read_history_keys({
+        key: extra[key]
+        for key in ("history-budget-dm", "history-budget-group", "budget-compaction")
+        if key in extra
+    })
     compression = host_config.get("compression")
     compression = compression if isinstance(compression, Mapping) else {}
     enabled = compression.get("enabled") is not False
@@ -107,5 +113,14 @@ def describe_compression(
         ),
         "sediment_margin_tokens": margin,
         "sediment_point_tokens": max(1, threshold - margin),
+        "history_budget_dm": history["history_budget_dm"],
+        "history_budget_group": history["history_budget_group"],
+        "budget_compaction": "on" if history["budget_compaction"] else "off",
+        "budget_role": (
+            "ClawChat conversations compact at the history budget; "
+            "threshold_tokens is the backstop only"
+            if history["budget_compaction"] else
+            "ClawChat budget compaction is disabled; the host compression point applies"
+        ),
         "notes": notes,
     }

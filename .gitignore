@@ -413,3 +413,5 @@ CLAUDE.md
 
 # Current-conversation history schemas, ledger isolation, formatting and public access.
 !tests/test_chat_history_tools.py
+# Runtime history maintenance and private-host compatibility contract.
+!tests/test_history_maintenance.py

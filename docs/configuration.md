@@ -259,16 +259,18 @@ Read at adapter startup from `platforms.clawchat.extra` (hyphenated); restart th
 | `sediment-on-compact` | `on` | on/off | Sediment before compression |
 | `sediment-on-reset` | `on` | on/off | Sediment before `/new` / `/reset` |
 
-Unconsumed shared keys: `idle-reset-dm`, `idle-reset-group`, `daily-reset` (host owns resets; see [Upgrade notes](#upgrade-notes)); `archive-muted-groups` (ledger records muted messages); `digest-every-messages` (Hermes already has sessions). Plugin-driven reset would need the host's confirm-guarded `/new`.
+### Conversation history budget
+
+ClawChat conversations are compacted into a rolling summary when their history exceeds a per-conversation token budget (`history-budget-dm` 25000 / `history-budget-group` 15000 by default); the Hermes compression threshold is only a backstop. Keys, behaviour, host requirements and limits: [history-budget.md](history-budget.md).
 
 ### Sediment turns
 
 Hermes has no pre-compression/reset memory flush; its periodic single-user review is disabled below. The plugin runs a synthetic sediment turn in the same session before losing context:
 
 - `/new` / `/reset`: finish sediment before the host command/confirmation; skip busy sessions or those with nothing said since reset, so reset remains an immediate escape.
-- Compression: after a turn reaches the trigger, run when idle, once per Hermes session id. The compression point is the lower of the absolute cap and Hermes' ratio threshold (default 0.5; 0.75 below 512 K, accounting for output reservation). Plugin load/activation **fill only missing** `compression.threshold_tokens` from `session-cap-tokens`; this host key is global across platforms (Hermes 0.20.1+).
+- Compression with budget maintenance: run notes after summary publication and before renewal. When budget maintenance is unavailable or off, use the legacy trigger after a turn, when idle, once per Hermes session id. The compression point is the lower of the absolute cap and Hermes' ratio threshold (default 0.5; 0.75 below 512 K, accounting for output reservation). Plugin load/activation **fill only missing** `compression.threshold_tokens` from `session-cap-tokens`; this host key is global across platforms (Hermes 0.20.1+).
 
-Trigger example without output reservation: `0.75 × 128000 − 10000 = 86000`, rather than `150000 − 10000 = 140000`. Computation uses `post_api_request` usage/context length, `pre_api_request` max tokens and Hermes `ContextCompressor` math when importable (same fallback rule). Per-model ratio overrides are unseen; until the first request supplies a window, the cap alone decides.
+Legacy fallback trigger example without output reservation: `0.75 × 128000 − 10000 = 86000`, rather than `150000 − 10000 = 140000`. Computation uses `post_api_request` usage/context length, `pre_api_request` max tokens and Hermes `ContextCompressor` math when importable (same fallback rule). Per-model ratio overrides are unseen; until the first request supplies a window, the cap alone decides.
 See [Effective compression point](#effective-compression-point) for read-only status diagnostics.
 
 The prompt targets only this DM peer's note (`owner.md` for owner) or this group's note, up to 10 recent speakers' notes and owner facts said in-group. Shared groups also receive unseen context within `delta-budget-chars`. It asks the model to read then append, omit facts people asked it not to remember/asked to forget, avoid Hermes `memory`, send no messages and return the no-reply token.
@@ -284,6 +286,10 @@ absent; an existing value, including an invalid one, is never overwritten.
 Hermes compresses at the lower of the absolute cap and the active model's ratio
 threshold (default ratio 0.5, at least 0.75 below a 512K window, accounting for
 output reservation). Status does not calculate the model-dependent ratio point.
+
+For ClawChat conversations this point is only a backstop: budget maintenance
+compacts them at `history-budget-dm` / `history-budget-group` first (see
+[history-budget.md](history-budget.md)).
 
 `hermes clawchat status` reads configuration without changing it. Its
 `compression` object describes the configured cap and the plugin's sediment
@@ -303,6 +309,10 @@ adapter with the configuration on disk.
 | `ratio_applies` | Explanation of the model-dependent ratio limit |
 | `sediment_margin_tokens` | Plugin margin after defaulting and clamping (2000–50000) |
 | `sediment_point_tokens` | `max(1, threshold_tokens - sediment_margin_tokens)`, an upper bound; the model's ratio limit can trigger sediment earlier |
+| `history_budget_dm` | Account-level DM history budget after defaulting (25000) and clamping (5000–200000); excludes `chats.<id>` overrides |
+| `history_budget_group` | Account-level group history budget after defaulting (15000) and clamping (5000–200000); excludes `groups.*` and `groups.<id>` overrides |
+| `budget_compaction` | Account-level `budget-compaction` configuration as `on` / `off` (default `on`); excludes conversation overrides and does not probe runtime capabilities |
+| `budget_role` | Explains the account-level switch: `on` means ClawChat history budgets compact first and the host threshold is a backstop; `off` means plugin budget compaction is disabled and the host compression point applies. Configuration only; no runtime capability probe |
 | `notes` | Override, invalid-host-key and disabled-compression explanations; empty when none apply |
 
 An override note appears only when the plugin cap was explicitly set and differs

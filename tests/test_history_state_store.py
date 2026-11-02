@@ -107,18 +107,21 @@ def test_held_rows_survive_reopen_and_purge_only_old_dispatched(store, monkeypat
     assert {row["message_id"] for row in rows} == {"old-held", "old-dispatching", "new-done"}
 
 
-def test_migration_upgrades_existing_database_and_is_idempotent(tmp_path):
+@pytest.mark.parametrize("existing_version", [16, 17])
+def test_migration_upgrades_existing_database_and_is_idempotent(tmp_path, existing_version):
     path = tmp_path / "existing.sqlite"
     with sqlite3.connect(path) as conn:
-        for version, name, sql in MIGRATIONS[:-1]:
+        for version, name, sql in MIGRATIONS:
+            if version > existing_version:
+                break
             conn.executescript(sql)
             conn.execute("INSERT INTO schema_migrations VALUES (?, ?, ?)", (version, name, 1))
         conn.execute("INSERT INTO recalled_messages VALUES ('a', 'existing', 1)")
     ClawChatStore(path).initialize()
     ClawChatStore(path).initialize()
     with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT version,name FROM schema_migrations ORDER BY version DESC LIMIT 1").fetchone() == (17, "history_state")
-        assert conn.execute("SELECT count(*) FROM schema_migrations").fetchone()[0] == 17
+        assert conn.execute("SELECT version,name FROM schema_migrations ORDER BY version DESC LIMIT 1").fetchone() == (18, "history_positions")
+        assert conn.execute("SELECT count(*) FROM schema_migrations").fetchone()[0] == 18
         assert conn.execute("SELECT message_id FROM recalled_messages").fetchone()[0] == "existing"
         for table, primary in (("clawchat_history_state", ["account_id", "conv_key"]),
                                ("clawchat_held_inbound", ["account_id", "conv_key", "message_id"])):
@@ -177,3 +180,32 @@ def test_losing_summary_cas_keeps_authoritative_version(store, tmp_path):
     assert row["summary_ref"] == first and row["summary_through"] == "m1"
     assert read_summary(directory, row["summary_ref"])[1] == "first"
     assert read_summary(directory, second)[1] == "second"
+
+
+def test_history_positions_backfill_and_cover_older_writer_inserts(tmp_path):
+    path = tmp_path / 'before-positions.sqlite'
+    with sqlite3.connect(path) as conn:
+        for version, name, sql in MIGRATIONS:
+            if version >= 18:
+                break
+            conn.executescript(sql)
+            conn.execute('INSERT INTO schema_migrations VALUES (?, ?, ?)', (version, name, 1))
+        for seq, mid in ((10, 'first'), (20, 'last')):
+            conn.execute('INSERT INTO clawchat_messages '
+                '(id,platform,account_id,kind,direction,event_type,chat_id,message_id,text,created_at) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                (seq, 'hermes', 'default', 'message', 'inbound', 'message.send', 'chat', mid, 'example', 1))
+    store = ClawChatStore(path)
+    store.initialize()
+    before = store.history_positions('default', 'chat')
+    assert before['first'] < before['last']
+    assert store.recall_message(account_id='default', message_id='last') == 1
+    # Simulate the prior version: insert a ledger row without knowing this table.
+    with sqlite3.connect(path) as conn:
+        conn.execute('INSERT INTO clawchat_messages '
+            '(id,platform,account_id,kind,direction,event_type,chat_id,message_id,text,created_at) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (20, 'hermes', 'default', 'message', 'inbound', 'message.send', 'chat', 'new', 'example', 2))
+        assert 'text' not in {row[1] for row in conn.execute('PRAGMA table_info(clawchat_history_positions)')}
+    after = store.history_positions('default', 'chat')
+    assert after['last'] == before['last'] and after['new'] > before['last']
