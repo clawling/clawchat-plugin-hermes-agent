@@ -28,6 +28,12 @@ unconsumed (muted messages stay in the ledger; Hermes owns its sessions).
 After a real answer completes, history **strictly greater** than the DM/group
 budget triggers maintenance. An idle interval also triggers maintenance **after
 answering in the original session**; it does not clear history before the answer.
+Idle time uses the preceding real conversational input or agent answer, captured
+before this input batch. Host shutdown/startup notices, plugin notifications,
+maintenance output and command/confirmation receipts do not count as activity.
+Original frame `emitted_at`, then `timestamp`, take priority over ledger ingest
+time; delayed offline delivery therefore keeps its original interval. The clock
+is captured before the answer and does not use the processing-complete time.
 History uses the first injected request's prompt-token baseline and subsequent
 usage growth, or ledger estimates when usage is absent. The opening history
 baseline includes the triggering input (all members of a batch) as well as the
@@ -90,6 +96,15 @@ previously summarized. The first input starts this work immediately and is
 handed to the host before later held arrivals; a drain cannot skip its in-flight
 journal entry. Internal maintenance resets use a separate operation
 identity and do not become user `/new` events.
+Reset commands and their confirmation replies are recorded as control input.
+Showing the host confirmation prompt or returning from its command handler
+retires their journal entries, including owner button flows that do not set the
+ordinary admission receipt. A control input still held before its first handoff
+can be delivered once, but uncertain `dispatching` controls are never retried;
+legacy journal entries are retired instead of reopening the confirmation prompt.
+If a reset's outcome is uncertain after a restart, the user must issue it again.
+This policy does not bypass the host's confirmation gate or confirm a reset
+before its persistent route changes.
 
 **Host threshold priority:** ClawChat uses the plugin DM/group budgets. Hermes'
 `compression.threshold_tokens` (or the missing value filled from

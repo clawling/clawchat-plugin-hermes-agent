@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import asyncio
 from contextvars import ContextVar
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import inspect
 import json
@@ -33,6 +34,100 @@ POLL_SECONDS = .1
 _internal_reset = ContextVar("clawchat_internal_history_reset", default=None)
 _llm = None
 _instances = weakref.WeakSet()
+
+
+@dataclass
+class _ActivityTurn:
+    chat_id: str
+    trigger: str
+    real: bool
+    closed: bool = False
+
+
+_activity_turn = ContextVar("clawchat_history_activity_turn", default=None)
+
+
+@contextmanager
+def activity_turn(event, inbound, *, control=False):
+    """Host tasks inherit provenance; unrelated notices have no answer marker."""
+    raw = inbound.raw_message if isinstance(inbound.raw_message, dict) else {}
+    if raw.get("clawchat_group_batch"):
+        raw = (raw.get("messages") or [{}])[-1]
+    payload = raw.get("payload") or {}
+    trigger = payload.get("message_id") or raw.get("message_id") or getattr(event, "message_id", "") or ""
+    marker = _ActivityTurn(inbound.chat_id, trigger,
+                           bool(trigger) and not inbound.is_internal_synthetic and not control
+                           and not inbound.text.lstrip().startswith("/"))
+    event._clawchat_history_activity = marker
+    context = _activity_turn.set(marker)
+    try:
+        yield marker
+    finally:
+        _activity_turn.reset(context)
+
+
+def bind_activity(event, marker=None):
+    # Durable host admission may restore a new event object in another task.
+    # The plugin-owned nonce map preserves provenance across that boundary.
+    existing = getattr(event, "_clawchat_history_activity", None)
+    if existing is not None and marker is not None and existing is not marker:
+        existing.closed = True
+    marker = existing or marker
+    if marker is not None:
+        event._clawchat_history_activity = marker
+    _activity_turn.set(marker)
+
+
+def restore_activity(adapter, event):
+    """Recover provenance for host-admitted work resumed after a gateway restart."""
+    if getattr(event, "internal", False):
+        return None
+    chat_id = str(getattr(getattr(event, "source", None), "chat_id", "") or "")
+    trigger = str(getattr(event, "message_id", "") or adapter._turn_trigger_message_id(event))
+    store = getattr(adapter, "_store", None)
+    if not chat_id or not trigger or store is None:
+        return None
+    try:
+        rows = store.list_chat_history_messages("default", chat_id)
+        for row in rows or []:
+            if row["direction"] != "inbound" or row["message_id"] != trigger:
+                continue
+            raw = json.loads(row.get("raw_json") or "{}")
+            if not isinstance(raw, dict) or raw.get("clawchat_history_control") is True:
+                return None
+            text = str(row.get("text") or "").lstrip()
+            if text.startswith("/") or raw.get("sender", {}).get("id") == "system":
+                return None
+            return _ActivityTurn(chat_id, trigger, True)
+    except Exception:
+        # Missing optional provenance must never break delivery or invent activity.
+        return None
+    return None
+
+
+def finish_activity(event, marker=None):
+    marker = getattr(event, "_clawchat_history_activity", None) or marker
+    if marker is not None:
+        marker.closed = True
+    _activity_turn.set(None)
+
+
+def outbound_activity(chat_id, metadata=None):
+    marker = _activity_turn.get()
+    interim = isinstance(metadata, dict) and metadata.get("_interim_send")
+    if marker and marker.real and not marker.closed and marker.chat_id == chat_id and not interim:
+        return {"kind": "answer", "trigger": marker.trigger}
+    return {"kind": "notice"}
+
+
+def original_message_time(raw, created_at):
+    from clawchat_gateway.chat_history import _stamp
+    for value in (raw.get("emitted_at"), raw.get("timestamp"), created_at):
+        if value is not None:
+            stamp = _stamp(value)
+            if _entry_time(stamp) is not None:
+                return stamp
+    return None
 
 
 def configure(llm):
@@ -289,6 +384,54 @@ class HistoryMaintenance:
                                 _speaker(e), e.text))
         return result
 
+    def activity_entries(self, inbound):
+        from clawchat_gateway.chat_history import _object
+        rows = self.store.list_chat_history_messages("default", inbound.chat_id)
+        if rows is None:
+            raise RuntimeError("history activity ledger unavailable")
+        entries = {entry.id: entry for entry in self.entries(inbound)}
+        human = {row.get("protocol_message_id") or row["message_id"] for row in rows
+                 if row["direction"] == "inbound" and (row.get("protocol_message_id") or row["message_id"]) in entries}
+        controls = set()
+        for row in rows:
+            try:
+                raw = json.loads(row.get("raw_json") or "{}")
+                if isinstance(raw, dict) and raw.get("clawchat_history_control") is True:
+                    controls.add(row.get("protocol_message_id") or row["message_id"])
+            except (TypeError, ValueError):
+                pass
+        human -= controls
+        result = []
+        for row in rows:
+            mid = row.get("protocol_message_id") or row["message_id"]
+            entry = entries.get(mid)
+            if entry is None:
+                continue
+            try:
+                raw = json.loads(row.get("raw_json") or "{}")
+            except (TypeError, ValueError):
+                raw = {}
+            if not isinstance(raw, dict):
+                raw = {}
+            if row["direction"] == "outbound":
+                activity = raw.get("clawchat_history_activity")
+                if activity is not None:
+                    if not isinstance(activity, dict) or activity.get("kind") != "answer":
+                        continue
+                else:
+                    message = _object(_object(raw.get("payload")).get("message"))
+                    reply = _object(_object(message.get("context")).get("reply"))
+                    if reply.get("reply_to_msg_id") not in human:
+                        continue
+            elif (raw.get("clawchat_history_control") is True
+                  or _object(raw.get("sender")).get("id") in ("system", self.adapter._clawchat_config.user_id)):
+                continue
+            stamp = original_message_time(raw, row["created_at"])
+            if stamp is not None:
+                result.append(replace(entry, ts=stamp))
+        order = self.store.history_positions("default", inbound.chat_id)
+        return sorted(result, key=lambda entry: order[entry.id])
+
     def position(self, marker, saved=None):
         # An older writer can advance an ID while leaving an additive *_seq
         # field untouched. The immutable ID mapping resolves that mixed-version case.
@@ -306,10 +449,71 @@ class HistoryMaintenance:
         order = self.store.history_positions("default", inbound.chat_id)
         return [e for e in entries if start < order[e.id] <= end]
 
+    def control_input(self, inbound):
+        from clawchat_gateway.adapter import _slash_command_name, _slash_confirm_choice, HERMES_CONFIRM_SLASH_COMMANDS
+        text = inbound.text
+        if inbound.chat_type == "group":
+            text = self.adapter._group_command_text(inbound) or text
+        if _slash_command_name(text) in {"new", "reset", *HERMES_CONFIRM_SLASH_COMMANDS}:
+            return True
+        if self.journal_ready():
+            row = self.held_row(self.key(inbound), self.adapter._inbound_trigger_id(inbound.raw_message))
+            if row and row["payload"].get("control"):
+                return True
+        choice = _slash_confirm_choice(text)
+        host_choices = getattr(self.gateway, "_slash_confirm_text_choices", None)
+        if choice is None and callable(host_choices):
+            choice = host_choices().get(text.strip().lstrip("!/").lower())
+        if choice is None:
+            return False
+        if (inbound.chat_id in self.adapter._non_owner_slash_confirms
+                or inbound.chat_id in self.adapter._owner_group_slash_confirms):
+            return True
+        return self.journal_ready() and self.key(inbound) in self.candidates
+
+    def command_prompted(self, key):
+        if not self.journal_ready():
+            return
+        candidate = self.candidates.get(key)
+        if candidate:
+            self.store.finish_held_batch(self.account, key, {candidate["mid"]})
+            if key in self.drain_waiting:
+                self.wake_drain(key)
+
+    def finish_control(self, inbound):
+        if not self.journal_ready():
+            return
+        key = self.key(inbound)
+        row = self.held_row(key, self.adapter._inbound_trigger_id(inbound.raw_message))
+        if self.control_input(inbound) or (row and row["payload"].get("control")):
+            self.no_reply(inbound)
+
+    def retire_control_replay(self, key, row):
+        if row["state"] != "dispatching":
+            return False
+        from clawchat_gateway.inbound import parse_inbound_message
+        inbound = parse_inbound_message(row["payload"]["frame"], self.adapter._clawchat_config)
+        control = row["payload"].get("control") or (inbound and self.control_input(inbound))
+        if not control and inbound:
+            from clawchat_gateway.adapter import _slash_confirm_choice, _slash_command_name
+            if _slash_confirm_choice(inbound.text) is not None:
+                previous = [item for item in self.store.list_held(
+                    self.account, key, states=("held", "dispatching", "dispatched")) if item["seq"] < row["seq"]]
+                if previous:
+                    last = previous[-1]
+                    prior = parse_inbound_message(last["payload"]["frame"], self.adapter._clawchat_config)
+                    control = last["payload"].get("control") or bool(
+                        prior and _slash_command_name(prior.text) in {"new", "reset"})
+        if not control:
+            return False
+        self.store.finish_held_batch(self.account, key, {row["message_id"]})
+        logger.info("clawchat history control not replayed conv=%s", key)
+        return True
+
     def claim_options(self, inbound):
         if not self.enabled(inbound) or inbound.is_internal_synthetic:
             return {}
-        return {"held_key": self.key(inbound), "held_account_id": self.account, "held_payload": {"frame": inbound.raw_message}}
+        return {"held_key": self.key(inbound), "held_account_id": self.account, "held_payload": {"frame": inbound.raw_message, "control": self.control_input(inbound)}}
 
     def held_row(self, key, mid):
         return next((row for row in self.store.list_held(self.account, key)
@@ -443,6 +647,8 @@ class HistoryMaintenance:
                     attempted.add(mid)
                     row = self.held_row(key, mid)
                     if row is None:
+                        continue
+                    if self.retire_control_replay(key, row):
                         continue
                     if self.recalled_row(key, row):
                         continue
@@ -738,9 +944,13 @@ class HistoryMaintenance:
             # Capture the prior *original* timestamp before this turn; arrivals
             # after the trigger cannot erase an idle interval.
             all_entries = self.entries(inbound)
+            activity = self.activity_entries(inbound)
+            activity_start = next((i for i, e in enumerate(activity) if e.id in ids), len(activity))
+            first_activity = next((e.ts for e in activity if e.id in ids), None)
             first = next((i for i, e in enumerate(all_entries) if e.id in ids), len(all_entries))
-            previous = all_entries[first - 1] if first else None
-            self.turns[self.adapter._inbound_trigger_id(inbound.raw_message)] = (inbound, previous.ts if previous else None)
+            previous = activity[activity_start - 1] if activity_start else None
+            self.turns[self.adapter._inbound_trigger_id(inbound.raw_message)] = (
+                inbound, previous.ts if previous else None, first_activity)
             needs = state.get("inject_next") or not sid or sid != state.get("injected_for")
             if not needs:
                 return ""
@@ -828,7 +1038,7 @@ class HistoryMaintenance:
                 self.adapter._clawchat_config, chat, group).budget_compaction)
         if not self.enabled(turn[0]):
             return False
-        inbound, previous = turn
+        inbound, previous, *started = turn
         key = self.key(inbound)
         state = self.state(key)
         if state.get("retry_after_msgs", 0):
@@ -848,8 +1058,9 @@ class HistoryMaintenance:
                 state = self.queue_pending(inbound, state, "budget")
             elif settings.idle_reset and previous:
                 stamp = _entry_time(previous)
-                current = next((e for e in entries if e.id == mid), None)
-                now = _entry_time(current.ts) if current else datetime.now(timezone.utc)
+                current = next((e for e in self.activity_entries(inbound) if e.id == mid), None)
+                now = _entry_time(started[0]) if started and started[0] else (
+                    _entry_time(current.ts) if current else None)
                 if stamp and now and now - stamp > settings.idle_reset:
                     state = self.queue_pending(inbound, state, "idle")
         if state.get("pending"):

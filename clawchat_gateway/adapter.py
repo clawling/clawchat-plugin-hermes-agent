@@ -1320,6 +1320,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._widget_target_lock = asyncio.Lock()
         self._widget_identity = None
         self._history = None
+        self._history_activity_markers: dict[str, Any] = {}
         self._widget_epoch = 0
         set_clawchat_mention_sender(self)
 
@@ -1404,6 +1405,9 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
 
     async def disconnect(self) -> None:
+        for marker in getattr(self, "_history_activity_markers", {}).values():
+            marker.closed = True
+        getattr(self, "_history_activity_markers", {}).clear()
         if self._history:
             await self._history.close()
             self._history = None
@@ -3982,6 +3986,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         rule that ``/approve`` goes to a blocking dangerous-command approval in
         the same session before the confirm.
         """
+        if self._history:
+            self._history.command_prompted(str(session_key or ""))
         receipt = active_receipt(chat_id)
         if receipt is not None:
             return await self._ask_owner_group_slash_confirm(
@@ -5494,8 +5500,25 @@ class ClawChatAdapter(BasePlatformAdapter):
                     if self._grant_dispatch_started.get(key) == snapshot.nonce:
                         self._grant_dispatch_started.pop(key, None)
                 return
-            await self.handle_message(event)
+            from clawchat_gateway.history_maintenance import activity_turn
+            control = bool(_slash_command_name(inbound.text)) or bool(
+                self._history and self._history.control_input(inbound))
+            with activity_turn(event, inbound, control=control) as activity:
+                nonce = str(getattr(event.source, "message_id", "") or "")
+                if nonce:
+                    if not hasattr(self, "_history_activity_markers"):
+                        self._history_activity_markers = {}
+                    while len(self._history_activity_markers) >= 4096:
+                        expired = self._history_activity_markers.pop(next(iter(self._history_activity_markers)))
+                        expired.closed = True
+                    previous_activity = self._history_activity_markers.get(nonce)
+                    if previous_activity is not None:
+                        previous_activity.closed = True
+                    self._history_activity_markers[nonce] = activity
+                await self.handle_message(event)
             accepted = getattr(event, '_gateway_accepted', None) is not False
+            if self._history:
+                self._history.finish_control(inbound)
             if accepted and self._history and self._history.gateway:
                 self._history.dispatched(event)
             if inbound.grant_origin and not accepted:
@@ -5670,7 +5693,12 @@ class ClawChatAdapter(BasePlatformAdapter):
         return max(1, point - config.sediment_margin_tokens)
 
     async def on_processing_start(self, event: Any) -> None:
+        from clawchat_gateway.history_maintenance import bind_activity, restore_activity
         nonce = str(getattr(getattr(event, "source", None), "message_id", "") or "")
+        activity = getattr(self, "_history_activity_markers", {}).get(nonce)
+        if activity is None and getattr(event, "_clawchat_history_activity", None) is None:
+            activity = restore_activity(self, event)
+        bind_activity(event, activity)
         from clawchat_gateway.turn_attachments import start_processing
         start_processing(nonce, self._account_id(),
                          str(getattr(getattr(event, "source", None), "chat_id", "") or ""))
@@ -5783,9 +5811,15 @@ class ClawChatAdapter(BasePlatformAdapter):
         return trigger
 
     async def on_processing_complete(self, event: Any, outcome: Any) -> None:
+        from clawchat_gateway.history_maintenance import finish_activity
         from clawchat_gateway.turn_grants import release_turn
 
         nonce = str(getattr(getattr(event, "source", None), "message_id", "") or "")
+        activities = getattr(self, "_history_activity_markers", {})
+        activity = getattr(event, "_clawchat_history_activity", None) or activities.get(nonce)
+        finish_activity(event, activity)
+        if activities.get(nonce) is activity:
+            activities.pop(nonce, None)
         release_turn(nonce)
         from clawchat_gateway.turn_attachments import finish_processing
         finish_processing(nonce)
@@ -7457,8 +7491,9 @@ class ClawChatAdapter(BasePlatformAdapter):
             reply_to = self._grant_reply_anchors.get(reply_to) or None
         # Read the caller first: the host frames are only on the stack until
         # the first await.
+        process_sender = self._host_process_sender()
         message_mode = kwargs.pop("_clawchat_message_mode", None) or (
-            MESSAGE_MODE_THINKING if self._host_process_sender() else MESSAGE_MODE_NORMAL
+            MESSAGE_MODE_THINKING if process_sender else MESSAGE_MODE_NORMAL
         )
         content, is_host_redelivery = _strip_host_recovered_marker(content or "")
         from clawchat_gateway.history_maintenance import suppress_reset_output
@@ -7488,6 +7523,10 @@ class ClawChatAdapter(BasePlatformAdapter):
             return SendResult(success=True)
         if self._is_runtime_status_text(content or ""):
             message_mode = MESSAGE_MODE_THINKING
+        from clawchat_gateway.history_maintenance import outbound_activity
+        history_activity = outbound_activity(chat_id, metadata)
+        if process_sender or message_mode != MESSAGE_MODE_NORMAL:
+            history_activity = {"kind": "notice"}
         if self._hold_unlisted_status(
             chat_id, content or "", reply_to, metadata, kwargs,
             message_mode=message_mode, is_explicit_send=is_explicit_send,
@@ -7711,6 +7750,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 message_id=message_id,
                 text=visible_content,
                 raw=frame,
+                history_activity=history_activity,
             )
             claimed: bool | None = True
         else:
@@ -7721,6 +7761,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 message_id=message_id,
                 text=visible_content,
                 raw=frame,
+                history_activity=history_activity,
             )
         if claimed is False:
             return SendResult(success=True, message_id=message_id)
@@ -7745,6 +7786,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 message_id=message_id,
                 text=error,
                 raw=frame,
+                history_activity=history_activity,
             )
             logger.warning(
                 "clawchat send complete reply dropped chat_id=%s message_id=%s",
@@ -7986,6 +8028,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             include_message_id=True,
             context_mentions=context_mentions,
         )
+        from clawchat_gateway.history_maintenance import outbound_activity
         claimed = self._claim_outbound_message(
             event_type="message.reply",
             trace_id=frame.get("trace_id") or frame.get("id"),
@@ -7993,6 +8036,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             message_id=run.message_id,
             text=final_content,
             raw=frame,
+            history_activity=outbound_activity(run.chat_id, run.metadata),
         )
         if claimed is False:
             # The reply under this id already went out: close the stream as
@@ -9494,6 +9538,9 @@ class ClawChatAdapter(BasePlatformAdapter):
         if self._store is None:
             return None
         try:
+            if direction == "inbound" and isinstance(raw, dict):
+                control = bool((history_claim.get("held_payload") or {}).get("control"))
+                raw = dict(raw, clawchat_history_control=control)
             return self._store.claim_message_once(
                 platform="hermes",
                 account_id="default",
@@ -9520,7 +9567,12 @@ class ClawChatAdapter(BasePlatformAdapter):
         message_id: str,
         text: str | None,
         raw: Any,
+        history_activity: dict | None = None,
     ) -> bool | None:
+        from clawchat_gateway.history_maintenance import outbound_activity
+        if isinstance(raw, dict):
+            raw = dict(raw, clawchat_history_activity=(history_activity if history_activity is not None
+                                                     else outbound_activity(chat_id)))
         claimed = self._claim_message_once(
             kind="message",
             direction="outbound",
@@ -9560,10 +9612,15 @@ class ClawChatAdapter(BasePlatformAdapter):
         message_id: str | None,
         text: str | None,
         raw: Any,
+        history_activity: dict | None = None,
     ) -> None:
         if self._store is None or not message_id:
             return
         try:
+            if direction == "outbound" and isinstance(raw, dict):
+                from clawchat_gateway.history_maintenance import outbound_activity
+                raw = dict(raw, clawchat_history_activity=(history_activity if history_activity is not None
+                                                         else outbound_activity(chat_id)))
             self._store.update_message_by_identity(
                 account_id="default",
                 kind=kind,

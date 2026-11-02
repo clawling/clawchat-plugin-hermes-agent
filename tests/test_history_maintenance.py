@@ -1427,3 +1427,236 @@ async def test_recall_still_blocks_handoff_if_capabilities_fail_during_preparati
     monkeypatch.setattr(rig.a, '_compose_channel_prompt_parts', lambda *a, **k: [])
     await rig.a._handle_inbound_now(msg)
     assert not events and not rig.m.held_row(key, 'withdrawn-on-fallback')
+
+
+@pytest.mark.parametrize('confirmation', ['/approve', 'approve once'])
+async def test_owner_button_reset_is_received_once_before_renewed_and_next_input(rig, monkeypatch, confirmation):
+    ledger(rig, count=2, text='agreed appointment')
+    command = inbound('owner-reset', '/new')
+    claim(rig, command)
+    key = initialize(rig, command)
+    for row in rig.m.store.list_held(rig.m.account, key):
+        if row['message_id'] != 'owner-reset':
+            rig.m.store.finish_held_batch(rig.m.account, key, {row['message_id']})
+    received, prompts = [], []
+    async def dispatch(msg): await rig.a._handle_inbound_now(msg)
+    async def handle(ev):
+        received.append(ev.text)
+        if ev.text == '/new':
+            # Button-capable owner path consumes the command without an admission receipt.
+            ev._gateway_accepted = False
+            result = await rig.a.send_slash_confirm(command.chat_id, '/new', 'Confirm /new',
+                                                   key, 'example-confirmation')
+            prompts.append(result)
+        elif ev.text == confirmation:
+            ev._gateway_accepted = False
+            rig.host.persist(key, 'owner-new')
+            rig.m.observe_reset('old-session', 'owner-new', None)
+        else:
+            assert 'meet at 10' in ev.channel_context
+    monkeypatch.setattr(rig.a, '_continue_claimed_inbound', dispatch)
+    monkeypatch.setattr(rig.a, 'handle_message', handle)
+    monkeypatch.setattr(rig.a, '_is_non_owner_direct_chat', lambda *a, **k: False)
+    monkeypatch.setattr(rig.a, '_compose_channel_prompt_parts', lambda *a, **k: [])
+    await rig.m.continue_claimed(command)
+    assert not rig.m.held_row(key, 'owner-reset')
+    approved = inbound('owner-confirmation', confirmation)
+    assert rig.a._claim_message_once(kind='message', direction='inbound', event_type='message.send',
+        trace_id=None, chat_id=approved.chat_id, message_id='owner-confirmation', text=approved.text,
+        raw=approved.raw_message, **rig.m.claim_options(approved))
+    await rig.m.continue_claimed(approved)
+    assert not rig.m.held_row(key, 'owner-confirmation')
+    next_input = inbound('after-owner-reset', 'next question')
+    claim(rig, next_input)
+    await rig.m.continue_claimed(next_input)
+    await rig.m.recover()
+    assert received == ['/new', confirmation, 'next question']
+    assert len(prompts) == 1 and len(rig.llm.calls) == 1
+    assert rig.m.state(key)['pending'] is None
+
+
+@pytest.mark.parametrize('text', ['/new', '/reset', '/approve', '/cancel'])
+async def test_legacy_dispatching_reset_controls_are_never_replayed(rig, text):
+    message = inbound('legacy-control', text)
+    claim(rig, message)
+    key = initialize(rig, message)
+    # Simulate journal payloads written before the control marker existed.
+    rig.m.store.update_held_payload(rig.m.account, key, 'legacy-control', {'control': False})
+    rig.m.store.mark_held_state(rig.m.account, key, 'legacy-control', 'held', 'dispatching')
+    await rig.m.recover()
+    assert not rig.calls and not rig.m.held_row(key, 'legacy-control')
+
+
+async def test_legacy_plain_reset_confirmation_is_not_replayed_after_candidate_is_gone(rig):
+    command, approval = inbound('legacy-reset', '/new'), inbound('legacy-confirm', 'approve once')
+    key = initialize(rig, command)
+    for message in (command, approval):
+        claim(rig, message)
+        mid = rig.a._inbound_trigger_id(message.raw_message)
+        rig.m.store.update_held_payload(rig.m.account, key, mid, {'control': False})
+        rig.m.store.mark_held_state(rig.m.account, key, mid, 'held', 'dispatching')
+    await rig.m.recover()
+    assert not rig.calls and not rig.m.store.list_held(rig.m.account, key)
+
+
+async def test_plugin_resolved_confirmation_finishes_original_reset_journal(rig, monkeypatch):
+    command = inbound('friend-reset', '/reset', sender='usr_guest')
+    claim(rig, command)
+    key = initialize(rig, command)
+    await rig.m.before(command)
+    sent = []
+    async def send(*args, **kwargs):
+        sent.append(args)
+        return NS(success=True)
+    monkeypatch.setattr(rig.a, '_is_non_owner_direct_chat', lambda *a, **k: True)
+    monkeypatch.setattr(rig.a, 'send', send)
+    await rig.a.send_slash_confirm(command.chat_id, '/reset', 'Confirm /reset', key, 'example-confirmation')
+    assert sent and not rig.m.held_row(key, 'friend-reset')
+    # Resolving the plugin's pending confirmation does not resurrect the command.
+    rig.host.persist(key, 'friend-new')
+    rig.m.observe_reset('old-session', 'friend-new', None)
+    await rig.m.release(key)
+    assert not rig.calls
+
+
+async def test_shutdown_notification_does_not_reset_idle_clock_or_change_wire_frame(rig, monkeypatch):
+    ledger(rig, count=2, text='old agreement')
+    message = inbound('idle-question')
+    key = initialize(rig, message)
+    rig.a._clawchat_config = replace(rig.a._clawchat_config, idle_reset_dm=timedelta(hours=1))
+    frames = []
+    async def ack(frame, **kwargs):
+        frames.append(frame)
+        return True
+    monkeypatch.setattr(rig.a._connection, 'send_frame', ack)
+    # The host supplies the interim marker even when a real turn is still active.
+    context = inbound('active-input')
+    with hm.activity_turn(event(rig, context), context):
+        result = await rig.a.send(message.chat_id, 'Hermes is shutting down',
+                                  metadata={'chat_type': 'direct', '_interim_send': True, 'notify': True})
+    assert result.success
+    rows = rig.m.store.list_chat_history_messages('default', message.chat_id)
+    notice = next(row for row in rows if row['direction'] == 'outbound')
+    assert json.loads(notice['raw_json'])['clawchat_history_activity']['kind'] == 'notice'
+    assert all('clawchat_history_activity' not in frame for frame in frames)
+    claim(rig, message)
+    await rig.m.before(message)
+    assert rig.m.turns['idle-question'][1] == rig.m.entries(message)[1].ts
+    assert rig.m.after_turn(event(rig, message))
+    assert rig.m.state(key)['pending']['why'] == 'idle'
+    await rig.m.tasks[key]
+
+
+async def test_real_agent_answer_counts_as_activity_across_restored_host_event(rig, monkeypatch):
+    previous = ledger(rig, count=2, text='old agreement')
+    message = inbound('new-question')
+    key = initialize(rig, message)
+    rig.a._clawchat_config = replace(rig.a._clawchat_config, idle_reset_dm=timedelta(hours=1))
+    source = event(rig, previous[-1])
+    with hm.activity_turn(source, previous[-1]) as marker:
+        pass
+    # Host admission restores a different event object in a different task context.
+    restored = event(rig, previous[-1])
+    hm.bind_activity(restored, marker)
+    frame = {'emitted_at': int((datetime.now(timezone.utc) - timedelta(minutes=30)).timestamp() * 1000),
+             'payload': {'message_mode': 'normal'}}
+    try:
+        assert rig.a._claim_outbound_message(event_type='message.reply', trace_id=None,
+            chat_id=message.chat_id, message_id='genuine-answer', text='answer', raw=frame)
+    finally:
+        hm.finish_activity(restored)
+    assert hm.outbound_activity(message.chat_id)['kind'] == 'notice'
+    claim(rig, message)
+    await rig.m.before(message)
+    activity = rig.m.activity_entries(message)
+    assert 'genuine-answer' in {entry.id for entry in activity}
+    assert rig.m.turns['new-question'][1] == next(e.ts for e in activity if e.id == 'genuine-answer')
+    assert rig.m.after_turn(event(rig, message))
+    assert rig.m.state(key)['pending'] is None
+
+
+@pytest.mark.parametrize('field', ['emitted_at', 'timestamp'])
+@pytest.mark.parametrize('gap_hours, idle', [(2, True), (.5, False)])
+async def test_offline_replay_uses_original_frame_times_for_idle(rig, field, gap_hours, idle):
+    now = datetime.now(timezone.utc)
+    previous_at = now - timedelta(hours=4)
+    current_at = previous_at + timedelta(hours=gap_hours)
+    for mid in ('earlier-one', 'earlier-two'):
+        prior = inbound(mid, 'agreement')
+        prior.raw_message.pop('emitted_at', None)
+        prior.raw_message[field] = int(previous_at.timestamp() * 1000)
+        claim(rig, prior)
+    message = inbound('offline-message')
+    message.raw_message.pop('emitted_at', None)
+    message.raw_message[field] = int(current_at.timestamp() * 1000)
+    claim(rig, message)  # Ingested now, long after both original timestamps.
+    key = initialize(rig, message)
+    rig.a._clawchat_config = replace(rig.a._clawchat_config, idle_reset_dm=timedelta(hours=1))
+    await rig.m.before(message)
+    started = rig.m.turns['offline-message'][2]
+    assert hm._entry_time(started) == current_at.replace(microsecond=(current_at.microsecond // 1000) * 1000)
+    assert rig.m.after_turn(event(rig, message))
+    pending = rig.m.state(key)['pending']
+    assert bool(pending) is idle
+    if idle:
+        assert pending['why'] == 'idle'
+        await rig.m.tasks[key]
+
+
+async def test_command_receipts_and_control_confirmations_do_not_count_as_idle_activity(rig):
+    command = inbound('clock-reset', '/new')
+    key = initialize(rig, command)
+    claim(rig, command)
+    await rig.m.before(command)
+    confirmation = inbound('clock-confirm', 'approve once')
+    assert rig.a._claim_message_once(kind='message', direction='inbound', event_type='message.send',
+        trace_id=None, chat_id=confirmation.chat_id, message_id='clock-confirm', text=confirmation.text,
+        raw=confirmation.raw_message, **rig.m.claim_options(confirmation))
+    with hm.activity_turn(event(rig, command), command, control=True):
+        assert rig.a._claim_outbound_message(event_type='message.reply', trace_id=None,
+            chat_id=command.chat_id, message_id='reset-receipt', text='Session reset', raw={})
+    assert rig.m.activity_entries(command) == []
+    assert rig.m.state(key)['boundary'] is None
+
+
+def test_activity_timestamp_prefers_frame_fields_before_ingest_fallback():
+    received = 1800000000000
+    original = 1700000000000
+    assert hm.original_message_time({'emitted_at': original, 'timestamp': received}, received) == \
+        hm.original_message_time({'timestamp': original}, received)
+    assert hm.original_message_time({}, received) == hm.original_message_time({'timestamp': received}, original)
+
+
+async def test_answer_activity_survives_host_event_restore_in_fresh_context(rig, monkeypatch):
+    import contextvars
+    message = inbound('restored-answer-input')
+    claim(rig, message)
+    initialize(rig, message)
+    async def handle(ev):
+        restored = NS(source=ev.source, text=ev.text, message_id=ev.message_id, raw_message=ev.raw_message)
+        async def process():
+            await rig.a.on_processing_start(restored)
+            assert hm.outbound_activity(message.chat_id)['kind'] == 'answer'
+            assert rig.a._claim_outbound_message(event_type='message.reply', trace_id=None,
+                chat_id=message.chat_id, message_id='restored-answer', text='answer', raw={})
+            await rig.a.on_processing_complete(restored, NS(name='SUCCESS'))
+            assert hm.outbound_activity(message.chat_id)['kind'] == 'notice'
+        await asyncio.create_task(process(), context=contextvars.Context())
+    monkeypatch.setattr(rig.a, 'handle_message', handle)
+    monkeypatch.setattr(rig.a, '_compose_channel_prompt_parts', lambda *a, **k: [])
+    await rig.a._handle_inbound_now(message)
+    assert 'restored-answer' in {entry.id for entry in rig.m.activity_entries(message)}
+
+
+async def test_host_resumed_real_answer_recovers_activity_from_human_ledger_input(rig):
+    message = inbound('resumed-answer-input')
+    claim(rig, message)
+    initialize(rig, message)
+    ev = event(rig, message)
+    assert not rig.a._history_activity_markers
+    await rig.a.on_processing_start(ev)
+    try:
+        assert hm.outbound_activity(message.chat_id)['kind'] == 'answer'
+    finally:
+        await rig.a.on_processing_complete(ev, NS(name='SUCCESS'))
+    assert hm.outbound_activity(message.chat_id)['kind'] == 'notice'

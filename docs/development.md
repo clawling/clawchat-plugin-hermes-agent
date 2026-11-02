@@ -140,6 +140,27 @@ Pending JSON records `why`, fixed `cut_id`, `boundary`, target `host_session`,
 block advances state with CAS; CAS loss discards late results. Non-renewed passes
 process at most three blocks. Confirmed user renewal folds the entire interval
 before the next dispatch, bounded by five minutes. Retry counters survive restart.
+Reset/control journal payloads add `control: true`. Prompt rendering proves
+that the host has received the original command; a normally returned command
+handler also retires it even if `_gateway_accepted` remains false. Recovery
+retires uncertain dispatching resets and confirmations instead of sending them
+again, and recognizes ID-only legacy controls by their frame (or the preceding
+reset for a plain confirmation). A never-attempted held control can have its
+first handoff. Ordinary message recovery remains unchanged.
+
+Idle clocks use `activity_entries`, separately from the summary interval.
+Inbound `clawchat_history_control` and outbound `clawchat_history_activity`
+are local ledger metadata, never wire fields. Answer provenance follows the
+plugin-owned source nonce through host task creation and restored event objects;
+work resumed after restart can recover provenance from its human ledger input.
+Interim/process notices, synthetic rounds and command receipts are excluded.
+Completion closes the marker so late background notices cannot advance activity.
+Old outbound rows count only with a reply anchor to a real conversational input;
+untagged, unanchored notices cannot reset idle. Timing prefers valid original
+`emitted_at`, then `timestamp`, then ledger `created_at`, capturing both previous
+activity and the current batch's first input before the answer. Older versions
+ignore these additive metadata fields.
+
 First-request confirmation is correlated by source nonce and works without usage;
 `open_context` is set only when prompt tokens are available. `open_history`
 counts both injected recent originals and the complete triggering input batch,
