@@ -145,7 +145,9 @@ that the host has received the original command; a normally returned command
 handler also retires it even if `_gateway_accepted` remains false. Recovery
 retires uncertain dispatching resets and confirmations instead of sending them
 again, and recognizes ID-only legacy controls by their frame (or the preceding
-reset for a plain confirmation). A never-attempted held control can have its
+reset for a plain confirmation). That inference applies only when the payload
+has no `control` marker; explicit `control: false` preserves ordinary input even
+when its text resembles confirmation. A never-attempted held control can have its
 first handoff. Ordinary message recovery remains unchanged.
 
 Idle clocks use `activity_entries`, separately from the summary interval.
@@ -165,8 +167,11 @@ First-request confirmation is correlated by source nonce and works without usage
 `open_context` is set only when prompt tokens are available. `open_history`
 counts both injected recent originals and the complete triggering input batch,
 with each message counted once; snapshot replay and direct binding use the same
-baseline. Journal helpers are no-ops when required host capabilities are absent,
-so ordinary delivery retains the legacy path. Summary files live
+baseline. Journal helpers require storage and host routing capabilities, separately
+from budget maintenance availability. Missing routing keeps them as no-ops;
+loss of summary capability still drains previously accepted inputs in order through
+ordinary authorization and delivery. New inputs then use the legacy path without
+new journal claims. Summary files live
 under the ledger's data directory in `summaries/<profile>/<account>/<escaped-key>`
 (the default profile omits its prefix). They are outside agent memory/workspace.
 Maintenance logs record no message bodies or raw exceptions.

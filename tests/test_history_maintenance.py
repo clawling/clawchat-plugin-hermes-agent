@@ -121,11 +121,14 @@ def inbound(mid='trigger', text='question', chat='cnv_test', sender='usr_owner',
                           sender_name='Owner', text=text, raw_message=frame, emitted_at=ts)
 
 
-def claim(rig, message):
+def claim(rig, message, *, legacy=False):
     m = rig.m
+    options = m.claim_options(message)
+    if legacy:
+        options['held_payload'].pop('control')
     return m.store.claim_message_once(platform='hermes', account_id='default', kind='message', direction='inbound',
         event_type='message.send', chat_id=message.chat_id, message_id=message.raw_message['payload']['message_id'],
-        text=message.text, raw=message.raw_message, **m.claim_options(message))
+        text=message.text, raw=message.raw_message, **options)
 
 
 def ledger(rig, count=5, text='中' * 5000, sender='usr_owner'):
@@ -263,6 +266,64 @@ async def test_summary_failure_no_notes_no_reset_backoff(rig, monkeypatch, failu
         assert state['failures'] == 1 and state['retry_after_msgs'] == 1
     else:
         assert not rig.m.available
+
+
+async def test_summary_permission_failure_drains_held_inputs_before_ordinary_delivery(rig):
+    ledger(rig)
+    answered = inbound('answered')
+    claim(rig, answered)
+    key = initialize(rig, answered)
+    for row in rig.m.store.list_held(rig.m.account, key):
+        rig.m.store.finish_held_batch(rig.m.account, key, {row['message_id']})
+    rig.m.queue_pending(answered, rig.m.state(key), 'budget')
+    rig.llm.wait = asyncio.Event()
+    rig.llm.error = PermissionError('placeholder-denied')
+    task = asyncio.create_task(rig.m.start(answered))
+    async with asyncio.timeout(5):
+        while not rig.llm.calls:
+            await asyncio.sleep(.001)
+    for mid in ('held-first', 'held-second'):
+        message = inbound(mid)
+        claim(rig, message)
+        await rig.m.continue_claimed(message)
+        assert rig.m.held_row(key, mid)['state'] == 'held'
+    assert not rig.calls
+    rig.llm.wait.set()
+    await task
+    assert not rig.m.available and not rig.m.enabled(answered)
+    assert rig.m.journal_ready()
+    assert rig.calls == ['held-first', 'held-second']
+    assert not rig.m.store.list_held(rig.m.account, key)
+    assert not rig.host.reset_calls and not rig.m.state(key)['summary_ref']
+    later = inbound('ordinary-after-downgrade')
+    assert rig.m.claim_options(later) == {}
+    claim(rig, later)
+    assert rig.m.held_row(key, 'ordinary-after-downgrade') is None
+    assert await rig.m.before(later) == ''
+    await rig.m.continue_claimed(later)
+    assert rig.calls == ['held-first', 'held-second', 'ordinary-after-downgrade']
+    await rig.m.recover()
+    assert len(rig.llm.calls) == 1 and not rig.m.tasks
+
+
+@pytest.mark.parametrize('disabled', ['runtime', 'missing-llm'])
+async def test_recovery_drains_journal_without_summary_capability(rig, disabled):
+    first, second = inbound('recover-first'), inbound('recover-second')
+    key = initialize(rig, first)
+    claim(rig, first)
+    claim(rig, second)
+    rig.m.store.mark_held_state(rig.m.account, key, 'recover-second', 'held', 'dispatching')
+    rig.m.queue_pending(first, rig.m.state(key), 'budget')
+    if disabled == 'runtime':
+        rig.m.available = False
+    else:
+        rig.m.llm = None
+        rig.m.connect()
+    assert not rig.m.enabled(first) and rig.m.journal_ready()
+    await rig.m.recover()
+    assert rig.calls == ['recover-first', 'recover-second']
+    assert not rig.m.store.list_held(rig.m.account, key)
+    assert not rig.m.tasks and not rig.llm.calls and not rig.host.reset_calls
 
 
 async def test_pending_cut_fixed_backoff_persists_restart(rig):
@@ -1478,10 +1539,10 @@ async def test_owner_button_reset_is_received_once_before_renewed_and_next_input
 @pytest.mark.parametrize('text', ['/new', '/reset', '/approve', '/cancel'])
 async def test_legacy_dispatching_reset_controls_are_never_replayed(rig, text):
     message = inbound('legacy-control', text)
-    claim(rig, message)
+    claim(rig, message, legacy=True)
     key = initialize(rig, message)
     # Simulate journal payloads written before the control marker existed.
-    rig.m.store.update_held_payload(rig.m.account, key, 'legacy-control', {'control': False})
+    assert 'control' not in rig.m.held_row(key, 'legacy-control')['payload']
     rig.m.store.mark_held_state(rig.m.account, key, 'legacy-control', 'held', 'dispatching')
     await rig.m.recover()
     assert not rig.calls and not rig.m.held_row(key, 'legacy-control')
@@ -1491,12 +1552,41 @@ async def test_legacy_plain_reset_confirmation_is_not_replayed_after_candidate_i
     command, approval = inbound('legacy-reset', '/new'), inbound('legacy-confirm', 'approve once')
     key = initialize(rig, command)
     for message in (command, approval):
-        claim(rig, message)
+        claim(rig, message, legacy=True)
         mid = rig.a._inbound_trigger_id(message.raw_message)
-        rig.m.store.update_held_payload(rig.m.account, key, mid, {'control': False})
+        assert 'control' not in rig.m.held_row(key, mid)['payload']
         rig.m.store.mark_held_state(rig.m.account, key, mid, 'held', 'dispatching')
     await rig.m.recover()
     assert not rig.calls and not rig.m.store.list_held(rig.m.account, key)
+
+
+async def test_recovery_retires_explicit_control_without_pending_candidate(rig):
+    approval = inbound('confirmed-control', 'once')
+    key = initialize(rig, approval)
+    claim(rig, approval)
+    rig.m.store.update_held_payload(rig.m.account, key, 'confirmed-control', {'control': True})
+    rig.m.store.mark_held_state(rig.m.account, key, 'confirmed-control', 'held', 'dispatching')
+    await rig.m.recover()
+    assert not rig.calls and not rig.m.store.list_held(rig.m.account, key)
+
+
+@pytest.mark.parametrize('text', ['no', 'once', 'approve once'])
+@pytest.mark.parametrize('pending_confirmation', [False, True])
+async def test_recovery_preserves_explicit_non_control_after_reset(rig, text, pending_confirmation):
+    command = inbound('finished-reset', '/new')
+    key = initialize(rig, command)
+    claim(rig, command)
+    rig.m.store.finish_held_batch(rig.m.account, key, {'finished-reset'})
+    message = inbound('ordinary-confirmation-shaped', text)
+    claim(rig, message)
+    assert rig.m.held_row(key, 'ordinary-confirmation-shaped')['payload']['control'] is False
+    rig.m.store.mark_held_state(rig.m.account, key, 'ordinary-confirmation-shaped', 'held', 'dispatching')
+    if pending_confirmation:
+        rig.m.candidates[key] = {'inbound': command, 'mid': 'finished-reset', 'old': 'old-session'}
+    assert not rig.m.control_input(message)
+    await rig.m.recover()
+    assert rig.calls == ['ordinary-confirmation-shaped']
+    assert not rig.m.store.list_held(rig.m.account, key)
 
 
 async def test_plugin_resolved_confirmation_finishes_original_reset_journal(rig, monkeypatch):

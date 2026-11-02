@@ -66,7 +66,9 @@ replays held or uncertain dispatching input through ordinary authorization and
 routing. Recall tombstones are checked before replay and after asynchronous
 preparation; withdrawn journal entries finish without reaching the host. Saved
 batches containing a withdrawn member are rebuilt from surviving frames.
-Adapter-consumed replies, including skill-update consent, finish their journal
+Losing summary capability disables budget maintenance and new journal claims,
+but existing journal entries still drain in order while storage and routing remain
+available. Adapter-consumed replies, including skill-update consent, finish their journal
 entries too; queued inputs remain pending. Only confirmed final delivery or an explicit successful no-reply terminal
 can suppress uncertain replay. Pending, failed and process outputs cannot.
 Host deduplication is session scoped; an uncertain retry across rotation may
@@ -102,6 +104,8 @@ retires their journal entries, including owner button flows that do not set the
 ordinary admission receipt. A control input still held before its first handoff
 can be delivered once, but uncertain `dispatching` controls are never retried;
 legacy journal entries are retired instead of reopening the confirmation prompt.
+Legacy inference applies only when the control marker is absent; explicit
+`control: false` keeps confirmation-shaped ordinary replies eligible for replay.
 If a reset's outcome is uncertain after a restart, the user must issue it again.
 This policy does not bypass the host's confirmation gate or confirm a reset
 before its persistent route changes.

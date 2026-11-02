@@ -273,13 +273,15 @@ class HistoryMaintenance:
             missing.append("gateway_runner")
         if not reset_signature_supported(getattr(self.gateway, "_handle_reset_command", None)):
             missing.append("async _handle_reset_command(event)")
+        self.read_route = None
         try:
             host_store = self.gateway.session_store
-            self.read_route = routing_reader(host_store)
+            read_route = routing_reader(host_store)
             if not callable(getattr(host_store, "peek_session_id", None)):
                 raise ValueError
             if not callable(getattr(self.gateway, "_session_key_for_source", None)):
                 raise ValueError
+            self.read_route = read_route
         except Exception:
             missing.append("canonical key / persistent routing")
         if not callable(getattr(self.gateway, "_is_session_running", None)):
@@ -315,11 +317,15 @@ class HistoryMaintenance:
                                    "disable them or upgrade to 0.21.1+ for answer-before-idle-maintenance")
 
     def enabled(self, inbound):
-        return bool(self.journal_ready() and self.account and self.settings(inbound).budget_compaction)
+        return bool(self.available and self.journal_ready() and self.account
+                    and self.settings(inbound).budget_compaction)
 
     def journal_ready(self):
-        return bool(self.available and not self.closed and self.store is not None
+        """Accepted inputs must drain even after summary capability is disabled."""
+        return bool(not self.closed and self.store is not None
                     and self.account == self.adapter._account_id()
+                    and callable(self.read_route)
+                    and callable(getattr(getattr(self.gateway, "session_store", None), "peek_session_id", None))
                     and callable(getattr(self.gateway, "_session_key_for_source", None)))
 
     def settings(self, inbound):
@@ -458,8 +464,8 @@ class HistoryMaintenance:
             return True
         if self.journal_ready():
             row = self.held_row(self.key(inbound), self.adapter._inbound_trigger_id(inbound.raw_message))
-            if row and row["payload"].get("control"):
-                return True
+            if row and "control" in row["payload"]:
+                return row["payload"]["control"] is True
         choice = _slash_confirm_choice(text)
         host_choices = getattr(self.gateway, "_slash_confirm_text_choices", None)
         if choice is None and callable(host_choices):
@@ -491,9 +497,12 @@ class HistoryMaintenance:
     def retire_control_replay(self, key, row):
         if row["state"] != "dispatching":
             return False
+        payload = row["payload"]
+        if "control" in payload and payload["control"] is not True:
+            return False
         from clawchat_gateway.inbound import parse_inbound_message
-        inbound = parse_inbound_message(row["payload"]["frame"], self.adapter._clawchat_config)
-        control = row["payload"].get("control") or (inbound and self.control_input(inbound))
+        inbound = parse_inbound_message(payload["frame"], self.adapter._clawchat_config)
+        control = payload.get("control") is True or (inbound and self.control_input(inbound))
         if not control and inbound:
             from clawchat_gateway.adapter import _slash_confirm_choice, _slash_command_name
             if _slash_confirm_choice(inbound.text) is not None:
@@ -502,8 +511,9 @@ class HistoryMaintenance:
                 if previous:
                     last = previous[-1]
                     prior = parse_inbound_message(last["payload"]["frame"], self.adapter._clawchat_config)
-                    control = last["payload"].get("control") or bool(
-                        prior and _slash_command_name(prior.text) in {"new", "reset"})
+                    control = last["payload"].get("control") is True or bool(
+                        "control" not in last["payload"] and prior
+                        and _slash_command_name(prior.text) in {"new", "reset"})
         if not control:
             return False
         self.store.finish_held_batch(self.account, key, {row["message_id"]})
