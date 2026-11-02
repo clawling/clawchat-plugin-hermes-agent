@@ -228,11 +228,75 @@ def test_status_compression_snapshot(status_profile, capsys):
         ),
         "sediment_margin_tokens": 10000,
         "sediment_point_tokens": 140000,
+        "history_budget_dm": 25000,
+        "history_budget_group": 15000,
+        "budget_compaction": "on",
+        "budget_role": (
+            "ClawChat conversations compact at the history budget; "
+            "threshold_tokens is the backstop only"
+        ),
         "notes": [],
     }
     assert actual == expected
     assert list(actual) == list(expected)
     assert captured.err == ""
+
+
+@pytest.mark.parametrize("extra", [None, {}, {
+    "history-budget-dm": "invalid", "history-budget-group": True,
+    "budget-compaction": "invalid",
+}])
+def test_status_history_budget_defaults(status_profile, monkeypatch, capsys, extra):
+    from clawchat_cli import main
+
+    monkeypatch.setattr(config, "operator_clawchat_extra", lambda: extra)
+    assert main(["status"]) == 0
+    result = json.loads(capsys.readouterr().out)["compression"]
+    assert result["history_budget_dm"] == 25000
+    assert result["history_budget_group"] == 15000
+    assert result["budget_compaction"] == "on"
+    assert result["budget_role"] == (
+        "ClawChat conversations compact at the history budget; "
+        "threshold_tokens is the backstop only"
+    )
+
+
+@pytest.mark.parametrize("dm,group,expected", [
+    ("35000", 22000, (35000, 22000)),
+    (1, 300000, (5000, 200000)),
+])
+def test_status_history_budget_account_overrides(status_profile, monkeypatch, capsys, dm, group, expected):
+    from clawchat_cli import main
+
+    extra = {
+        "history-budget-dm": dm, "history-budget-group": group,
+        "groups": {"*": {"history-budget-group": 8000, "budget-compaction": "off"},
+                   "example-group": {"history-budget-group": 9000}},
+        "chats": {"example-dm": {"history-budget-dm": 7000, "budget-compaction": "off"}},
+    }
+    original = deepcopy(extra)
+    monkeypatch.setattr(config, "operator_clawchat_extra", lambda: extra)
+    assert main(["status"]) == 0
+    result = json.loads(capsys.readouterr().out)["compression"]
+    assert (result["history_budget_dm"], result["history_budget_group"]) == expected
+    assert result["budget_compaction"] == "on"
+    assert extra == original
+
+
+@pytest.mark.parametrize("value", ["off", False])
+def test_status_history_budget_compaction_off(status_profile, monkeypatch, capsys, value):
+    from clawchat_cli import main
+
+    monkeypatch.setattr(config, "operator_clawchat_extra", lambda: {
+        "budget-compaction": value,
+        "chats": {"example-dm": {"budget-compaction": "on"}},
+    })
+    assert main(["status"]) == 0
+    result = json.loads(capsys.readouterr().out)["compression"]
+    assert result["budget_compaction"] == "off"
+    assert result["history_budget_dm"] == 25000
+    assert result["history_budget_group"] == 15000
+    assert result["budget_role"] == describe_compression({}, {}, host_version=None)["budget_role"]
 
 
 @pytest.mark.parametrize("extra,notes", [({}, []), ({"session-cap-tokens": 150000}, []),

@@ -309,6 +309,10 @@ adapter with the configuration on disk.
 | `ratio_applies` | Explanation of the model-dependent ratio limit |
 | `sediment_margin_tokens` | Plugin margin after defaulting and clamping (2000–50000) |
 | `sediment_point_tokens` | `max(1, threshold_tokens - sediment_margin_tokens)`, an upper bound; the model's ratio limit can trigger sediment earlier |
+| `history_budget_dm` | Account-level DM history budget after defaulting (25000) and clamping (5000–200000); excludes `chats.<id>` overrides |
+| `history_budget_group` | Account-level group history budget after defaulting (15000) and clamping (5000–200000); excludes `groups.*` and `groups.<id>` overrides |
+| `budget_compaction` | Account-level `budget-compaction` configuration as `on` / `off` (default `on`); excludes conversation overrides and does not probe runtime capabilities |
+| `budget_role` | Fixed explanation: "ClawChat conversations compact at the history budget; threshold_tokens is the backstop only" |
 | `notes` | Override, invalid-host-key and disabled-compression explanations; empty when none apply |
 
 An override note appears only when the plugin cap was explicitly set and differs
