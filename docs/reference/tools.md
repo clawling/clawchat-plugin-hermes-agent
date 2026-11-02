@@ -261,12 +261,13 @@ ambiguous identity errors. Exclude recalls, failed sends, non-messages and
 snapshot trigger/batch ids.
 Legacy calls use available ids/unique batches.
 
-Inclusive ISO/local dates; date-only `to` covers the day. Frame time wins; invalid
-times use insertion time on reads, rank last in search and never match ranges.
+Inclusive ISO/local dates; date-only `to` covers the day. Invalid frame times
+display `[invalid time]`; reads still order by insertion time, search ranks them
+last and excludes them from ranges.
 
-Before matching/truncation, body/names/query echoes use URL then credential
-redaction (`_redact_history_text` / `_CREDENTIAL_KEYS` in `clawchat_gateway/chat_history.py`).
-URLs keep origin/path or `[redacted URL]`; inbound URLs are replaced first.
+Before matching/truncation, body/names/query echoes strip userinfo (quotes
+included) before URL matching, then redact URLs/credentials
+(`_redact_history_text`). Errors fail closed; inbound URLs are replaced first.
 Keyed/quoted values, Bearer/Basic and JWT follow the reference. Basic allows
 any-case/length except lowercase prose. Ambiguity/deep/unterminated quotes or
 failure yield `[redacted]`. Removed values cannot match; ledger data is unchanged.

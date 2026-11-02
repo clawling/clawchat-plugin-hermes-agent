@@ -951,3 +951,51 @@ def test_large_query_still_shows_large_matching_entry(ledger):
     assert ids(output) == ["large"]
     assert 'showing 1, best match first.' in output
     assert history._length(output) <= 12000
+
+
+@pytest.mark.parametrize("scheme", ["https", "long" + "scheme" * 8])
+@pytest.mark.parametrize("delimiter", ["'", '"', "!$&()*+,;=:", "@"])
+def test_userinfo_is_removed_before_url_matching(ledger, scheme, delimiter):
+    h = ledger
+    redacted_probe = "HISTORY_USERINFO_PROBE"
+    source = f"{scheme}://sample:x{delimiter}{redacted_probe}@EXAMPLE.com/report.pdf?query=placeholder#placeholder"  # redact-allow:email
+    h.add("body", body="needle " + source)
+    h.add("metadata", "2026-10-02", "needle", raw_extra={
+        "sender": {"id": "usr_ada", "nick_name": "Ada " + source},
+        "payload": {"message": {"body": {"fragments": [{"kind": "file", "name": source}]}}},
+    })
+    h.add("outbound", "2026-10-03", "needle", {"direction": "outbound"}, {"attachmentNames": [source]})
+    for output in (h.read(), h.search(query="needle"), h.search(query=source + "\nneedle")):
+        assert redacted_probe not in output
+        assert "sample" not in output
+        assert "query=placeholder" not in output and "#placeholder" not in output
+        assert ids(output)
+    assert ids(h.search(query=redacted_probe)) == []
+    assert ids(h.search(speaker=redacted_probe)) == []
+    assert redacted_probe not in h.search(query=source)
+    assert redacted_probe in h.store.list_chat_history_messages("default", "cnv_a")[0]["text"]
+    if scheme == "https":
+        assert "https://example.com/report.pdf" in h.read()
+
+
+@pytest.mark.parametrize("field", ["emitted_at", "timestamp"])
+@pytest.mark.parametrize("invalid_time", [
+    "Bearer OBVIOUS_HISTORY_TIME_PROBE",  # redact-allow:bearer-literal
+    "eyJHistoryTimePlaceholder.cGF5bG9hZA.c2lnbmF0dXJl",  # redact-allow:bearer-literal
+])
+def test_invalid_stored_times_never_reach_read_or_search_headers(ledger, field, invalid_time):
+    h = ledger
+    h.add("valid", "2026-10-01T00:00:00Z", "needle")
+    h.add("invalid", body="needle", extra={"raw": {
+        field: invalid_time, "sender": {"id": "usr_ada", "nick_name": "Ada"},
+    }})
+    for output in (h.read(), h.search(query="needle")):
+        assert "[invalid time] Ada (id invalid): needle" in output
+        assert invalid_time not in output
+        assert "OBVIOUS_HISTORY_TIME_PROBE" not in output
+        assert "eyJHistoryTimePlaceholder" not in output
+        assert ids(output) == ["valid", "invalid"]
+    assert ids(h.read(**{"from": "2026-09-01"})) == ["valid"]
+    assert ids(h.search(query="needle", **{"from": "2026-09-01"})) == ["valid"]
+    assert ids(h.search(query="OBVIOUS_HISTORY_TIME_PROBE")) == []
+    assert invalid_time in h.store.list_chat_history_messages("default", "cnv_a")[1]["raw_json"]

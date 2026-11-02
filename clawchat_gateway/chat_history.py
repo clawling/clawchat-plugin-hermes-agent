@@ -140,7 +140,7 @@ _CREDENTIAL_KEYS = re.compile(
 )
 _MASK = '"[redacted]"'
 _MASK_BOUNDARY = re.compile("[" + _WHITESPACE + r"\,;&}\])\"']")
-_USERINFO_SCHEME = re.compile(r"(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,31}://", re.IGNORECASE | re.ASCII)
+_USERINFO_SCHEME = re.compile(r"(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*://", re.IGNORECASE | re.ASCII)
 
 
 def _strip_history_userinfo(value):
@@ -224,9 +224,9 @@ def _mask_history_credentials(value):
 
 
 def _redact_history_text(value):
-    """URL redaction followed by the shared reference diagnostic credential rules."""
+    """Strip complete userinfo before URL matching, then mask credential shapes."""
     try:
-        safe = _mask_history_credentials(_strip_history_userinfo(_redact_history_urls(value)))
+        safe = _mask_history_credentials(_redact_history_urls(_strip_history_userinfo(value)))
         safe = re.sub(r"\b(bearer)[" + _WHITESPACE + r"]+[A-Za-z0-9._~+/=-]+",
                       lambda m: m[1] + " [redacted]", safe, flags=re.IGNORECASE | re.ASCII)
         safe = re.sub(r"\b([Bb][Aa][Ss][Ii][Cc])[" + _WHITESPACE
@@ -389,6 +389,9 @@ def _entry(row, scope):
                 if isinstance(source, str) and source:
                     body = body.replace(source, _redact_history_url(source))
     at = _parse_iso(ts)
+    if not math.isfinite(at):
+        # Keep invalid-time ordering/range semantics; never display raw metadata.
+        ts = "invalid time"
     return _Entry(row.get("protocol_message_id") or row["message_id"], ts, at,
                   at if math.isfinite(at) else row["created_at"], _redact_history_text(body), from_id, _redact_history_text(name),
                   self, not self and bool(scope.get("owner_user_id")) and from_id == scope["owner_user_id"], [_redact_history_text(f) for f in files], row["id"])
