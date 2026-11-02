@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from contextvars import ContextVar
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import inspect
 import json
@@ -138,6 +139,7 @@ class HistoryMaintenance:
         self.inflight = set()
         self.releasing = set()
         self.releasing_messages = set()
+        self.drain_waiting = set()
         self.drains = set()
         self.replays = {}
         self.delivered = {}
@@ -216,8 +218,12 @@ class HistoryMaintenance:
                                    "disable them or upgrade to 0.21.1+ for answer-before-idle-maintenance")
 
     def enabled(self, inbound):
-        return bool(self.available and not self.closed and self.account
-                    and self.account == self.adapter._account_id() and self.settings(inbound).budget_compaction)
+        return bool(self.journal_ready() and self.account and self.settings(inbound).budget_compaction)
+
+    def journal_ready(self):
+        return bool(self.available and not self.closed and self.store is not None
+                    and self.account == self.adapter._account_id()
+                    and callable(getattr(self.gateway, "_session_key_for_source", None)))
 
     def settings(self, inbound):
         return effective_history_settings(self.adapter._clawchat_config,
@@ -236,6 +242,9 @@ class HistoryMaintenance:
         return self.store.get_history_state(self.account, key) or {"gen": 0}
 
     def cas(self, key, state, **fields):
+        for marker in ("summary_through", "boundary"):
+            if marker in fields and marker + "_seq" not in fields:
+                fields[marker + "_seq"] = self.position(fields[marker]) if fields[marker] else None
         if self.closed or self.account != self.adapter._account_id() or not self.store.cas_history_state(self.account, key, state["gen"], **fields):
             raise Superseded
         return self.state(key)
@@ -259,7 +268,8 @@ class HistoryMaintenance:
                  "owner_user_id": self.adapter._owner_user_id(), "self_name": "you"}
         # History storage returns only normal messages, excludes recall tombstones.
         result = []
-        for row in sorted(rows, key=lambda r: r["id"]):
+        positions = self.store.history_positions("default", inbound.chat_id)
+        for row in sorted(rows, key=lambda r: positions[r.get("protocol_message_id") or r["message_id"]]):
             e = _entry(row, scope)
             if not e.self:
                 command_text = row.get("text") or ""
@@ -277,17 +287,22 @@ class HistoryMaintenance:
                                 _speaker(e), e.text))
         return result
 
-    def interval(self, inbound, state, *, cut=None, boundary=True):
+    def position(self, marker, saved=None):
+        # An older writer can advance an ID while leaving an additive *_seq
+        # field untouched. The immutable ID mapping resolves that mixed-version case.
+        value = self.store.history_positions("default").get(marker)
+        if value is None:
+            raise RuntimeError("history marker has no recoverable position")
+        return saved if saved == value else value
+
+    def interval(self, inbound, state, *, cut=None, cut_seq=None, boundary=True):
         entries = self.entries(inbound)
-        markers = [state.get("summary_through")]
-        if boundary:
-            markers.append(state.get("boundary"))
-        # Compare durable ledger order, including commands used as boundaries.
-        rows = self.store.list_chat_history_messages("default", inbound.chat_id)
-        order = {r.get("protocol_message_id") or r["message_id"]: r["id"] for r in rows}
-        start = max((order.get(m, -1) for m in markers if m), default=-1)
-        end = order.get(cut, float("inf")) if cut else float("inf")
-        return [e for e in entries if start < order.get(e.id, -1) <= end]
+        markers = ["summary_through"] + (["boundary"] if boundary else [])
+        start = max((self.position(state[m], state.get(m + "_seq"))
+                     for m in markers if state.get(m)), default=0)
+        end = self.position(cut, cut_seq) if cut else float("inf")
+        order = self.store.history_positions("default", inbound.chat_id)
+        return [e for e in entries if start < order[e.id] <= end]
 
     def claim_options(self, inbound):
         if not self.enabled(inbound) or inbound.is_internal_synthetic:
@@ -298,12 +313,81 @@ class HistoryMaintenance:
         return next((row for row in self.store.list_held(self.account, key)
                      if row["message_id"] == mid), None)
 
+    def wake_drain(self, key):
+        if self.closed:
+            return
+        task = asyncio.create_task(self.release(key))
+        self.drains.add(task)
+        task.add_done_callback(self.drains.discard)
+
+    def recalled_inbound(self, inbound):
+        if inbound.is_internal_synthetic or self.store is None:
+            return False
+        ids = self.adapter._batch_message_ids(inbound)
+        if not ids:
+            return False
+        ready = self.journal_ready()
+        if ready:
+            keys = {self.key(inbound)}
+        else:
+            # Recall remains authoritative if capabilities fail during an await.
+            # Use durable journal keys; the legacy path must not call host routing.
+            keys = {row["conv_key"] for row in self.store.list_held(self.account)
+                    if row["message_id"] in ids}
+        recalled = set()
+        for key in keys or {""}:
+            checked = set(ids)
+            for mid in tuple(ids):
+                row = self.held_row(key, mid)
+                snapshot = row["payload"].get("snapshot", {}) if row else {}
+                checked.update(snapshot.get("history", {}).get("ids", []))
+            found = self.store.retire_recalled_held(self.account, key, checked)
+            recalled.update(found)
+            if found:
+                for mid in checked:
+                    self.replays.pop(mid, None)
+                if ready:
+                    self.wake_drain(key)
+        return bool(recalled)
+
+    def recalled_row(self, key, row):
+        primary = row["payload"].get("batch_primary", row["message_id"])
+        parent = self.held_row(key, primary) or row
+        snapshot = parent["payload"].get("snapshot", {})
+        raw = snapshot.get("raw_message", {}).get("clawchat_raw", {})
+        frames = raw.get("messages", []) if raw.get("clawchat_group_batch") else []
+        ids = {row["message_id"], primary}
+        ids.update(snapshot.get("history", {}).get("ids", []))
+        ids.update(self.adapter._inbound_trigger_id(frame) for frame in frames)
+        recalled = self.store.retire_recalled_held(self.account, key, ids - {""})
+        if recalled:
+            for mid in ids:
+                self.replays.pop(mid, None)
+        return row["message_id"] in recalled
+
+    @asynccontextmanager
+    async def dispatch_scope(self, inbound):
+        if inbound.is_internal_synthetic or not self.journal_ready():
+            yield
+            return
+        key = self.key(inbound)
+        owned = {(key, mid) for mid in self.adapter._batch_message_ids(inbound)} - self.inflight
+        self.inflight.update(owned)
+        try:
+            yield
+        finally:
+            self.inflight.difference_update(owned)
+            if key in self.drain_waiting:
+                self.wake_drain(key)
+
     def defer(self, inbound):
         if inbound.is_internal_synthetic or not self.enabled(inbound):
             return False
         key = self.key(inbound)
         mid = self.adapter._inbound_trigger_id(inbound.raw_message)
-        if key not in self.blocked and (key not in self.releasing or (key, mid) in self.releasing_messages):
+        draining = key in self.releasing or key in self.drain_waiting
+        admitted = (key, mid) in self.releasing_messages or (key, mid) in self.inflight
+        if key not in self.blocked and (not draining or admitted):
             return False
         for mid in self.adapter._batch_message_ids(inbound):
             row = self.held_row(key, mid)
@@ -314,7 +398,11 @@ class HistoryMaintenance:
         return True
 
     async def continue_claimed(self, inbound, key=None):
+        if not self.journal_ready():
+            return await self.adapter._continue_claimed_inbound(inbound)
         key = key or self.key(inbound)
+        if self.recalled_inbound(inbound):
+            return
         mid = self.adapter._inbound_trigger_id(inbound.raw_message)
         if self.defer(inbound):
             return
@@ -331,11 +419,14 @@ class HistoryMaintenance:
         finally:
             self.inflight.discard((key, mid))
             self.replays.pop(mid, None)
+            if key in self.drain_waiting:
+                self.wake_drain(key)
 
     async def release(self, key):
-        if key in self.releasing or self.closed:
+        if key in self.releasing or not self.journal_ready():
             return
         self.releasing.add(key)
+        self.drain_waiting.discard(key)
         try:
             attempted = set()
             while not self.closed and key not in self.blocked:
@@ -349,8 +440,16 @@ class HistoryMaintenance:
                     mid = candidate["message_id"]
                     attempted.add(mid)
                     row = self.held_row(key, mid)
-                    if row is None or (key, mid) in self.inflight:
+                    if row is None:
                         continue
+                    if self.recalled_row(key, row):
+                        continue
+                    row = self.held_row(key, mid)
+                    if row is None:
+                        continue
+                    if (key, mid) in self.inflight:
+                        self.drain_waiting.add(key)
+                        return
                     if row["payload"].get("terminal"):
                         self.store.mark_held_state(self.account, key, mid, row["state"], "dispatched")
                         continue
@@ -372,6 +471,10 @@ class HistoryMaintenance:
 
     async def restore_inbound(self, row):
         from clawchat_gateway.inbound import parse_inbound_message
+        if not self.journal_ready() or self.recalled_row(row["conv_key"], row):
+            return None
+        # A recall may have invalidated the batch snapshot above.
+        row = self.held_row(row["conv_key"], row["message_id"]) or row
         inbound = parse_inbound_message(row["payload"]["frame"], self.adapter._clawchat_config)
         if inbound is None or self.adapter._is_chat_dead(inbound.chat_id):
             return None
@@ -395,7 +498,7 @@ class HistoryMaintenance:
 
     def begin_recovery(self):
         """Do not block the transport's READY callback or its receive loop."""
-        if self.closed:
+        if not self.journal_ready():
             return
         epoch = self.epoch
         async def run():
@@ -412,6 +515,8 @@ class HistoryMaintenance:
         task.add_done_callback(self.drains.discard)
 
     async def recover(self):
+        if not self.journal_ready():
+            return
         # Recovery is required even when the budget switch was subsequently disabled.
         for key in dict.fromkeys(row["conv_key"] for row in self.store.list_held(self.account)):
             await self.release(key)
@@ -428,12 +533,16 @@ class HistoryMaintenance:
                     self.schedule(inbound)
 
     def no_reply(self, inbound):
-        if inbound.is_internal_synthetic or not self.gateway or self.closed:
+        if inbound.is_internal_synthetic or not self.journal_ready():
             return
         key = self.key(inbound)
         self.store.finish_held_batch(self.account, key, self.adapter._batch_message_ids(inbound))
+        if key in self.drain_waiting:
+            self.wake_drain(key)
 
     def replay_nonce(self, inbound):
+        if not self.journal_ready():
+            return None
         mid = self.adapter._inbound_trigger_id(inbound.raw_message)
         snapshot = self.replays.get(mid)
         if not snapshot and self.gateway:
@@ -442,7 +551,7 @@ class HistoryMaintenance:
         return (snapshot or {}).get("nonce")
 
     def save_snapshot(self, inbound, event, history_text=None):
-        if inbound.is_internal_synthetic or self.closed or not self.gateway:
+        if inbound.is_internal_synthetic or not self.journal_ready():
             return
         key = self.key(inbound)
         mid = self.adapter._inbound_trigger_id(inbound.raw_message)
@@ -462,14 +571,15 @@ class HistoryMaintenance:
                 event.timestamp = datetime.fromisoformat(snapshot["timestamp"])
             for name, value in snapshot.get("source_labels", {}).items():
                 setattr(event.source, name, value)
+            history = snapshot.get("history", {})
+            snapshot["history"] = dict(self.opening_history(inbound, history.get("ids", [])),
+                                       injected=history.get("injected", False))
         else:
             snapshot = {name: getattr(event, name) for name in fields if hasattr(event, name)}
             snapshot["source_labels"] = {name: getattr(event.source, name) for name in
                                          ("chat_name", "user_name", "chat_topic") if hasattr(event.source, name)}
-            ids = self.delivered.get(key, set())
-            snapshot["history"] = {"injected": bool(history_text), "ids": sorted(ids),
-                                   "tokens": sum(estimate_entry_tokens(e) for e in
-                                                 self.interval(inbound, self.state(key)) if e.id in ids)}
+            snapshot["history"] = dict(self.opening_history(inbound, self.delivered.get(key, set())),
+                                       injected=bool(history_text))
             snapshot["nonce"] = str(getattr(event.source, "message_id", ""))
             if hasattr(event, "timestamp"):
                 snapshot["timestamp"] = event.timestamp.isoformat()
@@ -484,12 +594,16 @@ class HistoryMaintenance:
 
     def dispatched(self, event):
         """Only the actual host handoff may finish a durable dispatch."""
-        if self.closed:
+        if not self.journal_ready():
             return
         key = self.gateway._session_key_for_source(event.source)
         self.store.finish_held_batch(self.account, key, set(self.event_ids(event)))
+        if key in self.drain_waiting:
+            self.wake_drain(key)
 
     def replaying_batch(self, inbound):
+        if not self.journal_ready():
+            return False
         mid = self.adapter._inbound_trigger_id(inbound.raw_message)
         return bool(self.replays.get(mid, {}).get("raw_message", {}).get("clawchat_raw", {}).get("clawchat_group_batch"))
 
@@ -506,6 +620,8 @@ class HistoryMaintenance:
         return [self.adapter._inbound_trigger_id(inner)]
 
     def completed(self, event, outcome):
+        if not self.journal_ready():
+            return
         if getattr(outcome, "name", str(outcome)).upper() != "SUCCESS":
             return
         # SUCCESS means confirmed final delivery OR the host's explicit no-reply
@@ -520,7 +636,8 @@ class HistoryMaintenance:
         key = self.key(inbound)
         if state.get("pending") and why != "renewed":
             return state
-        entries = self.interval(inbound, state, boundary=why != "renewed", cut=cut)
+        cut_seq = self.position(cut) if cut else None
+        entries = self.interval(inbound, state, boundary=why != "renewed", cut=cut, cut_seq=cut_seq)
         settings = self.settings(inbound)
         fold = entries if why == "renewed" else plan_compaction(
             entries, datetime.now(timezone.utc), settings.recent_window,
@@ -531,6 +648,7 @@ class HistoryMaintenance:
                 return self.cas(key, state, boundary=boundary, inject_next=1)
             return state
         pending = {"why": why, "cut_id": cut if why == "renewed" else (fold[-1].id if fold else None),
+                   "cut_seq": cut_seq if why == "renewed" else (self.position(fold[-1].id) if fold else None),
                    "boundary": boundary or state.get("boundary"), "stage": "summary",
                    "host_session": state.get("host_session")}
         return self.cas(key, state, pending=pending, **({"boundary": boundary} if boundary else {}))
@@ -640,6 +758,11 @@ class HistoryMaintenance:
             self.delivered[key] = {e.id for e in window}
             return text
 
+    def opening_history(self, inbound, prior_ids):
+        ids = set(prior_ids) | self.adapter._batch_message_ids(inbound)
+        return {"ids": sorted(ids), "tokens": sum(estimate_entry_tokens(e)
+                for e in self.entries(inbound) if e.id in ids)}
+
     def bind_injection(self, inbound, event, text, metadata=None):
         if inbound.is_internal_synthetic or not self.enabled(inbound):
             return
@@ -647,10 +770,8 @@ class HistoryMaintenance:
         nonce = str(getattr(event.source, "message_id", ""))
         while len(self.injections) >= 4096:
             self.injections.pop(next(iter(self.injections)))
-        metadata = metadata or {
-            "injected": bool(text), "ids": list(self.delivered.get(key, set())),
-            "tokens": sum(estimate_entry_tokens(e) for e in self.interval(inbound, self.state(key))
-                          if e.id in self.delivered.get(key, set()))}
+        metadata = metadata or dict(self.opening_history(inbound, self.delivered.get(key, set())),
+                                    injected=bool(text))
         self.injections[nonce] = {"key": key, "text": metadata["injected"], "state": self.state(key),
                                   "chat": inbound.chat_id, "group": inbound.chat_type == "group",
                                   "ids": set(metadata["ids"]) | self.adapter._batch_message_ids(inbound),
@@ -868,7 +989,7 @@ class HistoryMaintenance:
         if not pending:
             return 0, "empty"
         renewed = pending["why"] == "renewed"
-        blocks = split_blocks(self.interval(inbound, state, cut=pending["cut_id"], boundary=not renewed)) if pending["cut_id"] else []
+        blocks = split_blocks(self.interval(inbound, state, cut=pending["cut_id"], cut_seq=pending.get("cut_seq"), boundary=not renewed)) if pending["cut_id"] else []
         count = 0
         previous_ref = pending.get("previous_ref") or state.get("summary_ref")
         for block in blocks if renewed else blocks[:3]:

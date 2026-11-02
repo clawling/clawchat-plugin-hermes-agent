@@ -114,13 +114,38 @@ finishes all of its journal members in one transaction. Budget-enabled groups
 configured for per-speaker sessions use separate coalescer batches per speaker,
 so one host event cannot cross canonical session ownership.
 
+Migration 18 adds `clawchat_history_positions` with an AUTOINCREMENT sequence,
+backfilled in existing ledger order and populated by an insert trigger (including
+inserts by older plugin versions). Positions retain only identity/routing
+metadata after recall, never message text. `summary_through_seq` and
+`boundary_seq` accompany state IDs; pending JSON also carries fixed `cut_seq`.
+Reads resolve old ID-only markers through the retained position mapping and
+handle older writers that advanced an ID without updating its additive sequence
+field. An unknown historical marker stops maintenance instead of reopening a
+range or expanding a cut. Older readers ignore the additive table and fields.
+
+Tombstones are checked under an immediate transaction before journal replay and
+again after asynchronous preparation, before host handoff. Recalled held or
+dispatching members finish without delivery. A recall invalidates a saved batch
+snapshot and returns survivors to held for fresh parsing and authorization;
+retracted batch content is never restored from the old snapshot. Recall-read
+errors stop the attempt. Adapter-only terminal decisions, including skill-update
+consent, settle the journal; actual permission queues and maintenance deferrals
+remain recoverable. An in-flight journal head stops a drain from overtaking it.
+The first post-reset input starts renewed summary inline and wakes later held
+work only after its own handoff or terminal decision, including coalescer inputs.
+
 Pending JSON records `why`, fixed `cut_id`, `boundary`, target `host_session`,
 `stage` (summary/reset), and whether the optional notes already ran. Each published
 block advances state with CAS; CAS loss discards late results. Non-renewed passes
 process at most three blocks. Confirmed user renewal folds the entire interval
 before the next dispatch, bounded by five minutes. Retry counters survive restart.
 First-request confirmation is correlated by source nonce and works without usage;
-`open_context` is set only when prompt tokens are available. Summary files live
+`open_context` is set only when prompt tokens are available. `open_history`
+counts both injected recent originals and the complete triggering input batch,
+with each message counted once; snapshot replay and direct binding use the same
+baseline. Journal helpers are no-ops when required host capabilities are absent,
+so ordinary delivery retains the legacy path. Summary files live
 under the ledger's data directory in `summaries/<profile>/<account>/<escaped-key>`
 (the default profile omits its prefix). They are outside agent memory/workspace.
 Maintenance logs record no message bodies or raw exceptions.

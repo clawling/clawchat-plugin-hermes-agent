@@ -29,7 +29,9 @@ After a real answer completes, history **strictly greater** than the DM/group
 budget triggers maintenance. An idle interval also triggers maintenance **after
 answering in the original session**; it does not clear history before the answer.
 History uses the first injected request's prompt-token baseline and subsequent
-usage growth, or ledger estimates when usage is absent. The recent window keeps
+usage growth, or ledger estimates when usage is absent. The opening history
+baseline includes the triggering input (all members of a batch) as well as the
+injected window, matching the opening prompt's usage. The recent window keeps
 other-speaker turns, gives budget priority, and folds replies with their questions.
 Idle, confirmed `/new`, and external rotation skip sparse folds with fewer than
 two other-speaker messages and no owner message.
@@ -39,7 +41,9 @@ group keys; budget-enabled per-speaker groups also keep their input batches
 separate by speaker. It fixes a durable cut, makes independent summary calls in consecutive
 blocks of at most 24000 estimated tokens (`timeout=120`, `max_tokens=4000`),
 validates four summary sections, publishes immutable synced files, then advances
-SQLite state by generation CAS. Each pass handles at most three blocks; confirmed
+SQLite state by generation CAS. Cuts and summary/reset boundaries retain
+immutable ledger positions even when their referenced messages are recalled;
+withdrawal never moves a fixed interval. Each pass handles at most three blocks; confirmed
 `/new` finishes its whole interval before the next input is handed to Hermes.
 After publication, optional notes run in the old session, then a completely idle
 host session is renewed. The plugin rereads the **persistent route** to verify
@@ -53,7 +57,11 @@ Arrivals are journaled in the same transaction as their ledger claim, held durin
 maintenance, and released in ledger order. The journal records held, dispatching
 and dispatched states and a stable host event snapshot before handoff. Restart
 replays held or uncertain dispatching input through ordinary authorization and
-routing; only confirmed final delivery or an explicit successful no-reply terminal
+routing. Recall tombstones are checked before replay and after asynchronous
+preparation; withdrawn journal entries finish without reaching the host. Saved
+batches containing a withdrawn member are rebuilt from surviving frames.
+Adapter-consumed replies, including skill-update consent, finish their journal
+entries too; queued inputs remain pending. Only confirmed final delivery or an explicit successful no-reply terminal
 can suppress uncertain replay. Pending, failed and process outputs cannot.
 Host deduplication is session scoped; an uncertain retry across rotation may
 answer twice. Delivery takes priority over silently losing an input.
@@ -78,7 +86,9 @@ notes. The command alone does not advance a boundary. `on_session_reset` or the
 next dispatch's durable route check must confirm the change first. The confirmed
 boundary excludes pre-command originals from the next window; renewed summary
 work folds those originals into the summary, including a conversation never
-previously summarized. Internal maintenance resets use a separate operation
+previously summarized. The first input starts this work immediately and is
+handed to the host before later held arrivals; a drain cannot skip its in-flight
+journal entry. Internal maintenance resets use a separate operation
 identity and do not become user `/new` events.
 
 **Host threshold priority:** ClawChat uses the plugin DM/group budgets. Hermes'

@@ -3761,10 +3761,16 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
             return
         if await self._answer_owner_group_slash_confirm(inbound):
+            if self._history:
+                self._history.no_reply(inbound)
             return
         if await self._handle_owner_forwarded_approval(inbound):
+            if self._history:
+                self._history.no_reply(inbound)
             return
         if await self._answer_non_owner_slash_confirm(inbound):
+            if self._history:
+                self._history.no_reply(inbound)
             return
         if not self._direct_command_allowed(inbound):
             logger.info(
@@ -3773,6 +3779,8 @@ class ClawChatAdapter(BasePlatformAdapter):
                 inbound.sender_id,
                 len(inbound.text),
             )
+            if self._history:
+                self._history.no_reply(inbound)
             return
         if not self._direct_text_allowed_on_old_host(inbound):
             logger.info(
@@ -3782,6 +3790,8 @@ class ClawChatAdapter(BasePlatformAdapter):
                 inbound.sender_id,
                 len(inbound.text),
             )
+            if self._history:
+                self._history.no_reply(inbound)
             return
         await self._handle_inbound(inbound)
 
@@ -4312,6 +4322,8 @@ class ClawChatAdapter(BasePlatformAdapter):
                 inbound.chat_id,
                 inbound.sender_id,
             )
+            if self._history:
+                self._history.no_reply(inbound)
             return
         if eff.reply_mode == "mention" and not inbound.was_mentioned:
             logger.info(
@@ -4319,6 +4331,8 @@ class ClawChatAdapter(BasePlatformAdapter):
                 inbound.chat_id,
                 inbound.sender_id,
             )
+            if self._history:
+                self._history.no_reply(inbound)
             return
         await self._handle_inbound(inbound)
 
@@ -5119,6 +5133,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._check_request_wake(inbound)
         except Exception:
             self._finish_request_wake(inbound, 'host-rejected')
+            if self._history:
+                self._history.no_reply(inbound)
             return
         key = self._grant_session_key(inbound)
         if self._hold_owner_inbound(inbound):
@@ -5130,9 +5146,13 @@ class ClawChatAdapter(BasePlatformAdapter):
         arrival_restriction = pending_input_restriction(self._account_id(), key)
         self._admit_owner_direct_inbound(inbound)
         if await self._consume_grant_confirmation(inbound):
+            if self._history:
+                self._history.no_reply(inbound)
             return
         if self._refuses_turn(inbound):
             self._finish_request_wake(inbound, 'host-rejected')
+            if self._history:
+                self._history.no_reply(inbound)
             return
         if not self._is_owner_turn(inbound) and self._hold_granted_inbound(inbound, from_dispatch=True):
             return
@@ -5163,15 +5183,29 @@ class ClawChatAdapter(BasePlatformAdapter):
                 self._grant_dispatching_grants.pop(key, None)
 
     async def _handle_inbound_now(self, inbound: InboundMessage, *, unverified_token: str = "", arrival_restriction=None) -> None:
+        if self._history:
+            async with self._history.dispatch_scope(inbound):
+                return await self._handle_inbound_now_impl(inbound, unverified_token=unverified_token,
+                                                           arrival_restriction=arrival_restriction)
+        return await self._handle_inbound_now_impl(inbound, unverified_token=unverified_token,
+                                                   arrival_restriction=arrival_restriction)
+
+    async def _handle_inbound_now_impl(self, inbound: InboundMessage, *, unverified_token: str = "", arrival_restriction=None) -> None:
+        if self._history and self._history.recalled_inbound(inbound):
+            return
         if self._history and self._history.defer(inbound):
             return
         try:
             self._check_request_wake(inbound)
         except Exception:
             self._finish_request_wake(inbound, 'host-rejected')
+            if self._history:
+                self._history.no_reply(inbound)
             return
         if self._refuses_turn(inbound):
             self._finish_request_wake(inbound, 'host-rejected')
+            if self._history:
+                self._history.no_reply(inbound)
             return
         if inbound.chat_id and not self._inbound_trigger_id(inbound.raw_message):
             # A synthetic inbound (awareness / moment-comment note, permission
@@ -5190,6 +5224,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         # is consumed here (applies/cancels the update) and never reaches the LLM.
         # Ambiguous replies fall through to normal handling, keeping pending.
         if not is_sediment_turn and await self._maybe_consume_skill_update_consent(inbound):
+            if self._history:
+                self._history.no_reply(inbound)
             return
         reset_command = (
             not is_sediment_turn
@@ -5228,6 +5264,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         if deadline is not None:
             key = self._grant_session_key(inbound)
             if not await self._wait_held_owner_input(key, deadline, asyncio.current_task(), ignore_dispatch=True):
+                # Queue ownership moved; retain the journal for the new owner/recovery.
                 return
         if self._hold_owner_inbound(inbound):
             return
@@ -5243,6 +5280,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             return
         history_context = await self._history.prepare(inbound) if self._history else ""
         if self._history and self._history.defer(inbound):
+            return
+        if self._history and self._history.recalled_inbound(inbound):
             return
         source_kwargs: dict[str, Any] = {}
         snapshot = None
@@ -5441,6 +5480,14 @@ class ClawChatAdapter(BasePlatformAdapter):
             if self._history:
                 history_metadata = self._history.save_snapshot(inbound, event, history_context)
                 self._history.bind_injection(inbound, event, history_context, history_metadata)
+            if self._history and self._history.recalled_inbound(inbound):
+                self._finish_request_notices(notices, accepted=False)
+                if snapshot is not None:
+                    from clawchat_gateway.turn_grants import release_turn
+                    release_turn(snapshot.nonce)
+                    if self._grant_dispatch_started.get(key) == snapshot.nonce:
+                        self._grant_dispatch_started.pop(key, None)
+                return
             await self.handle_message(event)
             accepted = getattr(event, '_gateway_accepted', None) is not False
             if accepted and self._history and self._history.gateway:

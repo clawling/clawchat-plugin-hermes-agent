@@ -1094,3 +1094,327 @@ async def test_oversized_ascii_ledger_entry_keeps_original_before_block_truncati
     blocks = hm.split_blocks(entries)
     assert len(blocks) == 1 and blocks[0][0].truncated
     assert 'chat_history_read around=oversized-ascii' in blocks[0][0].text
+
+
+@pytest.mark.parametrize('state', ['held', 'dispatching'])
+async def test_recalled_journal_input_never_replays(rig, state):
+    msg = inbound('withdrawn')
+    claim(rig, msg)
+    key = initialize(rig, msg)
+    if state == 'dispatching':
+        rig.m.store.mark_held_state(rig.m.account, key, 'withdrawn', 'held', state)
+    assert rig.m.store.recall_message(account_id='default', message_id='withdrawn') == 1
+    await rig.m.recover()
+    assert not rig.calls
+    assert not rig.m.store.list_held(rig.m.account, key)
+
+
+@pytest.mark.parametrize('withdrawn', ['batch-first', 'batch-last'])
+async def test_recalled_saved_batch_member_is_removed_before_replay(rig, withdrawn):
+    first, last = inbound('batch-first', group=True), inbound('batch-last', group=True)
+    claim(rig, first)
+    claim(rig, last)
+    key = initialize(rig, first)
+    batch = replace(last, raw_message={'clawchat_group_batch': True,
+                    'messages': [first.raw_message, last.raw_message]},
+                    text='ClawChat group messages:\nfirst\nlast', _batch_speakers=('usr_owner',))
+    ev = event(rig, batch)
+    rig.m.save_snapshot(batch, ev, '')
+    rig.m.store.recall_message(account_id='default', message_id=withdrawn)
+    await rig.m.recover()
+    survivor = 'batch-last' if withdrawn == 'batch-first' else 'batch-first'
+    assert rig.calls == [survivor]
+    assert not rig.m.store.list_held(rig.m.account, key)
+
+
+async def test_recall_during_renewed_summary_prevents_host_handoff(rig, monkeypatch):
+    ledger(rig, count=2, text='keep this agreement')
+    command = inbound('command', '/new')
+    claim(rig, command)
+    key = initialize(rig, command)
+    rig.m.queue_pending(command, rig.m.state(key), 'renewed', cut='command', boundary='command')
+    for row in rig.m.store.list_held(rig.m.account, key):
+        rig.m.store.finish_held_batch(rig.m.account, key, {row['message_id']})
+    msg = inbound('withdrawn-during-maintenance')
+    claim(rig, msg)
+    rig.llm.wait = asyncio.Event()
+    entered = asyncio.Event()
+    complete = rig.llm.acomplete
+    async def summary(*args, **kwargs):
+        entered.set()
+        return await complete(*args, **kwargs)
+    monkeypatch.setattr(rig.llm, 'acomplete', summary)
+    events = []
+    async def dispatch(incoming): await rig.a._handle_inbound_now(incoming)
+    async def handle(ev): events.append(ev)
+    monkeypatch.setattr(rig.a, '_continue_claimed_inbound', dispatch)
+    monkeypatch.setattr(rig.a, 'handle_message', handle)
+    monkeypatch.setattr(rig.a, '_compose_channel_prompt_parts', lambda *a, **k: [])
+    task = asyncio.create_task(rig.m.continue_claimed(msg))
+    await asyncio.wait_for(entered.wait(), 1)
+    rig.m.store.recall_message(account_id='default', message_id='withdrawn-during-maintenance')
+    rig.llm.wait.set()
+    await task
+    assert not events
+    assert not rig.m.held_row(key, 'withdrawn-during-maintenance')
+
+
+async def test_recall_check_failure_stops_replay(rig, monkeypatch):
+    msg = inbound()
+    claim(rig, msg)
+    initialize(rig, msg)
+    def fail(*a, **kw): raise OSError('placeholder-storage-failure')
+    monkeypatch.setattr(rig.m.store, 'retire_recalled_held', fail)
+    await rig.m.recover()
+    assert not rig.calls
+
+
+@pytest.mark.parametrize('marker', ['summary_through', 'boundary'])
+async def test_recalled_start_marker_keeps_its_position(rig, marker):
+    ledger(rig, count=3, text='history')
+    msg = inbound()
+    key = initialize(rig, msg)
+    state = rig.m.cas(key, rig.m.state(key), **{marker: 'm1'})
+    position = state[marker + '_seq']
+    rig.m.store.recall_message(account_id='default', message_id='m1')
+    assert [e.id for e in rig.m.interval(msg, rig.m.state(key))] == ['m2']
+    assert rig.m.state(key)[marker + '_seq'] == position
+
+
+async def test_recalled_pending_cut_never_expands_to_later_arrivals(rig):
+    ledger(rig, count=4, text='old')
+    msg = inbound()
+    key = initialize(rig, msg)
+    rig.m.queue_pending(msg, rig.m.state(key), 'budget')
+    pending = rig.m.state(key)['pending']
+    assert pending['cut_id'] == 'm2'
+    fixed = pending['cut_seq']
+    rig.m.store.recall_message(account_id='default', message_id='m2')
+    claim(rig, inbound('later', 'new arrival'))
+    fold = rig.m.interval(msg, rig.m.state(key), cut=pending['cut_id'], cut_seq=fixed)
+    assert [e.id for e in fold] == ['m0', 'm1']
+    assert rig.m.state(key)['pending']['cut_seq'] == fixed
+
+
+async def test_legacy_marker_uses_retained_position_and_unknown_marker_fails_closed(rig):
+    ledger(rig, count=3, text='old')
+    msg = inbound()
+    rig.m.store.recall_message(account_id='default', message_id='m1')
+    assert [e.id for e in rig.m.interval(msg, {'summary_through': 'm1'})] == ['m2']
+    with pytest.raises(RuntimeError, match='no recoverable position'):
+        rig.m.interval(msg, {'summary_through': 'unknown-marker'})
+    with pytest.raises(RuntimeError, match='no recoverable position'):
+        rig.m.interval(msg, {}, cut='unknown-cut')
+
+
+async def test_last_rowid_reuse_does_not_reuse_history_position(rig):
+    msg = inbound('old-last')
+    claim(rig, msg)
+    key = initialize(rig, msg)
+    state = rig.m.cas(key, rig.m.state(key), boundary='old-last')
+    position = state['boundary_seq']
+    rig.m.store.recall_message(account_id='default', message_id='old-last')
+    claim(rig, inbound('new-last'))
+    assert rig.m.position('new-last') > position
+    assert [e.id for e in rig.m.interval(msg, state)] == ['new-last']
+
+
+@pytest.mark.parametrize('missing', ['key', 'peek', 'persistence', 'runner'])
+async def test_disabled_journal_helpers_preserve_ordinary_delivery(rig, monkeypatch, missing):
+    msg = inbound()
+    claim(rig, msg)
+    initialize(rig, msg)
+    if missing == 'key': rig.host._session_key_for_source = None
+    if missing == 'peek': rig.host.session_store.peek_session_id = None
+    if missing == 'persistence': rig.host.session_store.sessions_dir = None
+    if missing == 'runner': rig.a.gateway_runner = None
+    rig.m.connect()
+    assert not rig.m.available
+    monkeypatch.setattr(rig.m, 'key', lambda *a: pytest.fail('disabled helper routed input'))
+    events = []
+    async def handle(ev): events.append(ev)
+    monkeypatch.setattr(rig.a, 'handle_message', handle)
+    monkeypatch.setattr(rig.a, '_compose_channel_prompt_parts', lambda *a, **k: [])
+    assert rig.m.replay_nonce(msg) is None
+    assert rig.m.save_snapshot(msg, event_from_source(msg)) is None
+    rig.m.dispatched(event_from_source(msg))
+    rig.m.completed(event_from_source(msg), NS(name='SUCCESS'))
+    rig.m.no_reply(msg)
+    assert not rig.m.replaying_batch(msg)
+    await rig.a._handle_inbound_now(msg)
+    assert len(events) == 1 and events[0].text == msg.text
+
+
+def event_from_source(msg):
+    # Does not require any host routing capability.
+    return NS(source=NS(chat_id=msg.chat_id), raw_message={'clawchat_raw': msg.raw_message})
+
+
+@pytest.mark.parametrize('terminal', ['consent', 'refused', 'wake-rejected'])
+async def test_adapter_terminal_handlers_finish_journal_once(rig, monkeypatch, terminal):
+    msg = inbound('consumed', 'no')
+    claim(rig, msg)
+    key = initialize(rig, msg)
+    events = []
+    async def dispatch(incoming): await rig.a._handle_inbound_now(incoming)
+    async def handle(ev): events.append(ev)
+    async def consumed(_): return terminal == 'consent'
+    monkeypatch.setattr(rig.a, '_continue_claimed_inbound', dispatch)
+    monkeypatch.setattr(rig.a, 'handle_message', handle)
+    monkeypatch.setattr(rig.a, '_compose_channel_prompt_parts', lambda *a, **k: [])
+    monkeypatch.setattr(rig.a, '_maybe_consume_skill_update_consent', consumed)
+    monkeypatch.setattr(rig.a, '_refuses_turn', lambda _: terminal == 'refused')
+    def wake(_):
+        if terminal == 'wake-rejected': raise RuntimeError('placeholder-wake-rejected')
+    monkeypatch.setattr(rig.a, '_check_request_wake', wake)
+    await rig.m.continue_claimed(msg)
+    assert not rig.m.held_row(key, 'consumed')
+    async def no_consent(_): return False
+    monkeypatch.setattr(rig.a, '_maybe_consume_skill_update_consent', no_consent)
+    monkeypatch.setattr(rig.a, '_refuses_turn', lambda _: False)
+    monkeypatch.setattr(rig.a, '_check_request_wake', lambda _: None)
+    await rig.m.recover()
+    assert not events
+
+
+async def test_adapter_deferred_input_keeps_journal_live(rig, monkeypatch):
+    msg = inbound('deferred')
+    claim(rig, msg)
+    key = initialize(rig, msg)
+    monkeypatch.setattr(rig.a, '_hold_owner_inbound', lambda _: True)
+    await rig.a._handle_inbound_now(msg)
+    assert rig.m.held_row(key, 'deferred')
+
+
+@pytest.mark.parametrize('snapshot', [False, True])
+@pytest.mark.parametrize('batch', [False, True])
+async def test_open_history_includes_trigger_input_and_batch_once(rig, snapshot, batch):
+    messages = [inbound('first', '中' * 4000)]
+    if batch:
+        messages.append(inbound('second', '中' * 3000))
+    for msg in messages: claim(rig, msg)
+    trigger = messages[-1]
+    if batch:
+        trigger = replace(trigger, text='combined batch', raw_message={
+            'clawchat_group_batch': True, 'messages': [m.raw_message for m in messages]},
+            _batch_speakers=('usr_owner',))
+    key = initialize(rig, trigger)
+    rig.m.cas(key, rig.m.state(key), inject_next=1)
+    text = await rig.m.before(trigger)
+    ev = event(rig, trigger, 'opening-input')
+    metadata = rig.m.save_snapshot(trigger, ev, text) if snapshot else None
+    rig.m.bind_injection(trigger, ev, text, metadata)
+    rig.m.observe_request('opening-input', key, 'old-session', 10000)
+    expected = sum(hm.estimate_entry_tokens(e) for e in rig.m.entries(trigger))
+    state = rig.m.state(key)
+    assert state['open_history'] == expected
+    assert state['open_history'] > (7000 if batch else 4000)
+
+
+async def test_opening_input_cost_triggers_budget_on_next_turn(rig):
+    first, second = inbound('first', '中' * 4000), inbound('second', '中' * 3000)
+    claim(rig, first)
+    key = initialize(rig, first)
+    rig.m.cas(key, rig.m.state(key), inject_next=1)
+    text = await rig.m.before(first)
+    rig.m.bind_injection(first, event(rig, first, 'opening-budget'), text)
+    rig.m.observe_request('opening-budget', key, 'old-session', 10000)
+    claim(rig, second)
+    await rig.m.before(second)
+    rig.m.usage[key] = ('old-session', 13000)
+    assert rig.m.after_turn(event(rig, second))
+    assert rig.m.state(key)['pending']['why'] == 'budget'
+    await rig.m.tasks[key]
+
+
+@pytest.mark.parametrize('group', [False, True])
+async def test_inline_renewed_first_input_summarizes_and_dispatches_before_later_arrivals(rig, monkeypatch, group):
+    ledger(rig, count=2, text='agreed appointment')
+    command = inbound('command', '/new', group=group)
+    claim(rig, command)
+    key = initialize(rig, command)
+    await rig.m.before(command)
+    rig.host.persist(key, 'user-new')
+    rig.m.observe_reset('old-session', 'user-new', None)
+    for row in rig.m.store.list_held(rig.m.account, key):
+        rig.m.store.finish_held_batch(rig.m.account, key, {row['message_id']})
+    first, second = inbound('first-after-new', group=group), inbound('second-after-new', group=group)
+    claim(rig, first)
+    rig.llm.wait = asyncio.Event()
+    summarizing, second_sent = asyncio.Event(), asyncio.Event()
+    complete = rig.llm.acomplete
+    async def summary(*args, **kwargs):
+        summarizing.set()
+        return await complete(*args, **kwargs)
+    monkeypatch.setattr(rig.llm, 'acomplete', summary)
+    sent = []
+    async def dispatch(incoming): await rig.a._handle_inbound_now(incoming)
+    async def no_metadata(_): pass
+    monkeypatch.setattr(rig.a, '_ensure_group_participants_metadata', no_metadata)
+    async def handle(ev):
+        sent.append(ev.message_id)
+        if ev.message_id == 'first-after-new':
+            assert 'meet at 10' in ev.channel_context
+        if ev.message_id == 'second-after-new': second_sent.set()
+    monkeypatch.setattr(rig.a, '_continue_claimed_inbound', dispatch)
+    monkeypatch.setattr(rig.a, 'handle_message', handle)
+    monkeypatch.setattr(rig.a, '_compose_channel_prompt_parts', lambda *a, **k: [])
+    task = asyncio.create_task(rig.m.continue_claimed(first))
+    await asyncio.wait_for(summarizing.wait(), 1)  # First input starts summary before a second exists.
+    assert len(rig.llm.calls) == 1 and not sent
+    claim(rig, second)
+    await rig.m.continue_claimed(second)
+    assert not sent
+    rig.llm.wait.set()
+    await task
+    await asyncio.wait_for(second_sent.wait(), 1)
+    assert sent == ['first-after-new', 'second-after-new']
+
+
+@pytest.mark.parametrize('handler', ['group-confirm', 'forwarded-approval', 'non-owner-confirm',
+                                     'command-denied', 'old-host-denied'])
+async def test_route_terminal_handlers_do_not_replay_after_reconnect(rig, monkeypatch, handler):
+    msg = inbound('route-consumed')
+    claim(rig, msg)
+    key = initialize(rig, msg)
+    async def group_confirm(_): return handler == 'group-confirm'
+    async def forwarded(_): return handler == 'forwarded-approval'
+    async def non_owner(_): return handler == 'non-owner-confirm'
+    monkeypatch.setattr(rig.a, '_answer_owner_group_slash_confirm', group_confirm)
+    monkeypatch.setattr(rig.a, '_handle_owner_forwarded_approval', forwarded)
+    monkeypatch.setattr(rig.a, '_answer_non_owner_slash_confirm', non_owner)
+    monkeypatch.setattr(rig.a, '_direct_command_allowed', lambda _: handler != 'command-denied')
+    monkeypatch.setattr(rig.a, '_direct_text_allowed_on_old_host', lambda _: handler != 'old-host-denied')
+    await rig.a._route_inbound(msg)
+    assert not rig.m.held_row(key, 'route-consumed')
+    await rig.m.recover()
+    assert not rig.calls
+
+
+async def test_older_writer_advancing_marker_does_not_leave_stale_sequence(rig):
+    ledger(rig, count=4, text='old')
+    msg = inbound()
+    key = initialize(rig, msg)
+    rig.m.cas(key, rig.m.state(key), summary_through='m0')
+    old = rig.m.state(key)
+    # The previous version knows the ID field but not its new sequence companion.
+    rig.m.store.cas_history_state(rig.m.account, key, old['gen'], summary_through='m2')
+    assert [e.id for e in rig.m.interval(msg, rig.m.state(key))] == ['m3']
+
+
+async def test_recall_still_blocks_handoff_if_capabilities_fail_during_preparation(rig, monkeypatch):
+    msg = inbound('withdrawn-on-fallback')
+    claim(rig, msg)
+    key = initialize(rig, msg)
+    async def consent(_):
+        rig.host._session_key_for_source = None
+        rig.m.connect()
+        rig.m.store.recall_message(account_id='default', message_id='withdrawn-on-fallback')
+        return False
+    events = []
+    async def handle(ev): events.append(ev)
+    monkeypatch.setattr(rig.a, '_maybe_consume_skill_update_consent', consent)
+    monkeypatch.setattr(rig.a, 'handle_message', handle)
+    monkeypatch.setattr(rig.a, '_compose_channel_prompt_parts', lambda *a, **k: [])
+    await rig.a._handle_inbound_now(msg)
+    assert not events and not rig.m.held_row(key, 'withdrawn-on-fallback')
