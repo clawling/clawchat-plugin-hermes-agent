@@ -443,7 +443,7 @@ async def test_database_failure_and_error_redaction(session_ledger, monkeypatch,
         monkeypatch.setattr(h.store, "list_chat_history_messages", query)
         output = await plugin_tools.handle_chat_history_read({})
         assert json.loads(output) == {"error": "Local chat history is unavailable."}
-        query.assert_called_once_with("default", "cnv_A")
+        query.assert_called_once_with("default", "cnv_A", history.chat_history_read_query({}, {""}))
     h.store._disabled = True
     assert ClawChatStore.list_chat_history_messages(h.store, "default", "cnv_A") is None
 
@@ -532,3 +532,304 @@ async def test_ambiguous_stored_chat_identity_fails_closed(session_ledger, monke
     with bind(HERMES_SESSION_PLATFORM="clawchat", HERMES_SESSION_CHAT_ID="cnv_A"):
         assert json.loads(await plugin_tools.handle_chat_history_read({})) == {
             "error": "The conversation's stored identity is ambiguous."}
+
+
+def _add_flattened_message(h, mid, fragments):
+    from clawchat_gateway.config import ClawChatConfig
+    from clawchat_gateway.inbound import parse_inbound_message
+
+    frame = {"event": "message.send", "chat_id": "cnv_A", "chat_type": "direct",
+             "sender": {"id": "usr_ada", "nick_name": "Ada"},
+             "payload": {"message_id": mid, "message": {"body": {"fragments": fragments}}}}
+    inbound = parse_inbound_message(frame, ClawChatConfig(websocket_url=""))
+    assert inbound is not None
+    h.add(mid, body=inbound.text, raw_extra=frame)
+    return inbound.text
+
+
+def test_flattened_attachment_and_typed_link_credentials_are_redacted(ledger):
+    h = ledger
+    redacted_probe = "OBVIOUS_PLACEHOLDER_CREDENTIAL"
+    fragments = [
+        {"kind": "text", "text": "report links "},
+        {"kind": "file", "name": "report.pdf", "url": f"https://placeholder-user:{redacted_probe}@cdn.example.com/report.pdf?token={redacted_probe}#{redacted_probe}"},
+        {"kind": "image", "name": "chart.png", "url": f"https://cdn.example.com/chart.png?signature={redacted_probe}"},
+        {"kind": "text", "text": f" typed link https://placeholder-user:{redacted_probe}@example.com/manual?key={redacted_probe}#{redacted_probe}"},
+    ]
+    flattened = _add_flattened_message(h, "linked", fragments)
+    assert f"[report.pdf]({fragments[1]['url']})" in flattened
+    assert h.store.list_chat_history_messages("default", "cnv_a")[0]["text"] == flattened
+    for output in (h.search(query="report.pdf"), h.read()):
+        for removed in (redacted_probe, "placeholder-user", "?token=", "?signature=", "?key=", "#"):
+            assert removed not in output
+        assert "https://cdn.example.com/report.pdf" in output
+        assert "[file report.pdf]" in output
+    assert "https://example.com/manual" in h.read()
+    for query in (redacted_probe, "placeholder-user", "?token=", "?signature=", "?key="):
+        assert h.search(query=query).startswith("No message in this conversation matches ")
+    assert redacted_probe not in h.search(query=fragments[1]["url"])
+
+
+@pytest.mark.parametrize("source", [
+    "https://[invalid-host/report.pdf?token={probe}",
+    "https://[invalid host/report.pdf?token={probe}",
+])
+def test_malformed_full_fragment_urls_fail_closed(ledger, source):
+    h = ledger
+    redacted_probe = "OBVIOUS_PLACEHOLDER_CREDENTIAL"
+    _add_flattened_message(h, "malformed", [{"kind": "file", "name": "report.pdf", "url": source.format(probe=redacted_probe)}])
+    for output in (h.search(query="report.pdf"), h.read()):
+        assert redacted_probe not in output
+        assert "invalid-host" not in output and "invalid host" not in output
+        assert "[redacted URL]" in output
+    assert h.search(query=redacted_probe).startswith("No message in this conversation matches ")
+
+
+def test_attachment_and_display_names_are_sanitized_before_matching(ledger):
+    h = ledger
+    redacted_probe = "OBVIOUS_PLACEHOLDER_CREDENTIAL"
+    source = f"https://placeholder-user:{redacted_probe}@EXAMPLE.com:443/a/../report.pdf?key={redacted_probe}#{redacted_probe}"
+    h.add("in", raw_extra={"sender": {"id": "usr_ada", "nick_name": "Ada " + source},
+                          "payload": {"message": {"body": {"fragments": [{"kind": "file", "name": source}]}}}})
+    h.add("out", extra={"direction": "outbound"}, raw_extra={"attachmentNames": [source]})
+    assert redacted_probe not in h.read()
+    assert "Ada https://example.com/report.pdf" in h.read()
+    assert h.read().count("[file https://example.com/report.pdf]") == 2
+    assert ids(h.search(query="report.pdf")) == ["out", "in"]
+    assert ids(h.search(speaker=redacted_probe)) == []
+    assert ids(h.search(query=redacted_probe)) == []
+    assert redacted_probe not in h.search(query=source)
+
+
+def _continuation_args(output):
+    return {name: json.loads(value) for name, value in re.findall(
+        r'(around|from|to|limit): ("(?:\\.|[^"\\])*"|\d+)', output.split("\n")[-1])}
+
+
+@pytest.mark.parametrize("body,cap", [("same time", 20), ("x" * 3000, 20), ("same time", 1)],
+                         ids=["row-limit", "character-budget", "single-message-pages"])
+def test_equal_time_pagination_reaches_all_25_without_duplicates(ledger, body, cap):
+    h = ledger
+    ts = "2026-10-01T10:00:00Z"
+    for i in range(1, 26):
+        h.add(f"m{i}", ts, body)
+    h.add("outside-range", "2026-10-02T10:00:00Z", "outside range")
+    seen = []
+    page = h.read(**{"from": ts, "to": ts, "limit": cap})
+    for _ in range(25):
+        assert history._length(page) <= 12000
+        shown = ids(page)
+        assert shown and shown[0] == f"m{len(seen) + 1}"
+        assert not set(shown) & set(seen)
+        seen.extend(shown)
+        footer = page.split("\n")[-1]
+        if not footer.startswith("More messages follow"):
+            break
+        assert footer == (f'More messages follow — call again with around: "m{len(seen) + 1}", '
+                          f'from: "{ts}", to: "{ts}", limit: {cap}.')
+        page = h.read(**_continuation_args(page))
+    assert seen == [f"m{i}" for i in range(1, 26)]
+    assert "More messages follow" not in page
+
+
+def test_invalid_time_continuation_uses_insertion_time_and_keeps_advancing(ledger):
+    h = ledger
+    for i in range(1, 26):
+        h.add(f"m{i}", "invalid stored time", "x" * 3000)
+    seen = []
+    page = h.read(around="m1", limit=60)
+    for _ in range(25):
+        assert history._length(page) <= 12000
+        shown = ids(page)
+        assert shown and not set(shown) & set(seen)
+        seen.extend(shown)
+        if not page.split("\n")[-1].startswith("More messages follow"):
+            break
+        args = _continuation_args(page)
+        assert args["around"] == f"m{len(seen) + 1}"
+        assert args["from"] == history._stamp(1793491200000 + len(seen))
+        assert args["limit"] == 60
+        page = h.read(**args)
+    assert seen == [f"m{i}" for i in range(1, 26)]
+
+
+@pytest.mark.parametrize("source,expected", [
+    ("https://user:placeholder@EXAMPLE.com:443/report.pdf?key=placeholder#placeholder", "https://example.com/report.pdf"),  # redact-allow:email
+    ("https://example.com", "https://example.com/"),
+    ("https://example.com/a/%2E%2e/report%20one.pdf?key=placeholder", "https://example.com/report%20one.pdf"),
+    ("https://example.com/report one.pdf?key=placeholder", "https://example.com/report%20one.pdf"),
+    ("ftp://user:placeholder@example.com:21/report?key=placeholder#placeholder", "ftp://example.com/report"),  # redact-allow:email
+    ("custom://user:placeholder@example.com/report?key=placeholder", "[redacted URL]"),  # redact-allow:email
+    ("https://[invalid-host/report?key=placeholder", "[redacted URL]"),
+    ("https://[fe80::1%25placeholder]/report?key=placeholder", "[redacted URL]"),
+])
+def test_history_url_origin_path_matches_media_source_contract(source, expected):
+    assert history._redact_history_url(source) == expected
+
+
+@pytest.mark.parametrize("input_text,safe", [
+    ('Authorization: Bearer OBVIOUS_PLACEHOLDER_CREDENTIAL', 'Authorization: "[redacted]"'),  # redact-allow:bearer-literal
+    ('Bearer OBVIOUS_PLACEHOLDER_CREDENTIAL', 'Bearer [redacted]'),  # redact-allow:bearer-literal
+    ('Basic T0JWSU9VU19QTEFDRUhPTERFUg==', 'Basic [redacted]'),
+    ('{"token": "OBVIOUS_PLACEHOLDER_CREDENTIAL with spaces"}', '{"token": "[redacted]"}'),
+    ('"api_key"="OBVIOUS_PLACEHOLDER_CREDENTIAL"', '"api_key"="[redacted]"'),
+    ("'password': 'OBVIOUS_PLACEHOLDER_CREDENTIAL with spaces'", "'password': \"[redacted]\""),
+    ('refresh_token=OBVIOUS_PLACEHOLDER_CREDENTIAL; next', 'refresh_token="[redacted]"; next'),
+    ('eyJObviousPlaceholderHeader.cGF5bG9hZA.c2lnbmF0dXJl', '[redacted]'),  # redact-allow:bearer-literal
+    ('token: "OBVIOUS_PLACEHOLDER_CREDENTIAL', '[redacted]'),
+    (r'{\"token\": \"OBVIOUS_PLACEHOLDER_CREDENTIAL\"}', r'{\"token\": "[redacted]"}'),
+    ('token="OBVIOUS_PLACEHOLDER_CREDENTIAL"glued', '[redacted]'),
+    (r'token=\\"OBVIOUS_PLACEHOLDER_CREDENTIAL\\"', '[redacted]'),
+])
+def test_credential_shapes_redacted_before_matching_and_display(ledger, input_text, safe):
+    h = ledger
+    h.add("body", body=input_text)
+    h.add("metadata", "2026-10-02", "needle", raw_extra={
+        "sender": {"id": "usr_friend", "nick_name": input_text},
+        "payload": {"message": {"body": {"fragments": [{"kind": "file", "name": input_text}]}}},
+    })
+    h.add("outbound", "2026-10-03", "needle", {"direction": "outbound"}, {"attachmentNames": [input_text]})
+    output = h.read()
+    assert f"(id body): {safe}" in output
+    # File and display-name formatting escapes backslashes after sanitizing.
+    display_safe = safe.replace("\\", "\\\\")
+    assert f"[file {display_safe}]" in output
+    assert f"{display_safe} (id metadata)" in output
+    for rendered in (output, h.search(query="needle"), h.search(query=input_text + "\nneedle")):
+        for removed in ("OBVIOUS_PLACEHOLDER_CREDENTIAL", "T0JWSU9VU19QTEFDRUhPTERFUg==",
+                        "eyJObviousPlaceholderHeader.cGF5bG9hZA.c2lnbmF0dXJl"):  # redact-allow:bearer-literal
+            assert removed not in rendered
+            assert ids(h.search(query=removed)) == []
+
+
+@pytest.mark.parametrize("key", [
+    "proxy-authorization", "authorization", "access_token", "access-token", "accesstoken",
+    "refresh_token", "refresh-token", "refreshtoken", "token", "api_key", "api-key", "apikey",
+    "password", "passwd", "secret", "signature", "x-amz-signature", "x-amz-credential",
+])
+def test_every_reference_credential_key_is_masked(key):
+    assert history._redact_history_text(f'{key}="OBVIOUS_PLACEHOLDER_CREDENTIAL"; next') == f'{key}="[redacted]"; next'
+
+
+def test_plain_prose_and_noncredential_ids_are_preserved(ledger):
+    normal = ("Please review the report tomorrow. usr_example msg_example msg-example "
+              "usr_eyJObviousPlaceholderHeader msg_eyJObviousPlaceholderHeader")
+    ledger.add("msg_example", "2026-10-01T10:00:00Z", normal, raw_extra={"sender": {"id": "usr_example", "nick_name": "Ada"}})
+    assert ledger.read() == f"1 message(s), oldest first:\n[2026-10-01T10:00:00Z] Ada (id msg_example): {normal}"
+    assert ids(ledger.search(query="usr_example")) == ["msg_example"]
+    assert ids(ledger.search(query="tomorrow")) == ["msg_example"]
+
+
+def test_failed_credential_redaction_withholds_entire_string(monkeypatch):
+    monkeypatch.setattr(history, "_mask_history_credentials", Mock(side_effect=RuntimeError("fixture redaction failure")))
+    assert history._redact_history_text("ordinary text") == "[redacted]"
+
+
+@pytest.mark.parametrize("body", ["alpha", "x" * 3000], ids=["row-limit", "character-budget"])
+def test_ordinary_pagination_keeps_trimmed_to_on_every_page(ledger, body):
+    h = ledger
+    h.many(25, body)
+    to = "2026-10-01T00:00:22Z"
+    page = h.read(**{"from": "2026-10-01T00:00:00Z", "to": "  " + to + "  ", "limit": 20})
+    seen = []
+    for _ in range(25):
+        shown = ids(page)
+        assert shown and not set(shown) & set(seen)
+        seen.extend(shown)
+        footer = page.split("\n")[-1]
+        if not footer.startswith("More messages follow"):
+            break
+        assert footer == (f'More messages follow — call again with from: "2026-10-01T00:00:{len(seen) + 1:02d}.000Z", '
+                          f'to: "{to}".')
+        page = h.read(**_continuation_args(page), limit=20)
+    assert seen == [f"m{i}" for i in range(1, 23)]
+    assert "More messages follow" not in page
+
+
+def test_bounded_latest_ranges_match_full_ledger(ledger):
+    h = ledger
+    base = 1790812800000
+    for i in range(1, 81):
+        h.add(f"m{i}", base + (81 - i) * 1000)
+    h.add("legacy", extra={"direction": "outbound", "raw": None, "created_at": base + 90000})
+    h.add("trigger", base + 100000)
+    h.add("other-chat", base + 100000, extra={"chat_id": "cnv_other"})
+    h.add("other-account", base + 100000, extra={"account_id": "work"})
+    all_rows = h.store.list_chat_history_messages("default", "cnv_a")
+    assert len(all_rows) == 82
+    for args in ({}, {"limit": 1}, {"limit": 100},
+                 {"from": "2026-10-01T00:00:10Z", "to": "2026-10-01T00:00:50Z", "limit": 10},
+                 {"to": "2026-10-01T00:00:20Z", "limit": 10}):
+        plan = history.chat_history_read_query(args, {"trigger"})
+        bounded = h.store.list_chat_history_messages("default", "cnv_a", plan)
+        assert len(bounded) <= plan["limit"] + int(plan["from"] is not None or plan["to"] is not None)
+        assert all(row["message_id"] != "trigger" for row in bounded)
+        assert history.run_chat_history_tool("chat_history_read", args, bounded, SCOPE) == history.run_chat_history_tool("chat_history_read", args, all_rows, SCOPE)
+    assert history.chat_history_read_query({"around": "m40"}, {"trigger"}) is None
+    assert history.chat_history_read_query({"from": "not a date"}, {"trigger"}) is None
+
+
+@pytest.mark.parametrize("stamp", ["2026-10-01T00:00:00Z", "not a time", True, 9e20])
+def test_bounded_reads_fall_back_for_unsupported_stored_times(ledger, stamp):
+    h = ledger
+    for i in range(30):
+        h.add(f"m{i}", i * 1000)
+    h.add("unusual", stamp)
+    all_rows = h.store.list_chat_history_messages("default", "cnv_a")
+    for args in ({"limit": 5}, {"from": "1970-01-01T00:00:00Z", "limit": 5}):
+        bounded = h.store.list_chat_history_messages("default", "cnv_a", history.chat_history_read_query(args, {"trigger"}))
+        assert bounded == all_rows
+        assert history.run_chat_history_tool("chat_history_read", args, bounded, SCOPE) == history.run_chat_history_tool("chat_history_read", args, all_rows, SCOPE)
+
+
+def test_bounded_reads_preserve_ambiguous_chat_identity(ledger):
+    h = ledger
+    for i in range(25):
+        h.add(f"m{i}", i * 1000)
+    h.add("ambiguous", -1000, extra={"chat_id": "cnv_a"})
+    rows = h.store.list_chat_history_messages("default", "cnv_a", history.chat_history_read_query({}, {"trigger"}))
+    assert len(rows) == 26
+    assert {row["chat_id"] for row in rows} == {"cnv_A", "cnv_a"}
+
+
+def test_bounded_sql_excludes_entire_trigger_set_and_hides_ineligible_rows(ledger):
+    h = ledger
+    base = 1790812800000
+    for i in range(1, 31):
+        h.add(f"m{i}", base + i * 1000)
+    for mid, extra in (("failed", {"direction": "outbound", "event_type": "message.error"}),
+                       ("internal", {"kind": "thinking"}), ("recalled", {})):
+        h.add(mid, base + 40000, extra=extra)
+    assert h.store.recall_message(account_id="default", message_id="recalled") == 1
+    h.add("recalled", base + 40000)
+    scope = {**SCOPE, "exclude_ids": {"m29", "m30"}}
+    for args in ({"limit": 2}, {"from": "2026-10-01T00:00:25Z", "limit": 2}):
+        plan = history.chat_history_read_query(args, scope["exclude_ids"])
+        rows = h.store.list_chat_history_messages("default", "cnv_a", plan)
+        assert not {row["message_id"] for row in rows} & {"m29", "m30", "recalled", "failed", "internal"}
+        assert history.run_chat_history_tool("chat_history_read", args, rows, scope) == h.run(args=args, scope=scope)
+        assert len(rows) <= 2 + int(plan["from"] is not None)
+
+
+@pytest.mark.asyncio
+async def test_session_read_passes_bounded_plan_and_full_trigger_set(session_ledger, monkeypatch):
+    h = session_ledger
+    bind = install_host_context(monkeypatch)
+    for i in range(30):
+        h.add(f"m{i}", 1790812800000 + i * 1000)
+    snapshot = turns.register_turn(account_id="usr_agent", chat_id="cnv_A", speakers=("usr_a",),
+                                   session_key="history-sql", grants={}, history_exclude_ids=frozenset({"m28", "m29"}))
+    original = h.store.list_chat_history_messages
+    query = Mock(wraps=original)
+    monkeypatch.setattr(h.store, "list_chat_history_messages", query)
+    try:
+        with bind(HERMES_SESSION_PLATFORM="clawchat", HERMES_SESSION_CHAT_ID="cnv_A", HERMES_SESSION_MESSAGE_ID=snapshot.nonce):
+            assert ids(await plugin_tools.handle_chat_history_read({"limit": 2})) == ["m26", "m27"]
+            assert query.call_args.args[2]["exclude_ids"] == {"m28", "m29"}
+            assert len(query.call_args.args) == 3
+            await plugin_tools.handle_chat_history_search({"query": "alpha"})
+            assert len(query.call_args.args) == 2
+            await plugin_tools.handle_chat_history_read({"around": "m10"})
+            assert len(query.call_args.args) == 2
+    finally:
+        turns.release_turn(snapshot.nonce)

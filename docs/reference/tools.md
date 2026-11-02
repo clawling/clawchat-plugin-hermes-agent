@@ -252,38 +252,41 @@ errors that carry a machine-readable discriminator, and `retryable` / `status` /
 
 | Tool | Parameters | What it does |
 |------|------------|--------------|
-| `chat_history_search` | `query` (required), `from`, `to`, `speaker`, `limit` | Search original messages; any query word matches, ranked by distinct words matched, then newest first. Default 10 hits, clamped to 1–30. |
-| `chat_history_read` | `around`, `from`, `to`, `limit` | Read verbatim, oldest first: around an id, a time range, or latest messages. Default 20, clamped to 1–60; `around` takes precedence. |
+| `chat_history_search` | `query` (required), `from`, `to`, `speaker`, `limit` | Match any term; rank by distinct matches, then newest. Default 10; limit 1–30. |
+| `chat_history_read` | `around`, `from`, `to`, `limit` | Read oldest first, around an id, a range or latest. Default 20; limit 1–60. |
 
-Both tools are public, like `clawchat_memory_search`. They read the current
-ClawChat conversation from local SQLite `clawchat_messages`, across session resets.
-No chat/account selector is accepted; extras cannot widen scope.
-Missing or failed host session context returns an error without querying messages.
-Task session context precedes the older-host environment fallback.
-Ambiguous stored chat identities return an error.
-Hermes stores messages under ledger account `default`, independently of the
-paired-user account used by tool grants. Other platforms/accounts/chats, recalled
-messages (including tombstones), failed/suppressed sends and non-message rows
-are excluded. Each turn snapshot retains the trigger and coalesced batch ids to
-exclude from both tools; older/unbound host calls exclude the available session
-message id and any unique running batch available from the adapter.
-Synthetic turns have no original trigger to exclude.
+Public like `clawchat_memory_search`, these read the current chat's local SQLite
+ledger across resets; no chat/account selector or server request. Invalid context
+or ambiguous identity returns an error. Ledger account `default` differs from grants.
+Exclude recalls/tombstones, failed/suppressed sends and non-messages. Exclude
+snapshot trigger/batch ids, or available legacy session ids/unique running batches; synthetic turns have no message trigger.
 
-`from`/`to` accept YYYY-MM-DD or ISO 8601, with inclusive endpoints; bare dates
-and times without offsets use the machine's local timezone, and `to` includes
-the whole bare-date day. Frame `emitted_at`, then `timestamp`, precedes insertion
-time. Invalid stored times sort by insertion time for reading and last for
-search, and never match a time range. `speaker` accepts `owner`, `you`/`me`/`self`,
-a `usr_` id, or a partial name. Attachment names are searchable; output includes
-file markers without attachment URLs. No attachment content is fetched.
+`from`/`to`: inclusive ISO/local dates; date-only `to` covers the day. Frame
+`emitted_at`, then `timestamp`, precedes insertion time. Invalid times use insertion
+time for reads, rank last in search and never match ranges. `speaker` accepts
+`owner`, `you`/`me`/`self`, `usr_` id or partial name.
 
-Each hit includes time, speaker and message id. Search snippets are capped at
-280 UTF-16 units, read bodies at 4,000, and the whole plain-text result at 12,000.
-Truncation leaves a final narrowing or continuation line; range pagination gives
-the first omitted timestamp. `prompts/platform.md` instructs the agent to search
-before answering a reference to earlier messages it cannot see. These local reads add no protocol behavior. Hermes'
-`session_search` still requires its existing non-owner authorization because it
-can read across conversations.
+Before matching/truncation, bodies, attachment/display names and echoed queries
+undergo URL then credential redaction. URLs keep origin + path or `[redacted URL]`
+on failure; full inbound URLs are replaced first, including malformed/spaced ones.
+`_redact_history_text` / `_CREDENTIAL_KEYS` in `clawchat_gateway/chat_history.py`
+port the reference key list, keyed/quoted values, Bearer/Basic and JWT rules.
+Values become `"[redacted]"`; ambiguous/deep/unterminated quotes or failure withhold
+the whole string as `[redacted]`. Removed values cannot match; ledger data stays
+unchanged. Redaction alone changes verbatim reads.
+
+UTF-16 caps: snippets 280, bodies 4,000, replies 12,000, query echoes 11,000.
+`around` centers; with `from` equal to its exact time it reads forward, honoring
+`to`. Truncation supplies guidance. Equal/invalid-time boundaries use
+`around: "<id>", from: "<time>"[, to: "<to>"], limit: N`.
+Follow all arguments; pages retain the pair, using insertion time for invalid times.
+Other footers give the first omitted time. **Every footer keeps trimmed `to`**.
+
+Latest/range SQL materializes the cap (plus one for ranges) when times are
+numeric/in range or absent; it still scans time metadata. Search, around/id-cursor,
+unsupported times or ambiguous chat casing retain full reads. One SQLite snapshot
+covers eligibility/selection, excluding the **whole trigger-id set**. Delayed frames
+forbid insertion-time cutoffs.
 
 ## Local memory (Markdown files under `$HERMES_HOME/memories`)
 

@@ -1,14 +1,17 @@
 """Conversation-scoped queries over the plugin's original-message ledger."""
 from __future__ import annotations
 
+import ipaddress
 import json
 import math
 import re
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from types import SimpleNamespace
+from urllib.parse import quote, unquote, urlsplit
 
 _TIMES = {
     "from": {"type": "string", "description": "Earliest time: YYYY-MM-DD or ISO 8601."},
@@ -52,6 +55,190 @@ def _text(value):
 
 def _escape(value):
     return value.replace("\\", "\\\\").replace("\r", "\\r").replace("\n", "\\n")
+
+
+_HISTORY_URLS = re.compile(
+    r"\b[a-z][a-z0-9+.-]*://(?:(?!\b[a-z][a-z0-9+.-]*://)[^" + _WHITESPACE + r"\"'<>])+",
+    re.IGNORECASE | re.ASCII,
+)
+
+
+def _url_host(host):
+    if ":" in host:
+        if "%" in host:
+            raise ValueError("invalid URL host")
+        return f"[{ipaddress.IPv6Address(host).compressed}]"
+    host = unicodedata.normalize("NFKC", unquote(host, errors="strict")).lower()
+    if not host or re.search(r"[\x00-\x20\x7f #%/:<>?@\[\]\\^|]", host):
+        raise ValueError("invalid URL host")
+    host = ".".join(label if label.isascii() else "xn--" + label.encode("punycode").decode("ascii")
+                    for label in host.split("."))
+    parts = host.removesuffix(".").split(".")
+    if re.fullmatch(r"(?:[0-9]+|0x[0-9a-f]*)", parts[-1]):
+        numbers = []
+        for part in parts:
+            if part.startswith("0x"):
+                numbers.append(int(part[2:] or "0", 16))
+            elif len(part) > 1 and part.startswith("0"):
+                numbers.append(int(part, 8))
+            else:
+                numbers.append(int(part, 10))
+        if len(numbers) > 4 or any(n > 255 for n in numbers[:-1]) or numbers[-1] >= 256 ** (5 - len(numbers)):
+            raise ValueError("invalid URL host")
+        value = numbers[-1] + sum(n * 256 ** (3 - i) for i, n in enumerate(numbers[:-1]))
+        return str(ipaddress.IPv4Address(value))
+    return host
+
+
+def _redact_history_url(source):
+    """Match the media-source URL redactor's origin + path, failing closed."""
+    try:
+        source = source.strip("".join(map(chr, range(33))))
+        source = source.replace("\t", "").replace("\r", "").replace("\n", "")
+        scheme, rest = source.split(":", 1)
+        scheme = scheme.lower()
+        defaults = {"http": 80, "https": 443, "ftp": 21, "ws": 80, "wss": 443}
+        if scheme not in defaults:
+            return "[redacted URL]"
+        # WHATWG special URLs normalize backslashes and repeated opening slashes.
+        rest = re.split(r"[?#]", rest, maxsplit=1)[0].replace("\\", "/")
+        parsed = urlsplit(scheme + "://" + rest.lstrip("/"))
+        host = _url_host(parsed.hostname or "")
+        port = parsed.port
+        authority = host + (f":{port}" if port is not None and port != defaults[scheme] else "")
+        parts = []
+        segments = (parsed.path or "/").split("/")
+        for i, part in enumerate(segments):
+            dot = part.lower().replace("%2e", ".")
+            if dot in (".", ".."):
+                if dot == ".." and len(parts) > 1:
+                    parts.pop()
+                if i == len(segments) - 1:
+                    parts.append("")
+            else:
+                parts.append(part)
+        path = quote("/".join(parts), safe="/!$&'()*+,-.:;=@_~%[]|^")
+        return f"{scheme}://{authority}{path}"
+    except (ValueError, UnicodeError):
+        return "[redacted URL]"
+
+
+def _redact_history_urls(value):
+    def replace(match):
+        source = match.group(0)
+        closing = re.search(r"[)\]}]+$", source)
+        suffix = closing.group(0) if closing else ""
+        return _redact_history_url(source[:len(source) - len(suffix)]) + suffix
+    return _HISTORY_URLS.sub(replace, value)
+
+
+_CREDENTIAL_KEYS = re.compile(
+    r"(?:\\*[\"'])?\b(proxy-authorization|authorization|access[_-]?token|refresh[_-]?token|token|"
+    r"api[_-]?key|apikey|password|passwd|secret|signature|x-amz-signature|x-amz-credential)"
+    r"\b(?:\\*[\"'])?[" + _WHITESPACE + r"]*[:=][" + _WHITESPACE + r"]*",
+    re.IGNORECASE | re.ASCII,
+)
+_MASK = '"[redacted]"'
+_MASK_BOUNDARY = re.compile("[" + _WHITESPACE + r"\,;&}\])\"']")
+_USERINFO_SCHEME = re.compile(r"(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,31}://", re.IGNORECASE | re.ASCII)
+
+
+def _strip_history_userinfo(value):
+    parts = []
+    copied = 0
+    for match in _USERINFO_SCHEME.finditer(value):
+        if match.start() < copied:
+            continue
+        start = match.end()
+        boundary = re.search("[" + _WHITESPACE + r"/?#]", value[start:])
+        end = start + boundary.start() if boundary else len(value)
+        at = value.rfind("@", start, end)
+        if at < 0:
+            continue
+        boundary = re.search("[" + _WHITESPACE + r"\"'<>`]", value[at + 1:end])
+        host_end = at + 1 + boundary.start() if boundary else end
+        source = value[match.start():host_end]
+        try:
+            parsed = urlsplit(source)
+            if parsed.scheme in {"http", "https", "ftp", "ws", "wss"}:
+                safe = _redact_history_url(source)
+                authority = urlsplit(safe).netloc
+            else:
+                authority = parsed.netloc.rsplit("@", 1)[-1]
+                parsed.port  # Reject invalid ports, as new URL does.
+            safe = match.group(0) + authority if authority else "[redacted-url]"
+        except (ValueError, UnicodeError):
+            safe = "[redacted-url]"
+        parts.append(value[copied:match.start()] + safe)
+        copied = host_end
+    return "".join(parts) + value[copied:]
+
+
+def _quoted_history_value_end(value, start, level, quote):
+    for at in range(start, len(value)):
+        if value[at] != quote:
+            continue
+        run = 0
+        while at - run - 1 >= start and value[at - run - 1] == "\\":
+            run += 1
+        if level == 0:
+            if run % 2 == 0:
+                return at + 1
+        elif run % 4 == 1:
+            return at + 1
+        elif run % 2 == 0:
+            break
+    raise ValueError("ambiguous credential value")
+
+
+def _mask_history_credentials(value):
+    out = ""
+    pos = 0
+    mask_ends = []
+    while (match := _CREDENTIAL_KEYS.search(value, pos)) is not None:
+        start = match.end()
+        level = 0
+        while start + level < len(value) and value[start + level] == "\\":
+            level += 1
+        quote = value[start + level:start + level + 1]
+        if quote in ('"', "'"):
+            if level > 1:
+                raise ValueError("ambiguous credential value")
+            end = _quoted_history_value_end(value, start + level + 1, level, quote)
+        else:
+            delimiter = r"[\r\n]" if "authorization" in match[1].lower() else r"[\r\n\"',;&}]"
+            stop = re.search(delimiter, value[start:])
+            end = start + stop.start() if stop else len(value)
+        out += value[pos:start] + _MASK
+        mask_ends.append(len(out))
+        pos = end
+    out += value[pos:]
+    if any(at < len(out) and not _MASK_BOUNDARY.fullmatch(out[at]) for at in mask_ends):
+        raise ValueError("ambiguous credential value")
+    pos = 0
+    while (match := _CREDENTIAL_KEYS.search(out, pos)) is not None:
+        if not out.startswith(_MASK, match.end()):
+            raise ValueError("ambiguous credential value")
+        pos = match.end() + len(_MASK)
+    return out
+
+
+def _redact_history_text(value):
+    """URL redaction followed by the shared reference diagnostic credential rules."""
+    try:
+        safe = _mask_history_credentials(_strip_history_userinfo(_redact_history_urls(value)))
+        safe = re.sub(r"\b(bearer)[" + _WHITESPACE + r"]+[A-Za-z0-9._~+/=-]+",
+                      lambda m: m[1] + " [redacted]", safe, flags=re.IGNORECASE | re.ASCII)
+        safe = re.sub(r"\b(Basic)[" + _WHITESPACE + r"]+[A-Za-z0-9+/=]{8,}",
+                      lambda m: m[1] + " [redacted]", safe, flags=re.ASCII)
+        safe = re.sub(r"\beyJ[A-Za-z0-9._~+/=-]{10,}", "[redacted]", safe, flags=re.ASCII)
+        if safe in {"(diagnostic text withheld: base URL contains credentials)",
+                    "(diagnostic text withheld: redaction failed)",
+                    "(diagnostic text withheld: ambiguous credential value)"}:
+            return "[redacted]"
+        return safe
+    except Exception:  # noqa: BLE001 - ambiguous/failed redaction withholds the whole string
+        return "[redacted]"
 
 
 def _length(value):
@@ -184,6 +371,7 @@ def _entry(row, scope):
     from_id = from_id if isinstance(from_id, str) else ""
     name = name if isinstance(name, str) else ""
     files = []
+    body = row.get("text") or ""
     if self and isinstance(raw.get("attachmentNames"), list):
         files = [v if isinstance(v, str) else "" for v in raw["attachmentNames"]]
     elif self and type(raw.get("mediaCount")) in (int, float) and 0 < raw["mediaCount"] <= 9007199254740991 and int(raw["mediaCount"]) == raw["mediaCount"]:
@@ -192,12 +380,17 @@ def _entry(row, scope):
         # Hermes persists the full outbound frame as well as inbound frames.
         fragments = _object(_object(_object(raw.get("payload")).get("message")).get("body")).get("fragments")
         if isinstance(fragments, list):
-            files = [f.get("name") if isinstance(f.get("name"), str) else "" for f in map(_object, fragments)
-                     if f.get("kind") in ("image", "file", "audio", "video")]
+            media = [f for f in map(_object, fragments) if f.get("kind") in ("image", "file", "audio", "video")]
+            files = [f.get("name") if isinstance(f.get("name"), str) else "" for f in media]
+            # Replace full envelope URLs first, including malformed ones or spaces.
+            for fragment in media:
+                source = fragment.get("url")
+                if isinstance(source, str) and source:
+                    body = body.replace(source, _redact_history_url(source))
     at = _parse_iso(ts)
     return _Entry(row.get("protocol_message_id") or row["message_id"], ts, at,
-                  at if math.isfinite(at) else row["created_at"], row.get("text") or "", from_id, name,
-                  self, not self and bool(scope.get("owner_user_id")) and from_id == scope["owner_user_id"], files, row["id"])
+                  at if math.isfinite(at) else row["created_at"], _redact_history_text(body), from_id, _redact_history_text(name),
+                  self, not self and bool(scope.get("owner_user_id")) and from_id == scope["owner_user_id"], [_redact_history_text(f) for f in files], row["id"])
 
 
 def _speaker(e):
@@ -219,6 +412,18 @@ def _speaker_matches(e, who):
     if who in ("you", "me", "self"):
         return e.self
     return e.sender.lower() == who if who.startswith("usr_") else who in e.name.lower()
+
+
+def chat_history_read_query(args: dict, exclude_ids) -> dict | None:
+    """Latest/range SQL plan; render still validates after storage resolution."""
+    if _text(args.get("around")):
+        return None
+    try:
+        return {"limit": _limit(args.get("limit"), 20, 60),
+                "from": _time(args.get("from"), "from"), "to": _time(args.get("to"), "to", True),
+                "exclude_ids": frozenset(exclude_ids)}
+    except ValueError:
+        return None
 
 
 def _line(e, terms=None):
@@ -272,7 +477,8 @@ def run_chat_history_tool(tool: str, args: dict, rows: list[dict], scope: dict) 
     ranged = [e for e in all_entries if (start is None and end is None) or
               (math.isfinite(e.at) and (start is None or e.at >= start) and (end is None or e.at <= end))]
     if tool == "chat_history_search":
-        display = _slice(raw, 0, 11000) + "…" if _length(raw) > 11000 else raw
+        safe_query = _redact_history_text(raw)
+        display = _slice(safe_query, 0, 11000) + "…" if _length(safe_query) > 11000 else safe_query
         who = (_text(args.get("speaker")) or "").lower()
         hits = []
         for e in ranged:
@@ -290,20 +496,41 @@ def run_chat_history_tool(tool: str, args: dict, rows: list[dict], scope: dict) 
                      [_line(e, terms) for e, _ in shown], lambda _: _MORE, len(hits) > len(shown))
     cap = _limit(args.get("limit"), 20, 60)
     around = _text(args.get("around"))
+    continuation = False
     if around:
         at = next((i for i, e in enumerate(all_entries) if e.id == around), -1)
         if at < 0:
             raise ValueError(f"INVALID: no message with id {around} in this conversation.")
-        offset = max(0, min(at - (cap - 1) // 2, len(all_entries) - cap))
-        entries = all_entries[offset:offset + cap]
+        continuation = start is not None and start == all_entries[at].chronological_at
+        if continuation:
+            entries = [e for e in all_entries[at:] if end is None or e.chronological_at <= end][:cap + 1]
+        else:
+            offset = max(0, min(at - (cap - 1) // 2, len(all_entries) - cap))
+            entries = all_entries[offset:offset + cap]
     else:
         entries = ranged[:cap + 1] if start is not None or end is not None else all_entries[-cap:]
     if not entries:
         return "No messages in this conversation for that range."
-    next_ts = entries[cap].ts if len(entries) > cap else None
+    next_entry = entries[cap] if len(entries) > cap else None
     entries = entries[:cap]
-    return _pack(lambda n: f"{n} message(s), oldest first:", [_line(e) for e in entries],
-                 lambda cut: f'More messages follow — call again with from: "{next_ts if cut is None else entries[cut].ts}".', next_ts is not None)
+
+    def more(cut):
+        omitted = next_entry if cut is None else entries[cut]
+        if omitted is None:
+            return "More messages follow — narrow it down with from / to."
+        shown = entries if cut is None else entries[:cut]
+        same_time = any(e.chronological_at == omitted.chronological_at for e in shown)
+        if continuation or same_time or not math.isfinite(omitted.at):
+            stamp = omitted.ts if math.isfinite(omitted.at) else _stamp(omitted.chronological_at)
+            encode = lambda value: json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            until = "" if end is None else f", to: {encode(_text(args.get('to')))}"
+            return (f"More messages follow — call again with around: {encode(omitted.id)}, "
+                    f"from: {encode(stamp)}{until}, limit: {cap}.")
+        until = "" if end is None else f", to: {json.dumps(_text(args.get('to')), ensure_ascii=False)}"
+        return f'More messages follow — call again with from: "{omitted.ts}"{until}.'
+
+    return _pack(lambda n: f"{n} message(s), oldest first:", [_line(e) for e in entries], more, next_entry is not None)
+
 
 
 def history_for_session(tool: str, args: dict, *, session_id="", turn_id="") -> str:
@@ -322,10 +549,26 @@ def history_for_session(tool: str, args: dict, *, session_id="", turn_id="") -> 
     if snapshot and snapshot.chat_id.lower() != chat.lower():
         raise ValueError(HISTORY_SCOPE_UNAVAILABLE)
     excluded = snapshot.history_exclude_ids if snapshot else frozenset({nonce})
+    if snapshot is None:
+        try:
+            from clawchat_gateway.terminal_send import get_clawchat_sender
+            sender = get_clawchat_sender()
+            if sender is not None:
+                trigger = sender._current_turn_trigger(chat)
+                if trigger:
+                    excluded |= frozenset({trigger})
+                    open_turns = sender._open_turns(chat)
+                    if len(open_turns) == 1 and open_turns[0][1] == trigger:
+                        raw = _object(getattr(open_turns[0][0], "raw_message", None)).get("clawchat_raw")
+                        excluded |= frozenset(sender._batch_message_ids(SimpleNamespace(raw_message=raw)))
+        except (AttributeError, OSError, ValueError):
+            pass
     store = get_clawchat_store()
     # Message ingestion and outbound persistence both use this ledger account;
     # the turn-grants account is instead the paired user's identity.
-    rows = store.list_chat_history_messages("default", chat)
+    query = chat_history_read_query(args, excluded) if tool == "chat_history_read" else None
+    rows = (store.list_chat_history_messages("default", chat, query) if query is not None
+            else store.list_chat_history_messages("default", chat))
     if rows is None:
         raise RuntimeError(HISTORY_UNAVAILABLE)
     if len({row.get("chat_id") for row in rows}) > 1:
@@ -337,14 +580,6 @@ def history_for_session(tool: str, args: dict, *, session_id="", turn_id="") -> 
         sender = get_clawchat_sender()
         if sender is not None:
             self_id, self_name = sender._current_agent_identity(sender._read_memory_metadata("owner", "owner"))
-            if snapshot is None:
-                trigger = sender._current_turn_trigger(chat)
-                if trigger:
-                    excluded |= frozenset({trigger})
-                    open_turns = sender._open_turns(chat)
-                    if len(open_turns) == 1 and open_turns[0][1] == trigger:
-                        raw = _object(getattr(open_turns[0][0], "raw_message", None)).get("clawchat_raw")
-                        excluded |= frozenset(sender._batch_message_ids(SimpleNamespace(raw_message=raw)))
     except (AttributeError, OSError, ValueError):
         # Display metadata is optional; it cannot widen the conversation scope.
         pass
