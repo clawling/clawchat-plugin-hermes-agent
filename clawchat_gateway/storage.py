@@ -1838,13 +1838,17 @@ class ClawChatStore:
         self.initialize()
         if self._disabled:
             return None
-        scope = """
+        # Legacy malformed metadata is treated as absent, as in the time plan.
+        safe_raw = "CASE WHEN json_valid(m.raw_json) THEN m.raw_json ELSE '{}' END"
+        mode_filter = _NORMAL_MODE_FILTER_SQL.replace("raw_json", safe_raw)
+        scope = f"""
             FROM clawchat_messages m
             WHERE m.platform = 'hermes' AND m.account_id = ?
               AND m.chat_id = ? COLLATE NOCASE
               AND m.kind = 'message' AND m.message_id IS NOT NULL AND m.message_id <> ''
               AND m.direction IN ('inbound', 'outbound')
               AND m.event_type IN ('message.send', 'message.reply')
+              {mode_filter}
               AND NOT EXISTS (SELECT 1 FROM recalled_messages r
                 WHERE r.account_id = m.account_id AND r.message_id = m.message_id)
         """

@@ -427,6 +427,28 @@ def chat_history_read_query(args: dict, exclude_ids) -> dict | None:
         return None
 
 
+_FIELD_CHARS = 256
+_FILE_MARKERS_CHARS = 2048
+_ENTRY_CHARS = 8000
+
+
+def _clip(value, cap):
+    """A cap includes its deterministic ellipsis, measured in UTF-16 units."""
+    return value if _length(value) <= cap else _slice(value, 0, cap - 1) + "…"
+
+
+def _file_markers(names):
+    tail = ""
+    for i, name in enumerate(names):
+        marker = f"  [file {_clip(_escape(name), _FIELD_CHARS)}]" if name else "  [file]"
+        # Keep complete markers and reserve the final ellipsis when files remain.
+        reserve = int(i + 1 < len(names))
+        if _length(tail) + _length(marker) + reserve > _FILE_MARKERS_CHARS:
+            return tail + "…"
+        tail += marker
+    return tail
+
+
 def _line(e, terms=None):
     body = e.text if e.text.strip(_WHITESPACE) else "(empty message)"
     if terms is not None:
@@ -439,12 +461,18 @@ def _line(e, terms=None):
             body = ("…" if start else "") + _slice(body, start, end) + ("…" if end < _length(body) else "")
     elif _length(body) > 4000:
         body = _slice(body, 0, 4000) + "… (cut)"
-    head = f"[{e.ts}] {_speaker(e)} (id {e.id}):"
-    tail = "".join(f"  [file {_escape(name)}]" if name else "  [file]" for name in e.files)
-    return head + ("\n" if "\n" in body else " ") + body + tail
+    head = f"[{_clip(e.ts, _FIELD_CHARS)}] {_clip(_speaker(e), _FIELD_CHARS)} (id {e.id}):"
+    tail = _file_markers(e.files)
+    return _clip(head + ("\n" if "\n" in body else " ") + body + tail, _ENTRY_CHARS)
 
 
 def _pack(header, lines, more, force_more):
+    # Query echoes can consume most of a search reply. Bound each entry to
+    # what one line can actually use after reserving header/newlines/footer.
+    longest = max(_length(more(None)), *(_length(more(i)) for i in range(len(lines))))
+    entry_budget = max(1, 12000 - _length(header(len(lines))) - longest - 2)
+    lines = [_clip(line, min(_ENTRY_CHARS, entry_budget)) for line in lines]
+
     def fit(budget):
         spent = _length(header(len(lines)))
         shown = 0
@@ -456,7 +484,6 @@ def _pack(header, lines, more, force_more):
         return shown
     shown = -1 if force_more else fit(12000)
     if shown < 0 or shown < len(lines):
-        longest = max(_length(more(None)), *(_length(more(i)) for i in range(len(lines))))
         shown = fit(12000 - 1 - longest)
     return "\n".join([header(shown), *lines[:shown],
                       *([more(shown if shown < len(lines) else None)] if force_more or shown < len(lines) else [])])

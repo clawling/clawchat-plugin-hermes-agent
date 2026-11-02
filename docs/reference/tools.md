@@ -256,39 +256,40 @@ errors that carry a machine-readable discriminator, and `retryable` / `status` /
 | `chat_history_read` | `around`, `from`, `to`, `limit` | Read oldest first, around an id, a range or latest. Default 20; limit 1–60. |
 
 Public like `clawchat_memory_search`, these read the current chat's local SQLite
-ledger across resets; no chat/account selector or server request. Invalid context
-or ambiguous identity returns an error. Ledger account `default` differs from grants.
-Exclude recalls/tombstones, failed/suppressed sends and non-messages. Exclude
-snapshot trigger/batch ids, or available legacy session ids/unique running batches; synthetic turns have no message trigger.
+ledger across resets. No chat/account selector/server access; invalid context or
+ambiguous identity errors. Exclude recalls, failed sends, non-messages and
+snapshot trigger/batch ids.
+Legacy calls use available ids/unique batches.
 
-`from`/`to`: inclusive ISO/local dates; date-only `to` covers the day. Frame
-`emitted_at`, then `timestamp`, precedes insertion time. Invalid times use insertion
-time for reads, rank last in search and never match ranges. `speaker` accepts
-`owner`, `you`/`me`/`self`, `usr_` id or partial name.
+Inclusive ISO/local dates; date-only `to` covers the day. Frame time wins; invalid
+times use insertion time on reads, rank last in search and never match ranges.
 
-Before matching/truncation, bodies, attachment/display names and echoed queries
-undergo URL then credential redaction. URLs keep origin + path or `[redacted URL]`
-on failure; full inbound URLs are replaced first, including malformed/spaced ones.
-`_redact_history_text` / `_CREDENTIAL_KEYS` in `clawchat_gateway/chat_history.py`
-port the reference key list, keyed/quoted values, Bearer/Basic and JWT rules
-(Basic: any-case scheme, any-length value; an all-lowercase word after "basic" is prose and kept).
-An unknown `around` id is a validation error that does not echo the id.
-Values become `"[redacted]"`; ambiguous/deep/unterminated quotes or failure withhold
-the whole string as `[redacted]`. Removed values cannot match; ledger data stays
-unchanged. Redaction alone changes verbatim reads.
+Before matching/truncation, body/names/query echoes use URL then credential
+redaction (`_redact_history_text` / `_CREDENTIAL_KEYS` in `clawchat_gateway/chat_history.py`).
+URLs keep origin/path or `[redacted URL]`; inbound URLs are replaced first.
+Keyed/quoted values, Bearer/Basic and JWT follow the reference. Basic allows
+any-case/length except lowercase prose. Ambiguity/deep/unterminated quotes or
+failure yield `[redacted]`. Removed values cannot match; ledger data is unchanged.
+Unknown `around` errors never echo the id. Redaction/truncation limit verbatim reads.
 
 UTF-16 caps: snippets 280, bodies 4,000, replies 12,000, query echoes 11,000.
-`around` centers; with `from` equal to its exact time it reads forward, honoring
-`to`. Truncation supplies guidance. Equal/invalid-time boundaries use
-`around: "<id>", from: "<time>"[, to: "<to>"], limit: N`.
-Follow all arguments; pages retain the pair, using insertion time for invalid times.
-Other footers give the first omitted time. **Every footer keeps trimmed `to`**.
+Time text, escaped speaker labels and attachment names: 256 each. Marker text:
+2,048, complete markers plus `…` if files remain. Entries: 8,000, then remaining
+reply space (12,000 minus header, longest footer and two newlines). Each new cap
+includes final `…`; large entries appear and pagination advances.
 
-Latest/range SQL materializes the cap (plus one for ranges) when times are
-numeric/in range or absent; it still scans time metadata. Search, around/id-cursor,
-unsupported times or ambiguous chat casing retain full reads. One SQLite snapshot
-covers eligibility/selection, excluding the **whole trigger-id set**. Delayed frames
-forbid insertion-time cutoffs.
+`around` centers; exact `from` switches to forward reads honoring `to`. Tied or
+invalid-time continuations use
+`around: "<id>", from: "<time>"[, to: "<to>"], limit: N`.
+Follow all arguments; invalid times use insertion time. Ordinary footers give the
+first omitted time; all keep trimmed `to`.
+
+Latest/range SQL emits the cap (+1 for ranges) for numeric/in-range/absent times;
+search, around/id-cursor, unsupported times or ambiguous casing use full reads.
+One snapshot covers eligibility/selection/all trigger ids; no insertion-time cutoff.
+Before selection/LIMIT in every path, exclude JSON-text `payload.message_mode`
+whose SQL-trimmed value is neither empty nor `normal` (thinking/progress/status).
+Missing/malformed metadata stays eligible.
 
 ## Local memory (Markdown files under `$HERMES_HOME/memories`)
 

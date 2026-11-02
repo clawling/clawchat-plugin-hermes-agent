@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -110,6 +111,18 @@ def test_chat_account_platform_isolation_and_injected_arguments(ledger):
         h.read(around="group")
 
 
+def _claim_outbound(h, mid, mode="thinking", stamp=1790812840000):
+    from clawchat_gateway.adapter import ClawChatAdapter
+
+    adapter = object.__new__(ClawChatAdapter)
+    adapter._store = h.store
+    frame = {"event": "message.reply", "emitted_at": stamp,
+             "payload": {"message_id": mid, "message_mode": mode,
+                         "message": {"body": {"fragments": [{"kind": "text", "text": "alpha"}]}}}}
+    assert adapter._claim_outbound_message(event_type="message.reply", trace_id=None,
+                                            chat_id="cnv_A", message_id=mid, text="alpha", raw=frame) is True
+
+
 def test_recalled_failed_suppressed_and_internal_hidden(ledger):
     h = ledger
     h.add("kept")
@@ -118,7 +131,7 @@ def test_recalled_failed_suppressed_and_internal_hidden(ledger):
     h.add("recalled")  # Legacy insert bypasses ingestion's tombstone guard.
     for mid in ("failed", "suppressed"):
         h.add(mid, extra={"direction": "outbound", "event_type": "message.error"})
-    h.add("thinking", extra={"kind": "thinking"})
+    _claim_outbound(h, "thinking")
     h.add("internal", extra={"event_type": "notification"})
     h.add("out", extra={"direction": "outbound", "event_type": "message.reply"})
     assert ids(h.read()) == ["kept", "out"]
@@ -802,8 +815,9 @@ def test_bounded_sql_excludes_entire_trigger_set_and_hides_ineligible_rows(ledge
     for i in range(1, 31):
         h.add(f"m{i}", base + i * 1000)
     for mid, extra in (("failed", {"direction": "outbound", "event_type": "message.error"}),
-                       ("internal", {"kind": "thinking"}), ("recalled", {})):
+                       ("recalled", {})):
         h.add(mid, base + 40000, extra=extra)
+    _claim_outbound(h, "internal")
     assert h.store.recall_message(account_id="default", message_id="recalled") == 1
     h.add("recalled", base + 40000)
     scope = {**SCOPE, "exclude_ids": {"m29", "m30"}}
@@ -837,3 +851,103 @@ async def test_session_read_passes_bounded_plan_and_full_trigger_set(session_led
             assert len(query.call_args.args) == 2
     finally:
         turns.release_turn(snapshot.nonce)
+
+
+@pytest.mark.parametrize("stored_time", [1790812840000, "2026-10-01T00:00:40Z"])
+def test_real_outbound_modes_are_hidden_before_full_and_bounded_selection(ledger, stored_time):
+    h = ledger
+    for i in range(1, 4):
+        h.add(f"m{i}", 1790812800000 + i * 1000)
+    for i, mode in enumerate(("thinking", "tool-progress", "status", "widget", " thinking ")):
+        _claim_outbound(h, f"hidden-{i}", mode=mode, stamp=stored_time)
+    _claim_outbound(h, "normal", mode="normal", stamp=1790812804000)
+    _claim_outbound(h, "empty-mode", mode="", stamp=1790812805000)
+    _claim_outbound(h, "whitespace-mode", mode="  ", stamp=1790812806000)
+    with sqlite3.connect(h.store.db_path) as conn:
+        row = conn.execute("SELECT kind, event_type, raw_json FROM clawchat_messages WHERE message_id = ?", ("hidden-0",)).fetchone()
+    assert row[:2] == ("message", "message.reply")
+    assert json.loads(row[2])["payload"]["message_mode"] == "thinking"
+    assert ids(h.search()) == ["whitespace-mode", "empty-mode", "normal", "m3", "m2", "m1"]
+    for args, expected in (({}, ["m3", "normal", "empty-mode", "whitespace-mode"]),
+                           ({"from": "2026-10-01T00:00:00Z"}, ["m1", "m2", "m3", "normal"])):
+        args = {**args, "limit": 4}
+        plan = history.chat_history_read_query(args, {"trigger"})
+        rows = h.store.list_chat_history_messages("default", "cnv_a", plan)
+        assert all(not row["message_id"].startswith("hidden-") for row in rows)
+        assert len(rows) <= 4 + int(plan["from"] is not None)
+        page = history.run_chat_history_tool("chat_history_read", args, rows, SCOPE)
+        assert ids(page) == expected
+        assert "hidden-" not in page
+    assert "hidden-" not in h.read(around="m3")
+
+
+def test_normal_mode_filter_keeps_legacy_malformed_metadata(ledger):
+    h = ledger
+    h.add("legacy", 1790812800000)
+    with sqlite3.connect(h.store.db_path) as conn:
+        conn.execute("UPDATE clawchat_messages SET raw_json = ? WHERE message_id = ?", ("{broken", "legacy"))
+    for plan in (None, history.chat_history_read_query({}, {"trigger"})):
+        assert [row["message_id"] for row in h.store.list_chat_history_messages("default", "cnv_a", plan)] == ["legacy"]
+
+
+@pytest.mark.parametrize("outbound", [False, True])
+def test_large_attachment_entries_are_returned_and_pagination_advances(ledger, outbound):
+    h = ledger
+    names = ["N" * 251 for _ in range(50)]
+    extra = {"direction": "outbound"} if outbound else {}
+    raw = ({"attachmentNames": names} if outbound else
+           {"payload": {"message": {"body": {"fragments": [{"kind": "file", "name": name} for name in names]}}}})
+    for i in range(1, 5):
+        h.add(f"m{i}", 1790812800000 + i * 1000, "needle " + "x" * 4000, extra, raw)
+    page = h.read(**{"from": "2026-10-01T00:00:00Z", "limit": 4})
+    seen = []
+    for _ in range(4):
+        assert history._length(page) <= 12000
+        shown = ids(page)
+        assert shown and shown[0] == f"m{len(seen) + 1}"
+        assert not set(shown) & set(seen)
+        assert "[file " + "N" * 251 + "]" in page
+        assert "…" in page
+        seen.extend(shown)
+        if not page.split("\n")[-1].startswith("More messages follow"):
+            break
+        assert len(seen) < 4
+        args = _continuation_args(page)
+        assert args.get("around") != shown[0]
+        assert args["from"] == history._stamp(1790812800000 + (len(seen) + 1) * 1000)
+        page = h.read(**args, limit=4)
+    assert seen == ["m1", "m2", "m3", "m4"]
+    output = h.search(query="needle", limit=1)
+    assert ids(output) == ["m4"]
+    assert 'showing 1, best match first.' in output
+    assert history._length(output) <= 12000
+
+
+def test_entry_name_and_total_bounds_include_ellipsis_and_escaping(ledger):
+    h = ledger
+    h.add("bounded", body="needle", raw_extra={
+        "sender": {"id": "usr_ada", "nick_name": "A" * 9000},
+        "payload": {"message": {"body": {"fragments": [{"kind": "file", "name": "N" * 1000}]}}},
+    })
+    output = h.read()
+    assert ids(output) == ["bounded"]
+    assert "A" * 255 + "…" in output
+    assert "N" * 255 + "…" in output
+    assert "N" * 256 not in output
+    for i in range(1, 5):
+        h.add(f"empty-{i}", body="needle", raw_extra={"payload": {"message": {"body": {"fragments": [{"kind": "file"} for _ in range(1000)]}}}})
+    assert ids(h.read(limit=1)) == ["empty-4"]
+    assert h.read(limit=1).count("  [file]") == 255
+    assert h.read(limit=1).endswith("…")
+
+
+def test_large_query_still_shows_large_matching_entry(ledger):
+    h = ledger
+    h.add("large", body="needle " + "x" * 4000, raw_extra={
+        "sender": {"id": "usr_ada", "nick_name": "N" * 9000},
+        "payload": {"message": {"body": {"fragments": [{"kind": "file", "name": "F" * 251} for _ in range(50)]}}},
+    })
+    output = h.search(query="q" * 11000 + " needle")
+    assert ids(output) == ["large"]
+    assert 'showing 1, best match first.' in output
+    assert history._length(output) <= 12000
