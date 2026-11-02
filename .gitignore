@@ -265,6 +265,8 @@ tests/fixtures/*
 !tests/conftest.py
 !tests/hermes_source.py
 !tests/test_host_version.py
+# Compression diagnostics expose effective caps and provenance without writing config.
+!tests/test_compression_status.py
 !tests/test_instance_lock.py
 !tests/test_install_conflict.py
 !tests/test_takeover_close_backoff.py
@@ -406,6 +408,8 @@ CLAUDE.md
 
 # Proactive grants wake original requests; owner steer waits; restart retries are bounded.
 !tests/test_owner_wake_steer.py
+# Session schemas stay stable while execution authority remains per turn.
+!tests/test_stable_tool_schema.py
 
 # Current-conversation history schemas, ledger isolation, formatting and public access.
 !tests/test_chat_history_tools.py

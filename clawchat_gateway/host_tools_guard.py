@@ -29,20 +29,18 @@ and without the initiating turn's session identity. The hook cannot identify
 that caller in the worker, so every ``kanban_*`` tool is restricted at dispatch
 in the initiating turn.
 
-This module narrows those turns in two layers. Per-person grants can add
+This module protects those turns in two layers. Per-person grants can add
 individual tools back: the adapter holds new input while a granted turn is
 busy, and a nonce snapshot must match the first pre_llm_call session/turn
 binding. No session-level fallback supplies execution authority.
 
-* :func:`toolsets_for_source` — the adapter's per-source toolset override
-  (``BasePlatformAdapter.toolsets_for_source``, host 0.20.1+). Every turn but
-  the owner's own direct chat loses ungranted :data:`RESTRICTED_TOOLSETS`
-  (``memory`` among them) by default and gets the host's ``no_mcp`` sentinel,
-  so the model does not see those tools. Listing no MCP server would not do: the host then adds back
-  every enabled one, the fallback list included. Group authority comes only
-  from the trusted batch snapshot: a nonempty owner-only batch has full
-  ordinary tools; mixed batches intersect their non-owner speakers' grants.
-  Changing the toolset can rebuild the agent and its prompt cache.
+* :func:`toolsets_for_source` keeps a sorted platform union for every turn
+  in a group or the owner's activation DM when :func:`stable_tool_schema`
+  verifies registered execution/binding hooks and the required host capabilities.
+  Access requests remain present throughout when grants are enabled. Model
+  catalog construction uses the same union; search/describe catalogs still
+  filter by turn. Non-owner DMs and unsupported hosts retain the legacy
+  narrowing and ``no_mcp`` sentinel. See docs/non-owner-boundaries.md.
 * :func:`clawchat_pre_tool_call` — a ``pre_tool_call`` hook that blocks any of
   those tools still reaching dispatch in such a turn (an older host without the
   override, a toolset the filter could not see into). MCP tools are known by
@@ -56,7 +54,8 @@ binding. No session-level fallback supplies execution authority.
   on the spot, a group's goes to the owner (``adapter.send_exec_approval``).
   Effective direct grants execute directly; ask grants route each call,
   including otherwise open tools, to the owner's direct chat. Grant management
-  has its own toolset, hidden from non-owner turns regardless of this setting.
+  has its own toolset; non-owner execution is always refused, including when
+  the stable schema makes it visible.
 
   The hook also limits a few tools such turns keep, by what a call asks for
   (:func:`_limited_call`): ``skill_manage`` (a skill it writes is in the
@@ -580,6 +579,8 @@ def _guest_catalog_turn():
     try:
         from clawchat_gateway.turn_grants import effective_snapshot, session_context_value
 
+        if _UNNARROWED_CATALOG.get():
+            return False
         if session_context_value("HERMES_SESSION_PLATFORM") != "clawchat":
             return False
         snapshot = effective_snapshot(session_context_value("HERMES_SESSION_MESSAGE_ID"))
@@ -743,6 +744,15 @@ def _install_grant_catalog_filter() -> bool:
                     snapshot = None
                 bound = signature.bind(*args, **kwargs)
                 skip_assembly = bound.arguments.get("skip_tool_search_assembly", False)
+                if not skip_assembly and stable_tool_schema(
+                        chat_id, session_context_value("HERMES_SESSION_CHAT_TYPE")):
+                    # Model schemas stay session-wide. Search/describe reads
+                    # request the raw catalog and still take the filter below.
+                    token = _UNNARROWED_CATALOG.set(True)
+                    try:
+                        return original(*args, **kwargs)
+                    finally:
+                        _UNNARROWED_CATALOG.reset(token)
                 if modern:
                     bound.arguments["skip_tool_search_assembly"] = True
                 raw = original(*bound.args, **bound.kwargs)
@@ -1033,7 +1043,11 @@ def _limited_call(tool_name: str, args: Any) -> bool:
 
 def _override_narrows() -> bool:
     """Whether layer 1 takes the restricted toolsets out of such turns."""
-    return host_supports_toolset_override() and non_owner_host_tools() != SETTING_APPROVE
+    from clawchat_gateway.turn_grants import session_context_value
+
+    return (host_supports_toolset_override() and non_owner_host_tools() != SETTING_APPROVE
+            and not stable_tool_schema(session_context_value("HERMES_SESSION_CHAT_ID"),
+                                       session_context_value("HERMES_SESSION_CHAT_TYPE")))
 
 
 def _strict_unregistered(tool_name: str) -> bool:
@@ -1181,8 +1195,53 @@ def _legacy_approve_toolsets():
     return None if kept == platform else sorted(kept) or list(FALLBACK_TOOLSETS)
 
 
+def _host_supports_stable_schema() -> bool:
+    """Require installed guards, execution identity and a per-turn user block."""
+    try:
+        import inspect
+        from gateway.session_context import _VAR_MAP
+        from hermes_cli.plugins import _get_pre_tool_call_directive_details
+        from clawchat_gateway.adapter import _host_supports_channel_context
+
+        return bool(_hook_missing is False and _binding_hook_registered
+                    and host_supports_toolset_override() and _host_supports_pre_llm_call()
+                    and _host_supports_channel_context()
+                    and {"session_id", "turn_id"} <= set(inspect.signature(
+                        _get_pre_tool_call_directive_details).parameters)
+                    and {"HERMES_SESSION_PLATFORM", "HERMES_SESSION_CHAT_ID",
+                         "HERMES_SESSION_CHAT_TYPE", "HERMES_SESSION_MESSAGE_ID"} <= set(_VAR_MAP))
+    except Exception:  # Unknown capabilities retain the original narrowing.
+        return False
+
+
+def stable_tool_schema(chat_id: str, chat_type: str, *, owner_direct_chat_id=None) -> bool:
+    """Schema scope is the chat, never the speaker or their current grants."""
+    try:
+        if not chat_id or not _host_supports_stable_schema():
+            return False
+        if str(chat_type).lower() == "group":
+            return True
+        return (str(chat_type).lower() in _DIRECT_CHAT_TYPES
+                and chat_id == (owner_direct_chat_id or _owner_direct_chat_id)())
+    except Exception:  # Failed chat classification never widens the schema.
+        return False
+
+
 def toolsets_for_source(source: Any, *, owner_user_id, owner_direct_chat_id=None):
     from clawchat_gateway.turn_grants import get_snapshot
+    try:
+        if stable_tool_schema(str(getattr(source, "chat_id", "") or ""),
+                              str(getattr(source, "chat_type", "") or ""),
+                              owner_direct_chat_id=owner_direct_chat_id):
+            toolsets = _platform_toolsets()
+            if _tool_grants_enabled():
+                # Guests can request access without changing the next owner's
+                # schema. Visibility never supplies request/management authority.
+                toolsets = toolsets | {GRANT_REQUEST_TOOLSET}
+            if toolsets:
+                return sorted(toolsets)
+    except Exception:
+        logger.warning("clawchat stable tool catalog unavailable; retaining restrictions")
     result = _toolsets_for_source(source, owner_user_id=owner_user_id, owner_direct_chat_id=owner_direct_chat_id)
     try:
         snapshot = get_snapshot(str(getattr(source, "message_id", "") or ""))
@@ -1262,6 +1321,24 @@ def _toolsets_for_source(source: Any, *, owner_user_id: str | Callable[[], str],
     except Exception as exc:  # noqa: BLE001 - host fallback would otherwise expose everything
         logger.warning("clawchat host tools: toolset override failed (%s); retaining restrictions", exc)
         return narrowed
+
+
+def _legacy_schema_hides(tool_name: str, nonce: str, chat_id: str, chat_type: str) -> bool:
+    """Preserve exclusion of innocent members of a restricted mixed toolset."""
+    from types import SimpleNamespace
+
+    source = SimpleNamespace(message_id=nonce, chat_id=chat_id, chat_type=chat_type)
+    kept = _toolsets_for_source(source, owner_user_id=_owner_user_id)
+    if kept is None:
+        return False
+    hidden = False
+    for name in _platform_toolsets():
+        if tool_name in _resolve_tools(name):
+            if name in kept or (name.startswith(_MCP_TOOLSET_PREFIX)
+                                and name[len(_MCP_TOOLSET_PREFIX):] in kept):
+                return False
+            hidden = True
+    return hidden
 
 
 def _session_turn() -> str:
@@ -1558,10 +1635,14 @@ def _cross_session_decision(tool_name, args, session_id=""):
 
 
 def clawchat_pre_tool_call(*, tool_name: str = "", args: Any = None, **kwargs: Any) -> Optional[dict[str, Any]]:
-    from clawchat_gateway.turn_attachments import record_call
-    decision = _clawchat_pre_tool_decision(tool_name=tool_name, args=args, **kwargs)
-    record_call(tool_name=tool_name, args=args, decision=decision, **kwargs)
-    return decision
+    try:
+        from clawchat_gateway.turn_attachments import record_call
+        decision = _clawchat_pre_tool_decision(tool_name=tool_name, args=args, **kwargs)
+        record_call(tool_name=tool_name, args=args, decision=decision, **kwargs)
+        return decision
+    except Exception:  # The host ignores escaped hook errors and executes.
+        logger.warning("clawchat tool guard failed; blocking call")
+        return {"action": "block", "message": BLOCK_MESSAGE}
 
 
 def _clawchat_pre_tool_decision(*, tool_name: str = "", args: Any = None, **kwargs: Any) -> Optional[dict[str, Any]]:
@@ -1739,9 +1820,19 @@ def _clawchat_pre_tool_decision_raw(*, tool_name: str = "", args: Any = None, **
         strict = not guarded and _strict_unregistered(tool_name)
         if session_turn != "other":
             return None
+        stable = stable_tool_schema(chat_id, session_context_value("HERMES_SESSION_CHAT_TYPE"))
+        # Judge exclusions by the execution's own turn: a queued follow-up runs
+        # under the previous input's context nonce but binds a newer snapshot.
+        # A bindable call that resolved no snapshot gets the unattributed
+        # (narrowest) selection rather than the inherited turn's.
+        schema_nonce = snapshot.nonce if snapshot is not None else ("" if can_bind_call else nonce)
+        schema_hidden = stable and _legacy_schema_hides(
+            tool_name, schema_nonce, chat_id, session_context_value("HERMES_SESSION_CHAT_TYPE"))
         try:
             _, available = host_tool_catalog()
         except Exception:  # noqa: BLE001 - old hosts retain ordinary defaults
+            if stable:
+                return _grant_block("not-available")
             available = ()
         default_allowed = (bool(orchestrate_origin) or (not guarded and not strict)
                            or tool_name in public_tool_names(available, args=args))
@@ -1783,6 +1874,8 @@ def _clawchat_pre_tool_decision_raw(*, tool_name: str = "", args: Any = None, **
                 reason = grant_failure_code(grants, tool_name, args=args, context=context, now=now,
                                             speakers=snapshot.non_owner_speakers if snapshot else ())
                 return _grant_block(reason)
+            if schema_hidden:
+                return _grant_block("not-granted")
             if mode in ("ask", "direct") or default_allowed:
                 route_block = _cross_session_decision(tool_name, args, kwargs.get("session_id", ""))
                 if route_block:
@@ -1810,6 +1903,8 @@ def _clawchat_pre_tool_decision_raw(*, tool_name: str = "", args: Any = None, **
                     return {**_ordinary_non_owner_decision(tool_name, args, grants_enabled=True),
                             "reasonCode": reason}
             return _grant_block(reason)
+        if schema_hidden:
+            return _grant_block("not-granted")
         if default_allowed:
             route_block = _cross_session_decision(tool_name, args, kwargs.get("session_id", ""))
             if route_block:
@@ -1903,6 +1998,7 @@ def limited_tools_hint(*, public_tools=()) -> Optional[str]:
 #: Set by :func:`register_host_tools_guard` when the host could not take the
 #: ``pre_tool_call`` hook. ``None`` until the guard was registered.
 _hook_missing: Optional[bool] = None
+_binding_hook_registered = False
 
 
 def refuses_non_owner_turns() -> bool:
@@ -1916,7 +2012,9 @@ def refuses_non_owner_turns() -> bool:
 
 def register_host_tools_guard(ctx: Any) -> None:
     """Register the ``pre_tool_call`` hook and say so when a layer is missing."""
-    global _hook_missing
+    global _hook_missing, _binding_hook_registered
+    _hook_missing = None
+    _binding_hook_registered = False
     install_host_whitelist_mirror()
     from clawchat_gateway import turn_attachments
     turn_attachments.completion_hook_registered = False
@@ -1958,6 +2056,7 @@ def register_host_tools_guard(ctx: Any) -> None:
     if _host_supports_pre_llm_call():
         try:
             register_hook("pre_llm_call", clawchat_pre_llm_call)
+            _binding_hook_registered = True
         except Exception:  # noqa: BLE001 - unbound grants remain unusable
             logger.warning("clawchat turn grants: pre_llm_call hook was not registered")
 

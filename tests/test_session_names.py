@@ -63,6 +63,36 @@ def test_direct_chat_without_a_nickname_falls_back_to_the_id(adapter):
     assert adapter._session_names(_inbound("cnv_dm", "direct", "usr_x")) == ("cnv_dm", None)
 
 
+def notification(chat="cnv_owner"):
+    return InboundMessage.internal_synthetic(chat_id=chat, chat_type="direct",
+        sender_id="clawchat-awareness", sender_name="ClawChat", text="ClawChat: contacts updated.", raw_message={})
+
+
+def test_owner_notification_before_first_real_turn_uses_owner_metadata(adapter, monkeypatch):
+    monkeypatch.setattr(adapter, "_owner_direct_chat_id", lambda: "cnv_owner")
+    adapter._test_meta[("owner", "owner")] = {"agent_owner_nickname": "Owner"}
+    assert adapter._session_names(notification()) == adapter._session_names(
+        _inbound("cnv_owner", "direct", OWNER)) == ("Owner", "Owner")
+
+
+def test_notification_reuses_peer_display_name_and_keeps_sender_attribution(adapter):
+    real = _inbound("cnv_dm", "direct", "usr_peer", "Peer")
+    expected = adapter._session_names(real)
+    note = notification("cnv_dm")
+    assert adapter._session_names(note) == expected == ("Peer", "Peer")
+    assert note.sender_name == "ClawChat" and note.text.startswith("ClawChat:")
+
+
+def test_notification_uses_cached_peer_metadata_without_previous_session_names(adapter):
+    adapter._direct_chat_peers["cnv_dm"] = "usr_peer"
+    adapter._test_meta[("user", "usr_peer")] = {"nickname": "Peer"}
+    assert adapter._session_names(notification("cnv_dm")) == ("Peer", "Peer")
+
+
+def test_notification_without_known_peer_uses_conversation_id(adapter):
+    assert adapter._session_names(notification("cnv_unknown")) == ("cnv_unknown", None)
+
+
 def test_shared_group_is_named_after_its_title_with_no_user_name(adapter):
     adapter._test_meta[("group", "cnv_g")] = {"group_title": "Spring Trip"}
     adapter._test_meta[("user", "usr_ada")] = {"nickname": "Ada"}
