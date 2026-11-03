@@ -258,6 +258,8 @@ Read at adapter startup from `platforms.clawchat.extra` (hyphenated); restart th
 | `sediment-margin-tokens` | `10000` | 2000–50000 | Margin below compression point |
 | `sediment-on-compact` | `on` | on/off | Sediment before compression |
 | `sediment-on-reset` | `on` | on/off | Sediment before `/new` / `/reset` |
+| `history-summary-max-tokens` | `4000` | 1000–32000 | Summary output limit; [rules and overrides](history-budget.md) |
+| `interrupted-turn-notice` | `true` | true/false (global) | [One-time restart notice](history-budget.md#interrupted-turns-after-a-restart) |
 
 ### Conversation history budget
 

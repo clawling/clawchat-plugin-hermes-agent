@@ -415,3 +415,5 @@ CLAUDE.md
 !tests/test_chat_history_tools.py
 # Runtime history maintenance and private-host compatibility contract.
 !tests/test_history_maintenance.py
+# Restart notices are durable, localized, deduplicated and excluded from history.
+!tests/test_interrupted_turn_notice.py

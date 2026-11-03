@@ -111,6 +111,7 @@ def test_history_settings_factory_and_account_values(make_config):
     group = cfg.effective_history_settings(config, "group", True)
     assert dm.recent_window == timedelta(days=3)
     assert dm.keep_recent_turns == 8 and dm.budget_compaction
+    assert dm.history_summary_max_tokens == 4000
     assert dm.history_budget_tokens == 25000 and dm.idle_reset == timedelta(hours=24)
     assert group.history_budget_tokens == 15000 and group.idle_reset == timedelta(hours=6)
     config = make_config({"recent-window": "2天", "history-budget-dm": 30000,
@@ -161,6 +162,8 @@ def test_dart_duration_grammar(raw, minutes):
 
 @pytest.mark.parametrize("key,value,field,expected", [
     ("history-budget-dm", 1, "history_budget_dm", 5000),
+    ("history-summary-max-tokens", 999, "history_summary_max_tokens", 1000),
+    ("history-summary-max-tokens", 32001, "history_summary_max_tokens", 32000),
     ("history-budget-group", 999999, "history_budget_group", 200000),
     ("keep-recent-turns", 0, "keep_recent_turns", 1),
     ("keep-recent-turns", 99, "keep_recent_turns", 50),
@@ -183,6 +186,8 @@ def test_setting_clamps_and_warns(make_config, caplog, key, value, field, expect
     ("recent-window", False, "recent_window", timedelta(days=3)),
     ("idle-reset-dm", "1w", "idle_reset_dm", timedelta(hours=24)),
     ("history-budget-dm", True, "history_budget_dm", 25000),
+    ("history-summary-max-tokens", True, "history_summary_max_tokens", 4000),
+    ("history-summary-max-tokens", "bad", "history_summary_max_tokens", 4000),
     ("history-budget-group", 1.5, "history_budget_group", 15000),
     ("keep-recent-turns", None, "keep_recent_turns", 8),
     ("budget-compaction", "perhaps", "budget_compaction", True),
@@ -201,3 +206,25 @@ def test_bad_override_uses_factory_and_never_logs_raw_value(make_config, caplog,
     assert cfg.effective_history_settings(config, "dm", False).history_budget_tokens == 25000
     assert_no_secrets(caplog=caplog, secrets=(placeholder,))
     assert "history-budget-dm invalid; using 25000" in caplog.text
+
+
+def test_summary_max_tokens_override_chain(make_config):
+    config = make_config({'history-summary-max-tokens': '7000',
+        'groups': {'*': {'history-summary-max-tokens': 9000},
+                   'group': {'history-summary-max-tokens': 11000}},
+        'chats': {'dm': {'history-summary-max-tokens': 13000}}})
+    assert config.history_summary_max_tokens == 7000
+    assert cfg.effective_history_settings(config, 'dm', False).history_summary_max_tokens == 13000
+    assert cfg.effective_history_settings(config, 'missing', False).history_summary_max_tokens == 7000
+    assert cfg.effective_history_settings(config, 'group', True).history_summary_max_tokens == 11000
+    assert cfg.effective_history_settings(config, 'missing', True).history_summary_max_tokens == 9000
+
+
+@pytest.mark.parametrize('raw,expected', [(True, True), (False, False), ('on', True), ('off', False),
+                                         ('false', False), ('invalid', True)])
+def test_interrupted_notice_global_bool(make_config, raw, expected):
+    assert make_config({}).interrupted_turn_notice
+    config = make_config({'interrupted-turn-notice': raw,
+                          'chats': {'dm': {'interrupted-turn-notice': not expected}}})
+    assert config.interrupted_turn_notice is expected
+    assert 'interrupted-turn-notice' not in config.chats['dm']

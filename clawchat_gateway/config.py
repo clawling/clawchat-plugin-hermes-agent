@@ -535,6 +535,7 @@ def _read_session_keys(extra: dict[str, Any]) -> dict[str, Any]:
 
 # Conversation-local history maintenance settings.
 HISTORY_INT_KEYS = {
+    "history-summary-max-tokens": ("history_summary_max_tokens", 4000, 1000, 32000),
     "history-budget-dm": ("history_budget_dm", 25000, 5000, 200000),
     "history-budget-group": ("history_budget_group", 15000, 5000, 200000),
     "keep-recent-turns": ("keep_recent_turns", 8, 1, 50),
@@ -626,6 +627,7 @@ def _read_chats(value: Any) -> dict[str, dict[str, Any]]:
 
 @dataclass(frozen=True)
 class HistorySettings:
+    history_summary_max_tokens: int
     recent_window: timedelta
     history_budget_dm: int
     history_budget_group: int
@@ -748,6 +750,8 @@ class ClawChatConfig:
     sediment_margin_tokens: int = 10000
     sediment_on_compact: bool = True
     sediment_on_reset: bool = True
+    interrupted_turn_notice: bool = True
+    history_summary_max_tokens: int = HISTORY_INT_KEYS["history-summary-max-tokens"][1]
     recent_window: timedelta = HISTORY_SPAN_KEYS["recent-window"][1]
     history_budget_dm: int = HISTORY_INT_KEYS["history-budget-dm"][1]
     history_budget_group: int = HISTORY_INT_KEYS["history-budget-group"][1]
@@ -934,6 +938,8 @@ class ClawChatConfig:
             )
             is True,
             **_read_session_keys(extra if isinstance(extra, dict) else {}),
+            interrupted_turn_notice=_read_optional_bool(
+                _get_config_value(extra, "interrupted-turn-notice", True)) is not False,
             **_read_history_keys(extra if isinstance(extra, dict) else {}),
             history_sources={key: "account" if key in extra else "factory" for key in HISTORY_KEYS}
             if isinstance(extra, dict) else {},

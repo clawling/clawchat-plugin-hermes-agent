@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import sqlite3
@@ -580,6 +581,9 @@ _CONVERSATION_ROWS_SQL = """
     LIMIT ?
 """
 _NORMAL_MODE_FILTER_SQL = """
+      AND NOT (direction = 'outbound' AND COALESCE(json_extract(
+        CASE WHEN json_valid(raw_json) THEN raw_json ELSE '{}' END,
+        '$.clawchat_interrupted_turn_notice'), 0))
       AND NOT COALESCE(
         json_valid(raw_json)
         AND json_type(raw_json, '$.payload.message_mode') = 'text'
@@ -868,19 +872,89 @@ class ClawChatStore:
                     (json.dumps(payload, ensure_ascii=False, allow_nan=False), account_id, conv_key, mid))
         self._tool_grants_transaction(write)
 
-    def finish_held_batch(self, account_id: str, conv_key: str, message_ids: set[str]) -> None:
+    def update_journal_payload(self, account_id: str, conv_key: str,
+                               message_id: str, payload: dict) -> bool:
+        """Merge terminal metadata in any state; absent (legacy) rows are a no-op."""
+        def write(conn):
+            row = conn.execute(
+                "SELECT payload FROM clawchat_held_inbound WHERE account_id=? "
+                "AND conv_key=? AND message_id=?", (account_id, conv_key, message_id)).fetchone()
+            if row is None:
+                return False
+            encoded = json.dumps(json.loads(row[0]) | payload, ensure_ascii=False, allow_nan=False)
+            conn.execute("UPDATE clawchat_held_inbound SET payload=? WHERE account_id=? "
+                         "AND conv_key=? AND message_id=?", (encoded, account_id, conv_key, message_id))
+            return True
+        return self._tool_grants_transaction(write)
+
+    def finish_held_batch(self, account_id: str, conv_key: str, message_ids: set[str],
+                          *, handoff_at: float | None = None) -> None:
         if not message_ids:
             return
-        self._tool_grants_transaction(lambda conn: conn.execute(
-            "UPDATE clawchat_held_inbound SET state='dispatched' WHERE account_id=? "
-            "AND conv_key=? AND message_id IN (" + ",".join("?" for _ in message_ids) + ")",
-            [account_id, conv_key, *message_ids]))
+        def write(conn):
+            rows = conn.execute(
+                "SELECT message_id,payload FROM clawchat_held_inbound WHERE account_id=? "
+                "AND conv_key=? AND state != 'dispatched' AND message_id IN ("
+                + ",".join("?" for _ in message_ids) + ")", [account_id, conv_key, *message_ids])
+            for mid, encoded in rows.fetchall():
+                payload = json.loads(encoded)
+                if handoff_at is not None:
+                    # A new host attempt must not inherit a failed attempt's
+                    # completion or notice. Successful terminals remain final.
+                    terminal = payload.get("terminal")
+                    if terminal is not True and terminal != "success":
+                        payload.pop("terminal", None)
+                    payload.pop("notified", None)
+                payload.update({"local_consumed": True} if handoff_at is None else {"handoff_at": handoff_at})
+                conn.execute("UPDATE clawchat_held_inbound SET state='dispatched',payload=? "
+                             "WHERE account_id=? AND conv_key=? AND message_id=?",
+                             (json.dumps(payload, ensure_ascii=False, allow_nan=False), account_id, conv_key, mid))
+        self._tool_grants_transaction(write)
+
+    def claim_interrupted_turn_notice(self, account_id: str, conv_key: str,
+                                      *, started_at: float, now: float) -> dict | None:
+        """Recheck candidates, outbound claims and notice dedupe in one transaction.
+
+        The message ledger uses the existing default namespace, separately from
+        the history journal's adapter account. Read errors propagate: no notice
+        may be sent based on an unavailable ledger or an uncommitted marker.
+        """
+        from clawchat_gateway.interrupted_turns import notice_candidate
+        def write(conn):
+            conn.row_factory = sqlite3.Row
+            rows = [dict(row) | {"payload": json.loads(row["payload"])} for row in conn.execute(
+                "SELECT * FROM clawchat_held_inbound WHERE account_id=? AND conv_key=? "
+                "AND state='dispatched'", (account_id, conv_key))]
+            candidates = []
+            for row in rows:
+                if not notice_candidate(row, started_at=started_at, now=now):
+                    continue
+                payload = row["payload"]
+                outbound = conn.execute(
+                    "SELECT 1 FROM clawchat_messages WHERE account_id='default' "
+                    "AND kind='message' AND direction='outbound' AND chat_id=? COLLATE NOCASE "
+                    "AND created_at>=? LIMIT 1",
+                    (payload["frame"]["chat_id"], math.floor(payload["handoff_at"] * 1000))).fetchone()
+                if outbound is None:
+                    candidates.append(row)
+            if not candidates:
+                return None
+            for row in candidates:
+                payload = row["payload"] | {"notified": True}
+                conn.execute("UPDATE clawchat_held_inbound SET payload=? WHERE account_id=? "
+                             "AND conv_key=? AND message_id=?",
+                             (json.dumps(payload, ensure_ascii=False, allow_nan=False),
+                              account_id, conv_key, row["message_id"]))
+            return max(candidates, key=lambda row: (row["payload"]["handoff_at"], row["seq"]))
+        return self._tool_grants_transaction(write)
 
     def purge_dispatched(self, older_than_s: float) -> int:
         cutoff = _now_ms() - older_than_s * 1000
         return self._tool_grants_transaction(lambda conn: conn.execute(
-            "DELETE FROM clawchat_held_inbound WHERE state='dispatched' AND created_at<?",
-            (cutoff,),
+            "DELETE FROM clawchat_held_inbound WHERE state='dispatched' AND created_at<? "
+            "AND (json_extract(payload, '$.handoff_at') IS NULL "
+            "OR json_extract(payload, '$.handoff_at') < ?)",
+            (cutoff, (_now_ms() - 24 * 60 * 60 * 1000) / 1000),
         ).rowcount)
 
     @staticmethod

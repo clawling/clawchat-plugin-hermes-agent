@@ -5846,7 +5846,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             except Exception:  # noqa: BLE001
                 logger.debug("clawchat base on_processing_complete failed", exc_info=True)
         try:
-            if self._history and self._history.available:
+            if self._history:
                 self._history.completed(event, outcome)
             if getattr(outcome, "name", str(outcome)).upper() == "FAILURE":
                 self._after_host_turn(event, failed=True)
