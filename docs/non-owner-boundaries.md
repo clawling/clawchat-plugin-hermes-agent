@@ -253,19 +253,24 @@ same plugin session and chat; only when none exists do they choose a notificatio
 Missing candidates fail closed. Each execution and nonce bind once.
 
 A real owner's ordinary private-chat input waits behind any registered,
-unreleased non-owner execution in the same grant session when busy input mode
-is `steer`, or when the text starts with `/steer`. The mode follows
+unreleased local notification in the same grant session in every busy input
+mode, including legacy owner activation bootstrap. Other non-owner executions
+cause a hold only in `steer` mode or for `/steer` input. The mode follows
 `HERMES_GATEWAY_BUSY_INPUT_MODE`, then `display.busy_input_mode`, defaulting to
-`interrupt`. Approval replies and control commands still pass immediately;
-groups and ordinary input in `queue` / `interrupt` keep their existing paths.
-Held inputs dispatch in order with fresh nonces after release, retaining owner
-tools when no third-party restrictions remain. Queued redispatch rechecks after
-media download: if the session is busy with a non-owner execution again, it waits
-within that message's original deadline, polling both session busy state and live
-non-owner executions. The hold deadline stays 120 seconds from enqueue; media
-preparation does not reset it. After the deadline, a prepared input dispatches with the existing
-overlap and unverified-input restrictions, without releasing the running nonce.
-The hold logs `owner_input_held reason=active_notice_turn`, without message text.
+`interrupt`. Approval replies and control commands pass immediately; group
+input keeps its existing path.
+
+Held inputs retain FIFO order, even across mode changes. They dispatch with
+fresh nonces after release or proven session idle, retaining owner tools when
+no third-party restrictions remain. Redispatch rechecks after media download,
+polling session busy state and live non-owner or notification turns. The deadline
+stays 120 seconds from enqueue, including media preparation. After it expires,
+prepared input dispatches with existing overlap and unverified-input restrictions,
+without releasing the running nonce.
+
+The hold logs `owner_input_held reason=active_notification_turn` for a live
+notification, otherwise `owner_input_held reason=active_notice_turn`, without
+message text.
 
 Downgrades emit one INFO line, without message text:
 `owner_downgrade reason=<unverified_input|revoke|overlap> trigger=<input kind>`;

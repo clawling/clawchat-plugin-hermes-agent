@@ -17,7 +17,9 @@ The policy below is *double unless asked*:
 Most of the suite is written against the double, so a found checkout does not
 switch the whole session to the real host by itself. Tests that check real host
 behaviour use ``hermes_source.require_hermes_source`` and run the host in a
-subprocess instead. Read ``clawchat_host_is_double`` in a test to tell which one
+subprocess instead. Multiplex isolation and orchestrate context modules are
+collected as subprocess proxies when their real host is unavailable here.
+Read ``clawchat_host_is_double`` in a test to tell which one
 you got. The pytest header reports the source found (or searched paths) and
 real-host/double mode.
 
@@ -38,6 +40,7 @@ from __future__ import annotations
 
 import atexit
 from contextlib import contextmanager
+import importlib
 import os
 import shutil
 import sys
@@ -106,7 +109,7 @@ _TESTS_DIR = Path(__file__).resolve().parent
 if str(_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_DIR))
 
-from hermes_source import candidates, find_hermes_source
+from hermes_source import REAL_HOST_SUBPROCESS, candidates, find_hermes_source, run_pytest_on_real_host
 
 _ORIGINAL_OS_HOME = Path.home().resolve()
 
@@ -153,6 +156,56 @@ def pytest_report_header():
         and not _REAL_HOST_REQUESTED else "double"
     )
     return f"Hermes source: {source}; session uses {mode}"
+
+
+_REAL_HOST_MODULES = {
+    "test_multiplex_isolation.py": ("hermes_constants.py", {
+        "hermes_constants": ("set_hermes_home_override", "reset_hermes_home_override"),
+        "agent.secret_scope": ("set_secret_scope", "reset_secret_scope", "set_multiplex_active", "load_env_file"),
+    }),
+    "test_orchestrate_real_host_context.py": ("model_tools.py", {
+        "model_tools": (),
+        "tools.approval_context": ("_approval_tool_call_id",),
+        "tools.registry": ("registry",),
+        "gateway.session_context": ("set_session_vars", "clear_session_vars"),
+    }),
+}
+
+
+class _RealHostItem(pytest.Item):
+    def runtest(self):
+        marker, _ = _REAL_HOST_MODULES[self.path.name]
+        run_pytest_on_real_host(self.path, marker)
+
+    def reportinfo(self):
+        return self.path, 0, "real Hermes subprocess"
+
+
+class _RealHostModule(pytest.Module):
+    def collect(self):
+        yield _RealHostItem.from_parent(self, name="test_real_host_subprocess")
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_pycollect_makemodule(module_path, parent):
+    if module_path.parent != _TESTS_DIR or module_path.name not in _REAL_HOST_MODULES:
+        return None
+    if os.environ.get(REAL_HOST_SUBPROCESS) == "1":
+        return None
+    _, imports = _REAL_HOST_MODULES[module_path.name]
+    available = not _USING_DOUBLE
+    if available:
+        try:
+            for name, attributes in imports.items():
+                module = importlib.import_module(name)
+                if any(not hasattr(module, attr) for attr in attributes):
+                    available = False
+                    break
+        except ImportError:
+            available = False
+    if not available:
+        return _RealHostModule.from_parent(parent, path=module_path)
+    return None
 
 
 @contextmanager
