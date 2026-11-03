@@ -206,6 +206,10 @@ _QUOTED_VALUE = (
     r'|"(?:[^"\\\r\n]|\\.)*"'
     r"|'(?:[^'\\\r\n]|\\.)*'"
 )
+# Try complete quoted values first. A truncated opening quote (including one
+# level of JSON escaping) hides the rest of its line, before the bare branch
+# can consume only the leading backslash and expose the remaining value.
+_UNTERMINATED_QUOTED_VALUE = r"\\?[\"'][^\r\n]*"
 _BARE_VALUE = r"[^\s&#\"'<>`,;}\]]+"
 
 
@@ -235,14 +239,15 @@ def redact_display_text(value: object, *secrets: str) -> str:
             text = text.replace(secret, "***")
         text = re.sub(
             r"(?i)(\bauthorization(?:\\?[\"'])?\s*[:=]\s*)"
-            r"(?:" + _QUOTED_VALUE + r"|(?:(?:Bearer|Basic)\s+)?" + _BARE_VALUE + r")",
+            r"(?:" + _QUOTED_VALUE + r"|" + _UNTERMINATED_QUOTED_VALUE
+            + r"|(?:(?:Bearer|Basic)\s+)?" + _BARE_VALUE + r")",
             lambda match: match.group(1) + "***", text,
         )
         text = re.sub(r"(?i)\bBearer\s+" + _BARE_VALUE, "Bearer ***", text)
         text = re.sub(
             r"(?i)(\b(?:(?:access[_-]?|refresh[_-]?)?token|api[_-]?key|key|secret|password|signature|sig)"
             r"(?:\\?[\"'])?\s*[:=]\s*)"
-            r"(?:" + _QUOTED_VALUE + r"|" + _BARE_VALUE + r")",
+            r"(?:" + _QUOTED_VALUE + r"|" + _UNTERMINATED_QUOTED_VALUE + r"|" + _BARE_VALUE + r")",
             lambda match: match.group(1) + "***", text,
         )
         # Unlike refresh diagnostics, no blanket long-run rule: ids, paths and

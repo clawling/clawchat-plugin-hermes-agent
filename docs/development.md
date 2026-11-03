@@ -221,6 +221,9 @@ dispatch errors, liveware subprocess failures and supervisor diagnostics use the
 shared display redactor without raw exception tracebacks. Debug snapshots and
 tool audits pass through `redact_display_data` before being written to disk;
 message bodies are omitted from routing logs (only their lengths are recorded).
+Credential values with an unterminated opening quote (including one level of
+JSON escaping) are masked from the value start through the end of that line,
+stopping before CR or LF.
 Parse errors that carry a source position (YAML) are shown as error class and
 line/column only, never the quoted source.
 
