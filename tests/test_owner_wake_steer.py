@@ -7,6 +7,7 @@ import sys
 import time
 from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -131,6 +132,145 @@ async def finish(h, event):
     await h.adapter.on_processing_complete(event, 'SUCCESS')
 
 
+async def dispatch_local_notification(a, monkeypatch, kind):
+    if kind == 'bootstrap':
+        monkeypatch.setattr(a, '_await_owner_metadata_refreshed', AsyncMock())
+        a._store.claim_pending_activation_bootstrap = lambda **_: SimpleNamespace(
+            conversation_id=OWNER_CHAT, owner_user_id='usr_owner', claimed_at=1)
+        a._store.mark_activation_bootstrap_sent = lambda **_: True
+        await a._dispatch_activation_bootstrap()
+    else:
+        from clawchat_gateway import permission_result
+        permission_result._seen_request_ids.clear()
+        try:
+            await a._on_message({'sender': {'id': 'system'}, 'chat_id': OWNER_CHAT,
+                'chat_type': 'direct', 'payload': {'metadata': {'kind': 'permission_result',
+                'request_id': 'receipt-example', 'operation': 'example.read', 'outcome': 'approved',
+                'result': {'count': 1}}}})
+        finally:
+            permission_result._seen_request_ids.clear()
+
+
+@pytest.mark.parametrize('mode', ['interrupt', 'queue'])
+@pytest.mark.parametrize('kind', ['bootstrap', 'permission_result'])
+@pytest.mark.parametrize('ending', ['released', 'idle'])
+async def test_owner_waits_for_local_notification_in_any_busy_mode(
+        harness, host, monkeypatch, caplog, mode, kind, ending):
+    a = harness.adapter
+    monkeypatch.setenv('HERMES_GATEWAY_BUSY_INPUT_MODE', mode)
+    a._owner_input_poll_seconds = 0.005
+    caplog.set_level(logging.INFO, logger=adapter_mod.__name__)
+    await dispatch_local_notification(a, monkeypatch, kind)
+    first = harness.events[0]
+    notification = turns.get_snapshot(first.source.message_id)
+    key = a._grant_session_key(message('usr_owner', chat=OWNER_CHAT))
+    assert notification.plugin_notification and not notification.owner_side
+    assert not notification.owner_verified
+    assert notification.legacy_owner_tools is (kind == 'bootstrap')
+    assert turns.has_notification_turn(a._account_id(), key)
+    assert turns.has_non_owner_turn(a._account_id(), key) is (kind != 'bootstrap')
+    if kind == 'permission_result':
+        with host(**context(notification)):
+            guard.clawchat_pre_llm_call(session_id='notice-session', turn_id='notice-turn')
+            assert guard._clawchat_pre_tool_decision(tool_name='clawchat_widget_send', args={},
+                session_id='notice-session', turn_id='notice-turn')['action'] == 'block'
+    await a._on_message(message('usr_owner', 'private owner text', chat=OWNER_CHAT).raw_message)
+    assert key in a._owner_input_tasks
+    await asyncio.sleep(0.015)
+    assert harness.events == [first]
+    assert turns.get_snapshot(notification.nonce) is not None
+    assert 'owner_input_held reason=active_notification_turn' in caplog.text
+    assert 'private owner text' not in caplog.text
+    if ending == 'released':
+        await finish(harness, first)
+    else:
+        a._active_sessions.clear()
+    await wait_for_events(harness, 2)
+    owner = turns.get_snapshot(harness.events[1].source.message_id)
+    assert owner.nonce != notification.nonce
+    assert owner.owner_side and owner.owner_verified and not owner.non_owner_speakers
+    assert not turns.has_notification_turn(a._account_id(), key)
+    with host(**context(owner)):
+        guard.clawchat_pre_llm_call(session_id='owner-session', turn_id='owner-turn')
+        assert guard._clawchat_pre_tool_decision(tool_name='clawchat_widget_send', args={},
+            session_id='owner-session', turn_id='owner-turn') is None
+    await asyncio.gather(*a._owner_input_tasks.values())
+
+
+@pytest.mark.parametrize('mode', ['interrupt', 'queue'])
+@pytest.mark.parametrize('kind', ['bootstrap', 'permission_result'])
+async def test_notification_hold_deadline_dispatches_without_releasing_running_turn(
+        harness, monkeypatch, mode, kind):
+    a = harness.adapter
+    monkeypatch.setenv('HERMES_GATEWAY_BUSY_INPUT_MODE', mode)
+    a._owner_input_poll_seconds = 0.005
+    await dispatch_local_notification(a, monkeypatch, kind)
+    first = harness.events[0]
+    incoming = message('usr_owner', 'held until deadline', chat=OWNER_CHAT)
+    assert a._hold_owner_inbound(incoming)
+    key = a._grant_session_key(incoming)
+    _, deadline = a._owner_input_pending[key][0]
+    monotonic, offset = time.monotonic, [0.0]
+    monkeypatch.setattr(adapter_mod.time, 'monotonic', lambda: monotonic() + offset[0])
+    await asyncio.sleep(0.015)
+    assert harness.events == [first]
+    assert 119 < deadline - monotonic() <= 120
+    offset[0] = deadline - monotonic() + 0.001
+    await wait_for_events(harness, 2)
+    owner = turns.get_snapshot(harness.events[1].source.message_id)
+    assert owner.nonce != first.source.message_id
+    assert owner.owner_side and not owner.owner_verified
+    assert turns.get_snapshot(first.source.message_id) is not None
+    assert a._active_sessions
+    await asyncio.gather(*a._owner_input_tasks.values())
+
+
+@pytest.mark.parametrize('mode', ['interrupt', 'queue'])
+@pytest.mark.parametrize('kind', ['bootstrap', 'permission_result'])
+@pytest.mark.parametrize('text', ['yes', '/status', '/restart', '/clawchat-allow 482193', 'restart gateway'])
+async def test_owner_approvals_and_commands_bypass_notification_hold(harness, monkeypatch, mode, kind, text):
+    a = harness.adapter
+    monkeypatch.setenv('HERMES_GATEWAY_BUSY_INPUT_MODE', mode)
+    monkeypatch.setattr(a, '_direct_chat_approval_blocking', lambda _: True)
+    await dispatch_local_notification(a, monkeypatch, kind)
+    incoming = message('usr_owner', text, chat=OWNER_CHAT)
+    assert not a._hold_owner_inbound(incoming)
+    assert not a._owner_input_tasks and not a._owner_input_pending
+    if not text.startswith('/clawchat-allow'):
+        await a._handle_inbound(incoming)
+        assert len(harness.events) == 2
+
+
+@pytest.mark.parametrize('mode', ['interrupt', 'queue'])
+async def test_held_owner_fifo_survives_notification_release_and_mode_change(harness, monkeypatch, mode):
+    a = harness.adapter
+    monkeypatch.setenv('HERMES_GATEWAY_BUSY_INPUT_MODE', mode)
+    a._owner_input_poll_seconds = 0.005
+    entered, proceed = asyncio.Event(), asyncio.Event()
+    async def download(inbound):
+        if inbound.text == 'first held':
+            entered.set()
+            await proceed.wait()
+        return []
+    monkeypatch.setattr(a, '_download_inbound_media', download)
+    await dispatch_local_notification(a, monkeypatch, 'bootstrap')
+    await a._on_message(message('usr_owner', 'first held', chat=OWNER_CHAT).raw_message)
+    await finish(harness, harness.events[0])
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    monkeypatch.setenv('HERMES_GATEWAY_BUSY_INPUT_MODE', 'queue' if mode == 'interrupt' else 'interrupt')
+    key = a._grant_session_key(message('usr_owner', chat=OWNER_CHAT))
+    assert not turns.has_notification_turn(a._account_id(), key)
+    await a._on_message(message('usr_owner', 'second held', chat=OWNER_CHAT).raw_message)
+    assert len(harness.events) == 1
+    assert [inbound.text for inbound, _ in a._owner_input_pending[key]] == ['second held']
+    proceed.set()
+    await wait_for_events(harness, 3)
+    assert [event.text for event in harness.events[1:]] == ['first held', 'second held']
+    assert len({event.source.message_id for event in harness.events}) == 3
+    assert all(turns.get_snapshot(event.source.message_id).owner_side for event in harness.events[1:])
+    await asyncio.gather(*a._owner_input_tasks.values())
+
+
 @pytest.mark.parametrize('kind', ['awareness', 'moment_comment', 'foreign_sender'])
 @pytest.mark.parametrize('entry', ['wire', 'internal'])
 async def test_owner_steer_waits_for_release_then_has_owner_tools(harness, host, monkeypatch, caplog, kind, entry):
@@ -156,7 +296,8 @@ async def test_owner_steer_waits_for_release_then_has_owner_tools(harness, host,
     await asyncio.sleep(0.015)
     assert len(h.events) == 1
     assert turns.get_snapshot(original.nonce) is not None
-    assert 'owner_input_held reason=active_notice_turn' in caplog.text
+    reason = 'active_notification_turn' if kind == 'awareness' else 'active_notice_turn'
+    assert f'owner_input_held reason={reason}' in caplog.text
     assert 'private owner text' not in caplog.text
     await finish(h, first)
     await wait_for_events(h, 2)
@@ -287,7 +428,9 @@ async def test_explicit_steer_waits_in_other_busy_modes(harness, monkeypatch, mo
 async def test_owner_controls_and_other_modes_are_not_held(harness, monkeypatch, case):
     a = harness.adapter
     monkeypatch.setenv('HERMES_GATEWAY_BUSY_INPUT_MODE', case if case in ('queue', 'interrupt') else 'steer')
-    await a._handle_inbound(notice(a, 'awareness'))
+    # Ordinary third-party execution keeps the pre-existing queue/interrupt path.
+    await a._handle_inbound(message('usr_other', chat=OWNER_CHAT) if case in ('queue', 'interrupt')
+                            else notice(a, 'awareness'))
     incoming = message('usr_owner', chat=OWNER_CHAT)
     if case == 'group':
         incoming = message('usr_owner', chat=OWNER_CHAT, kind='group')
@@ -419,11 +562,16 @@ async def test_confirmation_bypasses_owner_hold_during_notice(request_env, monke
     assert latest_request(h)['wake_state'] == 'delivered'
 
 
-async def test_held_owner_inputs_keep_order_and_do_not_follow_active_pointer(harness, monkeypatch):
+@pytest.mark.parametrize('mode', ['steer', 'interrupt', 'queue'])
+@pytest.mark.parametrize('kind', ['awareness', 'bootstrap'])
+async def test_held_owner_inputs_keep_order_and_do_not_follow_active_pointer(harness, monkeypatch, mode, kind):
     a = harness.adapter
-    monkeypatch.setenv('HERMES_GATEWAY_BUSY_INPUT_MODE', 'steer')
+    monkeypatch.setenv('HERMES_GATEWAY_BUSY_INPUT_MODE', mode)
     a._owner_input_poll_seconds = 0.005
-    await a._handle_inbound(notice(a, 'awareness'))
+    if kind == 'bootstrap':
+        await dispatch_local_notification(a, monkeypatch, kind)
+    else:
+        await a._handle_inbound(notice(a, kind))
     original = harness.events[0]
     # A newer owner nonce must not hide the older live notification.
     turns.register_turn(account_id=a._account_id(), chat_id=OWNER_CHAT,

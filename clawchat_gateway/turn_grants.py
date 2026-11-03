@@ -230,6 +230,14 @@ def has_non_owner_turn(account_id: str, session_key: str) -> bool:
                    if (snapshot := _snapshots.get(nonce)) is not None)
 
 
+def has_notification_turn(account_id: str, session_key: str) -> bool:
+    """Include every live local notification, even legacy owner activation turns."""
+    with _lock:
+        return any(snapshot.plugin_notification
+                   for nonce in _session_nonces.get((account_id, session_key), ())
+                   if (snapshot := _snapshots.get(nonce)) is not None)
+
+
 def _withdraw_management(snapshot: TurnSnapshot) -> TurnSnapshot:
     """A local notice keeps ordinary owner tools; only grant management is withdrawn."""
     if snapshot.owner_verified:

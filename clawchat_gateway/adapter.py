@@ -4877,16 +4877,18 @@ class ClawChatAdapter(BasePlatformAdapter):
             or any(pattern.fullmatch(text) for pattern in _PLAINTEXT_GATEWAY_RESTART_RES)
         ):
             return False
-        if not explicit_steer and _read_host_busy_input_mode() != 'steer':
-            return False
-        from clawchat_gateway.turn_grants import has_non_owner_turn
+        from clawchat_gateway.turn_grants import has_non_owner_turn, has_notification_turn
 
         key = self._grant_session_key(inbound)
-        if not has_non_owner_turn(self._account_id(), key) and key not in self._owner_input_tasks:
+        notification = has_notification_turn(self._account_id(), key)
+        if not (key in self._owner_input_tasks or notification
+                or ((explicit_steer or _read_host_busy_input_mode() == 'steer')
+                    and has_non_owner_turn(self._account_id(), key))):
             return False
         self._owner_input_pending.setdefault(key, []).append(
             (inbound, time.monotonic() + self._owner_input_hold_seconds))
-        logger.info('owner_input_held reason=active_notice_turn')
+        logger.info('owner_input_held reason=%s',
+                    'active_notification_turn' if notification else 'active_notice_turn')
         if key not in self._owner_input_tasks:
             self._owner_input_tasks[key] = asyncio.create_task(self._dispatch_held_owner_inputs(key))
         return True
@@ -4907,12 +4909,13 @@ class ClawChatAdapter(BasePlatformAdapter):
 
     async def _wait_held_owner_input(self, key: str, deadline: float, task: asyncio.Task,
                                      *, ignore_dispatch: bool = False) -> bool:
-        from clawchat_gateway.turn_grants import has_non_owner_turn
+        from clawchat_gateway.turn_grants import has_non_owner_turn, has_notification_turn
 
         # The busy check also expires snapshots the idle host left behind.
         while self._owner_input_tasks.get(key) is task:
             if not (time.monotonic() < deadline and self._grant_session_busy(key, ignore_dispatch=ignore_dispatch)
-                    and has_non_owner_turn(self._account_id(), key)):
+                    and (has_non_owner_turn(self._account_id(), key)
+                         or has_notification_turn(self._account_id(), key))):
                 return True
             await asyncio.sleep(self._owner_input_poll_seconds)
         return False
