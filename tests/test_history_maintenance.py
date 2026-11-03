@@ -958,15 +958,21 @@ async def test_malformed_reset_is_disabled_without_dropping_inbound(rig):
     assert seen == ['question'] and not rig.host.reset_calls
 
 
-async def test_completed_hook_requires_confirmed_success(rig):
+@pytest.mark.parametrize('outcome', ['SUCCESS', 'FAILURE', 'CANCELLED', 'REJECTED'])
+@pytest.mark.parametrize('handed_off', [False, True])
+async def test_completed_hook_records_all_outcomes_in_any_state(rig, outcome, handed_off):
     msg = inbound()
     claim(rig, msg)
     key = initialize(rig, msg)
     ev = event(rig, msg)
-    rig.m.completed(ev, NS(name='FAILURE'))
-    assert not rig.m.held_row(key, 'trigger')['payload'].get('terminal')
-    rig.m.completed(ev, NS(name='SUCCESS'))
-    assert rig.m.held_row(key, 'trigger')['payload']['terminal']
+    if handed_off:
+        rig.m.dispatched(ev)
+    rig.m.completed(ev, NS(name=outcome))
+    row = rig.m.store.list_held(rig.m.account, key, states=('held', 'dispatched'))[0]
+    assert row['payload']['terminal'] == (True if outcome == 'SUCCESS' else outcome.lower())
+    if handed_off:
+        assert isinstance(row['payload']['handoff_at'], float)
+    assert row['payload']['frame'] == msg.raw_message
 
 
 async def test_history_hook_correlates_nonce_without_usage(rig, monkeypatch):
@@ -1994,3 +2000,91 @@ async def test_host_resumed_real_answer_recovers_activity_from_human_ledger_inpu
     finally:
         await rig.a.on_processing_complete(ev, NS(name='SUCCESS'))
     assert hm.outbound_activity(message.chat_id)['kind'] == 'notice'
+
+
+@pytest.mark.parametrize('signal', ['usage-object', 'usage-dict', 'finish_reason', 'stop_reason'])
+async def test_truncated_summary_retries_same_block_before_publication(rig, monkeypatch, signal, caplog):
+    ledger(rig, count=2)
+    calls = []
+    first = NS(text=SUMMARY)
+    if signal == 'usage-object':
+        first.usage = NS(output_tokens=6000)
+    elif signal == 'usage-dict':
+        first = {'text': SUMMARY, 'usage': {'completion_tokens': 6000}}
+    else:
+        setattr(first, signal, 'LENGTH' if signal == 'finish_reason' else 'max_tokens')
+    second = NS(text=SUMMARY.replace('work', 'second result'), usage=NS(output_tokens=1000))
+    async def complete(messages, **kwargs):
+        calls.append((messages, kwargs))
+        assert not rig.m.state(rig.m.key(inbound())).get('summary_ref')
+        return first if len(calls) == 1 else second
+    monkeypatch.setattr(rig.llm, 'acomplete', complete)
+    rig.a._clawchat_config = replace(rig.a._clawchat_config, history_summary_max_tokens=6000)
+    key, state = await compact(rig, inbound())
+    assert [kw['max_tokens'] for _, kw in calls] == [6000, 12000]
+    assert calls[0][0] == calls[1][0] and all(kw['timeout'] == 120 for _, kw in calls)
+    assert 'second result' in read_summary(rig.m.directory(key), state['summary_ref'])[1]
+    assert 'summary truncated, retrying with max_tokens=12000' in caplog.text
+
+
+@pytest.mark.parametrize('maximum,expected', [(4000, [4000, 8000]), (20000, [20000, 32000]), (32000, [32000])])
+async def test_repeated_truncation_rejects_complete_headings_and_backs_off(rig, monkeypatch, maximum, expected):
+    ledger(rig, count=2)
+    calls = []
+    async def complete(messages, **kwargs):
+        calls.append(kwargs['max_tokens'])
+        return NS(text=SUMMARY, usage={'output_tokens': kwargs['max_tokens']})
+    monkeypatch.setattr(rig.llm, 'acomplete', complete)
+    rig.a._clawchat_config = replace(rig.a._clawchat_config, history_summary_max_tokens=maximum)
+    key, state = await compact(rig, inbound())
+    assert calls == expected
+    assert state['failures'] == 1 and state['retry_after_msgs'] == 1 and state['pending']
+    assert not state['summary_ref'] and not state['summary_through']
+    assert not list(rig.m.directory(key).glob('*.md')) and not rig.host.reset_calls
+
+
+async def test_cancelled_summary_retry_cannot_publish(rig, monkeypatch):
+    ledger(rig, count=2)
+    second_started = asyncio.Event()
+    gate = asyncio.Event()
+    calls = []
+    async def complete(messages, **kwargs):
+        calls.append(kwargs['max_tokens'])
+        if len(calls) == 1:
+            return NS(text=SUMMARY, finish_reason='length')
+        second_started.set()
+        await gate.wait()
+        return NS(text=SUMMARY)
+    monkeypatch.setattr(rig.llm, 'acomplete', complete)
+    task = asyncio.create_task(compact(rig, inbound()))
+    await asyncio.wait_for(second_started.wait(), 2)
+    await rig.m.close()
+    gate.set()
+    await asyncio.gather(task, return_exceptions=True)
+    assert calls == [4000, 8000]
+    assert not rig.m.state(rig.m.key(inbound()))['summary_ref']
+
+
+async def test_failure_terminal_preserves_uncertain_replay(rig):
+    msg = inbound()
+    claim(rig, msg)
+    key = initialize(rig, msg)
+    rig.m.completed(event(rig, msg), NS(name='FAILURE'))
+    await rig.m.recover()
+    assert rig.calls == ['trigger']
+    row = rig.m.store.list_held(rig.m.account, key, states=('dispatched',))[0]
+    assert row['payload']['terminal'] == 'failure'
+    assert row['payload']['handoff_at']
+
+
+async def test_adapter_records_dispatched_terminal_after_budget_unavailable(rig, monkeypatch):
+    msg = inbound()
+    claim(rig, msg)
+    key = initialize(rig, msg)
+    ev = event(rig, msg)
+    rig.m.dispatched(ev)
+    rig.m.available = False
+    monkeypatch.setattr(rig.a, '_after_host_turn', lambda *a, **kw: None)
+    await rig.a.on_processing_complete(ev, NS(name='CANCELLED'))
+    row = rig.m.store.list_held(rig.m.account, key, states=('dispatched',))[0]
+    assert row['payload']['terminal'] == 'cancelled'

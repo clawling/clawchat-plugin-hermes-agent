@@ -2,7 +2,7 @@
 
 For operators and implementers: how ClawChat conversations are compacted into a rolling summary within a token budget, the settings that control it, and the host requirements and limits.
 
-These keys live in `platforms.clawchat.extra`. Every key below supports
+These keys live in `platforms.clawchat.extra`. Every key in the table supports
 `extra.groups.<chat_id>` and `extra.chats.<chat_id>` overrides (groups also accept
 `groups."*"`). Priority: exact conversation, group wildcard, account, factory.
 Invalid values use the factory value; out-of-range values clamp and log the
@@ -15,6 +15,7 @@ and round to minutes. Restart the gateway after changing settings.
 | `recent-window` | `3d` | 1h–30d; no off | both |
 | `history-budget-dm` | `25000` | 5000–200000 tokens | both |
 | `history-budget-group` | `15000` | 5000–200000 tokens | both |
+| `history-summary-max-tokens` | `4000` | 1000–32000 output tokens, including reasoning | both |
 | `keep-recent-turns` | `8` | 1–50 other-speaker messages | both |
 | `idle-reset-dm` | `24h` | off or 1h–30d | both |
 | `idle-reset-group` | `6h` | off or 1h–30d | both |
@@ -45,9 +46,15 @@ two other-speaker messages and no owner message.
 Maintenance serializes by the host's canonical session key, including per-speaker
 group keys; budget-enabled per-speaker groups also keep their input batches
 separate by speaker. It fixes a durable cut, makes independent summary calls in consecutive
-blocks of at most 24000 estimated tokens (`timeout=120`, `max_tokens=4000`),
+blocks of at most 24000 estimated tokens (`timeout=120`,
+`max_tokens=history-summary-max-tokens`),
 validates four summary sections, publishes immutable synced files, then advances
-SQLite state by generation CAS. Cuts and summary/reset boundaries retain
+SQLite state by generation CAS. A `length`/`max_tokens` finish or stop reason,
+or output usage reaching the call's token limit, rejects the result even when
+all four headings are present. The same block and previous summary are retried
+once with twice the configured limit, capped at 32000, within the same maintenance
+deadline; a limit already at 32000 skips that retry. Further truncation uses the
+ordinary failure backoff. Cuts and summary/reset boundaries retain
 immutable ledger positions even when their referenced messages are recalled;
 withdrawal never moves a fixed interval. Each pass handles at most three blocks; confirmed
 `/new` finishes its whole interval before the next input is handed to Hermes.
@@ -121,6 +128,57 @@ Legacy inference applies only when the control marker is absent; explicit
 If a reset's outcome is uncertain after a restart, the user must issue it again.
 This policy does not bypass the host's confirmation gate or confirm a reset
 before its persistent route changes.
+
+## Interrupted turns after a restart
+
+`interrupted-turn-notice` is a global boolean, enabled by default so a user is
+not left waiting silently after a restart; `false` disables both checks and sends.
+After READY starts journal recovery, a single check waits 120 seconds to allow
+Hermes to restore deliveries. Shutdown cancels the check, and replaced connection
+instances cannot send notices. The check considers only dispatched journal rows
+with a recorded `handoff_at` (Unix seconds) before this process started and within
+the last 24 hours, without a `terminal` field or a prior `notified` marker.
+Old rows without a handoff timestamp, control input, locally consumed input and
+internal synthetic turns are excluded. This covers journaled inputs only.
+
+The existing `default` message-ledger namespace is queried for **any outbound
+message claim** in that chat at or after handoff, including ACK-confirmed replies
+and final replies restored by Hermes. Any such claim suppresses the notice;
+a failed ledger read also prevents sending. Eligible rows in the same canonical
+conversation share one notice, replying to the most recently handed-off input,
+including in groups. Copy follows the owner's language (English if unknown).
+The notice asks the user to resend if help is still needed; it does not claim
+that tools or external actions never ran.
+
+Candidate checks, outbound lookup and marking all eligible members `notified:
+true` share one immediate SQLite transaction. The marker commits **before** the
+outbound claim and ACK-waiting `message.reply` send. A failed marker write sends
+nothing; a crash or send failure after committing may lose a notice, deliberately
+preferring a missed notice to duplicate sends. Notice rows carry the local
+`clawchat_interrupted_turn_notice` marker and notice activity metadata; history
+tools, context injection and rolling summaries exclude them. These markers are
+local ledger metadata, not wire fields.
+
+Host completion merges terminal metadata into journal rows in any state:
+successful outcomes retain the compatible `terminal: true`, while other outcomes
+use lowercase names such as `failure` or `cancelled`. Only successful terminals
+suppress uncertain input replay, while every terminal outcome excludes restart
+notices. Local consumption records `local_consumed: true`; actual host handoffs
+record `handoff_at` in the same transaction as the dispatched state. Dispatched
+cleanup retains recent handoffs for the 24-hour notice window even when their
+original input is older; receipt startup cleanup uses an eight-day cutoff on a
+separate table.
+
+Older versions ignore the new handoff, local-consumption and notice fields, but
+their replay code treats any terminal value as success. Before downgrading,
+stop the newer plugin, transactionally remove non-success `terminal` fields from
+held/dispatching rows, then start the older plugin. Those versions must not write
+to the same journal concurrently. Successful boolean terminals and existing
+dispatched rows need no conversion.
+
+Already handed-off turns are never automatically dispatched again: that could
+repeat tools or external operations and conflict with Hermes' own delivery
+recovery. Held or uncertain dispatching input retains the recovery rules above.
 
 **Host threshold priority:** ClawChat uses the plugin DM/group budgets. Hermes'
 `compression.threshold_tokens` (or the missing value filled from

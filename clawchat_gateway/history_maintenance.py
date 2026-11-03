@@ -18,6 +18,7 @@ import time
 import weakref
 
 from clawchat_gateway.config import effective_history_settings
+from clawchat_gateway.interrupted_turns import InterruptedTurnNotices
 from clawchat_gateway.history_budget import (
     Entry, _entry_time, estimate_entry_tokens, history_tokens, plan_compaction,
     recent_window_for_injection, split_blocks,
@@ -213,6 +214,18 @@ class Superseded(Exception):
     """Another generation committed; discard this attempt's result."""
 
 
+def summary_truncated(result, max_tokens):
+    def field(value, name):
+        return value.get(name) if isinstance(value, dict) else getattr(value, name, None)
+    reason = field(result, "finish_reason") or field(result, "stop_reason")
+    if str(reason or "").lower() in {"length", "max_tokens"}:
+        return True
+    usage = field(result, "usage")
+    return any(isinstance(count := field(usage, name), (int, float))
+               and not isinstance(count, bool) and count >= max_tokens
+               for name in ("output_tokens", "completion_tokens"))
+
+
 class HistoryMaintenance:
     def __init__(self, adapter, llm=None):
         self.adapter = adapter
@@ -244,6 +257,7 @@ class HistoryMaintenance:
         self.confirmed = {}
         self.progress = {}
         self.running_tasks = set()
+        self.interrupted_notices = InterruptedTurnNotices(self)
         _instances.add(self)
 
     def connect(self):
@@ -671,7 +685,7 @@ class HistoryMaintenance:
                     if (key, mid) in self.inflight:
                         self.drain_waiting.add(key)
                         return
-                    if row["payload"].get("terminal"):
+                    if row["payload"].get("terminal") in (True, "success"):
                         self.store.mark_held_state(self.account, key, mid, row["state"], "dispatched")
                         continue
                     if row["payload"].get("batch_primary", mid) != mid:
@@ -721,6 +735,7 @@ class HistoryMaintenance:
         """Do not block the transport's READY callback or its receive loop."""
         if not self.journal_ready():
             return
+        self.interrupted_notices.schedule()
         epoch = self.epoch
         async def run():
             try:
@@ -818,7 +833,7 @@ class HistoryMaintenance:
         if not self.journal_ready():
             return
         key = self.gateway._session_key_for_source(event.source)
-        self.store.finish_held_batch(self.account, key, set(self.event_ids(event)))
+        self.store.finish_held_batch(self.account, key, set(self.event_ids(event)), handoff_at=time.time())
         if key in self.drain_waiting:
             self.wake_drain(key)
 
@@ -843,15 +858,13 @@ class HistoryMaintenance:
     def completed(self, event, outcome):
         if not self.journal_ready():
             return
-        if getattr(outcome, "name", str(outcome)).upper() != "SUCCESS":
-            return
-        # SUCCESS means confirmed final delivery OR the host's explicit no-reply
-        # terminal. Process output and unconfirmed outbound ledger rows never count.
+        name = getattr(outcome, "name", str(outcome)).lower()
+        # Keep the legacy successful-terminal boolean. Other outcomes are terminal
+        # for restart notices, but do not become successful replay suppression.
         key = self.gateway._session_key_for_source(event.source)
         for mid in self.event_ids(event):
-            row = self.held_row(key, mid)
-            if row:
-                self.store.update_held_payload(self.account, key, mid, {"terminal": True})
+            self.store.update_journal_payload(self.account, key, mid,
+                                              {"terminal": True if name == "success" else name})
 
     def queue_pending(self, inbound, state, why, cut=None, boundary=None):
         key = self.key(inbound)
@@ -1235,11 +1248,19 @@ class HistoryMaintenance:
             old = read_summary(self.directory(key), state["summary_ref"]) if state.get("summary_ref") else None
             if state.get("summary_ref") and not old:
                 raise RuntimeError("published summary missing")
-            reply = await self.llm.acomplete(rendered_summary_messages(old[1] if old else None, block),
-                                             timeout=120, max_tokens=4000)
-            if self.blocked.get(key) is not token or self.closed:
-                return count, "deadline"
-            summary = safe_history_summary(getattr(reply, "text", None))
+            messages = rendered_summary_messages(old[1] if old else None, block)
+            max_tokens = self.settings(inbound).history_summary_max_tokens
+            for attempt in range(2):
+                reply = await self.llm.acomplete(messages, timeout=120, max_tokens=max_tokens)
+                if self.blocked.get(key) is not token or self.closed:
+                    return count, "deadline"
+                if not summary_truncated(reply, max_tokens):
+                    break
+                if attempt or max_tokens == 32000:
+                    raise ValueError("rolling summary truncated")
+                max_tokens = min(2 * max_tokens, 32000)
+                logger.warning("summary truncated, retrying with max_tokens=%d", max_tokens)
+            summary = safe_history_summary(reply.get("text") if isinstance(reply, dict) else getattr(reply, "text", None))
             if summary is None:
                 raise ValueError("invalid rolling summary")
             ref = publish_summary(self.directory(key), summary, through=block[-1].id,
