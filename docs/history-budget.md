@@ -96,6 +96,9 @@ Summary requests, published summary files and reinjected context use determinist
 credential redaction with the same rules as `chat_history_read`.
 Transcripts include stable `sender_id` and `role` fields; names and message bodies
 are escaped quoted data, preceded along with summaries by an untrusted-records notice.
+Each record is redacted and escaped whole before block splitting, middle
+omission and recent-window selection, so budgets measure the text actually sent;
+reinjected recent messages keep their timestamp.
 Legacy summary files are redacted again before reinjection.
 
 A user's `/new` keeps the host's confirmation gate and the existing old-session

@@ -8,10 +8,10 @@ import pytest
 
 from conftest import FAKE_SECRETS
 from clawchat_gateway import atomic_file, rolling_summary as summary
-from clawchat_gateway.history_budget import BlockItem, Entry, split_blocks
+from clawchat_gateway.history_budget import BlockItem, Entry, estimate_tokens, split_blocks
 from clawchat_gateway.history_transcript import (
     HEADINGS, UNTRUSTED_HISTORY, history_entry_line, quoted_history_summary,
-    safe_history_summary, safe_summary_messages,
+    render_entry, rendered_summary_messages, safe_history_summary, safe_summary_messages,
 )
 
 
@@ -140,6 +140,23 @@ def test_transcript_preserves_sender_id_through_blocks_and_quotes_data(cap, asse
     assert_no_secrets(messages, line)
     unknown = history_entry_line(Entry('m', 'invalid', 'other', 'name', 'body'))
     assert 'sender_id="unknown", role=other, name="name"' in unknown
+
+
+def test_blocks_budget_the_rendered_transcript():
+    rendered = render_entry(Entry('m1', 'invalid', 'other', 'name', '#' * 95000, sender_id='usr_guest'))
+    block = split_blocks([rendered])[0]
+    assert block[0].truncated and '#' not in block[0].text
+    content = safe_summary_messages(None, [])[1]['content']
+    request = rendered_summary_messages(None, block)[1]['content']
+    assert estimate_tokens(request) - estimate_tokens(content) <= 24000 + 64
+
+
+def test_recent_line_keeps_escaped_timestamp():
+    line = history_entry_line(Entry('m1', '2026-11-01T08:00:00.000Z', 'owner', 'Owner', 'see you tomorrow',
+                                    sender_id='usr_owner'))
+    assert line.startswith('- id m1, 2026-11-01T08:00:00.000Z, sender_id="usr_owner", role=owner')
+    odd = history_entry_line(Entry('m2', 'bad\n## Now', 'other', 'n', 'b'))
+    assert len(odd.splitlines()) == 1 and '##' not in odd
 
 
 def test_transcript_redacts_every_display_field(assert_no_secrets):

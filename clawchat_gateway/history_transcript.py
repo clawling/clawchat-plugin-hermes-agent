@@ -58,17 +58,33 @@ def _entry_name(entry: Entry) -> str:
     return f"sender_id={sender}, role={entry.role}, name={name}"
 
 
+def render_entry(entry: Entry) -> Entry:
+    """Redact and escape the complete record before any budgeting or truncation.
+
+    The ID and timestamp stay raw for bookkeeping and ordering; they are escaped
+    when printed. Token estimates of the result measure what is actually sent.
+    """
+    return replace(entry, name=_entry_name(entry), text=_literal(entry.text))
+
+
+def rendered_entry_line(entry: Entry) -> str:
+    """Format an entry already returned by ``render_entry``."""
+    return f"- id {_literal(entry.id)}, {_literal(entry.ts)}, {entry.name}: {entry.text}"
+
+
 def history_entry_line(entry: Entry) -> str:
-    return f"- id {_literal(entry.id)}, {_entry_name(entry)}: {_literal(entry.text)}"
+    return rendered_entry_line(render_entry(entry))
 
 
-def safe_summary_messages(previous: str | None, block: list[BlockItem]) -> list[dict]:
+def rendered_summary_messages(previous: str | None, block: list[BlockItem]) -> list[dict]:
+    """Build a summary request from blocks split from ``render_entry`` output."""
     prior = quoted_history_summary(previous) if previous is not None else None
     if previous is not None and prior is None:
         raise ValueError("history previous summary invalid")
-    messages = build_summary_messages(prior, [
-        replace(entry, id=_literal(entry.id), name=_entry_name(entry), text=_literal(entry.text))
-        for entry in block
-    ])
+    messages = build_summary_messages(prior, [replace(entry, id=_literal(entry.id)) for entry in block])
     messages[1]["content"] = UNTRUSTED_HISTORY + "\n" + messages[1]["content"]
     return messages
+
+
+def safe_summary_messages(previous: str | None, block: list[BlockItem]) -> list[dict]:
+    return rendered_summary_messages(previous, [render_entry(entry) for entry in block])
