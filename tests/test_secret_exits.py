@@ -3,6 +3,7 @@
 import io
 import json
 import logging
+from time import perf_counter
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from urllib.error import HTTPError, URLError
@@ -46,6 +47,83 @@ def test_display_redactor_handles_query_and_quoted_fields(key, assert_no_secrets
     for text in (f"https://example.invalid/?{key}=placeholder-query-g10&keep=ok",
                  json.dumps({key: SECRET["refresh"]})):
         assert_no_secrets(api.redact_display_text(text))
+
+
+@pytest.mark.parametrize("text,prefix,secret", [
+    ('password="placeholder-secret', 'password=', 'placeholder-secret'),
+    ('token: "placeholder-abc def', 'token: ', 'placeholder-abc def'),
+    ('{"password": "placeholder-sec', '{"password": ', 'placeholder-sec'),
+    ('Authorization: "Bearer placeholder-tok', 'Authorization: ', 'placeholder-tok'),
+    (r'{\"password\": \"placeholder-sec', r'{\"password\": ', 'placeholder-sec'),
+    ("secret='placeholder-sec", 'secret=', 'placeholder-sec'),
+])
+def test_display_redactor_masks_unterminated_quoted_values(text, prefix, secret, assert_no_secrets):
+    redacted = api.redact_display_text(text)
+    assert_no_secrets(redacted, secrets=(secret,))
+    assert redacted == prefix + "***"
+
+
+@pytest.mark.parametrize("key", ["password", "Authorization"])
+@pytest.mark.parametrize("opening", ['"', "'", r'\"'])
+@pytest.mark.parametrize("newline", ["\n", "\r", "\r\n"])
+def test_display_redactor_unterminated_value_stops_at_line_end(key, opening, newline, assert_no_secrets):
+    text = key + "=" + opening + "placeholder-secret trailing text" + newline + "keep=ok"
+    redacted = api.redact_display_text(text)
+    assert_no_secrets(redacted, secrets=("placeholder-secret",))
+    assert redacted == key + "=***" + newline + "keep=ok"
+
+
+@pytest.mark.parametrize("text,expected", [
+    ('password="placeholder-secret" x', 'password=*** x'),
+    ("secret='placeholder-secret' x", 'secret=*** x'),
+    ('Authorization: "Bearer placeholder-tok" x', 'Authorization: *** x'),
+    (r'{\"password\": \"placeholder-secret\", \"keep\": true}',
+     r'{\"password\": ***, \"keep\": true}'),
+])
+def test_display_redactor_closed_value_preserves_surrounding_text(text, expected, assert_no_secrets):
+    redacted = api.redact_display_text(text)
+    assert_no_secrets(redacted, secrets=("placeholder-secret", "placeholder-tok"))
+    assert redacted == expected
+
+
+def test_display_redactor_preserves_unlabelled_unterminated_quote():
+    text = 'ordinary text name="abc'
+    assert api.redact_display_text(text) == text
+
+
+def test_display_redactor_long_unterminated_value_is_bounded():
+    text = 'password="' + 'a' * 100_000
+    started = perf_counter()
+    redacted = api.redact_display_text(text)
+    elapsed = perf_counter() - started
+    assert redacted == "password=***"
+    assert elapsed < 2.0
+
+
+@pytest.mark.parametrize("boundary", ["connection", "display_data", "debug_snapshot"])
+def test_shared_redactor_exits_mask_unterminated_values(boundary, tmp_path, assert_no_secrets):
+    text = 'password="placeholder-secret'
+    if boundary == "connection":
+        conn = object.__new__(connection.ClawChatConnection)
+        conn._cfg = SimpleNamespace(base_url="https://example.invalid",
+                                    websocket_url="wss://example.invalid/ws", token="")
+        redacted = conn._sanitize_secret_text(text)
+        assert redacted == "password=***"
+    elif boundary == "display_data":
+        redacted = api.redact_display_data({"message": text})
+        assert redacted == {"message": "password=***"}
+    else:
+        from pathlib import Path
+        from clawchat_gateway.llm_context_debug import ClawChatLlmContextDebug
+
+        debug = ClawChatLlmContextDebug(env={"CLAWCHAT_LLM_CONTEXT_DEBUG": "1"},
+                                       default_snapshot_root=tmp_path)
+        run = Path(debug.write_snapshot(visibility="request", trace={}, input={"eventText": text}))
+        redacted = run.read_text()
+        assert json.loads(redacted)["input"]["eventText"] == "password=***"
+        assert_no_secrets((tmp_path / "hermes" / "latest.json").read_text(),
+                          secrets=("placeholder-secret",))
+    assert_no_secrets(redacted, secrets=("placeholder-secret",))
 
 
 async def test_connect_start_log_redacts_url_before_formatting(monkeypatch, caplog, assert_no_secrets):
