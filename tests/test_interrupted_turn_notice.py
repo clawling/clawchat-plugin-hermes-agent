@@ -308,3 +308,69 @@ async def test_outbound_claim_failure_does_not_send_or_repeat(rig, notices, monk
     rig.a._connection.send_frame.assert_not_awaited()
     await notices.check()
     rig.a._connection.send_frame.assert_not_awaited()
+
+
+@pytest.mark.parametrize('outcome', ['FAILURE', 'CANCELLED', 'REJECTED'])
+async def test_failed_replay_handoff_can_notify_after_restart(rig, notices, outcome):
+    msg = inbound('retried')
+    assert claim(rig, msg)
+    key = rig.m.key(msg)
+    rig.m.completed(event(rig, msg), NS(name=outcome))
+    rig.m.store.update_journal_payload(rig.m.account, key, 'retried', {'notified': True})
+    assert rows(rig, key)[0]['payload']['terminal'] == outcome.lower()
+
+    await rig.m.recover()
+    assert rig.calls == ['retried']
+    payload = rows(rig, key)[0]['payload']
+    assert 'terminal' not in payload and 'notified' not in payload
+    assert payload['handoff_at']
+
+    await rig.m.close()
+    fresh = hm.HistoryMaintenance(rig.a, rig.llm)
+    rig.a._history = fresh
+    fresh.connect()
+    checker = fresh.interrupted_notices
+    checker.started_at = time.time()
+    checker.delay = 0
+    try:
+        fresh.begin_recovery()
+        await checker.task
+        rig.a._connection.send_frame.assert_awaited_once()
+        frame = rig.a._connection.send_frame.call_args.args[0]
+        assert frame['payload']['message']['context']['reply']['reply_to_msg_id'] == 'retried'
+        assert rows(rig, key)[0]['payload']['notified'] is True
+        await checker.check()
+        rig.a._connection.send_frame.assert_awaited_once()
+    finally:
+        await fresh.close()
+
+
+@pytest.mark.parametrize('terminal', [True, 'success'])
+async def test_handoff_preserves_success_terminal_but_clears_old_notice(rig, notices, terminal):
+    msg = inbound('successful')
+    assert claim(rig, msg)
+    key = rig.m.key(msg)
+    rig.m.store.update_journal_payload(rig.m.account, key, 'successful',
+                                      {'terminal': terminal, 'notified': True})
+    rig.m.store.finish_held_batch(rig.m.account, key, {'successful'}, handoff_at=time.time() - 300)
+    payload = rows(rig, key)[0]['payload']
+    assert payload['terminal'] == terminal and 'notified' not in payload
+    await notices.check()
+    rig.a._connection.send_frame.assert_not_awaited()
+
+
+@pytest.mark.parametrize('offset_ms', [-1, 0, 1])
+async def test_outbound_at_floored_handoff_millisecond_suppresses_notice(rig, notices, offset_ms):
+    floor_ms = int((time.time() - 300) * 1000)
+    _, key = handed(rig, handoff=(floor_ms + .75) / 1000)
+    assert rig.m.store.claim_message_once(
+        platform='hermes', account_id='default', kind='message', direction='outbound',
+        event_type='message.reply', chat_id='cnv_test', message_id='boundary-output',
+        text='claimed answer', raw={}, created_at=floor_ms + offset_ms)
+    await notices.check()
+    if offset_ms < 0:
+        rig.a._connection.send_frame.assert_awaited_once()
+        assert rows(rig, key)[0]['payload']['notified'] is True
+    else:
+        rig.a._connection.send_frame.assert_not_awaited()
+        assert 'notified' not in rows(rig, key)[0]['payload']

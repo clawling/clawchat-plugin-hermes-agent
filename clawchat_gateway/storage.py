@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import sqlite3
@@ -897,6 +898,13 @@ class ClawChatStore:
                 + ",".join("?" for _ in message_ids) + ")", [account_id, conv_key, *message_ids])
             for mid, encoded in rows.fetchall():
                 payload = json.loads(encoded)
+                if handoff_at is not None:
+                    # A new host attempt must not inherit a failed attempt's
+                    # completion or notice. Successful terminals remain final.
+                    terminal = payload.get("terminal")
+                    if terminal is not True and terminal != "success":
+                        payload.pop("terminal", None)
+                    payload.pop("notified", None)
                 payload.update({"local_consumed": True} if handoff_at is None else {"handoff_at": handoff_at})
                 conn.execute("UPDATE clawchat_held_inbound SET state='dispatched',payload=? "
                              "WHERE account_id=? AND conv_key=? AND message_id=?",
@@ -926,7 +934,7 @@ class ClawChatStore:
                     "SELECT 1 FROM clawchat_messages WHERE account_id='default' "
                     "AND kind='message' AND direction='outbound' AND chat_id=? COLLATE NOCASE "
                     "AND created_at>=? LIMIT 1",
-                    (payload["frame"]["chat_id"], payload["handoff_at"] * 1000)).fetchone()
+                    (payload["frame"]["chat_id"], math.floor(payload["handoff_at"] * 1000))).fetchone()
                 if outbound is None:
                     candidates.append(row)
             if not candidates:

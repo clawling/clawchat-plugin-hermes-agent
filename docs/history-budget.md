@@ -143,7 +143,9 @@ internal synthetic turns are excluded. This covers journaled inputs only.
 
 The existing `default` message-ledger namespace is queried for **any outbound
 message claim** in that chat at or after handoff, including ACK-confirmed replies
-and final replies restored by Hermes. Any such claim suppresses the notice;
+and final replies restored by Hermes. The comparison floors `handoff_at * 1000`
+to integer milliseconds, conservatively including claims in the handoff's same
+millisecond. Any such claim suppresses the notice;
 a failed ledger read also prevents sending. Eligible rows in the same canonical
 conversation share one notice, replying to the most recently handed-off input,
 including in groups. Copy follows the owner's language (English if unknown).
@@ -164,10 +166,13 @@ successful outcomes retain the compatible `terminal: true`, while other outcomes
 use lowercase names such as `failure` or `cancelled`. Only successful terminals
 suppress uncertain input replay, while every terminal outcome excludes restart
 notices. Local consumption records `local_consumed: true`; actual host handoffs
-record `handoff_at` in the same transaction as the dispatched state. Dispatched
-cleanup retains recent handoffs for the 24-hour notice window even when their
-original input is older; receipt startup cleanup uses an eight-day cutoff on a
-separate table.
+record `handoff_at` in the same transaction as the dispatched state. Re-handing
+off replayed input clears the previous attempt's non-success `terminal` and
+`notified` fields in that same update, allowing a later interruption to be
+reported again; successful `terminal: true` (or `success`) remains intact.
+Dispatched cleanup retains recent handoffs for the 24-hour notice window even
+when their original input is older; receipt startup cleanup uses an eight-day
+cutoff on a separate table.
 
 Older versions ignore the new handoff, local-consumption and notice fields, but
 their replay code treats any terminal value as success. Before downgrading,

@@ -2073,7 +2073,7 @@ async def test_failure_terminal_preserves_uncertain_replay(rig):
     await rig.m.recover()
     assert rig.calls == ['trigger']
     row = rig.m.store.list_held(rig.m.account, key, states=('dispatched',))[0]
-    assert row['payload']['terminal'] == 'failure'
+    assert 'terminal' not in row['payload']  # Re-handoff starts a new attempt.
     assert row['payload']['handoff_at']
 
 
