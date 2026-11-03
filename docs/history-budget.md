@@ -92,6 +92,12 @@ with that dispatch's nonce and actual session ID. Usage is optional: absent
 usage still confirms injection, while token estimates continue from the ledger.
 Host refusal leaves the next input eligible for injection.
 
+Summary requests, published summary files and reinjected context use deterministic
+credential redaction with the same rules as `chat_history_read`.
+Transcripts include stable `sender_id` and `role` fields; names and message bodies
+are escaped quoted data, preceded along with summaries by an untrusted-records notice.
+Legacy summary files are redacted again before reinjection.
+
 A user's `/new` keeps the host's confirmation gate and the existing old-session
 notes. The command alone does not advance a boundary. `on_session_reset` or the
 next dispatch's durable route check must confirm the change first. The confirmed

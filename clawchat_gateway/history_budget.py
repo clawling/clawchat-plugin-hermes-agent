@@ -18,6 +18,7 @@ class Entry:
     role: Literal["self", "owner", "other"]
     name: str
     text: str
+    sender_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -125,7 +126,8 @@ def split_blocks(fold: list[Entry], block_cap_tokens: int = 24000) -> list[list[
     spent = 0
     for entry in fold:
         cost = estimate_entry_tokens(entry)
-        item = BlockItem(entry.id, entry.ts, entry.role, entry.name, entry.text)
+        item = BlockItem(entry.id, entry.ts, entry.role, entry.name, entry.text,
+                         sender_id=entry.sender_id)
         if cost > block_cap_tokens:
             if block:
                 blocks.append(block)
