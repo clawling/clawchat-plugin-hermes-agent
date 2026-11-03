@@ -1,9 +1,9 @@
 """Offline regression checks. Only temporary profiles; no network or real credentials.
 
-Needs a Hermes Agent checkout on PYTHONPATH (validated with 0.22.0). The
-plugin's declared ``test`` extra does NOT install Hermes and ``testpaths`` is
-``tests``, so on a plugin-only checkout this module skips itself — importing
-``hermes_constants`` unconditionally would abort collection for the whole suite.
+Needs a Hermes Agent checkout (validated with 0.22.0). Pytest uses the shared
+``hermes_source`` lookup and runs this module in a subprocess when the session
+cannot use the real host. A checkout already on PYTHONPATH runs directly.
+The plugin's declared ``test`` extra does NOT install Hermes.
 See docs/multiplex-profile-isolation.md for the run command.
 """
 import asyncio, contextlib, importlib.util, os, pathlib, sys, tempfile, unittest
@@ -15,7 +15,7 @@ try:
     from hermes_constants import set_hermes_home_override, reset_hermes_home_override
     from agent.secret_scope import set_secret_scope, reset_secret_scope, set_multiplex_active, load_env_file
 except ImportError as exc:  # pragma: no cover - environment gate
-    _REASON = f"needs a Hermes Agent checkout on PYTHONPATH ({exc})"
+    _REASON = f"real Hermes imports unavailable ({exc}); run with pytest for hermes_source shared lookup"
     try:
         import pytest
     except ImportError:

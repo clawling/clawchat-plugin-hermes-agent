@@ -118,6 +118,18 @@ warning per inbound message on every non-launch profile.
 Run from this repository using a Hermes installation with multiplex support
 (validated with Hermes 0.22.0). These integration checks import the real Hermes
 scope/config helpers; installing the plugin's test extra alone is insufficient.
+Pytest uses the shared `tests/hermes_source.py` lookup: `HERMES_SOURCE_DIR`, then
+`tmp/hermes` or `tmp/hermes-agent` in this checkout and the main checkout. If the
+session cannot use the real host, pytest runs this module in a subprocess with
+the source on `PYTHONPATH`, leaving the session's doubles in place. Missing source
+skips with searched paths; `HERMES_SOURCE_REQUIRED=1` makes it fail. Nonzero exits,
+timeouts and pytest subprocesses with no passed tests fail the outer check.
+
+```bash
+HERMES_SOURCE_DIR=tmp/hermes-agent uv run --extra test pytest tests/test_multiplex_isolation.py
+```
+
+The standalone command remains available when Hermes already imports:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 \
@@ -130,18 +142,18 @@ Any Hermes 0.21+ checkout on `PYTHONPATH` works; the plugin's own dependencies
 are not needed for this file. Strict foreign-home fail-closed assertions require
 Hermes 0.21.6+; older hosts only check that the plugin agrees with the host.
 
-Note the suite has TWO run modes and neither runs everything:
+The suite has two host modes:
 
 | Mode | Command | Result |
 |---|---|---|
-| Host double (default) | `pytest tests/` | 231 pass, this module skips |
-| Real Hermes | `PYTHONPATH=<hermes> pytest tests/` | this module runs; ~58 others error |
+| Host double (default) | `HERMES_SOURCE_DIR=<hermes> pytest tests/` | Session uses doubles; real-host checks use the shared lookup and subprocesses |
+| Real Hermes | `PYTHONPATH=<hermes> pytest tests/test_multiplex_isolation.py` | This module runs directly against the importable host |
 
-`conftest.py` prefers a real host when one is importable, but the real
-`gateway.config.Platform` enum has no `clawchat` member — the plugin registers
-the platform at runtime — so every test that builds a `ClawChatAdapter` fails
-there. Run this file on its own against real Hermes, and the rest against the
-double.
+`conftest.py` uses real Hermes whenever it already imports from `PYTHONPATH` /
+`sys.path`, even without `HERMES_REAL_HOST=1`. Most tests expect the double, so
+prefer the default mode for combined runs. Orchestrate context checks likewise
+proxy their module when needed; the real compaction formula and environment-lock
+checks use subprocesses only for their host-dependent assertions.
 
 The tests use temporary profiles, synthetic credentials and an offline supervisor.
 They cover connection coexistence and replacement, A/B/A database identity,

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import errno
 import os
+import subprocess
+import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -11,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import hermes_source
 from clawchat_gateway import activate, config, runtime_defaults
 from clawchat_gateway.state_lock import (
     StateLockError,
@@ -19,6 +22,7 @@ from clawchat_gateway.state_lock import (
     env_lock_path,
     state_file_lock,
 )
+from hermes_source import run_pytest_on_real_host
 
 
 @contextmanager
@@ -238,7 +242,13 @@ def test_real_host_save_env_value_under_plugin_lock(monkeypatch):
     from conftest import _USING_HERMES_CLI_DOUBLE
     from hermes_cli import config as host_config
 
-    if _USING_HERMES_CLI_DOUBLE or not hasattr(host_config, "_env_write_lock"):
+    if _USING_HERMES_CLI_DOUBLE:
+        run_pytest_on_real_host(
+            Path(__file__), "hermes_cli/config.py",
+            "-k", "test_real_host_save_env_value_under_plugin_lock",
+        )
+        return
+    if not hasattr(host_config, "_env_write_lock"):
         pytest.skip("real Hermes environment lock unavailable")
     env_path = Path(host_config.get_env_path())
     assert env_path.parent.resolve() == Path(os.environ["HERMES_HOME"]).resolve()
@@ -247,3 +257,74 @@ def test_real_host_save_env_value_under_plugin_lock(monkeypatch):
     with env_file_lock(env_path):
         host_config.save_env_value(key, "placeholder-real-host-value")
     assert "placeholder-real-host-value" in env_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("returncode,output,error", [
+    (0, "2 passed in 0.01s", None),
+    (0, "2 skipped in 0.01s", "reported no passed tests"),
+    (5, "no tests ran in 0.01s", "exited 5"),
+    (1, "1 failed, 1 passed in 0.01s", "exited 1"),
+])
+def test_real_host_pytest_runner_checks_results(monkeypatch, tmp_path, returncode, output, error):
+    source = tmp_path / "source"
+    monkeypatch.delenv(hermes_source.REAL_HOST_SUBPROCESS, raising=False)
+    monkeypatch.setenv("PYTHONPATH", "inherited-pythonpath")
+
+    def require_source(marker):
+        assert marker == "hermes_cli/config.py"
+        return source
+
+    def run(command, **kwargs):
+        assert command == [
+            sys.executable, "-m", "pytest", __file__, "-p", "no:cacheprovider",
+            "-k", "test_real_host_save_env_value_under_plugin_lock",
+        ]
+        assert kwargs["cwd"] == hermes_source.REPO_ROOT
+        assert kwargs["env"]["PYTHONPATH"] == os.pathsep.join((
+            str(source), str(hermes_source.REPO_ROOT), "inherited-pythonpath",
+        ))
+        assert kwargs["env"][hermes_source.REAL_HOST_SUBPROCESS] == "1"
+        assert kwargs["timeout"] == 600
+        return subprocess.CompletedProcess(command, returncode, stdout=output)
+
+    monkeypatch.setattr(hermes_source, "require_hermes_source", require_source)
+    monkeypatch.setattr(hermes_source.subprocess, "run", run)
+    args = (Path(__file__), "hermes_cli/config.py", "-k", "test_real_host_save_env_value_under_plugin_lock")
+    if error is None:
+        run_pytest_on_real_host(*args)
+    else:
+        with pytest.raises(pytest.fail.Exception, match=error):
+            run_pytest_on_real_host(*args)
+
+
+def test_real_host_runner_refuses_recursive_proxy(monkeypatch):
+    monkeypatch.setenv(hermes_source.REAL_HOST_SUBPROCESS, "1")
+    with pytest.raises(pytest.fail.Exception, match="refusing recursive retry"):
+        run_pytest_on_real_host(Path(__file__), "hermes_cli/config.py")
+
+
+@pytest.mark.parametrize("required", [False, True])
+def test_real_host_runner_missing_source_lists_search_paths(monkeypatch, tmp_path, required):
+    missing = tmp_path / "missing-hermes"
+    monkeypatch.delenv(hermes_source.REAL_HOST_SUBPROCESS, raising=False)
+    monkeypatch.delenv("HERMES_SOURCE_DIR", raising=False)
+    monkeypatch.setenv("HERMES_SOURCE_REQUIRED", "1" if required else "0")
+    monkeypatch.setattr(hermes_source, "candidates", lambda: [missing])
+    outcome = pytest.fail.Exception if required else pytest.skip.Exception
+    with pytest.raises(outcome, match="no Hermes source checkout") as caught:
+        run_pytest_on_real_host(Path(__file__), "hermes_cli/config.py")
+    assert f"searched: {missing}" in str(caught.value)
+
+
+def test_real_host_runner_timeout_includes_only_output_tail(monkeypatch, tmp_path):
+    monkeypatch.delenv(hermes_source.REAL_HOST_SUBPROCESS, raising=False)
+    monkeypatch.setattr(hermes_source, "require_hermes_source", lambda marker: tmp_path)
+    lines = [f"host output {i}" for i in range(100)]
+
+    def timeout(command, **kwargs):
+        raise subprocess.TimeoutExpired(command, 600, output="\n".join(lines).encode())
+
+    monkeypatch.setattr(hermes_source.subprocess, "run", timeout)
+    with pytest.raises(pytest.fail.Exception, match="timed out after 600s") as caught:
+        run_pytest_on_real_host(Path(__file__), "hermes_cli/config.py")
+    assert str(caught.value).splitlines()[1:] == lines[-80:]

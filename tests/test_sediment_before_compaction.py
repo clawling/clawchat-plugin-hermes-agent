@@ -25,6 +25,7 @@ import pytest
 
 from clawchat_gateway import sediment
 from clawchat_gateway.adapter import ClawChatAdapter
+from hermes_source import run_python_on_real_host
 
 DM = "cnv_dm"
 FRIEND = "usr_friend"
@@ -82,7 +83,14 @@ def _sediments(adapter):
 def test_compaction_point_on_a_128k_window(monkeypatch, use_host_formula):
     if use_host_formula:
         if sediment._host_threshold_helpers() is None:
-            pytest.skip("Hermes' agent.context_compressor is not importable here")
+            run_python_on_real_host("""
+from clawchat_gateway import sediment
+assert sediment._host_threshold_helpers() is not None
+assert sediment.compaction_point(
+    context_length=128_000, max_tokens=None, threshold_percent=None, threshold_tokens=150_000
+) == 96_000
+""", "agent/context_compressor.py")
+            return
     else:
         monkeypatch.setattr(sediment, "_host_threshold_helpers", lambda: None)
     # 0.50 is raised to 0.75 under 512K: 0.75 x 128000 = 96000, below the 150000 cap.

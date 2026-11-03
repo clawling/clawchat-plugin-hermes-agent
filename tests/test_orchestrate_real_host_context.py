@@ -13,7 +13,10 @@ try:
     from tools.registry import registry
     from gateway.session_context import set_session_vars, clear_session_vars
 except ImportError as exc:  # pragma: no cover - environment gate
-    pytest.skip(f"needs a real Hermes Agent checkout on PYTHONPATH ({exc})", allow_module_level=True)
+    pytest.skip(
+        f"real Hermes imports unavailable ({exc}); run with pytest for hermes_source shared lookup",
+        allow_module_level=True,
+    )
 
 from clawchat_gateway import host_tools_guard as guard, tools, turn_grants as turns
 
