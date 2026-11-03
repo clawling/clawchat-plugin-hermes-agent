@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import re
-from typing import Literal
+from typing import Callable, Literal
 
 
 @dataclass(frozen=True)
@@ -18,6 +18,7 @@ class Entry:
     role: Literal["self", "owner", "other"]
     name: str
     text: str
+    sender_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -111,12 +112,15 @@ def plan_compaction(
     return entries[:start], entries[start:]
 
 
-def split_blocks(fold: list[Entry], block_cap_tokens: int = 24000) -> list[list[BlockItem]]:
+def split_blocks(fold: list[Entry], block_cap_tokens: int = 24000, *,
+                 marker_id: Callable[[str], str] = str) -> list[list[BlockItem]]:
     """Keep whole messages together; only an oversized message loses its middle.
 
     For that exception use a conservative character allowance (one character per
     token), reserving space for the label and omission marker. The mandatory
-    marker itself may exceed an artificially tiny cap.
+    marker itself may exceed an artificially tiny cap. ``marker_id`` formats the
+    ID inside the marker; callers splitting already-rendered text must pass the
+    same escaping they use for displayed IDs.
     """
     if block_cap_tokens <= 0:
         raise ValueError("block_cap_tokens must be positive")
@@ -125,12 +129,13 @@ def split_blocks(fold: list[Entry], block_cap_tokens: int = 24000) -> list[list[
     spent = 0
     for entry in fold:
         cost = estimate_entry_tokens(entry)
-        item = BlockItem(entry.id, entry.ts, entry.role, entry.name, entry.text)
+        item = BlockItem(entry.id, entry.ts, entry.role, entry.name, entry.text,
+                         sender_id=entry.sender_id)
         if cost > block_cap_tokens:
             if block:
                 blocks.append(block)
                 block, spent = [], 0
-            marker = f"[middle omitted — chat_history_read around={entry.id}]"
+            marker = f"[middle omitted — chat_history_read around={marker_id(entry.id)}]"
             allowance = max(0, block_cap_tokens - estimate_entry_tokens(replace(entry, text=marker)))
             head = (allowance + 1) // 2
             tail = allowance // 2

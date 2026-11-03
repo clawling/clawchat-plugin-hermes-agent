@@ -22,9 +22,12 @@ from clawchat_gateway.history_budget import (
     Entry, _entry_time, estimate_entry_tokens, history_tokens, plan_compaction,
     recent_window_for_injection, split_blocks,
 )
+from clawchat_gateway.history_transcript import (
+    UNTRUSTED_HISTORY, quoted_history_summary, render_entry, rendered_entry_line, rendered_id,
+    rendered_summary_messages, safe_history_summary,
+)
 from clawchat_gateway.rolling_summary import (
-    build_summary_messages, cleanup_summaries, parse_rolling_summary,
-    publish_summary, read_summary, summary_dir,
+    cleanup_summaries, publish_summary, read_summary, summary_dir,
 )
 
 logger = logging.getLogger(__name__)
@@ -387,7 +390,7 @@ class HistoryMaintenance:
                 if command_text.lstrip().startswith("/"):
                     continue
             result.append(Entry(e.id, e.ts, "self" if e.self else "owner" if e.owner else "other",
-                                _speaker(e), e.text))
+                                _speaker(e), e.text, sender_id=e.sender))
         return result
 
     def activity_entries(self, inbound):
@@ -969,14 +972,16 @@ class HistoryMaintenance:
                 loaded = read_summary(self.directory(key), state["summary_ref"])
                 if not loaded:
                     raise RuntimeError("published summary unavailable")
-                summary = loaded[1]
+                summary = quoted_history_summary(loaded[1])
+                if summary is None:
+                    raise RuntimeError("published summary invalid")
             settings = self.settings(inbound)
             prior_ids = {e.id for e in all_entries[:first]}
-            window = recent_window_for_injection([e for e in entries if e.id in prior_ids and e.id not in ids],
+            window = recent_window_for_injection([render_entry(e) for e in entries if e.id in prior_ids and e.id not in ids],
                 settings.history_budget_tokens, has_summary=bool(summary), now=datetime.now(timezone.utc),
                 recent_window=settings.recent_window, keep_recent_turns=settings.keep_recent_turns)
-            text = ("## ClawChat Conversation Summary\n" + summary + "\n\n") if summary else ""
-            text += "## Recent messages\n" + "\n".join(f"- id {e.id}, {e.ts}, {e.name}: {e.text}" for e in window)
+            text = ("## ClawChat Conversation Summary\n" + UNTRUSTED_HISTORY + "\n" + summary + "\n\n") if summary else ""
+            text += "## Recent messages\n" + UNTRUSTED_HISTORY + "\n" + "\n".join(rendered_entry_line(e) for e in window)
             self.delivered[key] = {e.id for e in window}
             return text
 
@@ -1221,7 +1226,7 @@ class HistoryMaintenance:
         if not pending:
             return 0, "empty"
         renewed = pending["why"] == "renewed"
-        blocks = split_blocks(self.interval(inbound, state, cut=pending["cut_id"], cut_seq=pending.get("cut_seq"), boundary=not renewed)) if pending["cut_id"] else []
+        blocks = split_blocks([render_entry(e) for e in self.interval(inbound, state, cut=pending["cut_id"], cut_seq=pending.get("cut_seq"), boundary=not renewed)], marker_id=rendered_id) if pending["cut_id"] else []
         count = 0
         previous_ref = pending.get("previous_ref") or state.get("summary_ref")
         for block in blocks if renewed else blocks[:3]:
@@ -1230,12 +1235,12 @@ class HistoryMaintenance:
             old = read_summary(self.directory(key), state["summary_ref"]) if state.get("summary_ref") else None
             if state.get("summary_ref") and not old:
                 raise RuntimeError("published summary missing")
-            reply = await self.llm.acomplete(build_summary_messages(old[1] if old else None, block),
+            reply = await self.llm.acomplete(rendered_summary_messages(old[1] if old else None, block),
                                              timeout=120, max_tokens=4000)
             if self.blocked.get(key) is not token or self.closed:
                 return count, "deadline"
-            summary = parse_rolling_summary(getattr(reply, "text", None))
-            if not summary:
+            summary = safe_history_summary(getattr(reply, "text", None))
+            if summary is None:
                 raise ValueError("invalid rolling summary")
             ref = publish_summary(self.directory(key), summary, through=block[-1].id,
                                   boundary=state.get("boundary"), as_of=datetime.now(timezone.utc))
