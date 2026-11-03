@@ -23,7 +23,7 @@ from clawchat_gateway.history_budget import (
     recent_window_for_injection, split_blocks,
 )
 from clawchat_gateway.history_transcript import (
-    UNTRUSTED_HISTORY, quoted_history_summary, render_entry, rendered_entry_line,
+    UNTRUSTED_HISTORY, quoted_history_summary, render_entry, rendered_entry_line, rendered_id,
     rendered_summary_messages, safe_history_summary,
 )
 from clawchat_gateway.rolling_summary import (
@@ -1226,7 +1226,7 @@ class HistoryMaintenance:
         if not pending:
             return 0, "empty"
         renewed = pending["why"] == "renewed"
-        blocks = split_blocks([render_entry(e) for e in self.interval(inbound, state, cut=pending["cut_id"], cut_seq=pending.get("cut_seq"), boundary=not renewed)]) if pending["cut_id"] else []
+        blocks = split_blocks([render_entry(e) for e in self.interval(inbound, state, cut=pending["cut_id"], cut_seq=pending.get("cut_seq"), boundary=not renewed)], marker_id=rendered_id) if pending["cut_id"] else []
         count = 0
         previous_ref = pending.get("previous_ref") or state.get("summary_ref")
         for block in blocks if renewed else blocks[:3]:

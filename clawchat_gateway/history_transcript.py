@@ -67,6 +67,11 @@ def render_entry(entry: Entry) -> Entry:
     return replace(entry, name=_entry_name(entry), text=_literal(entry.text))
 
 
+def rendered_id(value: str) -> str:
+    """Display form of a message ID, also used inside middle-omission markers."""
+    return _literal(value)
+
+
 def rendered_entry_line(entry: Entry) -> str:
     """Format an entry already returned by ``render_entry``."""
     return f"- id {_literal(entry.id)}, {_literal(entry.ts)}, {entry.name}: {entry.text}"
