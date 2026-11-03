@@ -46,8 +46,8 @@ def _clawchat_home_extra() -> dict:
         return {}
     except Exception as exc:
         logger.debug(
-            "ClawChat could not read Hermes config.yaml for registry check: %s",
-            redact_display_text(exc),
+            "ClawChat could not read Hermes config.yaml for registry check: %s: %s",
+            type(exc).__name__, redact_display_text(exc),
         )
         return {}
 
@@ -224,7 +224,10 @@ def _patch_send_message_target_parser() -> None:
     try:
         from tools import send_message_tool
     except Exception as exc:
-        logger.debug("ClawChat could not patch send_message target parser: %s", exc)
+        logger.debug(
+            "ClawChat could not patch send_message target parser: %s: %s",
+            type(exc).__name__, redact_display_text(exc),
+        )
         return
 
     original = getattr(send_message_tool, "_parse_target_ref", None)
@@ -283,10 +286,10 @@ async def _send_clawchat_media_via_live_adapter(
                 _clawchat_force_document=bool(force_document),
             )
     except Exception as exc:
-        return {"error": f"Plugin platform send failed: {exc}"}
+        return {"error": f"Plugin platform send failed: {type(exc).__name__}: {redact_display_text(exc)}"}
     if result.success:
         return {"success": True, "message_id": result.message_id}
-    return {"error": f"Adapter send failed: {result.error}"}
+    return {"error": f"Adapter send failed: {redact_display_text(result.error)}"}
 
 
 def _patch_send_message_media_delivery() -> None:
@@ -301,7 +304,10 @@ def _patch_send_message_media_delivery() -> None:
     try:
         from tools import send_message_tool
     except Exception as exc:
-        logger.debug("ClawChat could not patch send_message media delivery: %s", exc)
+        logger.debug(
+            "ClawChat could not patch send_message media delivery: %s: %s",
+            type(exc).__name__, redact_display_text(exc),
+        )
         return
 
     original = getattr(send_message_tool, "_send_to_platform", None)
@@ -425,7 +431,10 @@ def _warn_on_shared_identity() -> None:
 
         warn_on_shared_identity()
     except Exception as exc:  # noqa: BLE001
-        logger.debug("ClawChat identity-collision check skipped: %s", exc)
+        logger.debug(
+            "ClawChat identity-collision check skipped: %s: %s",
+            type(exc).__name__, redact_display_text(exc),
+        )
 
 
 def _warn_on_unsupported_host() -> None:
@@ -437,7 +446,10 @@ def _warn_on_unsupported_host() -> None:
         if message is not None:
             logger.warning("%s", message)
     except Exception as exc:  # noqa: BLE001
-        logger.debug("ClawChat Hermes version check skipped: %s", exc)
+        logger.debug(
+            "ClawChat Hermes version check skipped: %s: %s",
+            type(exc).__name__, redact_display_text(exc),
+        )
 
 
 def _ensure_host_defaults() -> None:
@@ -569,9 +581,9 @@ def _seed_managed_skill(skill_id: str, bundled: Path) -> Path:
         return seed_managed_skill(skill_id, bundled)
     except Exception as exc:  # noqa: BLE001 — never let the skill mechanism crash load
         logger.warning(
-            "ClawChat managed-skill seeding unavailable for %s (%s); using bundled path",
+            "ClawChat managed-skill seeding unavailable for %s (%s: %s); using bundled path",
             skill_id,
-            exc,
+            type(exc).__name__, redact_display_text(exc),
         )
         return bundled
 
@@ -588,7 +600,10 @@ def _register_skill(ctx) -> None:
 
         set_skill_registrar(register_skill)
     except Exception as exc:  # noqa: BLE001 — never let the skill mechanism crash load
-        logger.warning("ClawChat skill hot-registrar unavailable: %s", exc)
+        logger.warning(
+            "ClawChat skill hot-registrar unavailable: %s: %s",
+            type(exc).__name__, redact_display_text(exc),
+        )
 
     # Managed skills only appear in the host's <available_skills> index /
     # skills_list if the managed dir is listed in skills.external_dirs.
@@ -598,7 +613,10 @@ def _register_skill(ctx) -> None:
 
         ensure_external_skills_dir()
     except Exception as exc:  # noqa: BLE001 — never let the skill mechanism crash load
-        logger.warning("ClawChat external skills dir setup skipped: %s", exc)
+        logger.warning(
+            "ClawChat external skills dir setup skipped: %s: %s",
+            type(exc).__name__, redact_display_text(exc),
+        )
 
     # Discover bundled skills by scanning the snapshot dir — the id list must
     # never be hard-coded again (that is how clawchat-set-greeting got lost).
@@ -614,7 +632,10 @@ def _register_skill(ctx) -> None:
 
         apply_bundled_tombstones()
     except Exception as exc:  # noqa: BLE001 — never let cleanup break load
-        logger.warning("ClawChat bundled tombstone cleanup skipped: %s", exc)
+        logger.warning(
+            "ClawChat bundled tombstone cleanup skipped: %s: %s",
+            type(exc).__name__, redact_display_text(exc),
+        )
 
     bundled_ids: set[str] = set()
     for bundled in sorted((_plugin_dir() / "skills").glob("*/SKILL.md")):
@@ -636,7 +657,8 @@ def _register_skill(ctx) -> None:
             )
         except Exception as exc:  # noqa: BLE001 — never let the skill mechanism crash load
             logger.warning(
-                "ClawChat bundled skill registration failed for %s: %s", skill_id, exc
+                "ClawChat bundled skill registration failed for %s: %s: %s",
+                skill_id, type(exc).__name__, redact_display_text(exc)
             )
 
     # Skills delivered dynamically (present in the managed manifest but not
@@ -661,7 +683,10 @@ def _register_skill(ctx) -> None:
                 description=skill_description(managed),
             )
     except Exception as exc:  # noqa: BLE001 — never let the skill mechanism crash load
-        logger.warning("ClawChat managed extra-skill registration skipped: %s", exc)
+        logger.warning(
+            "ClawChat managed extra-skill registration skipped: %s: %s",
+            type(exc).__name__, redact_display_text(exc),
+        )
 
 
 def _platform_value(platform) -> str:
@@ -844,7 +869,10 @@ def _register_session_usage_hook(ctx) -> None:
         register_hook("post_api_request", clawchat_post_api_request)
         register_hook("pre_api_request", clawchat_pre_api_request)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("ClawChat session usage hook skipped: %s", exc)
+        logger.warning(
+            "ClawChat session usage hook skipped: %s: %s",
+            type(exc).__name__, redact_display_text(exc),
+        )
 
 
 def _register_host_tools_guard(ctx) -> None:
@@ -854,7 +882,10 @@ def _register_host_tools_guard(ctx) -> None:
 
         register_host_tools_guard(ctx)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("ClawChat host tools guard not registered: %s", exc)
+        logger.warning(
+            "ClawChat host tools guard not registered: %s: %s",
+            type(exc).__name__, redact_display_text(exc),
+        )
 
 
 def _start_liveware_cli_download() -> None:
@@ -864,7 +895,10 @@ def _start_liveware_cli_download() -> None:
 
         ensure_liveware_cli_background()
     except Exception as exc:  # noqa: BLE001
-        logger.warning("ClawChat liveware CLI ensure skipped: %s", exc)
+        logger.warning(
+            "ClawChat liveware CLI ensure skipped: %s: %s",
+            type(exc).__name__, redact_display_text(exc),
+        )
 
 
 def register(ctx) -> None:

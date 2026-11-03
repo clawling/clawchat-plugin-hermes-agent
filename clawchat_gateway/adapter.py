@@ -4932,8 +4932,9 @@ class ClawChatAdapter(BasePlatformAdapter):
                 self._owner_input_deadlines[id(inbound)] = deadline
                 try:
                     await self._route_inbound(inbound)
-                except Exception:  # noqa: BLE001 - keep later held inputs
-                    logger.warning('clawchat held owner input dispatch failed', exc_info=True)
+                except Exception as exc:  # noqa: BLE001 - keep later held inputs
+                    logger.warning('clawchat held owner input dispatch failed: %s: %s',
+                                   type(exc).__name__, redact_display_text(exc))
                 finally:
                     self._owner_input_deadlines.pop(id(inbound), None)
         finally:

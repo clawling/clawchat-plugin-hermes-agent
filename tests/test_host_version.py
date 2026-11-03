@@ -92,7 +92,7 @@ def test_registration_survives_hint_failure(plugin, monkeypatch, caplog):
     with caplog.at_level(logging.DEBUG, logger=plugin.__name__):
         assert plugin._register_platform(ctx) is True
     ctx.register_platform.assert_called_once()
-    assert "ClawChat Hermes version check skipped: hint unavailable" in caplog.text
+    assert "ClawChat Hermes version check skipped: RuntimeError: hint unavailable" in caplog.text
 
 
 @pytest.mark.parametrize("version", ["0.20.4", "0.21.0"])

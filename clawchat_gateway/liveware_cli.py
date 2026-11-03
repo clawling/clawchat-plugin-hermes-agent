@@ -23,6 +23,7 @@ from concurrent.futures import Future, TimeoutError as FutureTimeout
 from pathlib import Path
 
 from clawchat_gateway import atomic_file
+from clawchat_gateway.api_client import redact_display_text
 
 logger = logging.getLogger(__name__)
 
@@ -323,7 +324,8 @@ def ensure_liveware_cli() -> None:
                     os.close(fd)
                 # Keep the lock file: waiters must continue using the same inode.
     except Exception as exc:  # noqa: BLE001
-        logger.warning("ClawChat: liveware CLI download skipped: %s", exc)
+        logger.warning("ClawChat: liveware CLI download skipped: %s: %s",
+                       type(exc).__name__, redact_display_text(exc))
 
 
 def ensure_liveware_cli_background() -> None:

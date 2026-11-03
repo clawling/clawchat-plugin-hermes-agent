@@ -79,7 +79,9 @@ def parse_livewares_manifest(raw: bytes | str) -> LivewareSampleManifest:
     try:
         parsed = json.loads(text)
     except Exception as exc:  # noqa: BLE001
-        raise LivewareSampleError(f"failed to parse livewares manifest: {exc}") from exc
+        raise LivewareSampleError(
+            f"failed to parse livewares manifest: {type(exc).__name__}: {redact_display_text(exc)}"
+        ) from None
     if not isinstance(parsed, dict):
         raise LivewareSampleError("livewares manifest must be a JSON object")
     livewares = parsed.get("livewares")
@@ -123,11 +125,13 @@ def _fetch_verified(fetch: Fetcher, url: str) -> bytes:
     except LivewareSampleError:
         raise
     except Exception as exc:  # noqa: BLE001
-        raise LivewareSampleError(f"fetch {url} failed: {exc}") from exc
+        raise LivewareSampleError(
+            f"fetch {redact_display_text(url)} failed: {type(exc).__name__}: {redact_display_text(exc)}"
+        ) from None
     if not isinstance(raw, (bytes, bytearray)):
-        raise LivewareSampleError(f"fetch {url} did not return bytes")
+        raise LivewareSampleError(f"fetch {redact_display_text(url)} did not return bytes")
     if len(raw) > MAX_SAMPLE_FILE_BYTES:
-        raise LivewareSampleError(f"fetch {url} exceeds {MAX_SAMPLE_FILE_BYTES} bytes")
+        raise LivewareSampleError(f"fetch {redact_display_text(url)} exceeds {MAX_SAMPLE_FILE_BYTES} bytes")
     return bytes(raw)
 
 
@@ -511,9 +515,9 @@ async def _read_until(proc, match, timeout: float, label: str) -> str:
 
     try:
         return await asyncio.wait_for(_loop(), timeout=timeout)
-    except asyncio.TimeoutError as exc:
+    except asyncio.TimeoutError:
         _safe_kill(proc)
-        raise LivewareSampleError(f"{label} timed out after {timeout}s") from exc
+        raise LivewareSampleError(f"{label} timed out after {timeout}s") from None
     except BaseException:  # LivewareSampleError early-exit, CancelledError, etc.
         _safe_kill(proc)
         raise
@@ -594,11 +598,11 @@ async def tunnel_bind(*, liveware_path, app_id, port: int,
     stderr = (err or b"").decode(errors="replace")
     if proc.returncode:
         raise LivewareSampleError(
-            f"liveware tunnel bind failed: {(stderr or stdout).strip()}")
+            f"liveware tunnel bind failed: {redact_display_text(stderr or stdout).strip()}")
     url = parse_tunnel_public_url(stdout) or parse_tunnel_public_url(stderr)
     if not url:
         raise LivewareSampleError(
-            f"liveware tunnel bind: cannot parse public URL from output: {stdout[:500]}")
+            f"liveware tunnel bind: cannot parse public URL from output: {redact_display_text(stdout)[:500]}")
     return url
 
 
@@ -642,9 +646,9 @@ async def _communicate(proc, timeout: float, label: str):
     """
     try:
         return await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError as exc:
+    except asyncio.TimeoutError:
         _safe_kill(proc)
-        raise LivewareSampleError(f"{label} timed out after {timeout}s") from exc
+        raise LivewareSampleError(f"{label} timed out after {timeout}s") from None
     except BaseException:  # CancelledError (stop() mid-CLI) etc. → don't orphan
         _safe_kill(proc)
         raise
@@ -658,12 +662,17 @@ async def liveware_login(*, liveware_path, token: str, exec: ExecFn | None = Non
                          timeout: float = _CLI_TIMEOUT,
                          account: "str | None" = None) -> None:
     exec = exec or asyncio.create_subprocess_exec
-    proc = await _maybe_await(exec(
-        liveware_path, "login", "--access-token", token,
-        *liveware_account_args(account),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    ))
-    out, err = await _communicate(proc, timeout, "liveware login")
+    try:
+        proc = await _maybe_await(exec(
+            liveware_path, "login", "--access-token", token,
+            *liveware_account_args(account),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        ))
+        out, err = await _communicate(proc, timeout, "liveware login")
+    except Exception as exc:  # noqa: BLE001
+        raise LivewareSampleError(
+            f"liveware login failed: {type(exc).__name__}: {redact_display_text(exc, token)}"
+        ) from None
     if proc.returncode:
         detail = _scrub((err or b"").decode(errors="replace")
                         or (out or b"").decode(errors="replace"), token).strip()
@@ -707,14 +716,15 @@ async def liveware_agent_is_running(
         out, err = await _communicate(proc, timeout, "liveware status")
     except Exception as exc:  # noqa: BLE001
         logger.debug(
-            "liveware-sample status probe failed; assuming not running: %s", exc)
+            "liveware-sample status probe failed; assuming not running: %s: %s",
+            type(exc).__name__, redact_display_text(exc))
         return False
     stdout = (out or b"").decode(errors="replace")
     if proc.returncode:
         stderr = (err or b"").decode(errors="replace")
         logger.debug(
             "liveware-sample status probe exited %s; assuming not running: %s",
-            proc.returncode, (stderr or stdout).strip())
+            proc.returncode, redact_display_text(stderr or stdout).strip())
         return False
     running = parse_agent_status_running(stdout)
     logger.debug("liveware-sample status probe: running=%s", running)
@@ -746,14 +756,15 @@ async def liveware_app_find_by_name(
         out, err = await _communicate(proc, timeout, "liveware app list")
     except Exception as exc:  # noqa: BLE001
         logger.debug(
-            "liveware-sample app list failed; falling back to app create: %s", exc)
+            "liveware-sample app list failed; falling back to app create: %s: %s",
+            type(exc).__name__, redact_display_text(exc))
         return None
     stdout = (out or b"").decode(errors="replace")
     if proc.returncode:
         stderr = (err or b"").decode(errors="replace")
         logger.debug(
             "liveware-sample app list failed; falling back to app create: %s",
-            (stderr or stdout).strip())
+            redact_display_text(stderr or stdout).strip())
         return None
     return find_app_id_by_name(stdout, name)
 
@@ -769,12 +780,12 @@ async def liveware_app_create(*, liveware_path, name: str, exec: ExecFn | None =
     out, err = await _communicate(proc, timeout, "liveware app create")
     stdout = (out or b"").decode(errors="replace")
     if proc.returncode:
-        detail = ((err or b"").decode(errors="replace") or stdout).strip()
+        detail = redact_display_text((err or b"").decode(errors="replace") or stdout).strip()
         raise LivewareSampleError(f"liveware app create failed: {detail}")
     app_id = parse_app_create_output(stdout)
     if not app_id:
         raise LivewareSampleError(
-            f"liveware app create: cannot parse app id from output: {stdout[:500]}"
+            f"liveware app create: cannot parse app id from output: {redact_display_text(stdout)[:500]}"
         )
     return app_id
 
@@ -815,20 +826,20 @@ def load_intro_text(app_dir: Path, language: str) -> str:
     table_path = Path(app_dir) / "intro.i18n.json"
     try:
         raw = table_path.read_text(encoding="utf-8")
-    except Exception:  # noqa: BLE001 — a bad table must never block the intro
+    except Exception as exc:  # noqa: BLE001 — a bad table must never block the intro
         logger.warning(
-            "clawchat liveware intro table unreadable at %s; using the English fallback",
-            table_path,
-            exc_info=True,
+            "clawchat liveware intro table unreadable at %s; using the English fallback: %s: %s",
+            redact_display_text(table_path),
+            type(exc).__name__, redact_display_text(exc),
         )
         return LIVEWARE_SAMPLE_INTRO_FALLBACK_EN
     try:
         table = json.loads(raw)
-    except Exception:  # noqa: BLE001 — a bad table must never block the intro
+    except Exception as exc:  # noqa: BLE001 — a bad table must never block the intro
         logger.warning(
-            "clawchat liveware intro table at %s is not valid JSON; using the English fallback",
-            table_path,
-            exc_info=True,
+            "clawchat liveware intro table at %s is not valid JSON; using the English fallback: %s: %s",
+            redact_display_text(table_path),
+            type(exc).__name__, redact_display_text(exc),
         )
         return LIVEWARE_SAMPLE_INTRO_FALLBACK_EN
     intro = table.get("intro") if isinstance(table, dict) else None
@@ -1017,13 +1028,13 @@ class LivewareSampleSupervisor:
             delays = _START_RETRY_DELAYS_S
             if attempt >= len(delays) or self._stopped:
                 self._log.warning(
-                    "liveware-sample start failed (attempt %d, giving up): %s",
-                    attempt + 1, exc)
+                    "liveware-sample start failed (attempt %d, giving up): %s: %s",
+                    attempt + 1, type(exc).__name__, redact_display_text(exc))
                 return
             delay = delays[attempt]
             self._log.warning(
-                "liveware-sample start failed (attempt %d, retrying in %.0fs): %s",
-                attempt + 1, delay, exc)
+                "liveware-sample start failed (attempt %d, retrying in %.0fs): %s: %s",
+                attempt + 1, delay, type(exc).__name__, redact_display_text(exc))
             self._spawn_task(self._retry_start(attempt + 1, delay))
         finally:
             self._launch_in_flight = False
@@ -1102,7 +1113,8 @@ class LivewareSampleSupervisor:
         except Exception as exc:  # noqa: BLE001
             local = d.sample_root / "app" / "server.mjs"
             if row_version is not None and local.exists():
-                self._log.debug("liveware-sample download failed, reusing local: %s", exc)
+                self._log.debug("liveware-sample download failed, reusing local: %s: %s",
+                                type(exc).__name__, redact_display_text(exc))
                 return row_version, d.sample_root / "app"
             raise
 
@@ -1197,7 +1209,7 @@ class LivewareSampleSupervisor:
             self._watch_child(self._server)
             self._watch_child(self._tunnel)
         await self._deliver_intro()
-        self._log.debug("liveware-sample bootstrap complete at %s", public_url)
+        self._log.debug("liveware-sample bootstrap complete at %s", redact_display_text(public_url))
 
     async def _relaunch(self, row, *, may_reuse_agent: bool) -> None:
         """Resume from a persisted row.
@@ -1268,7 +1280,8 @@ class LivewareSampleSupervisor:
                     # stop() must keep propagating so children aren't orphaned.
                     self._log.warning(
                         "liveware-sample relaunch re-login failed; continuing with "
-                        "cached CLI credentials: %s", exc)
+                        "cached CLI credentials: %s: %s",
+                        type(exc).__name__, redact_display_text(exc, token))
                 if self._bail_if_stale(gen):
                     return
             else:
@@ -1416,10 +1429,11 @@ class LivewareSampleSupervisor:
             await self._relaunch(row, may_reuse_agent=False)
         except Exception as exc:  # noqa: BLE001
             self._kill_children()
-            self._log.warning("liveware-sample relaunch failed: %s", exc)
+            self._log.warning("liveware-sample relaunch failed: %s: %s",
+                              type(exc).__name__, redact_display_text(exc))
             self._d.store.update_liveware_sample_status(
                 platform=self._d.platform, account_id=self._d.account_id,
-                status="failed", last_error=str(exc))
+                status="failed", last_error=redact_display_text(exc))
 
     async def _deliver_intro(self, try_index: int = 0) -> None:
         if self._stopped:
@@ -1433,7 +1447,8 @@ class LivewareSampleSupervisor:
             )
             delivered = await d.notify_owner(load_intro_text(d.sample_root / "app", language))
         except Exception as exc:  # noqa: BLE001
-            self._log.debug("liveware-sample intro send error: %s", exc)
+            self._log.debug("liveware-sample intro send error: %s: %s",
+                            type(exc).__name__, redact_display_text(exc))
         if self._stopped or generation != self._generation:
             return
         if delivered:

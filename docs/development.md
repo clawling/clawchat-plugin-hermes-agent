@@ -216,7 +216,9 @@ specific reason. Import aliases are outside the static scanner's coverage.
 
 Credential exit tests use `assert_no_secrets` from `tests/conftest.py` to check
 caller results, exceptions, logs and report payloads against obvious fake values.
-Redact credentials where values first become display text. Debug snapshots and
+Redact credentials where values first become display text. Plugin-load and held-input
+dispatch errors, liveware subprocess failures and supervisor diagnostics use the
+shared display redactor without raw exception tracebacks. Debug snapshots and
 tool audits pass through `redact_display_data` before being written to disk;
 message bodies are omitted from routing logs (only their lengths are recorded).
 Parse errors that carry a source position (YAML) are shown as error class and

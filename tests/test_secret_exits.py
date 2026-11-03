@@ -432,15 +432,25 @@ def test_tool_error_helpers_redact_message_and_path(assert_no_secrets, helper):
 @pytest.mark.parametrize("module_name,function_name,required", [
     ("llm_context_debug", "write_snapshot", {"redact_display_data", "redact_display_text"}),
     ("storage", "record_tool_call", {"redact_display_data", "redact_display_text"}),
+    ("__init__", "_patch_send_message_target_parser", {"redact_display_text"}),
+    ("__init__", "_seed_managed_skill", {"redact_display_text"}),
+    ("__init__", "_register_skill", {"redact_display_text"}),
+    ("liveware_cli", "ensure_liveware_cli", {"redact_display_text"}),
+    ("liveware_sample", "tunnel_bind", {"redact_display_text"}),
+    ("liveware_sample", "liveware_app_create", {"redact_display_text"}),
+    ("liveware_sample", "liveware_login", {"redact_display_text"}),
+    ("adapter", "_dispatch_held_owner_inputs", {"redact_display_text"}),
 ])
-def test_persisted_diagnostics_keep_redaction_calls(module_name, function_name, required):
+def test_diagnostic_exits_keep_redaction_calls(module_name, function_name, required):
     import ast
     from pathlib import Path
 
     path = Path(api.__file__).with_name(module_name + ".py")
+    if module_name == "__init__":
+        path = path.parent.parent / "__init__.py"
     tree = ast.parse(path.read_text())
     function = next(node for node in ast.walk(tree)
-                    if isinstance(node, ast.FunctionDef) and node.name == function_name)
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function_name)
     calls = {node.func.id for node in ast.walk(function)
              if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
     assert required <= calls
@@ -615,3 +625,270 @@ def test_yaml_errors_show_only_class_and_position(source, tmp_path, monkeypatch,
         profile.load_profile_config()
     assert_no_secrets(shown, str(profile_error.value),
                       "".join(traceback.format_exception(profile_error.value)), secrets=(SHORT_SIG,))
+
+
+@pytest.fixture
+def plugin_entry():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(api.__file__).parent.parent / "__init__.py"
+    spec = importlib.util.spec_from_file_location("clawchat_secret_exit_entry", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("helper,module_name,callee", [
+    ("_warn_on_shared_identity", "profile_collision", "warn_on_shared_identity"),
+    ("_warn_on_unsupported_host", "host_version", "unsupported_host_message"),
+    ("_seed_managed_skill", "skill_update", "seed_managed_skill"),
+    ("_register_host_tools_guard", "host_tools_guard", "register_host_tools_guard"),
+    ("_start_liveware_cli_download", "liveware_cli", "ensure_liveware_cli_background"),
+])
+def test_plugin_load_failure_logs_redact_errors(plugin_entry, tmp_path, monkeypatch, caplog,
+                                                assert_no_secrets, helper, module_name, callee):
+    import importlib
+
+    def fail(*args, **kwargs):
+        raise RuntimeError(diagnostic())
+
+    monkeypatch.setattr(importlib.import_module("clawchat_gateway." + module_name), callee, fail)
+    args = (("placeholder-skill", tmp_path) if helper == "_seed_managed_skill"
+            else (SimpleNamespace(),) if helper == "_register_host_tools_guard" else ())
+    with caplog.at_level(logging.DEBUG):
+        result = getattr(plugin_entry, helper)(*args)
+    if helper == "_seed_managed_skill":
+        assert result == tmp_path
+    assert "RuntimeError:" in caplog.text
+    assert all(record.exc_info is None and record.exc_text is None for record in caplog.records)
+    assert_no_secrets(caplog=caplog)
+
+
+@pytest.mark.parametrize("helper", ["_patch_send_message_target_parser", "_patch_send_message_media_delivery"])
+def test_plugin_import_failure_logs_redact_errors(plugin_entry, monkeypatch, caplog, assert_no_secrets, helper):
+    import builtins
+
+    original = builtins.__import__
+
+    def importing(name, *args, **kwargs):
+        if name == "tools":
+            raise ImportError(diagnostic())
+        return original(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", importing)
+    with caplog.at_level(logging.DEBUG):
+        getattr(plugin_entry, helper)()
+    assert "ImportError:" in caplog.text
+    assert_no_secrets(caplog=caplog)
+
+
+@pytest.mark.parametrize("fails", [True, False])
+async def test_plugin_media_failure_returns_safe_error(plugin_entry, monkeypatch, assert_no_secrets, fails):
+    from clawchat_gateway import terminal_send
+
+    send = AsyncMock(return_value=SimpleNamespace(success=False, error=diagnostic()))
+    if fails:
+        send.side_effect = RuntimeError(diagnostic())
+    monkeypatch.setattr(terminal_send, "get_clawchat_sender", lambda: SimpleNamespace(send=send))
+    result = await plugin_entry._send_clawchat_media_via_live_adapter(
+        None, None, "placeholder-chat", "placeholder message")
+    assert "failed:" in result["error"]
+    assert_no_secrets(result)
+
+
+@pytest.mark.parametrize("operation", ["login", "create", "bind"])
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+async def test_liveware_subprocess_failures_redact_exception_and_logs(monkeypatch, caplog, assert_no_secrets,
+                                                                     operation, stream):
+    # Bare login token verifies the explicit secret path, in addition to labels.
+    raw = (diagnostic() + (" bare " + SECRET["access"] if operation == "login" else "")).encode()
+    proc = SimpleNamespace(returncode=1, communicate=AsyncMock(
+        return_value=(raw, b"") if stream == "stdout" else (b"", raw)))
+    execute = AsyncMock(return_value=proc)
+    monkeypatch.setattr(liveware_sample.asyncio, "create_subprocess_exec", execute)
+    with pytest.raises(liveware_sample.LivewareSampleError) as raised:
+        if operation == "login":
+            await liveware_sample.liveware_login(liveware_path="placeholder-liveware", token=SECRET["access"])
+        elif operation == "create":
+            await liveware_sample.liveware_app_create(liveware_path="placeholder-liveware", name="Placeholder App")
+        else:
+            await liveware_sample.tunnel_bind(liveware_path="placeholder-liveware", app_id="placeholder-app", port=1234)
+    assert "failed:" in str(raised.value)
+    with caplog.at_level(logging.WARNING):
+        logging.getLogger(__name__).warning("liveware failed: %s", raised.value)
+    assert_no_secrets(raised.value, caplog=caplog)
+
+
+async def test_liveware_login_spawn_error_redacts_bare_token_and_cause(caplog, assert_no_secrets):
+    execute = AsyncMock(side_effect=OSError(diagnostic() + " bare " + SECRET["access"]))
+    with pytest.raises(liveware_sample.LivewareSampleError) as raised:
+        await liveware_sample.liveware_login(liveware_path="placeholder-liveware", token=SECRET["access"], exec=execute)
+    assert raised.value.__suppress_context__
+    assert raised.value.__cause__ is None
+    assert "OSError:" in str(raised.value)
+    with caplog.at_level(logging.WARNING):
+        logging.getLogger(__name__).warning("login failed: %s", raised.value)
+    assert_no_secrets(raised.value, caplog=caplog)
+
+
+@pytest.mark.parametrize("operation", ["create", "bind"])
+async def test_liveware_parse_failure_redacts_before_truncation(assert_no_secrets, operation):
+    # The credential crosses the old 500-character diagnostic boundary.
+    raw = ("x " * 244 + "token=" + SECRET["access"] + " refresh_token=" + SECRET["refresh"]).encode()
+    assert raw.index(SECRET["access"].encode()) < 500 < raw.index(SECRET["access"].encode()) + len(SECRET["access"])
+    proc = SimpleNamespace(returncode=0, communicate=AsyncMock(return_value=(raw, b"")))
+    execute = AsyncMock(return_value=proc)
+    with pytest.raises(liveware_sample.LivewareSampleError, match="cannot parse") as raised:
+        if operation == "create":
+            await liveware_sample.liveware_app_create(liveware_path="placeholder-liveware", name="Placeholder App", exec=execute)
+        else:
+            await liveware_sample.tunnel_bind(liveware_path="placeholder-liveware", app_id="placeholder-app", port=1234, exec=execute)
+    assert_no_secrets(raised.value)
+    # A middle fragment: a prefix such as "place" also matches test source in the traceback.
+    assert_no_secrets(raised.value, secrets=(SECRET["access"][12:25],))
+
+
+@pytest.mark.parametrize("operation", ["create", "bind"])
+async def test_liveware_success_keeps_original_business_value(operation):
+    value = SECRET["access"] if operation == "create" else SECRET["userinfo_url"] + "/?" + SECRET["query"]
+    raw = json.dumps({"id": value}) if operation == "create" else value
+    proc = SimpleNamespace(returncode=0, communicate=AsyncMock(return_value=(raw.encode(), b"")))
+    execute = AsyncMock(return_value=proc)
+    if operation == "create":
+        result = await liveware_sample.liveware_app_create(
+            liveware_path="placeholder-liveware", name="Placeholder App", exec=execute)
+    else:
+        result = await liveware_sample.tunnel_bind(
+            liveware_path="placeholder-liveware", app_id="placeholder-app", port=1234, exec=execute)
+    assert result == value
+
+
+@pytest.mark.parametrize("operation", ["status", "list"])
+@pytest.mark.parametrize("failure", ["exception", "stdout", "stderr"])
+async def test_liveware_probe_failure_logs_redact(caplog, assert_no_secrets, operation, failure):
+    proc = SimpleNamespace(returncode=1, communicate=AsyncMock(return_value=(
+        diagnostic().encode() if failure == "stdout" else b"",
+        diagnostic().encode() if failure == "stderr" else b"")))
+    execute = AsyncMock(return_value=proc)
+    if failure == "exception":
+        execute.side_effect = OSError(diagnostic())
+    with caplog.at_level(logging.DEBUG):
+        if operation == "status":
+            assert await liveware_sample.liveware_agent_is_running(liveware_path="placeholder-liveware", exec=execute) is False
+        else:
+            assert await liveware_sample.liveware_app_find_by_name(
+                liveware_path="placeholder-liveware", name="Placeholder App", exec=execute) is None
+    assert "assuming not running" in caplog.text or "falling back to app create" in caplog.text
+    assert all(record.exc_info is None and record.exc_text is None for record in caplog.records)
+    assert_no_secrets(caplog=caplog)
+
+
+def test_liveware_download_failure_log_redacts(tmp_path, monkeypatch, caplog, assert_no_secrets):
+    from clawchat_gateway import liveware_cli
+
+    def fail(*args, **kwargs):
+        raise OSError(diagnostic())
+
+    monkeypatch.setattr(liveware_cli.shutil, "which", lambda _: None)
+    monkeypatch.setattr(liveware_cli, "liveware_dir", lambda: tmp_path)
+    monkeypatch.setattr(liveware_cli, "platform_assets", lambda: "liveware-linux-amd64")
+    monkeypatch.setattr(liveware_cli, "_verified_local", lambda *a, **k: False)
+    monkeypatch.setattr(liveware_cli, "_download", fail)
+    with caplog.at_level(logging.WARNING):
+        liveware_cli.ensure_liveware_cli()
+    assert "download skipped: OSError:" in caplog.text
+    assert all(record.exc_info is None and record.exc_text is None for record in caplog.records)
+    assert_no_secrets(caplog=caplog)
+
+
+@pytest.mark.parametrize("failure", ["read", "json"])
+def test_liveware_intro_failure_logs_drop_raw_traceback(tmp_path, monkeypatch, caplog, assert_no_secrets, failure):
+    from pathlib import Path
+
+    def fail(*args, **kwargs):
+        raise ValueError(diagnostic())
+
+    if failure == "read":
+        monkeypatch.setattr(Path, "read_text", fail)
+    else:
+        (tmp_path / "intro.i18n.json").write_text("{}")
+        monkeypatch.setattr(liveware_sample.json, "loads", fail)
+    with caplog.at_level(logging.WARNING):
+        assert liveware_sample.load_intro_text(tmp_path, "en") == liveware_sample.LIVEWARE_SAMPLE_INTRO_FALLBACK_EN
+    assert "ValueError:" in caplog.text
+    assert all(record.exc_info is None and record.exc_text is None for record in caplog.records)
+    assert_no_secrets(caplog=caplog)
+
+
+@pytest.mark.parametrize("operation", ["manifest", "fetch"])
+def test_liveware_wrapped_errors_suppress_raw_cause(monkeypatch, assert_no_secrets, operation):
+    def fail(*args, **kwargs):
+        raise ValueError(diagnostic())
+
+    with pytest.raises(liveware_sample.LivewareSampleError) as raised:
+        if operation == "manifest":
+            monkeypatch.setattr(liveware_sample.json, "loads", fail)
+            liveware_sample.parse_livewares_manifest("{}")
+        else:
+            liveware_sample._fetch_verified(fail, SECRET["userinfo_url"] + "/?" + SECRET["query"])
+    assert raised.value.__suppress_context__
+    assert raised.value.__cause__ is None
+    assert_no_secrets(raised.value)
+
+
+@pytest.mark.parametrize("give_up", [False, True])
+async def test_liveware_start_failure_logs_redact(monkeypatch, caplog, assert_no_secrets, give_up):
+    deps = SimpleNamespace(
+        log=None, enabled=True, wait_cli_ready=None, platform="hermes", account_id="default",
+        store=SimpleNamespace(get_liveware_sample=lambda **kw: None),
+    )
+    supervisor = liveware_sample.LivewareSampleSupervisor(deps)
+    monkeypatch.setattr(supervisor, "_bootstrap", AsyncMock(side_effect=RuntimeError(diagnostic())))
+    monkeypatch.setattr(supervisor, "_spawn_task", lambda coro: coro.close())
+    attempt = len(liveware_sample._START_RETRY_DELAYS_S) if give_up else 0
+    with caplog.at_level(logging.WARNING):
+        await supervisor._start_attempt(attempt)
+    assert "giving up" in caplog.text if give_up else "retrying" in caplog.text
+    assert "RuntimeError:" in caplog.text
+    assert supervisor._launch_in_flight is False
+    assert_no_secrets(caplog=caplog)
+
+
+async def test_liveware_relaunch_failure_redacts_log_and_persisted_error(monkeypatch, caplog, assert_no_secrets):
+    from unittest.mock import Mock
+
+    update = Mock()
+    deps = SimpleNamespace(log=None, platform="hermes", account_id="default", store=SimpleNamespace(
+        get_liveware_sample=lambda **kw: SimpleNamespace(status="active"),
+        update_liveware_sample_status=update))
+    supervisor = liveware_sample.LivewareSampleSupervisor(deps)
+    monkeypatch.setattr(supervisor, "_relaunch", AsyncMock(side_effect=RuntimeError(diagnostic())))
+    with caplog.at_level(logging.WARNING):
+        await supervisor._delayed_relaunch(0)
+    update.assert_called_once()
+    assert update.call_args.kwargs["status"] == "failed"
+    assert "RuntimeError:" in caplog.text
+    assert all(record.exc_info is None and record.exc_text is None for record in caplog.records)
+    assert_no_secrets(update.call_args.kwargs, caplog=caplog)
+
+
+async def test_held_owner_dispatch_failure_log_drops_raw_traceback(caplog, assert_no_secrets):
+    import asyncio
+    from clawchat_gateway.adapter import ClawChatAdapter
+
+    key = "placeholder-session"
+    inbound = SimpleNamespace()
+    instance = SimpleNamespace(
+        _owner_input_pending={key: [(inbound, 123)]},
+        _owner_input_tasks={key: asyncio.current_task()}, _owner_input_deadlines={},
+        _wait_held_owner_input=AsyncMock(return_value=True),
+        _route_inbound=AsyncMock(side_effect=RuntimeError(diagnostic())),
+    )
+    with caplog.at_level(logging.WARNING):
+        await ClawChatAdapter._dispatch_held_owner_inputs(instance, key)
+    instance._route_inbound.assert_awaited_once_with(inbound)
+    assert "clawchat held owner input dispatch failed: RuntimeError:" in caplog.text
+    assert all(record.exc_info is None and record.exc_text is None for record in caplog.records)
+    assert instance._owner_input_tasks == instance._owner_input_pending == instance._owner_input_deadlines == {}
+    assert_no_secrets(caplog=caplog)
