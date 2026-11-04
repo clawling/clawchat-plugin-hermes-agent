@@ -186,7 +186,7 @@ unsupported features are not invitations to enable a flag without implementing i
 | `history_sync` | omitted | Hermes does not declare it; full sibling-history semantics belong to the upstream server contract (§11.4). |
 | `e2ee` | omitted | Hermes does not declare it; full ciphertext semantics belong to the upstream server contract. |
 | `reliable_delivery` | omitted | Hermes does not declare it; full v1 cursor semantics belong to the upstream server contract (§11.7). |
-| `reliable_delivery_v2` | omitted by default | Hermes declares `true` only with profile opt-in; OpenClaw does not declare it (§11.7). |
+| `reliable_delivery_v2` | omitted by default | Hermes declares `true` only with profile opt-in; OpenClaw likewise only with its `reliableDeliveryV2` opt-in (§11.7). |
 
 **Hermes:** `ack_progress_clock` is also omitted; it applies only to granted v2
 reliable delivery. Hermes implements only the opt-in v2 sync ack (§11.7).
@@ -1414,7 +1414,7 @@ restart**. An in-memory cache is insufficient (§11).
 
 `platforms.clawchat.extra.reliable_delivery_v2` defaults to `false`; [configuration](configuration.md#connection) covers overrides and rollback.
 Only opt-in Hermes connections advertise `reliable_delivery_v2:true`;
-OpenClaw does not declare this capability. Every hello independently requires
+OpenClaw has its own opt-in (`reliableDeliveryV2`, default false). Every hello independently requires
 `ack_mode:"dseq"` and a non-empty string `ack_epoch`; otherwise delivery is legacy.
 Each grant resets the read sequence and contiguous ack watermark to zero.
 
