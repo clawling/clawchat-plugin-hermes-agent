@@ -89,7 +89,8 @@ Missing capabilities or the off switch retain legacy notes and host compression.
 A socket close cancels maintenance; READY creates a new instance after reconnect
 or account replacement, fencing the previous account and generation.
 Adapter input queues and active dispatches retain ownership across maintenance
-replacement; journal recovery skips inputs still owned by those queues or tasks.
+replacement; journal recovery stops at inputs owned by another dispatch or still
+queued, resuming after delivery, ownership release or queue removal to preserve order.
 Enqueueing a group input transfers task ownership to the coalescer before any
 await, so a concurrent busy waiter can claim and dispatch the entire batch.
 The reset result is verified through freshly read persistent routing, never peek.

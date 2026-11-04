@@ -3679,6 +3679,24 @@ class ClawChatAdapter(BasePlatformAdapter):
             if self._history_input_owners.get(key) is task:
                 self._history_input_owners.pop(key)
 
+    def _history_input_busy_elsewhere(self, inbound: InboundMessage) -> bool:
+        if inbound.is_internal_synthetic:
+            return False
+        task = asyncio.current_task()
+        return self._history_input_queued(inbound) or any(
+            owner is not None and owner is not task
+            for mid in self._batch_message_ids(inbound)
+            for owner in [self._history_input_owners.get((self._account_id(), inbound.chat_id, mid))])
+
+    def _wake_history_input_drain(self, inbound: InboundMessage) -> None:
+        # A surviving dispatch must wake the current maintenance instance.
+        history = self._history
+        if not history or not history.journal_ready() or inbound.is_internal_synthetic:
+            return
+        key = history.key(inbound)
+        if key in history.drain_waiting:
+            history.wake_drain(key)
+
     @contextmanager
     def _history_input_scope(self, inbound: InboundMessage):
         """Keep live adapter dispatch ownership across maintenance replacement."""
@@ -3694,14 +3712,18 @@ class ClawChatAdapter(BasePlatformAdapter):
         try:
             yield True
         finally:
+            released = False
             for key in acquired:
                 # A late completion cannot release another dispatch's ownership.
                 if owners.get(key) is task:
                     owners.pop(key)
+                    released = True
+            if released:
+                self._wake_history_input_drain(inbound)
 
     async def _continue_claimed_inbound(self, inbound: InboundMessage) -> None:
         """Shared post-claim authorization and routing, also used by recovery."""
-        if self._history_input_queued(inbound):
+        if self._history_input_busy_elsewhere(inbound):
             return
         with self._history_input_scope(inbound) as admitted:
             if admitted:
@@ -5002,7 +5024,9 @@ class ClawChatAdapter(BasePlatformAdapter):
         finally:
             if self._owner_input_tasks.get(key) is task:
                 self._owner_input_tasks.pop(key, None)
-                self._owner_input_pending.pop(key, None)
+                dropped = self._owner_input_pending.pop(key, [])
+                if dropped:
+                    self._wake_history_input_drain(dropped[0][0])
 
     def _hold_granted_inbound(self, inbound: InboundMessage, *, from_dispatch: bool = False,
                               ignore_dispatch: bool = False, new_grants: dict[str, str] | None = None) -> bool:
