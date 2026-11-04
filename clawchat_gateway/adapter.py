@@ -3671,6 +3671,14 @@ class ClawChatAdapter(BasePlatformAdapter):
         return any(message.chat_id == inbound.chat_id and ids & self._batch_message_ids(message)
                    for message in pending)
 
+    def _handoff_history_input(self, inbound: InboundMessage) -> None:
+        """A successful enqueue transfers ownership from the caller to the queue."""
+        task = asyncio.current_task()
+        for mid in self._batch_message_ids(inbound):
+            key = (self._account_id(), inbound.chat_id, mid)
+            if self._history_input_owners.get(key) is task:
+                self._history_input_owners.pop(key)
+
     @contextmanager
     def _history_input_scope(self, inbound: InboundMessage):
         """Keep live adapter dispatch ownership across maintenance replacement."""
@@ -3798,6 +3806,9 @@ class ClawChatAdapter(BasePlatformAdapter):
                 inbound,
                 idle_seconds_override=float(_eff.batch_delay_seconds) if _eff is not None else None,
             )
+            # A busy waiter can flush during flush_now's gather below. The queue
+            # owns these inputs now; its dispatch task must be free to claim them.
+            self._handoff_history_input(inbound)
             if inbound.was_mentioned:
                 logger.info(
                     "clawchat flushing group batch immediately chat_id=%s sender_id=%s text_len=%d reason=agent_mention",
@@ -4936,6 +4947,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             return False
         self._owner_input_pending.setdefault(key, []).append(
             (inbound, time.monotonic() + self._owner_input_hold_seconds))
+        # The held-input task dispatches it later; it must be free to claim it.
+        self._handoff_history_input(inbound)
         logger.info('owner_input_held reason=%s',
                     'active_notification_turn' if notification else 'active_notice_turn')
         if key not in self._owner_input_tasks:
@@ -5021,6 +5034,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._group_message_coalescer.enqueue(inbound, idle_seconds_override=0.0)
         else:
             self._grant_admission_queue.enqueue(inbound)
+        # The queue's dispatch task owns this input from here on.
+        self._handoff_history_input(inbound)
         return True
 
     async def _recover_request_wakes(self):

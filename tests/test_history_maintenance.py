@@ -946,6 +946,90 @@ async def test_claimed_group_waiting_in_coalescer_remains_recoverable(rig):
     assert rig.m.held_row(key, 'trigger')['state'] == 'held'
 
 
+@pytest.mark.parametrize('history_enabled', [False, True])
+async def test_busy_waiter_dispatches_queued_and_mentioned_inputs_once(rig, monkeypatch, history_enabled):
+    first = inbound('queued-before-mention', group=True)
+    mention = replace(inbound('incoming-mention', group=True), was_mentioned=True)
+    a, batch = rig.a, rig.a._group_message_coalescer
+    monkeypatch.setattr(a, '_continue_claimed_inbound', ClawChatAdapter._continue_claimed_inbound.__get__(a))
+    monkeypatch.setattr(a, '_effective_group_settings', lambda _: NS(
+        muted=False, reply_mode='all', batch_delay_seconds=300))
+    if history_enabled:
+        initialize(rig, first)
+        for msg in (first, mention):
+            claim(rig, msg)
+        continue_claimed = rig.m.continue_claimed
+    else:
+        await rig.m.close()
+        a._history = None
+        a._clawchat_config = replace(a._clawchat_config, budget_compaction=False)
+        continue_claimed = a._continue_claimed_inbound
+
+    busy, waiter = True, None
+    polling = asyncio.Event()
+    def is_busy(_):
+        if asyncio.current_task() is waiter:
+            polling.set()
+        return busy
+    monkeypatch.setattr(batch, '_is_busy', is_busy)
+    # Keep the waiter runnable, so it resumes at flush_now's gather yield.
+    monkeypatch.setattr(batch, '_busy_poll_seconds', 0)
+    enqueue = batch.enqueue
+    def enqueue_and_become_idle(incoming, **kwargs):
+        nonlocal busy
+        enqueue(incoming, **kwargs)
+        if incoming.was_mentioned:
+            busy = False
+    monkeypatch.setattr(batch, 'enqueue', enqueue_and_become_idle)
+    dispatch, dispatch_tasks, delivered = batch._dispatch, [], []
+    dispatch_entered, dispatch_release = asyncio.Event(), asyncio.Event()
+    async def record_dispatch(incoming):
+        dispatch_tasks.append(asyncio.current_task())
+        await dispatch(incoming)
+    monkeypatch.setattr(batch, '_dispatch', record_dispatch)
+    async def handle(incoming):
+        dispatch_entered.set()
+        await dispatch_release.wait()
+        delivered.append([frame['payload']['message_id'] for frame in incoming.raw_message['messages']])
+        if history_enabled:
+            current = a._history
+            current.dispatched(event(NS(m=current), incoming))
+    monkeypatch.setattr(a, '_handle_inbound', handle)
+    key = a._group_batch_key(first)
+    try:
+        await continue_claimed(first)
+        await batch.flush_now(key)
+        waiter = batch._busy_waiters[key]
+        await asyncio.wait_for(polling.wait(), 1)
+        await asyncio.wait_for(continue_claimed(mention), 1)
+        assert dispatch_tasks == [waiter]  # The busy waiter won the gather race.
+        assert dispatch_entered.is_set()
+        # Returning from the inbound lane must not release the waiter's ownership.
+        assert set(a._history_input_owners.values()) == {waiter}
+        if history_enabled:
+            await rig.m.close()
+            fresh = hm.HistoryMaintenance(a, rig.llm)
+            a._history = fresh
+            fresh.connect()
+            await asyncio.wait_for(fresh.recover(), 1)
+            assert not batch._pending and not delivered
+        dispatch_release.set()
+        await asyncio.wait_for(waiter, 1)
+        assert delivered == [['queued-before-mention', 'incoming-mention']]
+        await batch.flush_now(key)
+        assert delivered == [['queued-before-mention', 'incoming-mention']]
+        assert not batch._pending and not a._history_input_owners
+        assert not rig.m.store.list_held(rig.m.account)
+    finally:
+        dispatch_release.set()
+        if waiter is not None:
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
+        await batch.cancel()
+        if a._history is not None:
+            await a._history.close()
+
+
 @pytest.mark.parametrize('queue', ['group', 'grant', 'owner'])
 async def test_reconnect_recovery_keeps_surviving_queue_ownership(rig, monkeypatch, queue):
     msg = inbound('queued-before-reconnect', group=True)
