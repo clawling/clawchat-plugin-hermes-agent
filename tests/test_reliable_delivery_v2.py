@@ -689,6 +689,69 @@ async def test_other_recall_receipt_finishes_only_after_lane_processing(monkeypa
         assert not h.conn._receipts_in_flight
 
 
+@pytest.mark.parametrize("failure", ["none", "raise", "missing-store"])
+@pytest.mark.parametrize("reconnect", [False, True])
+async def test_failed_recall_stays_pending_until_tombstone_is_durable(
+    monkeypatch, store, failure, reconnect, caplog,
+):
+    from clawchat_gateway.adapter import ClawChatAdapter
+
+    monkeypatch.setattr(delivery, "RECEIPT_RETRY_SECONDS", 0.05)
+    adapter = ClawChatAdapter({})
+    adapter._store = None if failure == "missing-store" else store
+    target = "test-withdrawn-message"
+    assert store.insert_message(
+        platform="hermes", account_id="default", kind="message", direction="inbound",
+        event_type="message.send", trace_id=None, chat_id="cnv_test", message_id=target,
+        text="placeholder withdrawn content", raw=message(message_id=target),
+    ) is not None
+    adapter._reply_preview_by_message_id[target] = {"text": "placeholder withdrawn content"}
+    adapter._reply_preview_order.append(target)
+    available = False
+    original = store.recall_message
+    def recall(**kwargs):
+        if available:
+            return original(**kwargs)
+        if failure == "raise":
+            raise OSError("placeholder-recall-write-secret")
+        return None
+    monkeypatch.setattr(store, "recall_message", recall)
+    frame = message(event="message.recall", message_id="rcl:" + target)
+    frame["payload"] = {"message_id": "rcl:" + target, "target_message_id": target}
+
+    async with peer(monkeypatch, store, on_message=adapter._on_message,
+                    cleanup_workers=not reconnect) as h:
+        h.ws.feed(frame)
+        await until(lambda: bool(h.ws.acks) and not h.conn._inbound_lanes)
+        assert rows(store)[0]["status"] == "pending"
+        assert len(store.recover_inbound_receipts(account_id="default")) == 1
+        assert not store.is_message_recalled(account_id="default", message_id=target)
+        assert store.list_recent_group_messages(account_id="default", chat_id="cnv_test", limit=20)
+        assert target not in adapter._reply_preview_by_message_id
+        assert not h.conn._receipts_in_flight
+        assert h.conn._receipt_retry_task is not None
+        # The sync ack covers the already durable receipt, not a successful purge.
+        assert h.ws.acks[-1]["payload"]["dseq"] == 1
+        assert "placeholder-recall-write-secret" not in caplog.text
+        if reconnect:
+            await h.conn.stop()
+        else:
+            available = True
+            adapter._store = store
+            await until(lambda: rows(store)[0]["status"] == "done" and not h.conn._inbound_lanes)
+            assert len(h.ws.acks) == 1
+
+    if reconnect:
+        available = True
+        adapter._store = store
+        async with peer(monkeypatch, store, on_message=adapter._on_message) as recovered:
+            await until(lambda: rows(store)[0]["status"] == "done" and not recovered.conn._inbound_lanes)
+            assert not recovered.ws.acks
+    assert store.is_message_recalled(account_id="default", message_id=target)
+    assert not store.list_recent_group_messages(account_id="default", chat_id="cnv_test", limit=20)
+    assert store.recover_inbound_receipts(account_id="default") == []
+
+
 async def test_new_instance_recovers_pending_left_by_stopped_instance(monkeypatch, store):
     entered = asyncio.Event()
     async def blocked(frame):

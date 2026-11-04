@@ -675,8 +675,6 @@ class HistoryMaintenance:
                     row = self.held_row(key, mid)
                     if row is None:
                         continue
-                    if self.retire_control_replay(key, row):
-                        continue
                     if self.recalled_row(key, row):
                         continue
                     row = self.held_row(key, mid)
@@ -688,10 +686,21 @@ class HistoryMaintenance:
                     if row["payload"].get("terminal") in (True, "success"):
                         self.store.mark_held_state(self.account, key, mid, row["state"], "dispatched")
                         continue
-                    if row["payload"].get("batch_primary", mid) != mid:
-                        continue
                     inbound = await self.restore_inbound(row)
                     if inbound is None:
+                        self.retire_control_replay(key, row)
+                        continue
+                    if self.closed:
+                        return
+                    if self.held_row(key, mid) is None:
+                        continue
+                    if ((key, mid) in self.inflight
+                            or self.adapter._history_input_busy_elsewhere(inbound)):
+                        self.drain_waiting.add(key)
+                        return
+                    if row["payload"].get("batch_primary", mid) != mid:
+                        continue
+                    if self.retire_control_replay(key, row):
                         continue
                     logger.info("clawchat history replay conv=%s state=%s", key, row["state"])
                     self.releasing_messages.add((key, mid))
@@ -699,6 +708,11 @@ class HistoryMaintenance:
                         await self.continue_claimed(inbound, key)
                     finally:
                         self.releasing_messages.discard((key, mid))
+                    # Enqueueing is not a handoff to the host. Keep later rows
+                    # behind this input even when this drain put it in a queue.
+                    if self.adapter._history_input_busy_elsewhere(inbound):
+                        self.drain_waiting.add(key)
+                        return
         except Exception:
             logger.warning("clawchat history held release failed conv=%s", key)
         finally:

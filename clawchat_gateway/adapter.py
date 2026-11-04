@@ -18,6 +18,7 @@ from clawchat_gateway.no_reply import (
 )
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from dataclasses import fields as dataclass_fields
 from datetime import datetime
@@ -1320,6 +1321,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._widget_target_lock = asyncio.Lock()
         self._widget_identity = None
         self._history = None
+        # Adapter queues and their dispatches outlive a socket's maintenance instance.
+        self._history_input_owners: dict[tuple[str, str, str], asyncio.Task] = {}
         self._history_activity_markers: dict[str, Any] = {}
         self._widget_epoch = 0
         set_clawchat_mention_sender(self)
@@ -3520,8 +3523,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 )
             return
         if event_name == "message.recall":
-            self._handle_message_recall(frame)
-            return
+            return self._handle_message_recall(frame)
         protocol_message_id = None
         if event_name in {"message.send", "message.reply"}:
             protocol_message_id = self._extract_protocol_message_id(frame)
@@ -3659,8 +3661,75 @@ class ClawChatAdapter(BasePlatformAdapter):
             return
         await self._continue_claimed_inbound(inbound)
 
+    def _history_input_queued(self, inbound: InboundMessage) -> bool:
+        ids = self._batch_message_ids(inbound)
+        if inbound.is_internal_synthetic or not ids:
+            return False
+        pending = [message for queue in (self._group_message_coalescer, self._grant_admission_queue)
+                   for batch in queue._pending.values() for message in batch]
+        pending.extend(message for batch in self._owner_input_pending.values() for message, _ in batch)
+        return any(message.chat_id == inbound.chat_id and ids & self._batch_message_ids(message)
+                   for message in pending)
+
+    def _handoff_history_input(self, inbound: InboundMessage) -> None:
+        """A successful enqueue transfers ownership from the caller to the queue."""
+        task = asyncio.current_task()
+        for mid in self._batch_message_ids(inbound):
+            key = (self._account_id(), inbound.chat_id, mid)
+            if self._history_input_owners.get(key) is task:
+                self._history_input_owners.pop(key)
+
+    def _history_input_busy_elsewhere(self, inbound: InboundMessage) -> bool:
+        if inbound.is_internal_synthetic:
+            return False
+        task = asyncio.current_task()
+        return self._history_input_queued(inbound) or any(
+            owner is not None and owner is not task
+            for mid in self._batch_message_ids(inbound)
+            for owner in [self._history_input_owners.get((self._account_id(), inbound.chat_id, mid))])
+
+    def _wake_history_input_drain(self, inbound: InboundMessage) -> None:
+        # A surviving dispatch must wake the current maintenance instance.
+        history = self._history
+        if not history or not history.journal_ready() or inbound.is_internal_synthetic:
+            return
+        key = history.key(inbound)
+        if key in history.drain_waiting:
+            history.wake_drain(key)
+
+    @contextmanager
+    def _history_input_scope(self, inbound: InboundMessage):
+        """Keep live adapter dispatch ownership across maintenance replacement."""
+        owners = self._history_input_owners
+        task = asyncio.current_task()
+        keys = {(self._account_id(), inbound.chat_id, mid) for mid in self._batch_message_ids(inbound)
+                if not inbound.is_internal_synthetic}
+        if any(key in owners and owners[key] is not task for key in keys):
+            yield False
+            return
+        acquired = keys - owners.keys()
+        owners.update(dict.fromkeys(acquired, task))
+        try:
+            yield True
+        finally:
+            released = False
+            for key in acquired:
+                # A late completion cannot release another dispatch's ownership.
+                if owners.get(key) is task:
+                    owners.pop(key)
+                    released = True
+            if released:
+                self._wake_history_input_drain(inbound)
+
     async def _continue_claimed_inbound(self, inbound: InboundMessage) -> None:
         """Shared post-claim authorization and routing, also used by recovery."""
+        if self._history_input_busy_elsewhere(inbound):
+            return
+        with self._history_input_scope(inbound) as admitted:
+            if admitted:
+                await self._continue_claimed_inbound_now(inbound)
+
+    async def _continue_claimed_inbound_now(self, inbound: InboundMessage) -> None:
         self._admit_owner_direct_inbound(inbound)
         if await self._consume_grant_confirmation(inbound):
             if self._history:
@@ -3673,6 +3742,11 @@ class ClawChatAdapter(BasePlatformAdapter):
         await self._route_inbound(inbound)
 
     async def _route_inbound(self, inbound: InboundMessage) -> None:
+        with self._history_input_scope(inbound) as admitted:
+            if admitted:
+                await self._route_inbound_now(inbound)
+
+    async def _route_inbound_now(self, inbound: InboundMessage) -> None:
         if inbound.chat_type == "group":
             # Gate ONLY group dispatch on the first per-(re)connect settings refresh
             # so a muted / mention-only group is not answered from a stale/empty
@@ -3754,6 +3828,9 @@ class ClawChatAdapter(BasePlatformAdapter):
                 inbound,
                 idle_seconds_override=float(_eff.batch_delay_seconds) if _eff is not None else None,
             )
+            # A busy waiter can flush during flush_now's gather below. The queue
+            # owns these inputs now; its dispatch task must be free to claim them.
+            self._handoff_history_input(inbound)
             if inbound.was_mentioned:
                 logger.info(
                     "clawchat flushing group batch immediately chat_id=%s sender_id=%s text_len=%d reason=agent_mention",
@@ -4305,6 +4382,11 @@ class ClawChatAdapter(BasePlatformAdapter):
         return busy
 
     async def _dispatch_group_batch(self, inbound: InboundMessage) -> None:
+        with self._history_input_scope(inbound) as admitted:
+            if admitted:
+                await self._dispatch_owned_group_batch(inbound)
+
+    async def _dispatch_owned_group_batch(self, inbound: InboundMessage) -> None:
         # Marked busy from the first line (no await before it) until the host
         # has taken the event and installed its own active-session guard.
         self._grant_group_grants[inbound.chat_id] = bool(self._turn_grant_values(inbound)[1])
@@ -4887,6 +4969,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             return False
         self._owner_input_pending.setdefault(key, []).append(
             (inbound, time.monotonic() + self._owner_input_hold_seconds))
+        # The held-input task dispatches it later; it must be free to claim it.
+        self._handoff_history_input(inbound)
         logger.info('owner_input_held reason=%s',
                     'active_notification_turn' if notification else 'active_notice_turn')
         if key not in self._owner_input_tasks:
@@ -4940,7 +5024,9 @@ class ClawChatAdapter(BasePlatformAdapter):
         finally:
             if self._owner_input_tasks.get(key) is task:
                 self._owner_input_tasks.pop(key, None)
-                self._owner_input_pending.pop(key, None)
+                dropped = self._owner_input_pending.pop(key, [])
+                if dropped:
+                    self._wake_history_input_drain(dropped[0][0])
 
     def _hold_granted_inbound(self, inbound: InboundMessage, *, from_dispatch: bool = False,
                               ignore_dispatch: bool = False, new_grants: dict[str, str] | None = None) -> bool:
@@ -4972,6 +5058,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._group_message_coalescer.enqueue(inbound, idle_seconds_override=0.0)
         else:
             self._grant_admission_queue.enqueue(inbound)
+        # The queue's dispatch task owns this input from here on.
+        self._handoff_history_input(inbound)
         return True
 
     async def _recover_request_wakes(self):
@@ -9408,7 +9496,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         except Exception:  # noqa: BLE001
             logger.warning("clawchat message database persistence failed")
 
-    def _handle_message_recall(self, frame: dict[str, Any]) -> None:
+    def _handle_message_recall(self, frame: dict[str, Any]) -> object | None:
         """Erase this agent's ledger row for a message its sender withdrew.
 
         **Two sites, not one.** ``connection.py`` has to route the frame here
@@ -9460,7 +9548,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 frame.get("chat_id"),
                 target,
             )
-            return
+            return INBOUND_RETRYABLE
         try:
             removed = self._store.recall_message(
                 # The persist path (_record_message / _claim_message_once) writes
@@ -9477,22 +9565,20 @@ class ClawChatAdapter(BasePlatformAdapter):
                 "clawchat recall purge failed chat_id=%s message_id=%s",
                 frame.get("chat_id"),
                 target,
-                exc_info=True,
             )
-            return
+            return INBOUND_RETRYABLE
         if removed is None:
             # ClawChatStore._write returns None for two different reasons: the
             # store is disabled, OR the write raised (SQLITE_BUSY, disk error,
             # locked DB) and _write caught it — so the except block above never
             # fires for a write failure; this is the branch that actually does.
-            # Never call this "purged": nothing was, and there is no tombstone
-            # or retry, so the recalled row stays in the ledger.
+            # Retain the pending receipt until the tombstone and purge are durable.
             logger.warning(
                 "clawchat recall purge unavailable chat_id=%s message_id=%s",
                 frame.get("chat_id"),
                 target,
             )
-            return
+            return INBOUND_RETRYABLE
         if removed:
             logger.info(
                 "clawchat recall purged chat_id=%s message_id=%s rows=%s",

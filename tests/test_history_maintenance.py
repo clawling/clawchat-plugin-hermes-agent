@@ -946,6 +946,382 @@ async def test_claimed_group_waiting_in_coalescer_remains_recoverable(rig):
     assert rig.m.held_row(key, 'trigger')['state'] == 'held'
 
 
+@pytest.mark.parametrize('history_enabled', [False, True])
+async def test_busy_waiter_dispatches_queued_and_mentioned_inputs_once(rig, monkeypatch, history_enabled):
+    first = inbound('queued-before-mention', group=True)
+    mention = replace(inbound('incoming-mention', group=True), was_mentioned=True)
+    a, batch = rig.a, rig.a._group_message_coalescer
+    monkeypatch.setattr(a, '_continue_claimed_inbound', ClawChatAdapter._continue_claimed_inbound.__get__(a))
+    monkeypatch.setattr(a, '_effective_group_settings', lambda _: NS(
+        muted=False, reply_mode='all', batch_delay_seconds=300))
+    if history_enabled:
+        initialize(rig, first)
+        for msg in (first, mention):
+            claim(rig, msg)
+        continue_claimed = rig.m.continue_claimed
+    else:
+        await rig.m.close()
+        a._history = None
+        a._clawchat_config = replace(a._clawchat_config, budget_compaction=False)
+        continue_claimed = a._continue_claimed_inbound
+
+    busy, waiter = True, None
+    polling = asyncio.Event()
+    def is_busy(_):
+        if asyncio.current_task() is waiter:
+            polling.set()
+        return busy
+    monkeypatch.setattr(batch, '_is_busy', is_busy)
+    # Keep the waiter runnable, so it resumes at flush_now's gather yield.
+    monkeypatch.setattr(batch, '_busy_poll_seconds', 0)
+    enqueue = batch.enqueue
+    def enqueue_and_become_idle(incoming, **kwargs):
+        nonlocal busy
+        enqueue(incoming, **kwargs)
+        if incoming.was_mentioned:
+            busy = False
+    monkeypatch.setattr(batch, 'enqueue', enqueue_and_become_idle)
+    dispatch, dispatch_tasks, delivered = batch._dispatch, [], []
+    dispatch_entered, dispatch_release = asyncio.Event(), asyncio.Event()
+    async def record_dispatch(incoming):
+        dispatch_tasks.append(asyncio.current_task())
+        await dispatch(incoming)
+    monkeypatch.setattr(batch, '_dispatch', record_dispatch)
+    async def handle(incoming):
+        dispatch_entered.set()
+        await dispatch_release.wait()
+        delivered.append([frame['payload']['message_id'] for frame in incoming.raw_message['messages']])
+        if history_enabled:
+            current = a._history
+            current.dispatched(event(NS(m=current), incoming))
+    monkeypatch.setattr(a, '_handle_inbound', handle)
+    key = a._group_batch_key(first)
+    try:
+        await continue_claimed(first)
+        await batch.flush_now(key)
+        waiter = batch._busy_waiters[key]
+        await asyncio.wait_for(polling.wait(), 1)
+        await asyncio.wait_for(continue_claimed(mention), 1)
+        assert dispatch_tasks == [waiter]  # The busy waiter won the gather race.
+        assert dispatch_entered.is_set()
+        # Returning from the inbound lane must not release the waiter's ownership.
+        assert set(a._history_input_owners.values()) == {waiter}
+        if history_enabled:
+            await rig.m.close()
+            fresh = hm.HistoryMaintenance(a, rig.llm)
+            a._history = fresh
+            fresh.connect()
+            await asyncio.wait_for(fresh.recover(), 1)
+            assert not batch._pending and not delivered
+        dispatch_release.set()
+        await asyncio.wait_for(waiter, 1)
+        assert delivered == [['queued-before-mention', 'incoming-mention']]
+        await batch.flush_now(key)
+        assert delivered == [['queued-before-mention', 'incoming-mention']]
+        assert not batch._pending and not a._history_input_owners
+        assert not rig.m.store.list_held(rig.m.account)
+    finally:
+        dispatch_release.set()
+        if waiter is not None:
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
+        await batch.cancel()
+        if a._history is not None:
+            await a._history.close()
+
+
+@pytest.mark.parametrize('queue', ['group', 'grant', 'owner'])
+async def test_reconnect_recovery_keeps_surviving_queue_ownership(rig, monkeypatch, queue):
+    from clawchat_gateway import turn_grants
+
+    msg = inbound('queued-before-reconnect', group=queue == 'group',
+                  sender='usr_peer' if queue == 'grant' else 'usr_owner')
+    a = rig.a
+    claim(rig, msg)
+    key = initialize(rig, msg)
+    monkeypatch.setattr(a, '_continue_claimed_inbound', ClawChatAdapter._continue_claimed_inbound.__get__(a))
+    monkeypatch.setattr(a, '_effective_group_settings', lambda _: NS(
+        muted=False, reply_mode='all', batch_delay_seconds=300))
+    busy = queue != 'group'
+    monkeypatch.setattr(a, '_grant_session_busy', lambda *args, **kwargs: busy)
+    if queue == 'grant':
+        a._clawchat_config = replace(a._clawchat_config, tool_grants='on')
+        monkeypatch.setattr(turn_grants, 'active_snapshot', lambda *args: NS(grants={'placeholder': 'direct'}))
+        # The coalescer captured its busy callback at construction time.
+        monkeypatch.setattr(a._grant_admission_queue, '_is_busy', lambda _: busy)
+        # Flush explicitly so the dispatch task identity is deterministic.
+        monkeypatch.setattr(a._grant_admission_queue, '_idle_seconds', 300)
+    elif queue == 'owner':
+        monkeypatch.setattr(a, '_owner_direct_chat_id', lambda: msg.chat_id)
+        monkeypatch.setattr(turn_grants, 'has_notification_turn', lambda *args: busy)
+        monkeypatch.setattr(a, '_owner_input_poll_seconds', .001)
+
+    enqueued, caller_release = asyncio.Event(), asyncio.Event()
+    continuation = a._continue_claimed_inbound_now
+    async def pause_after_enqueue(incoming):
+        await continuation(incoming)
+        enqueued.set()
+        await caller_release.wait()
+    monkeypatch.setattr(a, '_continue_claimed_inbound_now', pause_after_enqueue)
+    caller = asyncio.create_task(rig.m.continue_claimed(msg))
+    entered, dispatch_release = asyncio.Event(), asyncio.Event()
+    delivered = []
+    async def handle(incoming):
+        entered.set()
+        await dispatch_release.wait()
+        delivered.append(incoming)
+        current = a._history
+        current.dispatched(event(NS(m=current), incoming))
+    monkeypatch.setattr(a, '_handle_inbound', handle)
+
+    def pending():
+        if queue == 'owner':
+            return [item for batch in a._owner_input_pending.values() for item, _ in batch]
+        batch = a._group_message_coalescer if queue == 'group' else a._grant_admission_queue
+        return [item for messages in batch._pending.values() for item in messages]
+
+    dispatch_task = None
+    try:
+        await asyncio.wait_for(enqueued.wait(), 1)
+        assert len(pending()) == 1
+        # The caller's ownership scope is still open: only the real enqueue
+        # handoff can have made these inputs available to a different task.
+        assert not caller.done() and not a._history_input_owners
+        for _ in range(2):
+            await a._history.close()
+            fresh = hm.HistoryMaintenance(a, rig.llm)
+            a._history = fresh
+            fresh.connect()
+            await asyncio.wait_for(fresh.recover(), 1)
+            assert len(pending()) == 1
+            assert fresh.held_row(key, msg.raw_message['payload']['message_id'])['state'] == 'dispatching'
+            assert key in fresh.drain_waiting
+        busy = False
+        if queue == 'owner':
+            dispatch_task = a._owner_input_tasks[a._grant_session_key(msg)]
+        else:
+            batch = a._group_message_coalescer if queue == 'group' else a._grant_admission_queue
+            batch_key = a._group_batch_key(msg) if queue == 'group' else a._grant_session_key(msg)
+            dispatch_task = asyncio.create_task(batch.flush_now(batch_key))
+        await asyncio.wait_for(entered.wait(), 1)
+        await asyncio.wait_for(fresh.recover(), 1)
+        assert not pending() and not delivered
+        assert set(a._history_input_owners.values()) == {dispatch_task}
+        caller_release.set()
+        await asyncio.wait_for(caller, 1)
+        assert set(a._history_input_owners.values()) == {dispatch_task}
+        dispatch_release.set()
+        await asyncio.wait_for(dispatch_task, 1)
+        assert len(delivered) == 1
+        if queue == 'group':
+            assert len(delivered[0].raw_message['messages']) == 1
+        assert a._batch_message_ids(delivered[0]) == {'queued-before-reconnect'}
+        await asyncio.wait_for(fresh.recover(), 1)
+        assert len(delivered) == 1
+        assert not pending() and not a._history_input_owners
+        assert not fresh.store.list_held(fresh.account, key)
+    finally:
+        caller_release.set()
+        dispatch_release.set()
+        tasks = [caller, *a._owner_input_tasks.values()]
+        if dispatch_task is not None:
+            tasks.append(dispatch_task)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await a._group_message_coalescer.cancel()
+        await a._grant_admission_queue.cancel()
+        await a._history.close()
+
+
+@pytest.mark.parametrize('location', ['owned', 'queued', 'held'])
+async def test_reconnect_recovery_waits_for_head_before_later_control(rig, monkeypatch, location):
+    a = rig.a
+    first = replace(inbound('first-before-reconnect', group=True), was_mentioned=location == 'owned')
+    second = inbound('later-control', '/new', group=True)
+    key = initialize(rig, first)
+    claim(rig, first)
+    claim(rig, second)
+    monkeypatch.setattr(a, '_continue_claimed_inbound', ClawChatAdapter._continue_claimed_inbound.__get__(a))
+    monkeypatch.setattr(a, '_effective_group_settings', lambda _: NS(
+        muted=False, reply_mode='all', batch_delay_seconds=300))
+    entered, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    delivered = []
+    async def handle(incoming):
+        mid = a._inbound_trigger_id(incoming.raw_message)
+        if mid == 'first-before-reconnect':
+            entered.set()
+            await release.wait()
+        delivered.append(mid)
+        current = a._history
+        current.dispatched(event(NS(m=current), incoming))
+        if mid == 'later-control':
+            finished.set()
+    monkeypatch.setattr(a, '_handle_inbound', handle)
+    task = asyncio.create_task(rig.m.continue_claimed(first) if location != 'held' else asyncio.sleep(0))
+    batch = a._group_message_coalescer
+    flush = None
+    try:
+        if location == 'owned':
+            await asyncio.wait_for(entered.wait(), 1)
+            assert a._history_input_owners and not batch._pending
+        elif location == 'queued':
+            await asyncio.wait_for(task, 1)
+            assert batch._pending and not a._history_input_owners
+        else:
+            await asyncio.wait_for(task, 1)
+            assert rig.m.held_row(key, 'first-before-reconnect')['state'] == 'held'
+        rig.m.blocked[key] = object()
+        await rig.m.continue_claimed(second)
+        assert rig.m.held_row(key, 'later-control')['state'] == 'held'
+        await rig.m.close()
+        fresh = hm.HistoryMaintenance(a, rig.llm)
+        a._history = fresh
+        fresh.connect()
+        await asyncio.wait_for(fresh.recover(), 1)
+        assert delivered == [] and not finished.is_set()
+        assert key in fresh.drain_waiting
+        assert fresh.held_row(key, 'later-control')['state'] == 'held'
+        if location != 'owned':
+            flush = asyncio.create_task(batch.flush_now(a._group_batch_key(first)))
+            await asyncio.wait_for(entered.wait(), 1)
+            await asyncio.wait_for(fresh.recover(), 1)
+            assert delivered == []
+        release.set()
+        await asyncio.wait_for(task, 1)
+        if flush is not None:
+            await asyncio.wait_for(flush, 1)
+        # No explicit recovery: completing A must wake the replacement drain.
+        await asyncio.wait_for(finished.wait(), 1)
+        assert delivered == ['first-before-reconnect', 'later-control']
+        assert not a._history_input_owners and not batch._pending
+        assert not fresh.store.list_held(fresh.account, key)
+    finally:
+        release.set()
+        tasks = [task] + ([flush] if flush is not None else [])
+        for pending_task in tasks:
+            pending_task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await batch.cancel()
+        await a._history.close()
+
+
+async def test_cancelled_owner_queue_wakes_replacement_drain(rig, monkeypatch):
+    from clawchat_gateway import turn_grants
+
+    a, msg = rig.a, inbound('cancelled-owner-input')
+    key = initialize(rig, msg)
+    claim(rig, msg)
+    monkeypatch.setattr(a, '_continue_claimed_inbound', ClawChatAdapter._continue_claimed_inbound.__get__(a))
+    monkeypatch.setattr(a, '_owner_direct_chat_id', lambda: msg.chat_id)
+    busy = True
+    monkeypatch.setattr(a, '_grant_session_busy', lambda *args, **kwargs: busy)
+    monkeypatch.setattr(turn_grants, 'has_notification_turn', lambda *args: busy)
+    waiting, delivered = asyncio.Event(), asyncio.Event()
+    wait = a._wait_held_owner_input
+    async def record_wait(*args, **kwargs):
+        waiting.set()
+        return await wait(*args, **kwargs)
+    monkeypatch.setattr(a, '_wait_held_owner_input', record_wait)
+    seen = []
+    async def handle(incoming):
+        seen.append(a._inbound_trigger_id(incoming.raw_message))
+        current = a._history
+        current.dispatched(event(NS(m=current), incoming))
+        delivered.set()
+    monkeypatch.setattr(a, '_handle_inbound', handle)
+    await rig.m.continue_claimed(msg)
+    worker = a._owner_input_tasks[a._grant_session_key(msg)]
+    try:
+        await asyncio.wait_for(waiting.wait(), 1)
+        await rig.m.close()
+        fresh = hm.HistoryMaintenance(a, rig.llm)
+        a._history = fresh
+        fresh.connect()
+        await asyncio.wait_for(fresh.recover(), 1)
+        assert key in fresh.drain_waiting and not seen
+        busy = False
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+        await asyncio.wait_for(delivered.wait(), 1)
+        assert seen == ['cancelled-owner-input']
+        assert not a._owner_input_pending and not a._owner_input_tasks and not a._history_input_owners
+        assert not fresh.store.list_held(fresh.account, key)
+    finally:
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+        await a._history.close()
+
+
+@pytest.mark.parametrize('outcome', ['success', 'failure', 'cancel'])
+async def test_reconnect_recovery_does_not_duplicate_batch_during_flush(rig, monkeypatch, outcome):
+    msg = inbound('flushing-before-reconnect', group=True)
+    claim(rig, msg)
+    key = initialize(rig, msg)
+    monkeypatch.setattr(rig.a, '_continue_claimed_inbound',
+                        ClawChatAdapter._continue_claimed_inbound.__get__(rig.a))
+    monkeypatch.setattr(rig.a, '_effective_group_settings', lambda _: NS(
+        muted=False, reply_mode='all', batch_delay_seconds=300))
+    await rig.m.continue_claimed(msg)
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def settings_ready():
+        entered.set()
+        await release.wait()
+    monkeypatch.setattr(rig.a, '_await_group_settings_ready', settings_ready)
+    delivered = []
+    fail_dispatch = outcome == 'failure'
+    async def handle(incoming):
+        if fail_dispatch:
+            raise OSError('placeholder-dispatch-failure')
+        delivered.append(incoming)
+        fresh.dispatched(event(NS(m=fresh), incoming))
+    monkeypatch.setattr(rig.a, '_handle_inbound', handle)
+    batch = rig.a._group_message_coalescer
+    task = asyncio.create_task(batch.flush_now(rig.a._group_batch_key(msg)))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        assert not batch._pending
+        await rig.m.close()
+        fresh = hm.HistoryMaintenance(rig.a, rig.llm)
+        rig.a._history = fresh
+        fresh.connect()
+        # A replay must finish without waiting for, or enqueuing beside, the live flush.
+        await asyncio.wait_for(fresh.recover(), 1)
+        assert not batch._pending
+        if outcome == 'cancel':
+            task.cancel()
+            release.set()  # The automatically woken retry may prepare immediately.
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            release.set()
+            if fail_dispatch:
+                with pytest.raises(OSError, match='placeholder-dispatch-failure'):
+                    await task
+            else:
+                await task
+        if fresh.drains:
+            await asyncio.wait_for(asyncio.gather(*fresh.drains), 1)
+        assert not rig.a._history_input_owners
+        if outcome != 'success':
+            assert fresh.held_row(key, 'flushing-before-reconnect')['state'] == 'dispatching'
+            # Ownership release alone must wake recovery, without an explicit call.
+            assert len(batch._pending[rig.a._group_batch_key(msg)]) == 1
+            fail_dispatch = False
+            release.set()
+            await fresh.recover()
+            assert len(batch._pending[rig.a._group_batch_key(msg)]) == 1
+            await batch.flush_now(rig.a._group_batch_key(msg))
+        assert len(delivered) == 1
+        assert not fresh.held_row(key, 'flushing-before-reconnect')
+    finally:
+        release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await batch.cancel()
+        await rig.a._history.close()
+
+
 async def test_malformed_reset_is_disabled_without_dropping_inbound(rig):
     rig.host._handle_reset_command = lambda event: None
     rig.m.connect()
