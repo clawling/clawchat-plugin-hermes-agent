@@ -18,6 +18,7 @@ from clawchat_gateway.no_reply import (
 )
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from dataclasses import fields as dataclass_fields
 from datetime import datetime
@@ -41,6 +42,7 @@ from clawchat_gateway.api_client import (
     DEFAULT_BASE_URL,
     ClawChatApiClient,
     ClawChatApiError,
+    redact_display_text,
 )
 from clawchat_gateway.clawchat_memory import (
     METADATA_END,
@@ -67,6 +69,7 @@ from clawchat_gateway.connection import (
     ConnectionState,
     is_valid_chat_id,
 )
+from clawchat_gateway.reliable_delivery import INBOUND_RETRYABLE
 from clawchat_gateway.group_message_coalescer import (
     GroupMessageCoalescer,
     format_coalesced_group_text,
@@ -77,7 +80,7 @@ from clawchat_gateway.inbound import (
     split_leading_mentions,
 )
 from clawchat_gateway.hermes_home import hermes_home
-from clawchat_gateway import memory_migration
+from clawchat_gateway import atomic_file, memory_migration
 from clawchat_gateway.liveware_cli import resolve_liveware_path, wait_liveware_cli_ready
 from clawchat_gateway.liveware_sample import LivewareSampleDeps, LivewareSampleSupervisor
 try:
@@ -919,6 +922,8 @@ _MESSAGE_ID_ECHO_LIMIT = 64
 # swallows a non-cancellation BaseException) would otherwise keep its chat
 # "busy" forever and switch the react default off there for good.
 TURN_TRIGGER_TTL_SECONDS = 30 * 60
+# A held owner input waits this long for a notice execution to end.
+OWNER_INPUT_HOLD_SECONDS = 120
 ORCHESTRATE_RETRY_IDLE_POLL_SECONDS = 0.2
 
 
@@ -1024,6 +1029,24 @@ def _read_host_compression_ratio() -> float | None:
     return float(value)
 
 
+def _read_host_busy_input_mode() -> str:
+    """Mirror the gateway env/config loader and its interrupt default."""
+    mode = os.environ.get("HERMES_GATEWAY_BUSY_INPUT_MODE", "").strip()
+    if not mode:
+        try:
+            try:
+                from gateway.run import _load_gateway_config
+                config = _load_gateway_config()
+            except ImportError:
+                from hermes_cli.config import read_raw_config
+                config = read_raw_config()
+            mode = str((config or {}).get("display", {}).get("busy_input_mode") or "").strip()
+        except Exception:  # noqa: BLE001 - the host defaults to interrupt
+            mode = ""
+    mode = mode.lower()
+    return mode if mode in {"queue", "steer"} else "interrupt"
+
+
 def _read_host_compression_cap() -> int | None:
     """``compression.threshold_tokens`` from the host config, if set."""
     try:
@@ -1088,6 +1111,7 @@ _TRUSTED_RECEIPT_REASONS = frozenset({
 
 
 class ClawChatAdapter(BasePlatformAdapter):
+    _history = None
     SUPPORTS_MESSAGE_EDITING = True
     # ClawChat renders markdown: Hermes then shows a terminal tool call as a
     # fenced code block instead of quoting the raw command, whose ``*`` would
@@ -1166,6 +1190,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         # Direct chat -> the user on the other side (the last sender seen), so
         # a host callback that only carries chat_id can tell owner from friend.
         self._direct_chat_peers: dict[str, str] = {}
+        self._direct_chat_session_names: dict[str, tuple[str, str | None]] = {}
         # Direct chat -> the slash-confirm Hermes asked a NON-owner to answer.
         self._non_owner_slash_confirms: dict[str, _NonOwnerSlashConfirm] = {}
         # Keyed by the owner's direct chat id.
@@ -1251,6 +1276,11 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._grant_timeout_tasks: set[asyncio.Task[Any]] = set()
         self._grant_dispatch_started: dict[str, str] = {}
         self._grant_reply_anchors: OrderedDict[str, str] = OrderedDict()
+        self._owner_input_pending: dict[str, list[tuple[InboundMessage, float]]] = {}
+        self._owner_input_tasks: dict[str, asyncio.Task] = {}
+        self._owner_input_deadlines: dict[int, float] = {}
+        self._owner_input_hold_seconds = OWNER_INPUT_HOLD_SECONDS
+        self._owner_input_poll_seconds = 0.5
         self._grant_admission_queue = GroupMessageCoalescer(
             idle_seconds=0.0,
             max_wait_seconds=30.0,
@@ -1264,9 +1294,10 @@ class ClawChatAdapter(BasePlatformAdapter):
             idle_seconds=10.0,
             max_wait_seconds=30.0,
             dispatch=self._dispatch_group_batch,
-            is_busy=self._group_turn_in_flight,
+            is_busy=lambda key: self._group_turn_in_flight(key.split(":", 1)[0]),
+            key_for_message=self._group_batch_key,
             busy_timeout_seconds=TURN_TRIGGER_TTL_SECONDS,
-            on_busy_timeout=self._grant_group_timed_out,
+            on_busy_timeout=lambda key: self._grant_group_timed_out(key.split(":", 1)[0]),
         )
         self._group_settings_cache = GroupSettingsCache()
         # Monotonic fetch sequence assigned per dispatched settings pull. Passed
@@ -1289,6 +1320,10 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._widget_target_cache: dict[tuple, str] = {}
         self._widget_target_lock = asyncio.Lock()
         self._widget_identity = None
+        self._history = None
+        # Adapter queues and their dispatches outlive a socket's maintenance instance.
+        self._history_input_owners: dict[tuple[str, str, str], asyncio.Task] = {}
+        self._history_activity_markers: dict[str, Any] = {}
         self._widget_epoch = 0
         set_clawchat_mention_sender(self)
 
@@ -1300,6 +1335,10 @@ class ClawChatAdapter(BasePlatformAdapter):
         # needed here — accept and ignore the flag, but it MUST be accepted or
         # every reconnect raises TypeError.
         del is_reconnect
+        if self._history is None and getattr(self, "_store", None) is not None:
+            from clawchat_gateway.history_maintenance import HistoryMaintenance
+            self._history = HistoryMaintenance(self)
+            self._history.connect()
         # Best-effort unpaired report: runs even before activation credentials.
         self._spawn_plugin_report(authenticated=False)
         await self._connection.start()
@@ -1369,6 +1408,12 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
 
     async def disconnect(self) -> None:
+        for marker in getattr(self, "_history_activity_markers", {}).values():
+            marker.closed = True
+        getattr(self, "_history_activity_markers", {}).clear()
+        if self._history:
+            await self._history.close()
+            self._history = None
         self._widget_throttle.cancel_all()
         self._widget_target_cache.clear()
         self._widget_identity = None
@@ -1393,6 +1438,13 @@ class ClawChatAdapter(BasePlatformAdapter):
         await self._connection.stop()
         await self._group_message_coalescer.cancel()
         await self._grant_admission_queue.cancel()
+        owner_tasks = list(self._owner_input_tasks.values())
+        for task in owner_tasks:
+            task.cancel()
+        if owner_tasks:
+            await asyncio.gather(*owner_tasks, return_exceptions=True)
+        self._owner_input_pending.clear()
+        self._owner_input_deadlines.clear()
         from clawchat_gateway.turn_grants import release_session
 
         for key in list(self._grant_sessions):
@@ -1405,7 +1457,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         return {"name": chat_id, "type": "direct", "chat_id": chat_id}
 
     async def send_typing(self, chat_id: str, metadata: Any = None) -> None:
-        if chat_id in self._sediment_chats:
+        from clawchat_gateway.history_maintenance import suppress_reset_output
+        if chat_id in self._sediment_chats or suppress_reset_output(chat_id):
             return
         if self._is_chat_dead(chat_id):
             logger.debug(
@@ -1614,6 +1667,11 @@ class ClawChatAdapter(BasePlatformAdapter):
         return False
 
     async def _on_state_change(self, state: ConnectionState) -> None:
+        if state in {ConnectionState.DISCONNECTED, ConnectionState.RECONNECTING,
+                     ConnectionState.AUTH_FAILED, ConnectionState.SUSPENDED,
+                     ConnectionState.SUPERSEDED, ConnectionState.CLOSED}:
+            if self._history:
+                await self._history.close()
         if state == ConnectionState.AUTH_FAILED:
             self._auth_failed = True
         if state == ConnectionState.READY:
@@ -1631,6 +1689,12 @@ class ClawChatAdapter(BasePlatformAdapter):
             # use the stale cache. The refresh task re-sets it on completion /
             # fallback. Non-group traffic is never gated.
             self._group_settings_ready.clear()
+            if self._history and (self._history.closed or self._history.account != self._account_id()):
+                from clawchat_gateway.history_maintenance import HistoryMaintenance
+                previous_history = self._history
+                await previous_history.close()
+                self._history = HistoryMaintenance(self, previous_history.llm)
+                self._history.connect()
             # Owner-metadata refresh is scheduled BEFORE the activation
             # bootstrap: the bootstrap dispatch awaits the in-flight refresh
             # task so the first greeting is generated with owner.md already
@@ -1642,6 +1706,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._spawn_group_settings_refresh("reconnect")
             self._spawn_permissions_refresh("reconnect")
             await self._schedule_reconnect_conversation_refresh()
+            if self._history and getattr(self, "_store", None) is not None:
+                self._history.begin_recovery()
         logger.info("clawchat state -> %s", state.value)
 
     async def _on_signal(self, frame: dict[str, Any]) -> None:
@@ -2130,6 +2196,13 @@ class ClawChatAdapter(BasePlatformAdapter):
             removed = await asyncio.to_thread(skill_update.apply_skill_removal, removals)
         except Exception as exc:  # noqa: BLE001
             logger.warning("clawchat skill update apply failed: %s", exc, exc_info=True)
+            if isinstance(exc, skill_update.SkillUpdateIncomplete):
+                # Nothing was published: keep the request so the owner can retry.
+                try:
+                    skill_update.write_pending(pending)
+                    self._pending_skill_update = pending
+                except Exception as keep_exc:  # noqa: BLE001
+                    logger.warning("clawchat could not keep pending skill update: %s", keep_exc)
             await self._send_owner_text(inbound.chat_id, "技能更新失败,请稍后再试。")
             return True
         # A brand-new skill id (never bundled, never applied before) is on disk
@@ -2790,13 +2863,18 @@ class ClawChatAdapter(BasePlatformAdapter):
     def _non_owner_turn_section(self, inbound: InboundMessage) -> str | None:
         """What a turn the owner did not start cannot do, for the model."""
         from clawchat_gateway.turn_grants import active_snapshot
+        from clawchat_gateway.host_tools_guard import stable_tool_schema
+        stable = stable_tool_schema(inbound.chat_id, inbound.chat_type,
+                                    owner_direct_chat_id=self._owner_direct_chat_id)
         snapshot = active_snapshot(self._account_id(), self._grant_session_key(inbound))
         if ((snapshot is not None and (snapshot.owner_side or snapshot.legacy_owner_tools))
                 or (snapshot is None and self._is_owner_turn(inbound))):
-            return None
+            return "Tools this turn: ordinary owner tools; authorization requires verified ownership." if stable else None
         from clawchat_gateway.host_tools_guard import blocked_tools_hint, limited_tools_hint
 
         lines: list[str] = []
+        if stable:
+            lines.append("Tools this turn: public defaults and current grants only; owner-only tools are blocked.")
         from clawchat_gateway.tool_grants import NON_OWNER_GRANTS_HINT, build_non_owner_grants_hint
         from clawchat_gateway.host_tools_guard import host_tool_catalog, public_tool_names
         grants_hint = None
@@ -2826,7 +2904,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         return "\n".join(lines) or None
 
     def toolsets_for_source(self, source):
-        """Host tools only in the owner's own direct chat (``host_tools_guard``)."""
+        """Session-wide schemas where guarded; legacy narrowing elsewhere."""
         from clawchat_gateway.host_tools_guard import toolsets_for_source
 
         return toolsets_for_source(
@@ -3000,8 +3078,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                     scan.memory_person_entries,
                     scan.user_entries,
                 )
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.write_text(str(int(time.time())), encoding="utf-8")
+            atomic_file.atomic_write_text(marker, str(int(time.time())))
         except Exception:  # noqa: BLE001 - a hint, never a failure
             logger.warning("clawchat memory migration hint failed", exc_info=True)
 
@@ -3336,7 +3413,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         Why: hermes-agent has been observed to enter an interrupt-loop where
         it treats its own outbound chunks as new user input. This emits one
         log line per inbound frame with the fields needed to confirm/refute
-        that hypothesis (sender_id vs bot user_id, message_id, text head).
+        that hypothesis (sender_id vs bot user_id, message_id, text length).
         The per-chat rate warning is :meth:`_note_inbound_rate`, counted only
         after the self-echo drop and the message-id dedupe.
 
@@ -3359,33 +3436,32 @@ class ClawChatAdapter(BasePlatformAdapter):
         fragments = message.get("fragments") if isinstance(message.get("fragments"), list) else []
         frag_count = len(fragments)
 
-        text_head = ""
+        message_text = ""
         for frag in fragments:
             if not isinstance(frag, dict):
                 continue
             for key in ("text", "content", "value"):
                 value = frag.get(key)
                 if isinstance(value, str) and value:
-                    text_head = value
+                    message_text = value
                     break
-            if text_head:
+            if message_text:
                 break
-        if not text_head:
+        if not message_text:
             body = message.get("body")
             if isinstance(body, str):
-                text_head = body
+                message_text = body
             elif isinstance(body, dict):
                 for key in ("text", "content", "value"):
                     value = body.get(key)
                     if isinstance(value, str) and value:
-                        text_head = value
+                        message_text = value
                         break
-        text_head = text_head[:80].replace("\n", " ")
 
         log_fn = inbound_trace.warning if is_self_echo else inbound_trace.info
         log_fn(
             "inbound chat_id=%s chat_type=%s sender_id=%s bot_user_id=%s "
-            "is_self_echo=%s message_id=%s trace_id=%s frag_count=%d text_head=%r",
+            "is_self_echo=%s message_id=%s trace_id=%s frag_count=%d text_len=%d",
             chat_id,
             chat_type,
             sender_id,
@@ -3394,7 +3470,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             message_id,
             frame.get("trace_id"),
             frag_count,
-            text_head,
+            len(message_text),
         )
 
         return is_self_echo
@@ -3422,7 +3498,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 INBOUND_RATE_WINDOW_SECONDS,
             )
 
-    async def _on_message(self, frame: dict[str, Any]) -> None:
+    async def _on_message(self, frame: dict[str, Any]) -> object | None:
         # ANY inbound frame naming this chat is authoritative proof the server
         # can still route into it — stronger evidence than the error frame that
         # put it under gate. Cleared BEFORE the self-echo drop below on purpose:
@@ -3447,8 +3523,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 )
             return
         if event_name == "message.recall":
-            self._handle_message_recall(frame)
-            return
+            return self._handle_message_recall(frame)
         protocol_message_id = None
         if event_name in {"message.send", "message.reply"}:
             protocol_message_id = self._extract_protocol_message_id(frame)
@@ -3549,6 +3624,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 message_id=protocol_message_id,
                 text=inbound.text,
                 raw=frame,
+                **(self._history.claim_options(inbound) if self._history else {}),
             )
             if claimed is False:
                 logger.info(
@@ -3573,21 +3649,104 @@ class ClawChatAdapter(BasePlatformAdapter):
                     event_name,
                     claimed,
                 )
-                return
+                return INBOUND_RETRYABLE
             self._note_inbound_rate(inbound.chat_id)
             self._remember_reply_preview(
                 message_id=protocol_message_id, inbound=inbound
             )
             if protocol_message_id:
                 self._last_inbound_message_id_by_chat[inbound.chat_id] = protocol_message_id
+        if self._history and self._history.enabled(inbound):
+            await self._history.continue_claimed(inbound)
+            return
+        await self._continue_claimed_inbound(inbound)
+
+    def _history_input_queued(self, inbound: InboundMessage) -> bool:
+        ids = self._batch_message_ids(inbound)
+        if inbound.is_internal_synthetic or not ids:
+            return False
+        pending = [message for queue in (self._group_message_coalescer, self._grant_admission_queue)
+                   for batch in queue._pending.values() for message in batch]
+        pending.extend(message for batch in self._owner_input_pending.values() for message, _ in batch)
+        return any(message.chat_id == inbound.chat_id and ids & self._batch_message_ids(message)
+                   for message in pending)
+
+    def _handoff_history_input(self, inbound: InboundMessage) -> None:
+        """A successful enqueue transfers ownership from the caller to the queue."""
+        task = asyncio.current_task()
+        for mid in self._batch_message_ids(inbound):
+            key = (self._account_id(), inbound.chat_id, mid)
+            if self._history_input_owners.get(key) is task:
+                self._history_input_owners.pop(key)
+
+    def _history_input_busy_elsewhere(self, inbound: InboundMessage) -> bool:
+        if inbound.is_internal_synthetic:
+            return False
+        task = asyncio.current_task()
+        return self._history_input_queued(inbound) or any(
+            owner is not None and owner is not task
+            for mid in self._batch_message_ids(inbound)
+            for owner in [self._history_input_owners.get((self._account_id(), inbound.chat_id, mid))])
+
+    def _wake_history_input_drain(self, inbound: InboundMessage) -> None:
+        # A surviving dispatch must wake the current maintenance instance.
+        history = self._history
+        if not history or not history.journal_ready() or inbound.is_internal_synthetic:
+            return
+        key = history.key(inbound)
+        if key in history.drain_waiting:
+            history.wake_drain(key)
+
+    @contextmanager
+    def _history_input_scope(self, inbound: InboundMessage):
+        """Keep live adapter dispatch ownership across maintenance replacement."""
+        owners = self._history_input_owners
+        task = asyncio.current_task()
+        keys = {(self._account_id(), inbound.chat_id, mid) for mid in self._batch_message_ids(inbound)
+                if not inbound.is_internal_synthetic}
+        if any(key in owners and owners[key] is not task for key in keys):
+            yield False
+            return
+        acquired = keys - owners.keys()
+        owners.update(dict.fromkeys(acquired, task))
+        try:
+            yield True
+        finally:
+            released = False
+            for key in acquired:
+                # A late completion cannot release another dispatch's ownership.
+                if owners.get(key) is task:
+                    owners.pop(key)
+                    released = True
+            if released:
+                self._wake_history_input_drain(inbound)
+
+    async def _continue_claimed_inbound(self, inbound: InboundMessage) -> None:
+        """Shared post-claim authorization and routing, also used by recovery."""
+        if self._history_input_busy_elsewhere(inbound):
+            return
+        with self._history_input_scope(inbound) as admitted:
+            if admitted:
+                await self._continue_claimed_inbound_now(inbound)
+
+    async def _continue_claimed_inbound_now(self, inbound: InboundMessage) -> None:
         self._admit_owner_direct_inbound(inbound)
         if await self._consume_grant_confirmation(inbound):
+            if self._history:
+                self._history.no_reply(inbound)
+            return
+        if self._hold_owner_inbound(inbound):
             return
         if self._hold_granted_inbound(inbound):
             return
         await self._route_inbound(inbound)
 
     async def _route_inbound(self, inbound: InboundMessage) -> None:
+        with self._history_input_scope(inbound) as admitted:
+            if admitted:
+                await self._route_inbound_now(inbound)
+
+    async def _route_inbound_now(self, inbound: InboundMessage) -> None:
         if inbound.chat_type == "group":
             # Gate ONLY group dispatch on the first per-(re)connect settings refresh
             # so a muted / mention-only group is not answered from a stale/empty
@@ -3601,6 +3760,8 @@ class ClawChatAdapter(BasePlatformAdapter):
                     inbound.chat_id,
                     inbound.sender_id,
                 )
+                if self._history:
+                    self._history.no_reply(inbound)
                 return
             # agent-protocol.md §3.3: group commands (step 4) are judged BEFORE
             # the reply-mode gate (step 5), so `/new` still works in a
@@ -3627,20 +3788,22 @@ class ClawChatAdapter(BasePlatformAdapter):
                     command_allowed = False
                 if not command_allowed:
                     logger.info(
-                        "clawchat group command dropped chat_id=%s sender_id=%s mode=%s owner=%s text_head=%r",
+                        "clawchat group command dropped chat_id=%s sender_id=%s mode=%s owner=%s text_len=%d",
                         inbound.chat_id,
                         inbound.sender_id,
                         command_mode,
                         inbound.sender_relation == "owner",
-                        inbound.text[:80],
+                        len(inbound.text),
                     )
+                    if self._history:
+                        self._history.no_reply(inbound)
                     return
                 logger.info(
-                    "clawchat group command dispatching directly chat_id=%s sender_id=%s mode=%s text_head=%r",
+                    "clawchat group command dispatching directly chat_id=%s sender_id=%s mode=%s text_len=%d",
                     inbound.chat_id,
                     inbound.sender_id,
                     command_mode,
-                    inbound.text[:80],
+                    len(inbound.text),
                 )
                 receipt = self._owner_group_command_receipt(inbound, command_text)
                 if receipt is None:
@@ -3655,11 +3818,19 @@ class ClawChatAdapter(BasePlatformAdapter):
                     inbound.chat_id,
                     inbound.sender_id,
                 )
+                if self._history:
+                    self._history.no_reply(inbound)
+                return
+            if self._history and self._history.replaying_batch(inbound):
+                await self._dispatch_group_batch(inbound)
                 return
             self._group_message_coalescer.enqueue(
                 inbound,
                 idle_seconds_override=float(_eff.batch_delay_seconds) if _eff is not None else None,
             )
+            # A busy waiter can flush during flush_now's gather below. The queue
+            # owns these inputs now; its dispatch task must be free to claim them.
+            self._handoff_history_input(inbound)
             if inbound.was_mentioned:
                 logger.info(
                     "clawchat flushing group batch immediately chat_id=%s sender_id=%s text_len=%d reason=agent_mention",
@@ -3667,7 +3838,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                     inbound.sender_id,
                     len(inbound.text),
                 )
-                await self._group_message_coalescer.flush_now(inbound.chat_id)
+                await self._group_message_coalescer.flush_now(self._group_batch_key(inbound))
                 return
             logger.info(
                 "clawchat queued group batch chat_id=%s sender_id=%s text_len=%d",
@@ -3677,27 +3848,37 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
             return
         if await self._answer_owner_group_slash_confirm(inbound):
+            if self._history:
+                self._history.no_reply(inbound)
             return
         if await self._handle_owner_forwarded_approval(inbound):
+            if self._history:
+                self._history.no_reply(inbound)
             return
         if await self._answer_non_owner_slash_confirm(inbound):
+            if self._history:
+                self._history.no_reply(inbound)
             return
         if not self._direct_command_allowed(inbound):
             logger.info(
-                "clawchat direct command dropped chat_id=%s sender_id=%s reason=non_owner text_head=%r",
+                "clawchat direct command dropped chat_id=%s sender_id=%s reason=non_owner text_len=%d",
                 inbound.chat_id,
                 inbound.sender_id,
-                inbound.text[:80],
+                len(inbound.text),
             )
+            if self._history:
+                self._history.no_reply(inbound)
             return
         if not self._direct_text_allowed_on_old_host(inbound):
             logger.info(
                 "clawchat direct message dropped chat_id=%s sender_id=%s "
-                "reason=non_owner_gateway_control text_head=%r",
+                "reason=non_owner_gateway_control text_len=%d",
                 inbound.chat_id,
                 inbound.sender_id,
-                inbound.text[:80],
+                len(inbound.text),
             )
+            if self._history:
+                self._history.no_reply(inbound)
             return
         await self._handle_inbound(inbound)
 
@@ -3749,7 +3930,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 "clawchat group command receipt kept in group reason=missing_owner_direct_chat_id "
                 "group=%s command=%r",
                 receipt.group_id,
-                receipt.command_text,
+                redact_display_text(receipt.command_text),
             )
             return None
         if not receipt.group_title:
@@ -3769,12 +3950,13 @@ class ClawChatAdapter(BasePlatformAdapter):
                 _clawchat_message_mode=message_mode,
                 **dm_kwargs,
             )
-        except Exception:  # noqa: BLE001 — fall back to the group
+        except Exception as exc:  # noqa: BLE001 — fall back to the group
             logger.warning(
-                "clawchat group command receipt to owner failed group=%s owner_chat=%s",
+                "clawchat group command receipt to owner failed group=%s owner_chat=%s error=%s: %s",
                 receipt.group_id,
                 owner_chat_id,
-                exc_info=True,
+                type(exc).__name__,
+                redact_display_text(exc),
             )
             return None
         if not getattr(result, "success", False):
@@ -3783,14 +3965,14 @@ class ClawChatAdapter(BasePlatformAdapter):
                 "group=%s owner_chat=%s error=%s",
                 receipt.group_id,
                 owner_chat_id,
-                getattr(result, "error", None),
+                redact_display_text(getattr(result, "error", None)),
             )
             return None
         logger.info(
             "clawchat group command receipt sent to owner group=%s owner_chat=%s command=%r",
             receipt.group_id,
             owner_chat_id,
-            receipt.command_text,
+            redact_display_text(receipt.command_text),
         )
         await self._react_group_command_receipt(receipt)
         return result
@@ -3881,6 +4063,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         rule that ``/approve`` goes to a blocking dangerous-command approval in
         the same session before the confirm.
         """
+        if self._history:
+            self._history.command_prompted(str(session_key or ""))
         receipt = active_receipt(chat_id)
         if receipt is not None:
             return await self._ask_owner_group_slash_confirm(
@@ -4181,6 +4365,13 @@ class ClawChatAdapter(BasePlatformAdapter):
             return False
         return any(chat_id in str(key).split(":") for key in list(active))
 
+    def _group_batch_key(self, inbound: InboundMessage) -> str:
+        history = getattr(self, "_history", None)
+        if (history and history.enabled(inbound) and effective_group_sessions_per_user(
+                self._clawchat_config, inbound.chat_id)):
+            return inbound.chat_id + ":" + self._session_user_id_for_inbound(inbound)
+        return inbound.chat_id
+
     def _group_turn_in_flight(self, chat_id: str) -> bool:
         """Hold the next batch of a shared-session group while a turn runs."""
         if effective_group_sessions_per_user(self._clawchat_config, chat_id):
@@ -4191,6 +4382,11 @@ class ClawChatAdapter(BasePlatformAdapter):
         return busy
 
     async def _dispatch_group_batch(self, inbound: InboundMessage) -> None:
+        with self._history_input_scope(inbound) as admitted:
+            if admitted:
+                await self._dispatch_owned_group_batch(inbound)
+
+    async def _dispatch_owned_group_batch(self, inbound: InboundMessage) -> None:
         # Marked busy from the first line (no await before it) until the host
         # has taken the event and installed its own active-session guard.
         self._grant_group_grants[inbound.chat_id] = bool(self._turn_grant_values(inbound)[1])
@@ -4220,6 +4416,8 @@ class ClawChatAdapter(BasePlatformAdapter):
                 inbound.chat_id,
                 inbound.sender_id,
             )
+            if self._history:
+                self._history.no_reply(inbound)
             return
         if eff.reply_mode == "mention" and not inbound.was_mentioned:
             logger.info(
@@ -4227,6 +4425,8 @@ class ClawChatAdapter(BasePlatformAdapter):
                 inbound.chat_id,
                 inbound.sender_id,
             )
+            if self._history:
+                self._history.no_reply(inbound)
             return
         await self._handle_inbound(inbound)
 
@@ -4279,6 +4479,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         # Over-fetch by the batch size so MENTION_CONTEXT_N genuine prior rows
         # remain after the batch's ids are deduped out, then trim.
         batch_ids = self._batch_message_ids(inbound)
+        if self._history:
+            batch_ids |= self._history.seen_ids(inbound)
         fetch_limit = MENTION_CONTEXT_N + len(batch_ids)
         try:
             rows = self._store.list_recent_group_messages(account_id, inbound.chat_id, fetch_limit)
@@ -4641,8 +4843,11 @@ class ClawChatAdapter(BasePlatformAdapter):
             for key in self._grant_sessions if key.split(":", 1)[0] == chat_id
             for snapshot in [active_snapshot(self._account_id(), key)]
         )
-        pending_grants = any(self._turn_grant_values(message)[1] for message in
-                             self._group_message_coalescer._pending.get(chat_id, []))
+        pending_grants = any(
+            self._turn_grant_values(message)[1]
+            for batch_key, batch in self._group_message_coalescer._pending.items()
+            if batch_key.split(":", 1)[0] == chat_id for message in batch
+        )
         # The existing ungranted shared-group queue keeps its original wait.
         # Only the additional grant admission has a revocation deadline.
         if self._clawchat_config.tool_grants != "on" or not (
@@ -4740,6 +4945,89 @@ class ClawChatAdapter(BasePlatformAdapter):
                                       management_only=self._trusted_owner_notification(inbound))
         return True
 
+    def _hold_owner_inbound(self, inbound: InboundMessage) -> bool:
+        if not self._verified_owner_inbound(inbound):
+            return False
+        # Worker preparation rechecks asynchronously after media download using
+        # the original deadline; it must not enqueue this input again.
+        if self._owner_input_tasks.get(self._grant_session_key(inbound)) is asyncio.current_task():
+            return False
+        text = inbound.text.strip()
+        explicit_steer = text.lower().startswith('/steer')
+        if not explicit_steer and (
+            _slash_command_name(text) or self._owner_plaintext_control_reply(inbound)
+            or any(pattern.fullmatch(text) for pattern in _PLAINTEXT_GATEWAY_RESTART_RES)
+        ):
+            return False
+        from clawchat_gateway.turn_grants import has_non_owner_turn, has_notification_turn
+
+        key = self._grant_session_key(inbound)
+        notification = has_notification_turn(self._account_id(), key)
+        if not (key in self._owner_input_tasks or notification
+                or ((explicit_steer or _read_host_busy_input_mode() == 'steer')
+                    and has_non_owner_turn(self._account_id(), key))):
+            return False
+        self._owner_input_pending.setdefault(key, []).append(
+            (inbound, time.monotonic() + self._owner_input_hold_seconds))
+        # The held-input task dispatches it later; it must be free to claim it.
+        self._handoff_history_input(inbound)
+        logger.info('owner_input_held reason=%s',
+                    'active_notification_turn' if notification else 'active_notice_turn')
+        if key not in self._owner_input_tasks:
+            self._owner_input_tasks[key] = asyncio.create_task(self._dispatch_held_owner_inputs(key))
+        return True
+
+    def _owner_plaintext_control_reply(self, inbound: InboundMessage) -> bool:
+        text = inbound.text.strip()
+        if not (_slash_confirm_choice(text) or text.lower() in _PLAINTEXT_APPROVAL_WORDS):
+            return False
+        if self._direct_chat_approval_blocking(inbound.chat_id):
+            return True
+        try:
+            from tools.slash_confirm import get_pending
+
+            return any(get_pending(key) for key in getattr(self, '_active_sessions', {})
+                       if inbound.chat_id in str(key).split(':'))
+        except Exception:  # noqa: BLE001 - no known confirmation exempts ordinary text
+            return False
+
+    async def _wait_held_owner_input(self, key: str, deadline: float, task: asyncio.Task,
+                                     *, ignore_dispatch: bool = False) -> bool:
+        from clawchat_gateway.turn_grants import has_non_owner_turn, has_notification_turn
+
+        # The busy check also expires snapshots the idle host left behind.
+        while self._owner_input_tasks.get(key) is task:
+            if not (time.monotonic() < deadline and self._grant_session_busy(key, ignore_dispatch=ignore_dispatch)
+                    and (has_non_owner_turn(self._account_id(), key)
+                         or has_notification_turn(self._account_id(), key))):
+                return True
+            await asyncio.sleep(self._owner_input_poll_seconds)
+        return False
+
+    async def _dispatch_held_owner_inputs(self, key: str) -> None:
+        task = asyncio.current_task()
+        try:
+            pending = self._owner_input_pending[key]
+            while pending and self._owner_input_tasks.get(key) is task:
+                inbound, deadline = pending[0]
+                if not await self._wait_held_owner_input(key, deadline, task):
+                    return
+                pending.pop(0)
+                self._owner_input_deadlines[id(inbound)] = deadline
+                try:
+                    await self._route_inbound(inbound)
+                except Exception as exc:  # noqa: BLE001 - keep later held inputs
+                    logger.warning('clawchat held owner input dispatch failed: %s: %s',
+                                   type(exc).__name__, redact_display_text(exc))
+                finally:
+                    self._owner_input_deadlines.pop(id(inbound), None)
+        finally:
+            if self._owner_input_tasks.get(key) is task:
+                self._owner_input_tasks.pop(key, None)
+                dropped = self._owner_input_pending.pop(key, [])
+                if dropped:
+                    self._wake_history_input_drain(dropped[0][0])
+
     def _hold_granted_inbound(self, inbound: InboundMessage, *, from_dispatch: bool = False,
                               ignore_dispatch: bool = False, new_grants: dict[str, str] | None = None) -> bool:
         # Owner approvals and controls must reach their existing handlers even
@@ -4770,6 +5058,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._group_message_coalescer.enqueue(inbound, idle_seconds_override=0.0)
         else:
             self._grant_admission_queue.enqueue(inbound)
+        # The queue's dispatch task owns this input from here on.
+        self._handoff_history_input(inbound)
         return True
 
     async def _recover_request_wakes(self):
@@ -4877,14 +5167,21 @@ class ClawChatAdapter(BasePlatformAdapter):
             lang = "en"
         lang = lang if lang in ("zh", "zh_Hant") else "en"
         decision = None
+        wakes = []
         try:
             from clawchat_gateway.host_tools_guard import ask_grants_available
             mode = {'allow': 'direct', 'ask': 'ask', 'deny': 'deny'}[match[1]]
             decision = self._store.confirm_request(account_id=self._account_id(), code=match[2], mode=mode,
                 decided_by_user_id=inbound.sender_id, ask_available=ask_grants_available())
-            rows = decision['rows'] if decision else (
-                self._store.confirm_pending_grant(account_id=self._account_id(), code=match[2],
+            if decision:
+                rows = decision['rows']
+                wakes = [decision['request']['wake_key']]
+            else:
+                proactive = (self._store.confirm_pending_grant_decision(
+                    account_id=self._account_id(), code=match[2], decided_by_user_id=inbound.sender_id,
                     ask_available=ask_grants_available()) if match[1] == 'allow' else None)
+                rows = proactive['rows'] if proactive else None
+                wakes = [request['wake_key'] for request in proactive['requests']] if proactive else []
         except ValueError as exc:
             text = GRANT_ASK_UNAVAILABLE_RECEIPT[lang] if str(exc) == "ask-unavailable" else GRANT_WRITE_FAILED_MESSAGE[lang]
         except Exception:  # noqa: BLE001 - never acknowledge a failed write as active
@@ -4909,8 +5206,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         try:
             await self._send_owner_text(inbound.chat_id, text)
         finally:
-            if decision:
-                task = asyncio.create_task(self._dispatch_request_wake(decision['request']['wake_key']))
+            for wake_key in wakes:
+                task = asyncio.create_task(self._dispatch_request_wake(wake_key))
                 self._request_wake_tasks.add(task)
                 task.add_done_callback(self._request_wake_tasks.discard)
         return True
@@ -4940,18 +5237,26 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._check_request_wake(inbound)
         except Exception:
             self._finish_request_wake(inbound, 'host-rejected')
+            if self._history:
+                self._history.no_reply(inbound)
             return
         key = self._grant_session_key(inbound)
+        if self._hold_owner_inbound(inbound):
+            return
         if self._verified_owner_inbound(inbound):
-            # Owner input stays immediate; idle only determines verification.
+            # Controls stay immediate; idle determines verification.
             self._grant_session_busy(key)
         from clawchat_gateway.turn_grants import pending_input_restriction
         arrival_restriction = pending_input_restriction(self._account_id(), key)
         self._admit_owner_direct_inbound(inbound)
         if await self._consume_grant_confirmation(inbound):
+            if self._history:
+                self._history.no_reply(inbound)
             return
         if self._refuses_turn(inbound):
             self._finish_request_wake(inbound, 'host-rejected')
+            if self._history:
+                self._history.no_reply(inbound)
             return
         if not self._is_owner_turn(inbound) and self._hold_granted_inbound(inbound, from_dispatch=True):
             return
@@ -4982,13 +5287,29 @@ class ClawChatAdapter(BasePlatformAdapter):
                 self._grant_dispatching_grants.pop(key, None)
 
     async def _handle_inbound_now(self, inbound: InboundMessage, *, unverified_token: str = "", arrival_restriction=None) -> None:
+        if self._history:
+            async with self._history.dispatch_scope(inbound):
+                return await self._handle_inbound_now_impl(inbound, unverified_token=unverified_token,
+                                                           arrival_restriction=arrival_restriction)
+        return await self._handle_inbound_now_impl(inbound, unverified_token=unverified_token,
+                                                   arrival_restriction=arrival_restriction)
+
+    async def _handle_inbound_now_impl(self, inbound: InboundMessage, *, unverified_token: str = "", arrival_restriction=None) -> None:
+        if self._history and self._history.recalled_inbound(inbound):
+            return
+        if self._history and self._history.defer(inbound):
+            return
         try:
             self._check_request_wake(inbound)
         except Exception:
             self._finish_request_wake(inbound, 'host-rejected')
+            if self._history:
+                self._history.no_reply(inbound)
             return
         if self._refuses_turn(inbound):
             self._finish_request_wake(inbound, 'host-rejected')
+            if self._history:
+                self._history.no_reply(inbound)
             return
         if inbound.chat_id and not self._inbound_trigger_id(inbound.raw_message):
             # A synthetic inbound (awareness / moment-comment note, permission
@@ -5007,18 +5328,23 @@ class ClawChatAdapter(BasePlatformAdapter):
         # is consumed here (applies/cancels the update) and never reaches the LLM.
         # Ambiguous replies fall through to normal handling, keeping pending.
         if not is_sediment_turn and await self._maybe_consume_skill_update_consent(inbound):
+            if self._history:
+                self._history.no_reply(inbound)
             return
         reset_command = (
             not is_sediment_turn
             and _slash_command_name(inbound.text) in RESET_SLASH_COMMANDS
         )
         if reset_command and self._should_sediment_before_reset(inbound):
-            await self._run_sediment_turn(
-                chat_id=inbound.chat_id,
-                chat_type=inbound.chat_type,
-                sender_id=inbound.sender_id,
-                reason="reset",
-            )
+            if self._history and self._history.enabled(inbound):
+                await self._history.reset_notes(inbound)
+            else:
+                await self._run_sediment_turn(
+                    chat_id=inbound.chat_id,
+                    chat_type=inbound.chat_type,
+                    sender_id=inbound.sender_id,
+                    reason="reset",
+                )
         if inbound.chat_type == "group":
             await self._ensure_group_participants_metadata(inbound.chat_id)
         # Capture command-ness from the ORIGINAL inbound text before any batch
@@ -5035,6 +5361,17 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
         chat_name, user_name = self._session_names(inbound)
         downloaded_media = await self._download_inbound_media(inbound)
+        # A non-owner execution may have started during media preparation.
+        # Queued inputs retain their deadline through media preparation. Ignore
+        # this input's own dispatch counter when checking for a busy session.
+        deadline = self._owner_input_deadlines.get(id(inbound))
+        if deadline is not None:
+            key = self._grant_session_key(inbound)
+            if not await self._wait_held_owner_input(key, deadline, asyncio.current_task(), ignore_dispatch=True):
+                # Queue ownership moved; retain the journal for the new owner/recovery.
+                return
+        if self._hold_owner_inbound(inbound):
+            return
         speakers, grants, any_tools = self._turn_grant_values(inbound)
         # Recheck after all preparation awaits, using exactly the grants that
         # will enter the snapshot. A grant added during download must not get
@@ -5042,6 +5379,13 @@ class ClawChatAdapter(BasePlatformAdapter):
         if self._hold_granted_inbound(
             inbound, from_dispatch=True, ignore_dispatch=True, new_grants=grants,
         ):
+            return
+        if self._history and self._history.defer(inbound):
+            return
+        history_context = await self._history.prepare(inbound) if self._history else ""
+        if self._history and self._history.defer(inbound):
+            return
+        if self._history and self._history.recalled_inbound(inbound):
             return
         source_kwargs: dict[str, Any] = {}
         snapshot = None
@@ -5054,6 +5398,9 @@ class ClawChatAdapter(BasePlatformAdapter):
             snapshot = register_turn(
                 account_id=self._account_id(), chat_id=inbound.chat_id,
                 speakers=speakers, grants=grants, any_granted_tools=any_tools, session_key=key,
+                **({"replay_nonce": self._history.replay_nonce(inbound)}
+                   if self._history and self._history.replay_nonce(inbound) else {}),
+                history_exclude_ids=frozenset(self._batch_message_ids(inbound)),
                 request_origin=(RequestOrigin(requester, inbound.chat_id, inbound.chat_type, key,
                     self._inbound_trigger_id(inbound.raw_message), inbound.text)
                     if not inbound.is_internal_synthetic and requester else None),
@@ -5105,7 +5452,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         # the slash stays at the start.
         event_text = inbound.text
         is_synthetic = inbound.is_internal_synthetic
-        if inbound.chat_type == "group" and not is_group_command and not is_synthetic:
+        if inbound.chat_type == "group" and not is_group_command and not is_synthetic and not history_context:
             prior_context = self._group_context_for_turn(inbound)
             if prior_context:
                 event_text = prior_context + "\n\n" + event_text
@@ -5115,6 +5462,9 @@ class ClawChatAdapter(BasePlatformAdapter):
                     prior_context.count("\n"),
                 )
         event_kwargs: dict[str, Any] = {}
+        stable_message_id = self._inbound_trigger_id(inbound.raw_message)
+        if stable_message_id:
+            event_kwargs["message_id"] = stable_message_id
         if _host_supports_gateway_control():
             event_kwargs["allow_gateway_control"] = self._inbound_may_control_gateway(
                 inbound, is_group_command=is_group_command
@@ -5141,6 +5491,9 @@ class ClawChatAdapter(BasePlatformAdapter):
                 self._compose_channel_prompt_parts(inbound, split=True)
                 if split else self._compose_channel_prompt_parts(inbound)
             )
+            if history_context:
+                channel_prompt_parts.append(self._channel_prompt_part(
+                    "conversation-history", "platform", history_context, target="user.channel_context"))
             if (not inbound.is_internal_synthetic and self._clawchat_config.tool_grants == 'on'
                     and hasattr(self._store, 'take_pending_notice')):
                 from clawchat_gateway.tool_requests import build_request_notice
@@ -5182,7 +5535,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 )
                 if _debug_prompt_injection_enabled():
                     context_block = (
-                        (DEBUG_CHANNEL_CONTEXT_BEGIN, getattr(event, 'channel_context', None) or '',
+                        (DEBUG_CHANNEL_CONTEXT_BEGIN, redact_display_text(getattr(event, 'channel_context', None) or ''),
                          DEBUG_CHANNEL_CONTEXT_END)
                         if split else ()
                     )
@@ -5193,11 +5546,11 @@ class ClawChatAdapter(BasePlatformAdapter):
                         inbound.chat_type,
                         inbound.sender_id,
                         DEBUG_PROMPT_INJECTION_BEGIN,
-                        channel_prompt,
+                        redact_display_text(channel_prompt),
                         DEBUG_PROMPT_INJECTION_END,
                         *context_block,
                         DEBUG_EVENT_TEXT_BEGIN,
-                        event.text,
+                        redact_display_text(event.text),
                         DEBUG_EVENT_TEXT_END,
                     )
             write_llm_context_snapshot(
@@ -5228,8 +5581,38 @@ class ClawChatAdapter(BasePlatformAdapter):
                 reply_to_message_id,
             )
             self._check_request_wake(inbound)
-            await self.handle_message(event)
+            if self._history:
+                history_metadata = self._history.save_snapshot(inbound, event, history_context)
+                self._history.bind_injection(inbound, event, history_context, history_metadata)
+            if self._history and self._history.recalled_inbound(inbound):
+                self._finish_request_notices(notices, accepted=False)
+                if snapshot is not None:
+                    from clawchat_gateway.turn_grants import release_turn
+                    release_turn(snapshot.nonce)
+                    if self._grant_dispatch_started.get(key) == snapshot.nonce:
+                        self._grant_dispatch_started.pop(key, None)
+                return
+            from clawchat_gateway.history_maintenance import activity_turn
+            control = bool(_slash_command_name(inbound.text)) or bool(
+                self._history and self._history.control_input(inbound))
+            with activity_turn(event, inbound, control=control) as activity:
+                nonce = str(getattr(event.source, "message_id", "") or "")
+                if nonce:
+                    if not hasattr(self, "_history_activity_markers"):
+                        self._history_activity_markers = {}
+                    while len(self._history_activity_markers) >= 4096:
+                        expired = self._history_activity_markers.pop(next(iter(self._history_activity_markers)))
+                        expired.closed = True
+                    previous_activity = self._history_activity_markers.get(nonce)
+                    if previous_activity is not None:
+                        previous_activity.closed = True
+                    self._history_activity_markers[nonce] = activity
+                await self.handle_message(event)
             accepted = getattr(event, '_gateway_accepted', None) is not False
+            if self._history:
+                self._history.finish_control(inbound)
+            if accepted and self._history and self._history.gateway:
+                self._history.dispatched(event)
             if inbound.grant_origin and not accepted:
                 raise RuntimeError('host-rejected')
             self._finish_request_notices(notices, accepted=accepted)
@@ -5402,7 +5785,12 @@ class ClawChatAdapter(BasePlatformAdapter):
         return max(1, point - config.sediment_margin_tokens)
 
     async def on_processing_start(self, event: Any) -> None:
+        from clawchat_gateway.history_maintenance import bind_activity, restore_activity
         nonce = str(getattr(getattr(event, "source", None), "message_id", "") or "")
+        activity = getattr(self, "_history_activity_markers", {}).get(nonce)
+        if activity is None and getattr(event, "_clawchat_history_activity", None) is None:
+            activity = restore_activity(self, event)
+        bind_activity(event, activity)
         from clawchat_gateway.turn_attachments import start_processing
         start_processing(nonce, self._account_id(),
                          str(getattr(getattr(event, "source", None), "chat_id", "") or ""))
@@ -5515,9 +5903,15 @@ class ClawChatAdapter(BasePlatformAdapter):
         return trigger
 
     async def on_processing_complete(self, event: Any, outcome: Any) -> None:
+        from clawchat_gateway.history_maintenance import finish_activity
         from clawchat_gateway.turn_grants import release_turn
 
         nonce = str(getattr(getattr(event, "source", None), "message_id", "") or "")
+        activities = getattr(self, "_history_activity_markers", {})
+        activity = getattr(event, "_clawchat_history_activity", None) or activities.get(nonce)
+        finish_activity(event, activity)
+        if activities.get(nonce) is activity:
+            activities.pop(nonce, None)
         release_turn(nonce)
         from clawchat_gateway.turn_attachments import finish_processing
         finish_processing(nonce)
@@ -5544,7 +5938,12 @@ class ClawChatAdapter(BasePlatformAdapter):
             except Exception:  # noqa: BLE001
                 logger.debug("clawchat base on_processing_complete failed", exc_info=True)
         try:
-            self._after_host_turn(event)
+            if self._history:
+                self._history.completed(event, outcome)
+            if getattr(outcome, "name", str(outcome)).upper() == "FAILURE":
+                self._after_host_turn(event, failed=True)
+            else:
+                self._after_host_turn(event)
         except Exception:  # noqa: BLE001
             logger.warning("clawchat post-turn maintenance failed", exc_info=True)
         chat_id = str(getattr(getattr(event, "source", None), "chat_id", "") or "")
@@ -5557,7 +5956,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 if key.split(":", 1)[0] == chat_id:
                     self._grant_session_busy(key)
 
-    def _after_host_turn(self, event: Any) -> None:
+    def _after_host_turn(self, event: Any, *, failed: bool = False) -> None:
         raw = getattr(event, "raw_message", None)
         inner = raw.get("clawchat_raw") if isinstance(raw, dict) else None
         source = getattr(event, "source", None)
@@ -5568,6 +5967,11 @@ class ClawChatAdapter(BasePlatformAdapter):
                 pending[1].set()
             return
         if chat_id and not _slash_command_name(str(getattr(event, "text", "") or "")):
+            if self._history:
+                handled = (self._history.finish_failed_turn(event) if failed
+                           else self._history.after_turn(event))
+                if handled:
+                    return
             self._maybe_schedule_compact_sediment(chat_id, event)
 
     def _maybe_schedule_compact_sediment(self, chat_id: str, event: Any) -> None:
@@ -5652,10 +6056,25 @@ class ClawChatAdapter(BasePlatformAdapter):
                 speaker = self._resolve_sender_name(inbound)
                 user_name = speaker if speaker and speaker != inbound.sender_id else None
             return title or inbound.chat_id, user_name
+        if inbound.is_internal_synthetic:
+            cached = self._direct_chat_session_names.get(inbound.chat_id)
+            if cached is not None:
+                return cached
+            peer_id = self._direct_chat_peers.get(inbound.chat_id)
+            if not peer_id and inbound.chat_id == self._owner_direct_chat_id():
+                peer_id = self._owner_user_id()
+            if not peer_id:
+                return inbound.chat_id, None
+            # Resolve the peer's metadata without changing notification text
+            # or the sender attribution used by per-turn context.
+            inbound = replace(inbound, sender_id=peer_id, sender_name="")
         peer = self._resolve_sender_name(inbound)
         if peer and peer != inbound.sender_id:
-            return peer, peer
-        return inbound.chat_id, None
+            names = peer, peer
+        else:
+            names = inbound.chat_id, None
+        self._direct_chat_session_names[inbound.chat_id] = names
+        return names
 
     async def _ensure_group_participants_metadata(self, group_id: str) -> None:
         if not group_id:
@@ -6497,7 +6916,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             message_id or "-",
             len(text),
             DEBUG_HERMES_OUTPUT_BEGIN,
-            text,
+            redact_display_text(text),
             DEBUG_HERMES_OUTPUT_END,
         )
 
@@ -7171,11 +7590,13 @@ class ClawChatAdapter(BasePlatformAdapter):
             reply_to = self._grant_reply_anchors.get(reply_to) or None
         # Read the caller first: the host frames are only on the stack until
         # the first await.
+        process_sender = self._host_process_sender()
         message_mode = kwargs.pop("_clawchat_message_mode", None) or (
-            MESSAGE_MODE_THINKING if self._host_process_sender() else MESSAGE_MODE_NORMAL
+            MESSAGE_MODE_THINKING if process_sender else MESSAGE_MODE_NORMAL
         )
         content, is_host_redelivery = _strip_host_recovered_marker(content or "")
-        if chat_id in self._sediment_chats:
+        from clawchat_gateway.history_maintenance import suppress_reset_output
+        if chat_id in self._sediment_chats or suppress_reset_output(chat_id):
             logger.info(
                 "clawchat sediment turn output dropped chat_id=%s text_len=%d",
                 chat_id,
@@ -7201,6 +7622,10 @@ class ClawChatAdapter(BasePlatformAdapter):
             return SendResult(success=True)
         if self._is_runtime_status_text(content or ""):
             message_mode = MESSAGE_MODE_THINKING
+        from clawchat_gateway.history_maintenance import outbound_activity
+        history_activity = outbound_activity(chat_id, metadata)
+        if process_sender or message_mode != MESSAGE_MODE_NORMAL:
+            history_activity = {"kind": "notice"}
         if self._hold_unlisted_status(
             chat_id, content or "", reply_to, metadata, kwargs,
             message_mode=message_mode, is_explicit_send=is_explicit_send,
@@ -7424,6 +7849,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 message_id=message_id,
                 text=visible_content,
                 raw=frame,
+                history_activity=history_activity,
             )
             claimed: bool | None = True
         else:
@@ -7434,6 +7860,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 message_id=message_id,
                 text=visible_content,
                 raw=frame,
+                history_activity=history_activity,
             )
         if claimed is False:
             return SendResult(success=True, message_id=message_id)
@@ -7458,6 +7885,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 message_id=message_id,
                 text=error,
                 raw=frame,
+                history_activity=history_activity,
             )
             logger.warning(
                 "clawchat send complete reply dropped chat_id=%s message_id=%s",
@@ -7487,7 +7915,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         finalize: bool = False,
         **kwargs: Any,
     ) -> SendResult:
-        if chat_id in self._sediment_chats:
+        from clawchat_gateway.history_maintenance import suppress_reset_output
+        if chat_id in self._sediment_chats or suppress_reset_output(chat_id):
             return SendResult(success=True, message_id=message_id)
         run = self._resolve_active_run(chat_id=chat_id, message_id=message_id)
         if self._consume_terminal_send(chat_id, phase="edit_message"):
@@ -7698,6 +8127,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             include_message_id=True,
             context_mentions=context_mentions,
         )
+        from clawchat_gateway.history_maintenance import outbound_activity
         claimed = self._claim_outbound_message(
             event_type="message.reply",
             trace_id=frame.get("trace_id") or frame.get("id"),
@@ -7705,6 +8135,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             message_id=run.message_id,
             text=final_content,
             raw=frame,
+            history_activity=outbound_activity(run.chat_id, run.metadata),
         )
         if claimed is False:
             # The reply under this id already went out: close the stream as
@@ -9065,7 +9496,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         except Exception:  # noqa: BLE001
             logger.warning("clawchat message database persistence failed")
 
-    def _handle_message_recall(self, frame: dict[str, Any]) -> None:
+    def _handle_message_recall(self, frame: dict[str, Any]) -> object | None:
         """Erase this agent's ledger row for a message its sender withdrew.
 
         **Two sites, not one.** ``connection.py`` has to route the frame here
@@ -9117,7 +9548,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 frame.get("chat_id"),
                 target,
             )
-            return
+            return INBOUND_RETRYABLE
         try:
             removed = self._store.recall_message(
                 # The persist path (_record_message / _claim_message_once) writes
@@ -9134,22 +9565,20 @@ class ClawChatAdapter(BasePlatformAdapter):
                 "clawchat recall purge failed chat_id=%s message_id=%s",
                 frame.get("chat_id"),
                 target,
-                exc_info=True,
             )
-            return
+            return INBOUND_RETRYABLE
         if removed is None:
             # ClawChatStore._write returns None for two different reasons: the
             # store is disabled, OR the write raised (SQLITE_BUSY, disk error,
             # locked DB) and _write caught it — so the except block above never
             # fires for a write failure; this is the branch that actually does.
-            # Never call this "purged": nothing was, and there is no tombstone
-            # or retry, so the recalled row stays in the ledger.
+            # Retain the pending receipt until the tombstone and purge are durable.
             logger.warning(
                 "clawchat recall purge unavailable chat_id=%s message_id=%s",
                 frame.get("chat_id"),
                 target,
             )
-            return
+            return INBOUND_RETRYABLE
         if removed:
             logger.info(
                 "clawchat recall purged chat_id=%s message_id=%s rows=%s",
@@ -9201,10 +9630,14 @@ class ClawChatAdapter(BasePlatformAdapter):
         message_id: str | None,
         text: str | None,
         raw: Any,
+        **history_claim: Any,
     ) -> bool | None:
         if self._store is None:
             return None
         try:
+            if direction == "inbound" and isinstance(raw, dict):
+                control = bool((history_claim.get("held_payload") or {}).get("control"))
+                raw = dict(raw, clawchat_history_control=control)
             return self._store.claim_message_once(
                 platform="hermes",
                 account_id="default",
@@ -9216,6 +9649,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 message_id=message_id,
                 text=text,
                 raw=raw,
+                **history_claim,
             )
         except Exception:  # noqa: BLE001
             logger.warning("clawchat message database claim failed")
@@ -9230,7 +9664,12 @@ class ClawChatAdapter(BasePlatformAdapter):
         message_id: str,
         text: str | None,
         raw: Any,
+        history_activity: dict | None = None,
     ) -> bool | None:
+        from clawchat_gateway.history_maintenance import outbound_activity
+        if isinstance(raw, dict):
+            raw = dict(raw, clawchat_history_activity=(history_activity if history_activity is not None
+                                                     else outbound_activity(chat_id)))
         claimed = self._claim_message_once(
             kind="message",
             direction="outbound",
@@ -9270,10 +9709,15 @@ class ClawChatAdapter(BasePlatformAdapter):
         message_id: str | None,
         text: str | None,
         raw: Any,
+        history_activity: dict | None = None,
     ) -> None:
         if self._store is None or not message_id:
             return
         try:
+            if direction == "outbound" and isinstance(raw, dict):
+                from clawchat_gateway.history_maintenance import outbound_activity
+                raw = dict(raw, clawchat_history_activity=(history_activity if history_activity is not None
+                                                         else outbound_activity(chat_id)))
             self._store.update_message_by_identity(
                 account_id="default",
                 kind=kind,

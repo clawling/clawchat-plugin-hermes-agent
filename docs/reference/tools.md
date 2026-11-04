@@ -2,10 +2,10 @@
 
 `plugin.yaml` is the authoritative tool list (`provides_tools`). Schemas
 and `description` strings live in `clawchat_gateway/plugin_tools.py`
-inside `register_tools(...)`. This page is the human-readable index and
+inside `register_tools(...)`, with history specs in `clawchat_gateway/chat_history.py`. This page is the human-readable index and
 must stay aligned with both.
 
-There are **53** tools, grouped by purpose.
+There are **55** tools, grouped by purpose.
 
 ## Account and identity
 
@@ -247,6 +247,50 @@ errors that carry a machine-readable discriminator, and `retryable` / `status` /
 | `clawchat_create_moment_comment`    | Create a top-level comment on a moment.                                       |
 | `clawchat_reply_moment_comment`     | Reply to an existing comment on a moment.                                     |
 | `clawchat_delete_moment_comment`    | Delete a moment comment.                                                      |
+
+## Current conversation history
+
+| Tool | Parameters | What it does |
+|------|------------|--------------|
+| `chat_history_search` | `query` (required), `from`, `to`, `speaker`, `limit` | Match any term; rank by distinct matches, then newest. Default 10; limit 1–30. |
+| `chat_history_read` | `around`, `from`, `to`, `limit` | Read oldest first, around an id, a range or latest. Default 20; limit 1–60. |
+
+Public like `clawchat_memory_search`, these read the current chat's local SQLite
+ledger across resets. No chat/account selector/server access; invalid context or
+ambiguous identity errors. Exclude recalls, failed sends, non-messages and
+snapshot trigger/batch ids.
+Legacy calls use available ids/unique batches.
+
+Inclusive ISO/local dates; date-only `to` covers the day. Invalid frame times
+display `[invalid time]`; reads still order by insertion time, search ranks them
+last and excludes them from ranges.
+
+Before matching/truncation, body/names/query echoes strip userinfo (quotes
+included) before URL matching, then redact URLs/credentials
+(`_redact_history_text`). Errors fail closed; inbound URLs are replaced first.
+Keyed/quoted values, Bearer/Basic and JWT follow the reference. Basic allows
+any-case/length except lowercase prose. Ambiguity/deep/unterminated quotes or
+failure yield `[redacted]`. Removed values cannot match; ledger data is unchanged.
+Unknown `around` errors never echo the id. Redaction/truncation limit verbatim reads.
+
+UTF-16 caps: snippets 280, bodies 4,000, replies 12,000, query echoes 11,000.
+Time text, escaped speaker labels and attachment names: 256 each. Marker text:
+2,048, complete markers plus `…` if files remain. Entries: 8,000, then remaining
+reply space (12,000 minus header, longest footer and two newlines). Each new cap
+includes final `…`; large entries appear and pagination advances.
+
+`around` centers; exact `from` switches to forward reads honoring `to`. Tied or
+invalid-time continuations use
+`around: "<id>", from: "<time>"[, to: "<to>"], limit: N`.
+Follow all arguments; invalid times use insertion time. Ordinary footers give the
+first omitted time; all keep trimmed `to`.
+
+Latest/range SQL emits the cap (+1 for ranges) for numeric/in-range/absent times;
+search, around/id-cursor, unsupported times or ambiguous casing use full reads.
+One snapshot covers eligibility/selection/all trigger ids; no insertion-time cutoff.
+Before selection/LIMIT in every path, exclude JSON-text `payload.message_mode`
+whose SQL-trimmed value is neither empty nor `normal` (thinking/progress/status).
+Missing/malformed metadata stays eligible.
 
 ## Local memory (Markdown files under `$HERMES_HOME/memories`)
 
@@ -493,7 +537,7 @@ A timed flush consumes its minute even if it fails, and only logs the widget id,
 and error type, never the document. Queued results include `HH:MM:SS UTC`;
 successful immediate sends return:
 
-> Sent. It shows on their home screen once their phone has it.
+> Sent. It updates in its home-screen slot; a new one waits in ClawChat until they put it in one.
 
 Before admission and again immediately before sending, owner, activation and
 connection are checked. A changed target or failed resolution at flush drops

@@ -6,7 +6,7 @@ import shlex
 from contextlib import redirect_stderr
 
 from clawchat_gateway.activate import ExistingActivationError, activate_and_maybe_restart
-from clawchat_gateway.api_client import ClawChatApiError, format_connect_guidance
+from clawchat_gateway.api_client import ClawChatApiError, format_connect_guidance, redact_display_text
 from clawchat_gateway.cli import format_activation_failure
 from clawchat_gateway.config import resolve_activation_base_url
 from clawchat_gateway.output_visibility import apply_output_visibility
@@ -97,13 +97,13 @@ async def handle_clawchat_activate_command(raw_args: str) -> str:
     except ExistingActivationError as exc:
         # The connect code was never spent — surface the guidance in-chat so the
         # owner can redeem it into a fresh profile instead.
-        return f"clawchat: activation refused — {exc}"
+        return f"clawchat: activation refused — {redact_display_text(exc)}"
     except ClawChatApiError as exc:
         # Only when the server sent next_action/hint guidance: render it in-chat
         # so the agent knows what to do. Otherwise propagate exactly as before.
         if not format_connect_guidance(exc):
             raise
-        return "\n".join(format_activation_failure(exc))
+        return "\n".join(redact_display_text(line) for line in format_activation_failure(exc))
     lines = [f"clawchat: activation complete for {payload['user_id']}"]
     lines.extend(format_restart_lines(payload))
     return "\n".join(lines)

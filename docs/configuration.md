@@ -40,6 +40,36 @@ Automatic refresh, permanent-failure markers, empty credential tombstones and ac
 | `CLAWCHAT_WEBSOCKET_URL` (or `CLAWCHAT_WS_URL`) | `websocket_url` | `wss://app.clawling.com/ws` | Activation records the env value when set, else derives one from `base_url` (`activate._derive_websocket_url`). |
 | `CLAWCHAT_DEVICE_ID` | — | derived (below) | Pin per agent in container deployments; used verbatim with `hermes-` prefix, otherwise sanitized to `[A-Za-z0-9_.:-]` and prefixed. |
 | `CLAWCHAT_WIKI_VERSION` | — | empty | Optional install-page stamp for connect/connect-check onboarding telemetry; profile-first, trimmed to 40 characters (`onboarding.wiki_version`), never gates activation. |
+| `CLAWCHAT_RELIABLE_DELIVERY_V2` | `reliable_delivery_v2` | `false` | Profile opt-in to durable inbound receipts and negotiated dseq acknowledgements (§11.7). |
+
+`platforms.clawchat.extra.reliable_delivery_v2` is a YAML bool.
+Env overrides accept case-insensitive `true/false`, `1/0`, `yes/no`,
+`on/off`. Invalid values warn and disable it. For rollback, [drain pending receipts first](#reliable-delivery-rollback).
+Off: legacy, no receipts or sync acks.
+Each v2 grant registers a durable connection sequence before READY; registration or receipt-write failure closes without ack/dispatch, using normal reconnect/backoff.
+Each opt-in connection recovers pending even without a v2 grant, skipping dispatched work only.
+Gate waiters can recover. Old lane work precedes new business; controls bypass the gate.
+Recovery failure/10 s timeout opens only the gate. Unavailable claims stay pending;
+recovery retries every 30 s through failures until success. Turns require a claim.
+Lane work (including recall) finishes done/failed; inline unknown/transit becomes done on return. See
+[delivery behavior](client-integration.md#hermes-optional-reliable_delivery_v2).
+
+### Reliable delivery rollback
+
+Treat `pending` receipts as already-acked work awaiting Hermes handoff or completion.
+Disabling v2 stops reading this table, so drain it before rollback:
+
+1. Stop the profile's gateway.
+2. **While the gateway is stopped**, choose that profile's SQLite file from [Database location](#database-location) and count pending receipts:
+
+   ```sh
+   sqlite3 "<profile-clawchat-sqlite>" "SELECT count(*) FROM inbound_receipts WHERE status='pending'"
+   ```
+
+3. If the stopped count is `0`, set `reliable_delivery_v2: false`, remove or disable any enabling env override, and start the gateway.
+4. If the count is nonzero, keep the switch enabled and start one recovery cycle. After recovery processes the pending work, **stop the gateway again and return to step 2**.
+
+A zero count while running is insufficient: new frames can arrive and be acked before shutdown. Only a stopped count of `0` permits disabling the switch.
 
 ### Device id durability (deployment requirement)
 
@@ -228,21 +258,81 @@ Read at adapter startup from `platforms.clawchat.extra` (hyphenated); restart th
 | `sediment-margin-tokens` | `10000` | 2000–50000 | Margin below compression point |
 | `sediment-on-compact` | `on` | on/off | Sediment before compression |
 | `sediment-on-reset` | `on` | on/off | Sediment before `/new` / `/reset` |
+| `history-summary-max-tokens` | `4000` | 1000–32000 | Summary output limit; [rules and overrides](history-budget.md) |
+| `interrupted-turn-notice` | `true` | true/false (global) | [One-time restart notice](history-budget.md#interrupted-turns-after-a-restart) |
 
-Unconsumed shared keys: `idle-reset-dm`, `idle-reset-group`, `daily-reset` (host owns resets; see [Upgrade notes](#upgrade-notes)); `archive-muted-groups` (ledger records muted messages); `digest-every-messages` (Hermes already has sessions). Plugin-driven reset would need the host's confirm-guarded `/new`.
+### Conversation history budget
+
+ClawChat conversations are compacted into a rolling summary when their history exceeds a per-conversation token budget (`history-budget-dm` 25000 / `history-budget-group` 15000 by default); the Hermes compression threshold is only a backstop. Keys, behaviour, host requirements and limits: [history-budget.md](history-budget.md).
 
 ### Sediment turns
 
 Hermes has no pre-compression/reset memory flush; its periodic single-user review is disabled below. The plugin runs a synthetic sediment turn in the same session before losing context:
 
 - `/new` / `/reset`: finish sediment before the host command/confirmation; skip busy sessions or those with nothing said since reset, so reset remains an immediate escape.
-- Compression: after a turn reaches the trigger, run when idle, once per Hermes session id. The compression point is the lower of the absolute cap and Hermes' ratio threshold (default 0.5; 0.75 below 512 K, accounting for output reservation). Plugin load/activation **fill only missing** `compression.threshold_tokens` from `session-cap-tokens`; this host key is global across platforms (Hermes 0.20.1+).
+- Compression with budget maintenance: run notes after summary publication and before renewal. When budget maintenance is unavailable or off, use the legacy trigger after a turn, when idle, once per Hermes session id. The compression point is the lower of the absolute cap and Hermes' ratio threshold (default 0.5; 0.75 below 512 K, accounting for output reservation). Plugin load/activation **fill only missing** `compression.threshold_tokens` from `session-cap-tokens`; this host key is global across platforms (Hermes 0.20.1+).
 
-Trigger example without output reservation: `0.75 × 128000 − 10000 = 86000`, rather than `150000 − 10000 = 140000`. Computation uses `post_api_request` usage/context length, `pre_api_request` max tokens and Hermes `ContextCompressor` math when importable (same fallback rule). Per-model ratio overrides are unseen; until the first request supplies a window, the cap alone decides.
+Legacy fallback trigger example without output reservation: `0.75 × 128000 − 10000 = 86000`, rather than `150000 − 10000 = 140000`. Computation uses `post_api_request` usage/context length, `pre_api_request` max tokens and Hermes `ContextCompressor` math when importable (same fallback rule). Per-model ratio overrides are unseen; until the first request supplies a window, the cap alone decides.
+See [Effective compression point](#effective-compression-point) for read-only status diagnostics.
 
 The prompt targets only this DM peer's note (`owner.md` for owner) or this group's note, up to 10 recent speakers' notes and owner facts said in-group. Shared groups also receive unseen context within `delta-budget-chars`. It asks the model to read then append, omit facts people asked it not to remember/asked to forget, avoid Hermes `memory`, send no messages and return the no-reply token.
 
 **The plugin does not filter what a sediment turn writes**: prompt compliance is the model's judgement; memory-tool read scope remains enforced. Text, edits, media and typing to this chat are dropped until `on_processing_complete`; other chats work, the next group batch waits, and the synthetic exchange stays in history. With `display.busy_input_mode: interrupt`, newer hosts may fold a DM into sediment and drop its answer; default `queue` avoids this. See [prompt injection](reference/prompt-injection.md).
+
+### Effective compression point
+
+A valid host `compression.threshold_tokens` takes precedence over the plugin's
+`platforms.clawchat.extra.session-cap-tokens`. This host key is global across
+every Hermes platform. Plugin load/activation fills it only when the key is
+absent; an existing value, including an invalid one, is never overwritten.
+Hermes compresses at the lower of the absolute cap and the active model's ratio
+threshold (default ratio 0.5, at least 0.75 below a 512K window, accounting for
+output reservation). Status does not calculate the model-dependent ratio point.
+
+For ClawChat conversations this point is only a backstop: budget maintenance
+compacts them at `history-budget-dm` / `history-budget-group` first (see
+[history-budget.md](history-budget.md)).
+
+`hermes clawchat status` reads configuration without changing it. Its
+`compression` object describes the configured cap and the plugin's sediment
+calculation; restart the gateway after changing settings to align a running
+adapter with the configuration on disk.
+
+| Field | Meaning |
+| --- | --- |
+| `host_version` | Hermes version; empty, unparseable or `0.0.0` versions display `unknown (local build)` |
+| `host_compression_enabled` | False only for `compression.enabled: false`; a disabled host does not use the compression point |
+| `threshold_tokens` | Effective absolute cap used for the plugin's sediment calculation |
+| `threshold_tokens_source` | `host`: valid host cap; `plugin_fill`: missing host key, to be filled at next load/activation; `plugin_fallback`: invalid existing host key, plugin uses its own cap for sediment while Hermes controls its own compression behavior |
+| `host_threshold_tokens` | Valid numeric, non-boolean, positive host cap converted to an integer, otherwise null |
+| `plugin_session_cap_tokens` | Plugin cap after defaulting and clamping (50000–1000000) |
+| `plugin_session_cap_set` | Whether the plugin cap key is explicitly present in raw extra settings |
+| `host_threshold_ratio` | Valid host ratio in (0, 1], otherwise null; booleans are invalid |
+| `ratio_applies` | Explanation of the model-dependent ratio limit |
+| `sediment_margin_tokens` | Plugin margin after defaulting and clamping (2000–50000) |
+| `sediment_point_tokens` | `max(1, threshold_tokens - sediment_margin_tokens)`, an upper bound; the model's ratio limit can trigger sediment earlier |
+| `history_budget_dm` | Account-level DM history budget after defaulting (25000) and clamping (5000–200000); excludes `chats.<id>` overrides |
+| `history_budget_group` | Account-level group history budget after defaulting (15000) and clamping (5000–200000); excludes `groups.*` and `groups.<id>` overrides |
+| `budget_compaction` | Account-level `budget-compaction` configuration as `on` / `off` (default `on`); excludes conversation overrides and does not probe runtime capabilities |
+| `budget_role` | Explains the account-level switch: `on` means ClawChat history budgets compact first and the host threshold is a backstop; `off` means plugin budget compaction is disabled and the host compression point applies. Configuration only; no runtime capability probe |
+| `notes` | Override, invalid-host-key and disabled-compression explanations; empty when none apply |
+
+An override note appears only when the plugin cap was explicitly set and differs
+from the valid host cap; the CLI also prints that note once to stderr. A
+diagnostic failure produces `compression: {"error": "<exception class>"}` while
+status still succeeds. Unreadable host configuration is represented as empty
+configuration, so the displayed values are defaults rather than a runtime probe.
+
+### Operator advice: compression failures
+
+Summary failures and whether the original context is retained are Hermes host
+behavior. Use Hermes ≥0.21.5 for retention of the untrimmed original on truncation
+failure and increasing cooldowns. Route summaries through a model with a large
+enough output limit (configure a separate model with `auxiliary.compression`),
+or lower `compression.threshold_tokens` so the summary target fits within the
+model's output limit. The plugin does not implement compression; status changes
+no host compression settings, and plugin load/activation only fills a missing
+absolute cap as described above.
 
 ## Allowlist / home channel (read by Hermes platform registry)
 

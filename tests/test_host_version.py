@@ -92,7 +92,7 @@ def test_registration_survives_hint_failure(plugin, monkeypatch, caplog):
     with caplog.at_level(logging.DEBUG, logger=plugin.__name__):
         assert plugin._register_platform(ctx) is True
     ctx.register_platform.assert_called_once()
-    assert "ClawChat Hermes version check skipped: hint unavailable" in caplog.text
+    assert "ClawChat Hermes version check skipped: RuntimeError: hint unavailable" in caplog.text
 
 
 @pytest.mark.parametrize("version", ["0.20.4", "0.21.0"])
@@ -154,3 +154,20 @@ def test_missing_source_diagnostic(monkeypatch, tmp_path, required):
     assert all(str(path) in reason for path in paths)
     assert "HERMES_SOURCE_DIR was set" in reason
     assert "but lacks" in reason
+
+
+def test_placeholder_package_version_falls_back_to_cli_version(monkeypatch):
+    import importlib.metadata as md
+    from clawchat_gateway import host_version
+    monkeypatch.setattr(md, "version", lambda name: "0.0.0")
+    monkeypatch.setitem(sys.modules, "hermes_cli", SimpleNamespace(__version__="0.22.5"))
+    assert host_version.resolve_host_agent_version() == "0.22.5"
+
+
+def test_real_package_version_is_preferred(monkeypatch):
+    import importlib.metadata as md
+    from clawchat_gateway import host_version
+    monkeypatch.setattr(md, "version", lambda name: "0.21.0")
+    monkeypatch.setitem(sys.modules, "hermes_cli", SimpleNamespace(__version__="0.22.5"))
+    assert host_version.resolve_host_agent_version() == "0.21.0"
+

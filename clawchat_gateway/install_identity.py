@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
+from clawchat_gateway import atomic_file
 from clawchat_gateway.device_id import _host_device_id
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,7 @@ def _publish_seed(path: Path) -> None:
             os.link(temporary, path)
         except FileExistsError:
             pass
+        atomic_file.fsync_dir(path.parent)
     finally:
         try:
             Path(temporary).unlink(missing_ok=True)
@@ -218,24 +220,12 @@ def read_superseded(profile_home: Path, user_id: str | None = None) -> dict[str,
 
 def _write_superseded_unlocked(home: Path, value: dict[str, Any]) -> bool:
     path = superseded_path(home)
-    temporary = None
     try:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fd, temporary = tempfile.mkstemp(prefix=".install_superseded-", dir=path.parent)
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            json.dump(value, stream, ensure_ascii=True)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        atomic_file.atomic_write_text(path, json.dumps(value, ensure_ascii=True), mode=0o600)
         return True
     except OSError:
         return False
-    finally:
-        if temporary:
-            try:
-                Path(temporary).unlink(missing_ok=True)
-            except OSError:
-                logger.warning("cannot remove temporary installation state file")
 
 
 def write_superseded(profile_home: Path, value: dict[str, Any]) -> bool:
@@ -263,15 +253,7 @@ def _read_reclaim_generation(home: Path) -> str | None:
 
 def _bump_reclaim_generation_unlocked(home: Path) -> None:
     path = _reclaim_generation_path(home)
-    fd, temporary = tempfile.mkstemp(prefix=".install_reclaim-", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="ascii") as stream:
-            stream.write(uuid.uuid4().hex + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        Path(temporary).unlink(missing_ok=True)
+    atomic_file.atomic_write_text(path, uuid.uuid4().hex + "\n", encoding="ascii", mode=0o600)
 
 
 def _remember_failed_creation(home: Path, state: dict[str, Any], snapshot: str | None) -> None:

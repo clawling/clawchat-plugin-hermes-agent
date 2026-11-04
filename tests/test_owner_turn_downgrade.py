@@ -1,4 +1,5 @@
 """Owner authority survives local notices and follows queued execution inputs."""
+import asyncio
 import logging
 import sqlite3
 import time
@@ -32,12 +33,15 @@ def notice(a, kind):
 @pytest.mark.parametrize("kind", ["permission_result", "awareness", "memory_migration_hint", "bootstrap", "clawchat_sediment"])
 async def test_local_notice_in_flight_preserves_owner_ordinary_tools(harness, host, kind):
     a = harness.adapter
+    # Keep exercising overlapping permissions after the input's hold deadline.
+    a._owner_input_hold_seconds = 0
     await a._handle_inbound(notice(a, kind))
     notification = latest(harness)
     assert notification.plugin_notification and not notification.owner_verified
     assert not notification.owner_side and not notification.legacy_owner_tools
     assert not getattr(notification.grants, "owner_only", False)
     await a._handle_inbound(message(a._owner_user_id(), chat=OWNER_CHAT))
+    await asyncio.gather(*a._owner_input_tasks.values())
     owner = latest(harness)
     assert owner.owner_side and not owner.owner_verified
     with host(**context(owner)):
@@ -314,6 +318,7 @@ async def test_cross_session_refusal_uses_owner_downgrade_message(harness, host)
 @pytest.mark.parametrize("kind", ["owner_message", "awareness", "bootstrap"])
 async def test_consumption_during_preparation_keeps_old_batch_restricted(harness, host, monkeypatch, kind):
     a = harness.adapter
+    a._owner_input_hold_seconds = 0
     incoming = replace(notice(a, "moment_comment"), _plugin_notification_origin=None)
     await a._handle_inbound(incoming)
     foreign = latest(harness)
@@ -337,6 +342,7 @@ async def test_consumption_during_preparation_keeps_old_batch_restricted(harness
         assert guard._clawchat_pre_tool_decision(tool_name="terminal", args={},
             session_id="preparation-session", turn_id="old-batch")["action"] == "block"
     await a._handle_inbound(message(a._owner_user_id(), "arrived after consumption", chat=OWNER_CHAT))
+    await asyncio.gather(*a._owner_input_tasks.values())
     assert latest(harness).owner_side
     assert not turns.get_snapshot(old_batch.nonce).owner_side
 
@@ -417,6 +423,8 @@ async def test_queued_context_uses_one_effective_snapshot_at_every_boundary(
     from clawchat_gateway import local_paths, turn_attachments
 
     a = harness.adapter
+    # Follow-up binding still matters when the notification outlives the deadline.
+    a._owner_input_hold_seconds = 0
     assert guard._install_grant_catalog_filter()
 
     def visible():
@@ -431,6 +439,7 @@ async def test_queued_context_uses_one_effective_snapshot_at_every_boundary(
         assert "terminal" not in visible()
         speaker = a._owner_user_id() if candidate == "owner" else PARAMS["userIds"][0]
         await a._handle_inbound(message(speaker, "Next message", chat=OWNER_CHAT))
+        await asyncio.gather(*a._owner_input_tasks.values())
         target = latest(harness)
         guard.clawchat_pre_llm_call(session_id="effective-session", turn_id="follow-up")
         current = turns.effective_snapshot(notification.nonce)
@@ -474,11 +483,13 @@ async def test_queued_context_uses_one_effective_snapshot_at_every_boundary(
 @pytest.mark.asyncio
 async def test_effective_snapshot_falls_back_when_execution_is_unbound(harness, host, monkeypatch):
     a = harness.adapter
+    a._owner_input_hold_seconds = 0
     await a._handle_inbound(notice(a, "awareness"))
     notification = latest(harness)
     with host(**context(notification)):
         guard.clawchat_pre_llm_call(session_id="unbound-session", turn_id="notice")
         await a._handle_inbound(message(a._owner_user_id(), chat=OWNER_CHAT))
+        await asyncio.gather(*a._owner_input_tasks.values())
         owner = latest(harness)
         guard.clawchat_pre_llm_call(session_id="unbound-session", turn_id="owner")
         with monkeypatch.context() as patch:

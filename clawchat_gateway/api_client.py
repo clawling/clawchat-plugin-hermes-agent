@@ -198,6 +198,114 @@ def redact_refresh_message(value: object, *secrets: str, base_url: str | None = 
         return DIAGNOSTIC_REDACTION_FAILED
 
 
+# A quoted credential value ends only at its own unescaped closing quote: a
+# JSON-escaped quote inside it (or one level of JSON nested in a JSON string,
+# where the quotes themselves are escaped) must not end the match early.
+_QUOTED_VALUE = (
+    r'\\"(?:\\\\\\"|\\\\|\\(?!")|[^\\\r\n])*?\\"'
+    r'|"(?:[^"\\\r\n]|\\.)*"'
+    r"|'(?:[^'\\\r\n]|\\.)*'"
+)
+# Try complete quoted values first. A truncated opening quote (including one
+# level of JSON escaping) hides the rest of its line, before the bare branch
+# can consume only the leading backslash and expose the remaining value.
+_UNTERMINATED_QUOTED_VALUE = r"\\?[\"'][^\r\n]*"
+_BARE_VALUE = r"[^\s&#\"'<>`,;}\]]+"
+
+
+def _marked_parse_error_text(exc: BaseException) -> str | None:
+    """Describe a YAML-style parse error by position only.
+
+    Such errors quote a truncated snippet of the source; truncation can cut a
+    ``key=`` label off a credential value, so the snippet is never shown.
+    """
+    mark = getattr(exc, "problem_mark", None) or getattr(exc, "context_mark", None)
+    if mark is None or not hasattr(mark, "line"):
+        return None
+    # The problem text can quote source too (undefined aliases, unknown tags),
+    # so only the error class and position are shown.
+    return (
+        f"{type(exc).__name__} "
+        f"(line {int(mark.line) + 1}, column {int(getattr(mark, 'column', 0)) + 1})"
+    )
+
+
+def redact_display_text(value: object, *secrets: str) -> str:
+    """Redact credentials before diagnostics become logs or caller-visible text."""
+    try:
+        marked = _marked_parse_error_text(value) if isinstance(value, BaseException) else None
+        text = strip_url_userinfo(marked if marked is not None else str(value or ""))
+        for secret in sorted((s for s in secrets if s), key=len, reverse=True):
+            text = text.replace(secret, "***")
+        text = re.sub(
+            r"(?i)(\bauthorization(?:\\?[\"'])?\s*[:=]\s*)"
+            r"(?:" + _QUOTED_VALUE + r"|" + _UNTERMINATED_QUOTED_VALUE
+            + r"|(?:(?:Bearer|Basic)\s+)?" + _BARE_VALUE + r")",
+            lambda match: match.group(1) + "***", text,
+        )
+        text = re.sub(r"(?i)\bBearer\s+" + _BARE_VALUE, "Bearer ***", text)
+        text = re.sub(
+            r"(?i)(\b(?:(?:access[_-]?|refresh[_-]?)?token|api[_-]?key|key|secret|password|signature|sig)"
+            r"(?:\\?[\"'])?\s*[:=]\s*)"
+            r"(?:" + _QUOTED_VALUE + r"|" + _UNTERMINATED_QUOTED_VALUE + r"|" + _BARE_VALUE + r")",
+            lambda match: match.group(1) + "***", text,
+        )
+        # Unlike refresh diagnostics, no blanket long-run rule: ids, paths and
+        # hosts in ordinary API errors stay readable.
+        return re.sub(r"eyJ[A-Za-z0-9_=-]*\.[A-Za-z0-9_=-]+\.[A-Za-z0-9_=-]+", "***", text)
+    except Exception:  # noqa: BLE001 - diagnostics must fail closed
+        return DIAGNOSTIC_REDACTION_FAILED
+
+
+def redact_display_data(value: object, *secrets: str) -> object:
+    """Copy diagnostic data with credentials hidden; never return unsafe input."""
+    try:
+        active: set[int] = set()
+        sensitive = (
+            "token", "secret", "password", "passwd", "authorization", "apikey",
+            "refresh", "cookie", "credential", "signature",
+        )
+
+        def copy(item: object, depth: int) -> object:
+            if depth > 32:
+                return "[redacted]"
+            if isinstance(item, (dict, list, tuple)):
+                identity = id(item)
+                if identity in active:
+                    return "[redacted]"
+                active.add(identity)
+                try:
+                    if isinstance(item, dict):
+                        result = {}
+                        for key, child in item.items():
+                            name = redact_display_text(key, *secrets)
+                            normalized = re.sub(r"[-_ ]", "", str(key).lower())
+                            # Counters such as max_tokens / prompt_tokens stay
+                            # readable; any text or structure under the key is hidden.
+                            keep = child is None or type(child) in (int, float, bool)
+                            labelled = (
+                                any(part in normalized for part in sensitive)
+                                or normalized.endswith(("key", "sig"))
+                            )
+                            result[name] = (
+                                "***" if labelled and not keep
+                                else copy(child, depth + 1)
+                            )
+                        return result
+                    return [copy(child, depth + 1) for child in item]
+                finally:
+                    active.remove(identity)
+            if isinstance(item, str):
+                return redact_display_text(item, *secrets)
+            if item is None or type(item) in (int, float, bool):
+                return item
+            return redact_display_text(repr(item), *secrets)
+
+        return copy(value, 0)
+    except Exception:  # noqa: BLE001 - diagnostic conversion must fail closed
+        return DIAGNOSTIC_REDACTION_FAILED
+
+
 def normalize_refresh_code(value: object) -> int | None:
     if type(value) is int:
         return value
@@ -227,13 +335,13 @@ class ClawChatApiError(Exception):
     wait_retried: bool = False
 
     def __str__(self) -> str:
-        return self.message
+        return redact_display_text(self.message)
 
     @property
     def hint(self) -> str | None:
         """``data.hint`` — the server's guidance sentence, if present."""
         value = (self.data or {}).get("hint")
-        return value if isinstance(value, str) and value.strip() else None
+        return redact_display_text(value) if isinstance(value, str) and value.strip() else None
 
     @property
     def next_action(self) -> str | None:
@@ -263,12 +371,12 @@ def format_connect_guidance(exc: ClawChatApiError) -> list[str]:
     """
     lines: list[str] = []
     if exc.next_action:
-        line = f"clawchat: next_action={exc.next_action}"
+        line = f"clawchat: next_action={redact_display_text(exc.next_action)}"
         if exc.retry_after_seconds is not None:
             line = f"{line} retry_after_seconds={exc.retry_after_seconds}"
         lines.append(line)
     if exc.hint:
-        lines.append(f"clawchat: hint: {exc.hint}")
+        lines.append(f"clawchat: hint: {redact_display_text(exc.hint)}")
     if exc.wait_retried and exc.next_action == NEXT_ACTION_WAIT_RETRY:
         lines.append(
             "clawchat: the plugin already waited and retried once automatically; "
@@ -1279,7 +1387,7 @@ class ClawChatApiClient:
         code = payload.get("code") if isinstance(payload, dict) else None
         msg = ""
         if isinstance(payload, dict):
-            msg = str(payload.get("msg") or payload.get("message") or "")
+            msg = redact_display_text(payload.get("msg") or payload.get("message") or "", self._token)
         if code != 0:
             kind = "auth" if status in (401, 403) else "api"
             gate_data = payload.get("data") if isinstance(payload, dict) else None
@@ -1375,18 +1483,18 @@ class ClawChatApiClient:
             data = None
             if isinstance(payload, dict):
                 code = payload.get("code")
-                message = str(payload.get("msg") or payload.get("message") or exc.reason)
+                message = redact_display_text(payload.get("msg") or payload.get("message") or exc.reason, self._token)
                 # Keep the envelope's data so connect-code guidance (next_action /
                 # hint) survives a non-200 answer such as a proxy-level 429.
                 if isinstance(payload.get("data"), dict):
                     data = payload["data"]
             else:
                 code = None
-                message = str(exc.reason or exc)
+                message = redact_display_text(exc.reason or exc, self._token)
             kind = "auth" if status in (401, 403) else "api"
             raise ClawChatApiError(
                 kind, message, status=status, path=path, code=code, data=data
-            ) from exc
+            ) from None
         except URLError as exc:
             # connection-refused / DNS arrive here and prove the request never
             # reached the server, so they are safe to retry (connect_failed).
@@ -1395,22 +1503,22 @@ class ClawChatApiClient:
             reason = exc.reason
             connect_failed = isinstance(reason, (ConnectionRefusedError, socket.gaierror))
             raise ClawChatApiError(
-                "transport", str(reason or exc), path=path, connect_failed=connect_failed
-            ) from exc
+                "transport", redact_display_text(reason or exc, self._token), path=path, connect_failed=connect_failed
+            ) from None
         except TimeoutError as exc:
             # A timeout is ambiguous (the server may already have processed a
             # single-use request), so it is explicitly NOT connect_failed and
             # will not be retried.
             raise ClawChatApiError(
-                "transport", str(exc) or "request timed out", path=path, connect_failed=False
-            ) from exc
+                "transport", redact_display_text(exc, self._token) or "request timed out", path=path, connect_failed=False
+            ) from None
         except Exception as exc:
-            raise ClawChatApiError("transport", str(exc), path=path) from exc
+            raise ClawChatApiError("transport", redact_display_text(exc, self._token), path=path) from None
 
         try:
             payload = json.loads(raw)
-        except Exception as exc:
-            raise ClawChatApiError("transport", "non-JSON response", status=status, path=path) from exc
+        except Exception:
+            raise ClawChatApiError("transport", "non-JSON response", status=status, path=path) from None
 
         return payload, status
 

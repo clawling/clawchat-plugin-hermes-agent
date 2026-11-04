@@ -181,7 +181,9 @@ An allowed person may ask again alone after a mixed-turn block.
 **effective tool surface**, including sensitive tools, connected tools and
 **tools installed in the future**. The surface applies host configuration,
 platform, global disabled toolsets, dependencies and credentials before this
-plugin's per-turn narrowing. Execution rechecks current availability. It excludes
+plugin's authorization filtering. Guarded groups and the owner's DM keep a
+session-wide schema; other sessions retain per-turn narrowing. Execution
+rechecks current availability. It excludes
 `clawchat_tool_grant`, `clawchat_tool_revoke`, `clawchat_tool_grants_list` and
 `clawchat_tool_request`. It cannot bypass host global disablement, host policy,
 platform availability or tool identity/resource checks. Exact and capability
@@ -291,9 +293,9 @@ English display names plus IDs, e.g.
 `Not available to the caller yet: Terminal (terminal), Files (files).`
 It omits uninstalled/globally disabled capabilities and omits the list sentence
 when empty. One authorized available member, including an exact-tool exception
-to a capability denial, removes the capability from this hint; schemas and
-execution still check each tool separately. Catalog lookup failure emits only
-generic guidance. Mixed batches
+to a capability denial, removes the capability from this hint; authorization
+still checks each tool separately, including in a stable session-wide schema.
+Catalog lookup failure emits only generic guidance. Mixed batches
 describe shared availability without identifying who lacks access. The rest
 says to call `clawchat_tool_request` with the ability ID and one short reason
 for missing access, never request after denial or a mixed-turn block, and
@@ -361,6 +363,15 @@ A proactive 10-minute card still accepts only `/clawchat-allow` for its frozen
 mode. Every matching command is consumed before model dispatch; only a real,
 platform-identified owner in this account's owner direct chat may confirm.
 A card left in `sending` is also decidable: receiving the code proves delivery.
+Confirming a proactive direct/ask card also decides matching, unexpired,
+undecided requests from its grantees in the same SQLite transaction. Its selectors
+must cover every mapped tool in the requested capability (`all` covers every
+capability); exact-tool aliases use the canonical mapping. The requests become
+allowed/asked, their old codes are consumed, and the existing wake mechanism
+resumes each original guest chat after the owner's receipt, always with guest
+authority. Ask retains per-call approval. Deny grants create no confirmation
+card and do not decide or wake requests. Unconfirmed, expired or replayed cards
+and unmatched requests do not wake anything.
 
 See [wake and notice delivery](non-owner-boundaries.md#guest-access-requests-and-resumption)
 for the atomic decision, continuation and fallback notice lifecycle.

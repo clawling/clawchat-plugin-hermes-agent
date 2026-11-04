@@ -17,7 +17,9 @@ The policy below is *double unless asked*:
 Most of the suite is written against the double, so a found checkout does not
 switch the whole session to the real host by itself. Tests that check real host
 behaviour use ``hermes_source.require_hermes_source`` and run the host in a
-subprocess instead. Read ``clawchat_host_is_double`` in a test to tell which one
+subprocess instead. Multiplex isolation and orchestrate context modules are
+collected as subprocess proxies when their real host is unavailable here.
+Read ``clawchat_host_is_double`` in a test to tell which one
 you got. The pytest header reports the source found (or searched paths) and
 real-host/double mode.
 
@@ -38,10 +40,12 @@ from __future__ import annotations
 
 import atexit
 from contextlib import contextmanager
+import importlib
 import os
 import shutil
 import sys
 import tempfile
+import traceback
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -49,11 +53,63 @@ from typing import Any
 
 import pytest
 
+FAKE_SECRETS = {
+    "access": "placeholder-access-secret-g10",
+    "refresh": "placeholder-refresh-secret-g10",
+    # Assembled at runtime so the shapes do not trip credential scanners.
+    "bearer": " ".join(("Bearer", "placeholder-bearer-g10")),
+    "userinfo_url": "https://" + ":".join(("user-g10", "placeholder-pass-g10")) + "@example.invalid",
+    "query": "token=placeholder-query-g10",
+}
+FAKE_SECRETS_VALUES = tuple(FAKE_SECRETS.values()) + (
+    "user-g10", "placeholder-pass-g10", "placeholder-bearer-g10", "placeholder-query-g10",
+)
+
+
+@pytest.fixture
+def assert_no_secrets():
+    """Assert recursively across caller results, exceptions, payloads and logs."""
+    def expand(value):
+        if isinstance(value, str):
+            yield value
+        elif isinstance(value, bytes):
+            yield value.decode("utf-8", errors="replace")
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                yield from expand(key)
+                yield from expand(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                yield from expand(item)
+        elif isinstance(value, BaseException):
+            yield str(value)
+            yield repr(value)
+            yield "".join(traceback.format_exception(type(value), value, value.__traceback__))
+        else:
+            yield repr(value)
+
+    def check(*outputs, caplog=None, secrets=FAKE_SECRETS_VALUES):
+        exits = [(f"output {index}", output) for index, output in enumerate(outputs, 1)]
+        if caplog is not None:
+            for index, record in enumerate(caplog.records, 1):
+                texts = [record.getMessage(), record.exc_text or ""]
+                if record.exc_info:
+                    texts.append("".join(traceback.format_exception(*record.exc_info)))
+                exits.append((f"log record {index}", texts))
+        for label, output in exits:
+            for text in expand(output):
+                for index, secret in enumerate(secrets, 1):
+                    if secret and secret in text:
+                        pytest.fail(f"{label} contains fake credential #{index} [redacted]", pytrace=False)
+
+    return check
+
+
 _TESTS_DIR = Path(__file__).resolve().parent
 if str(_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_DIR))
 
-from hermes_source import candidates, find_hermes_source
+from hermes_source import REAL_HOST_SUBPROCESS, candidates, find_hermes_source, run_pytest_on_real_host
 
 _ORIGINAL_OS_HOME = Path.home().resolve()
 
@@ -100,6 +156,56 @@ def pytest_report_header():
         and not _REAL_HOST_REQUESTED else "double"
     )
     return f"Hermes source: {source}; session uses {mode}"
+
+
+_REAL_HOST_MODULES = {
+    "test_multiplex_isolation.py": ("hermes_constants.py", {
+        "hermes_constants": ("set_hermes_home_override", "reset_hermes_home_override"),
+        "agent.secret_scope": ("set_secret_scope", "reset_secret_scope", "set_multiplex_active", "load_env_file"),
+    }),
+    "test_orchestrate_real_host_context.py": ("model_tools.py", {
+        "model_tools": (),
+        "tools.approval_context": ("_approval_tool_call_id",),
+        "tools.registry": ("registry",),
+        "gateway.session_context": ("set_session_vars", "clear_session_vars"),
+    }),
+}
+
+
+class _RealHostItem(pytest.Item):
+    def runtest(self):
+        marker, _ = _REAL_HOST_MODULES[self.path.name]
+        run_pytest_on_real_host(self.path, marker)
+
+    def reportinfo(self):
+        return self.path, 0, "real Hermes subprocess"
+
+
+class _RealHostModule(pytest.Module):
+    def collect(self):
+        yield _RealHostItem.from_parent(self, name="test_real_host_subprocess")
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_pycollect_makemodule(module_path, parent):
+    if module_path.parent != _TESTS_DIR or module_path.name not in _REAL_HOST_MODULES:
+        return None
+    if os.environ.get(REAL_HOST_SUBPROCESS) == "1":
+        return None
+    _, imports = _REAL_HOST_MODULES[module_path.name]
+    available = not _USING_DOUBLE
+    if available:
+        try:
+            for name, attributes in imports.items():
+                module = importlib.import_module(name)
+                if any(not hasattr(module, attr) for attr in attributes):
+                    available = False
+                    break
+        except ImportError:
+            available = False
+    if not available:
+        return _RealHostModule.from_parent(parent, path=module_path)
+    return None
 
 
 @contextmanager

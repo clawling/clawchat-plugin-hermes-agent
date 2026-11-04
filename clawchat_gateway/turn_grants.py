@@ -51,6 +51,7 @@ class TurnSnapshot:
     downgrade_trigger: str = ""
     input_trigger: str = "unknown_sender"
     plugin_notification: bool = False
+    history_exclude_ids: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -100,9 +101,18 @@ def register_turn(*, account_id: str, chat_id: str, speakers: tuple[str, ...],
                   legacy_owner_tools: bool = False, request_origin: RequestOrigin | None = None,
                   approve_eligible: bool = True, orchestrate_retry: bool = False,
                   trusted_notification: bool = False, trigger: str = "unknown_sender",
-                  unverified_token: str = "", arrival_restriction: InputRestriction | None = None) -> TurnSnapshot:
+                  unverified_token: str = "", arrival_restriction: InputRestriction | None = None,
+                  history_exclude_ids: frozenset[str] = frozenset(),
+                  replay_nonce: str | None = None) -> TurnSnapshot:
     with _lock:
-        nonce = NONCE_PREFIX + secrets.token_urlsafe(24)
+        # Only the adapter's durable dispatch journal supplies this value;
+        # all authorization below is recomputed, never restored from disk.
+        if replay_nonce is not None and (not replay_nonce.startswith(NONCE_PREFIX)
+                                         or len(replay_nonce) > 128):
+            raise ValueError("invalid replay nonce")
+        nonce = replay_nonce or NONCE_PREFIX + secrets.token_urlsafe(24)
+        if nonce in _snapshots:
+            raise ValueError("replay nonce is still active")
         originally_owner_side = bool(owner_side)
         owner_side = bool(owner_side and speakers and all(isinstance(id_, str) and id_.strip() for id_ in speakers))
         if owner_side and ((account_id, session_key) in _unverified_inputs or arrival_restriction):
@@ -152,7 +162,7 @@ def register_turn(*, account_id: str, chat_id: str, speakers: tuple[str, ...],
             and not any(item.plugin_notification for item in all_overlaps),
             ids, owner_side and all(item.owner_side for item in overlaps),
             legacy_owner_tools, request_origin if not owner_side else None, bool(approve_eligible), new_orch,
-            originally_owner_side, "", "", trigger, trusted_notification,
+            originally_owner_side, "", "", trigger, trusted_notification, frozenset(history_exclude_ids),
         )
         if originally_owner_side and not snapshot.owner_side:
             reason = "unverified_input" if notices or arrival_restriction else "overlap"
@@ -210,6 +220,22 @@ def session_key_for_nonce(account_id: str, nonce: str) -> str:
 def active_snapshot(account_id: str, session_key: str) -> TurnSnapshot | None:
     with _lock:
         return _snapshots.get(_active.get((account_id, session_key), ""))
+
+
+def has_non_owner_turn(account_id: str, session_key: str) -> bool:
+    """Inspect every registered, unreleased execution, including older nonces."""
+    with _lock:
+        return any(not snapshot.owner_side and not snapshot.legacy_owner_tools
+                   for nonce in _session_nonces.get((account_id, session_key), ())
+                   if (snapshot := _snapshots.get(nonce)) is not None)
+
+
+def has_notification_turn(account_id: str, session_key: str) -> bool:
+    """Include every live local notification, even legacy owner activation turns."""
+    with _lock:
+        return any(snapshot.plugin_notification
+                   for nonce in _session_nonces.get((account_id, session_key), ())
+                   if (snapshot := _snapshots.get(nonce)) is not None)
 
 
 def _withdraw_management(snapshot: TurnSnapshot) -> TurnSnapshot:

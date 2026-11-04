@@ -76,6 +76,164 @@ live Hermes process; the WebSocket transport
 (`clawchat_gateway/connection.py`) is the main piece that needs a fake
 or recorded server.
 
+## State files and the write gate
+
+`history_budget.py` and `rolling_summary.py` provide the ClawChat desktop agent's
+history estimates, cuts, blocks and immutable summaries. `history_maintenance.py`
+connects them to post-answer maintenance and pre-dispatch user-context injection.
+The adapter contains only dispatch, lifecycle and output-suppression wiring.
+Budget work requires Hermes >= v0.14.0 and connect-time capability checks; the
+private bound async `_handle_reset_command(event)` signature is pinned by an AST
+test against the local host, with a verified range through v0.22.5 canary.
+Missing capabilities or the off switch retain legacy notes and host compression.
+A socket close cancels maintenance; READY creates a new instance after reconnect
+or account replacement, fencing the previous account and generation.
+Adapter input queues and active dispatches retain ownership across maintenance
+replacement; journal recovery stops at inputs owned by another dispatch or still
+queued, resuming after delivery, ownership release or queue removal to preserve order.
+Enqueueing a group input transfers task ownership to the coalescer before any
+await, so a concurrent busy waiter can claim and dispatch the entire batch.
+The reset result is verified through freshly read persistent routing, never peek.
+An independent five-minute watchdog releases journaled inbound even while a
+shielded reset is unfinished. Private reset output uses a task-local operation
+identity, so released real answers are not muted. Conversation overrides (group wildcard
+then exact group, or exact DM), account values and factory defaults resolve in
+that order; invalid settings use factory defaults. Durations use the desktop
+grammar and minute rounding, clamped to 1h–30d. Only idle resets accept off.
+Portable vectors are in `tests/fixtures/history_budget_vectors.json`; ISO dates
+use Dart's grammar and overflow normalization within Python's years 1–9999.
+
+Migration 17 adds history state with `BEGIN IMMEDIATE` generation CAS (first
+insert advances 0 to 1), and held inbound rows with caller-supplied ledger `seq`.
+JSON pending/payload values are decoded on read. Inbound claim and journal insert
+share one immediate transaction. History state and the held journal use the
+adapter account identity; the pre-existing message ledger retains its `default`
+account namespace. The journal payload adds `frame`, an immutable `snapshot`,
+`batch_primary` and optional successful `terminal` fields; older readers ignore
+these additions. Snapshots include the host timestamp, nonce and exact event
+content for same-message retry; grants are recomputed by normal authorization.
+Batch snapshot publication is transactional. Only the actual host handoff marks
+a dispatch complete (enqueueing a coalesced group does not). Snapshot and terminal
+payload merges read and write inside one immediate transaction. A batch handoff
+finishes all of its journal members in one transaction. Budget-enabled groups
+configured for per-speaker sessions use separate coalescer batches per speaker,
+so one host event cannot cross canonical session ownership.
+
+Migration 18 adds `clawchat_history_positions` with an AUTOINCREMENT sequence,
+backfilled in existing ledger order and populated by an insert trigger (including
+inserts by older plugin versions). Positions retain only identity/routing
+metadata after recall, never message text. `summary_through_seq` and
+`boundary_seq` accompany state IDs; pending JSON also carries fixed `cut_seq`.
+Reads resolve old ID-only markers through the retained position mapping and
+handle older writers that advanced an ID without updating its additive sequence
+field. An unknown historical marker stops maintenance instead of reopening a
+range or expanding a cut. Older readers ignore the additive table and fields.
+
+Tombstones are checked under an immediate transaction before journal replay and
+again after asynchronous preparation, before host handoff. Recalled held or
+dispatching members finish without delivery. A recall invalidates a saved batch
+snapshot and returns survivors to held for fresh parsing and authorization;
+retracted batch content is never restored from the old snapshot. Recall-read
+errors stop the attempt. Adapter-only terminal decisions, including skill-update
+consent, settle the journal; actual permission queues and maintenance deferrals
+remain recoverable. An in-flight journal head stops a drain from overtaking it.
+With reliable delivery enabled, an unavailable or failed recall write leaves its
+receipt pending for retry; only a durable tombstone and purge complete processing.
+The first post-reset input starts renewed summary inline and wakes later held
+work only after its own handoff or terminal decision, including coalescer inputs.
+
+Pending JSON records `why`, fixed `cut_id`, `boundary`, target `host_session`,
+`stage` (summary/reset), and whether the optional notes already ran. Each published
+block advances state with CAS; CAS loss discards late results. Non-renewed passes
+process at most three blocks. Confirmed user renewal folds the entire interval
+before the next dispatch, bounded by five minutes. Retry counters survive restart.
+Reset/control journal payloads add `control: true`. Prompt rendering proves
+that the host has received the original command; a normally returned command
+handler also retires it even if `_gateway_accepted` remains false. Recovery
+retires uncertain dispatching resets and confirmations instead of sending them
+again, and recognizes ID-only legacy controls by their frame (or the preceding
+reset for a plain confirmation). That inference applies only when the payload
+has no `control` marker; explicit `control: false` preserves ordinary input even
+when its text resembles confirmation. A never-attempted held control can have its
+first handoff. Ordinary message recovery remains unchanged.
+
+Idle clocks use `activity_entries`, separately from the summary interval.
+Inbound `clawchat_history_control` and outbound `clawchat_history_activity`
+are local ledger metadata, never wire fields. Answer provenance follows the
+plugin-owned source nonce through host task creation and restored event objects;
+work resumed after restart can recover provenance from its human ledger input.
+Interim/process notices, synthetic rounds and command receipts are excluded.
+Completion closes the marker so late background notices cannot advance activity.
+Old outbound rows count only with a reply anchor to a real conversational input;
+untagged, unanchored notices cannot reset idle. Timing prefers valid original
+`emitted_at`, then `timestamp`, then ledger `created_at`, capturing both previous
+activity and the current batch's first input before the answer. Older versions
+ignore these additive metadata fields.
+
+First-request confirmation is correlated by source nonce and works without usage;
+`open_context` is set only when prompt tokens are available. `open_history`
+counts both injected recent originals and the complete triggering input batch,
+with each message counted once; snapshot replay and direct binding use the same
+baseline. Journal helpers require storage and host routing capabilities, separately
+from budget maintenance availability. Missing routing keeps them as no-ops;
+loss of summary capability still drains previously accepted inputs in order through
+ordinary authorization and delivery. New inputs then use the legacy path without
+new journal claims. Summary files live
+under the ledger's data directory in `summaries/<profile>/<account>/<escaped-key>`
+(the default profile omits its prefix). They are outside agent memory/workspace.
+Maintenance logs record no message bodies or raw exceptions.
+
+Journal replays preserve the original payload/state on duplicate claims.
+Pending work with an available journaled source resumes at startup; recovery
+is scheduled after READY without blocking the transport receive loop. Message
+backoff remains in force across restarts. Explicit plugin policy decisions to
+produce no reply finish the journal as terminal decisions. Held reads include held and dispatching; purging uses dispatched
+creation time. Errors propagate. Older versions ignore the additive tables.
+Summary roots include any caller profile prefix, then escaped account/conversation
+segments. A directory lock protects existence checks and atomic publication;
+state CAS makes a ref authoritative. Cleanup protects caller-supplied current
+and previous refs, deleting other versions only after one hour. Oversized entries
+reserve room for their retrieval marker; tiny caps can be smaller than the marker.
+
+State files use `clawchat_gateway/atomic_file.py`, the repository's single
+implementation of synced, atomic file publication. It preserves existing
+permission bits by default and creates new files with private permissions.
+Create-only seed publication and directory installation retain their specialized
+publish steps and use the shared directory-sync helper.
+
+Memory and managed skill manifest/publication operations hold
+`state_lock.state_file_lock` for the complete mutation. Plugin `.env`
+read-modify-write operations use `state_lock.env_file_lock`, holding
+`<HERMES_HOME>/.clawchat-env.lock` separately from Hermes' own `.env.lock`.
+Locks are reentrant within a thread and serialize cooperating threads and processes;
+timeouts or unavailable locking fail closed by raising `StateLockError` before mutation.
+Credential compare-and-write steps (logout clears, bootstrap token rotation) check the
+persisted `.env` pair and write it inside one lock, so a concurrent re-pair is never
+overwritten. Managed skill downloads happen before taking the manifest lock; state is
+re-read under the lock before publishing.
+Hermes' `save_env_value` acquires its own lock inside the plugin lock: the order
+is always plugin outside, Hermes inside. Hermes never acquires the plugin lock.
+Raw writes (the allow-all default) also acquire Hermes' `.env` lock when available;
+a host lock timeout fails closed before reading or writing the file.
+
+`tests/check_state_writes.py` scans production filesystem write calls.
+`tests/test_state_write_gate.py` runs this gate. New writes either use the atomic
+helper or have a counted `ALLOWLIST` entry with a B/C classification and a
+specific reason. Import aliases are outside the static scanner's coverage.
+
+Credential exit tests use `assert_no_secrets` from `tests/conftest.py` to check
+caller results, exceptions, logs and report payloads against obvious fake values.
+Redact credentials where values first become display text. Plugin-load and held-input
+dispatch errors, liveware subprocess failures and supervisor diagnostics use the
+shared display redactor without raw exception tracebacks. Debug snapshots and
+tool audits pass through `redact_display_data` before being written to disk;
+message bodies are omitted from routing logs (only their lengths are recorded).
+Credential values with an unterminated opening quote (including one level of
+JSON escaping) are masked from the value start through the end of that line,
+stopping before CR or LF.
+Parse errors that carry a source position (YAML) are shown as error class and
+line/column only, never the quoted source.
+
 ## Live debugging against a Hermes process
 
 The supported development loop is:
@@ -143,10 +301,13 @@ contract first, then this subset and the peer client implementations.
    reactions/recall/system messages, fragments, legacy replay, heartbeat/errors
    and media. Keep §9.2, §9.7, §11.4, §11.6 and §14.4 as stubs; §11.7 keeps only
    legacy dedup plus defensive truncation, §16 has no examples, §17 is Hermes-only.
+   Exception: retain the Hermes: optional reliable_delivery_v2 subsection in §11.7.
    Do not restore full unsupported-frame semantics elsewhere in the guide.
 5. Compare `connection.py:build_connect_capabilities` with the OpenClaw peer,
    honoring its “keep in sync with OpenClaw” comment; an upstream feature does
    not authorize adding its capability to either plugin.
+   `reliable_delivery_v2` is an approved Hermes-only, opt-in exception;
+   OpenClaw does not declare it.
 6. Diff heading text, resolve all § references and verify constants/error names
    against both implementations. Update provenance without exposing private paths.
 
@@ -175,8 +336,14 @@ session uses real Hermes or the double; the session stays on the double unless
 `HERMES_REAL_HOST=1` (most tests are written against it). Exception: when Hermes
 already imports from `PYTHONPATH` / `sys.path`, `tests/conftest.py` uses the real
 host even without `HERMES_REAL_HOST=1`.
-`tests/test_multiplex_isolation.py` is the exception: it needs a Hermes
-checkout on `PYTHONPATH` and runs on its own
+When the session cannot use the required real-host imports, multiplex isolation
+and orchestrate context checks run their modules in subprocesses using the shared
+source lookup. The real compaction formula assertion and environment-lock check
+also use subprocesses when unavailable in the session. A missing checkout skips
+with searched paths, or fails with `HERMES_SOURCE_REQUIRED=1`; a pytest subprocess
+must report at least one passed test, and nonzero exits or timeouts fail the check.
+These subprocesses keep real imports separate from the session's doubles and do
+not proxy again. Direct runs with Hermes on `PYTHONPATH` remain supported
 ([multiplex-profile-isolation.md](multiplex-profile-isolation.md)).
 Run with a source present before a release. The scan also runs each pinned older Hermes scanner, so the checkout
 needs those tags (`git fetch --tags`). Hermes v0.20.3–v0.20.6 are an
@@ -347,3 +514,19 @@ reaches new installs at once. Investigate whether `hermes plugins install`
 can install a tag/ref (for example, an `@<tag>` ref), so installs could pin
 to the release tag and `main` merges would stop being publications. Until
 then, the exception above applies.
+
+
+Focused offline history validation:
+
+```sh
+nice -n 10 uv run --offline --extra test pytest -q tests/test_history_maintenance.py
+python3 -m py_compile clawchat_gateway/history_maintenance.py clawchat_gateway/adapter.py
+```
+
+The fake-host tests cover publication/reset ordering, failure/CAS/backoff,
+confirmed renewal, external rotation, independent deadlines, journal replay,
+nonce confirmation without usage, processing/queue idle guards, adapter injection
+and the local private-host signature. Real model context capacity, third-party
+reset hook side effects, and prompt-token median/P90 and compaction-success rates
+require a separately authorized development end-to-end run. Unit tests cannot
+supply those measurements.

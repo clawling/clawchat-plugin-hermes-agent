@@ -50,6 +50,7 @@ python "${HERMES_HOME:-$HOME/.hermes}/plugins/clawchat/clawchat_cli.py" activate
 `hermes clawchat status` prints JSON with a short install ID, superseded state
 (time, winner version, owner notice outcome), and the last lock holder record. Lock state is available for in-process gateways;
 a separate CLI process reports `unknown` because the record can outlive its holder.
+JSON also includes [`compression`](../configuration.md#effective-compression-point) settings and provenance; when a host cap overrides an explicitly set plugin cap, stderr prints one warning line.
 `hermes clawchat reclaim` clears superseded state; a running gateway reconnects
 within 30 seconds, otherwise it connects on next startup. `/clawchat-reclaim` takes
 no arguments and also immediately wakes this process's waiting connections.

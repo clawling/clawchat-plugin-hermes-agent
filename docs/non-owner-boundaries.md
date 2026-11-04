@@ -5,7 +5,7 @@ For implementers and auditors: trace non-owner tool enforcement, execution origi
 ## Host tools in turns the owner did not start
 
 Non-owner turns — a friend's direct chat or a group batch with non-owner
-speakers — lose these host toolsets by default (rules can restore authorized
+speakers — cannot execute these host toolsets by default (rules can authorize
 tools; see [tool grants](tool-grants.md#per-person-tool-grants)). A trusted owner-only batch keeps ordinary host tools even
 in a group; grant management remains owner-direct-chat-only. The default
 restricted toolsets are:
@@ -25,9 +25,8 @@ identify the caller there, so it blocks worker/subscriber-routing mutations
 even with a grant (see the [audited route list](#cross-session-execution-routes)).
 For the same reason the hook also blocks Bot Mode's `message_agent` (the
 receiving agent runs with its own full tools).
-Authority is resolved for the trusted speakers in each batch. Restoring
-toolsets can rebuild Hermes' cached agent; the hook still checks concrete
-calls. See [Local attachments](#local-attachments) for file delivery authority;
+Authority is resolved for the trusted speakers in each batch. Guarded group
+sessions keep one schema across speakers; the hook checks concrete calls. See [Local attachments](#local-attachments) for file delivery authority;
 other plugin local-path restrictions remain. In non-owner turns, HTTP(S) attachments are fetched only from globally
 routable unicast addresses. Connections use the checked IP directly, without
 proxies, and each redirect is resolved and checked again. In non-owner ClawChat
@@ -54,25 +53,47 @@ direct chat reads every note on those hosts too.
 
 Two layers (`clawchat_gateway/host_tools_guard.py`):
 
-- the adapter's per-source toolset override (`toolsets_for_source`, Hermes
-  0.20.1+): without grants, `public-tools` or the `approve` opt-in, these
-  restricted tools are not in the turn's schema at all. Grant management tools use a separate
-  `clawchat-grants` toolset, removed from non-owner turns under both policies.
-  MCP needs Hermes'
-  `no_mcp` sentinel in that list: a list that names no MCP server makes
-  Hermes add back every enabled one. On an older host the plugin logs a
-  warning at load and relies on the second layer;
-- a `pre_tool_call` hook that applies per-person grants first, then blocks
-  ungranted restricted calls still reaching dispatch (or escalates them under
-  `approve`). MCP tools are recognised by their host toolset
-  (`mcp-<server>`), else by the `mcp_` name prefix (`mcp_<server>_<tool>`
-  before Hermes 0.18.1, `mcp__<server>__<tool>` since); hosted connector tools
-  by their `connectors__` prefix (the `tool_call` bridge hands the hook the
-  underlying tool's name).
+- the adapter's toolset override (`toolsets_for_source`) keeps a sorted,
+  session-wide platform list in groups and the activation owner's DM. With
+  grants enabled it includes `clawchat-requests` on every turn, so a guest can
+  request access without changing the next owner's schema. Catalog construction
+  also preserves the full model schema; visibility grants no execution authority.
+  This fixes agent and prompt-cache rebuilds when speakers or notifications alternate;
+- `pre_tool_call` checks the bound turn's identity, grants, explicit denies,
+  owner-only tools, arguments and routing at dispatch. It also preserves exclusions
+  of ordinary members of mixed restricted toolsets. Unknown memory-provider tools,
+  catalog failures and hook bookkeeping errors fail closed. Approve requires the
+  existing human gate; missing support blocks the call.
+
+The stable path requires successful registration of both `pre_tool_call` and
+`pre_llm_call`, the toolset override, `MessageEvent.channel_context`, explicit
+`session_id`/`turn_id` parameters in the host directive dispatcher, and trusted
+session ContextVars for platform, chat ID/type and message nonce. Detection is
+by capability, not version. Missing or failed probes retain the original narrowing
+and catalog filter. Non-owner DMs retain those filters on every host.
+Legacy narrowing removes restricted and grant-management toolsets and adds
+`no_mcp`: omitting MCP server names alone makes Hermes add enabled servers back.
+MCP calls are recognized by host toolset (`mcp-<server>`) or `mcp_` prefix;
+connector calls by `connectors__` prefix, including unpacked `tool_call` calls.
+
+The existing `non-owner-turn` section in the per-turn `channel_context` carries
+one deterministic line: owner turns may use ordinary owner tools; other turns
+may use public defaults and current grants only, with owner-only tools blocked.
+Authorization still requires verified ownership. This line never enters system.
+Existing grant and argument-limit notices remain in that same per-turn section.
+Plugin synthetic DMs reuse the real peer's last session names (cached metadata
+before the first real turn); the notification text and sender attribution remain.
+Platform/configuration or installed-tool changes can still rebuild the host catalog.
+
+`chat_history_search` and `chat_history_read` are public plugin tools, like
+`clawchat_memory_search`; their own scope check reads only the current
+conversation's original messages in the local ledger. They do not expose other
+chats or accounts. Hermes' cross-conversation `session_search` remains guarded.
+See the [history tool reference](reference/tools.md#current-conversation-history).
 
 Without an applicable per-person grant, the hook also limits a few tools
 those turns keep, by what a call asks for. Legacy toolset narrowing can leave
-these tools in the schema, while the current catalog filter can omit them;
+these tools in the schema, while the legacy catalog filter can omit them;
 the channel prompt carries a line listing the limits:
 
 - `skill_manage` is blocked: a skill it creates or edits in place (bundled and
@@ -100,7 +121,8 @@ cannot be loaded or lists no tools, a turn layer 1 does not narrow (no override,
 or `approve`) blocks ungranted calls to tools the host's tool registry does not know, and the
 plugin logs it.
 
-What each Hermes version gets (block columns describe calls without an
+Legacy schema behavior by Hermes version (stable-capable group/owner-DM
+sessions instead use the list above; block columns describe calls without an
 applicable per-person grant). Per-person entries also require actual
 `pre_llm_call` support and matching execution ids; a version alone is not proof:
 
@@ -139,7 +161,7 @@ every MCP server back), and a hook that cannot place the turn blocks the call.
 ## Owner-only tools
 
 `clawchat_widget_send` is also owner-only and excluded from public overrides,
-`all` and exact grants. Its catalog, hook and handler use the same matching
+`all` and exact grants. Its search catalog, hook and handler use the same matching
 ClawChat snapshot checks, but require `owner_side` or `legacy_owner_tools`;
 orchestration `approved_retry` authority alone is insufficient. Existing host
 internal turns in the owner DM qualify. Current scheduled heartbeats are
@@ -148,7 +170,7 @@ ClawChat context remain blocked. It sends only to the effective owner's resolved
 `purpose`, and leaves normal follow-up replies enabled. See
 [widget tools](reference/tools.md#owner-home-screen-widgets).
 
-The twelve `clawchat_orchestrate_*` tools are owner-only: catalog filtering,
+The twelve `clawchat_orchestrate_*` tools are owner-only: search catalog filtering,
 `pre_tool_call` and a handler check each enforce a matching ClawChat turn
 snapshot. Owner-only speaker batches (including owner batches in groups),
 trusted owner actions and orchestration `approved_retry` receipts qualify;
@@ -230,6 +252,26 @@ Queued follow-ups prefer the latest live unbound non-notification nonce in the
 same plugin session and chat; only when none exists do they choose a notification.
 Missing candidates fail closed. Each execution and nonce bind once.
 
+A real owner's ordinary private-chat input waits behind any registered,
+unreleased local notification in the same grant session in every busy input
+mode, including legacy owner activation bootstrap. Other non-owner executions
+cause a hold only in `steer` mode or for `/steer` input. The mode follows
+`HERMES_GATEWAY_BUSY_INPUT_MODE`, then `display.busy_input_mode`, defaulting to
+`interrupt`. Approval replies and control commands pass immediately; group
+input keeps its existing path.
+
+Held inputs retain FIFO order, even across mode changes. They dispatch with
+fresh nonces after release or proven session idle, retaining owner tools when
+no third-party restrictions remain. Redispatch rechecks after media download,
+polling session busy state and live non-owner or notification turns. The deadline
+stays 120 seconds from enqueue, including media preparation. After it expires,
+prepared input dispatches with existing overlap and unverified-input restrictions,
+without releasing the running nonce.
+
+The hold logs `owner_input_held reason=active_notification_turn` for a live
+notification, otherwise `owner_input_held reason=active_notice_turn`, without
+message text.
+
 Downgrades emit one INFO line, without message text:
 `owner_downgrade reason=<unverified_input|revoke|overlap> trigger=<input kind>`;
 a notice withdrawing grant management logs `reason=management trigger=plugin_notice`. Blocked calls in a bound
@@ -246,13 +288,14 @@ Grant and request confirmation cards display resolved names without user IDs.
 With grants enabled, a bound non-owner turn can use `tool_search` and
 `tool_describe` only when the grants catalog filter is installed and the
 snapshot read by that filter matches the bound grants and non-owner speakers,
-including the chat ID. The host reads this authorized catalog with
+including the chat ID. Search/describe reads this authorized catalog with
 `skip_tool_search_assembly=True`; it includes `clawchat_tool_request` even under
 `all:deny` and excludes ungranted, denied and expired tools. In guest turns the
 plugin neutralizes the host's remote connector search/describe, registry
 fallback and list of declared but unavailable sources, so the bridges only see the filtered catalog, including after an
-authorization expires between checks and dispatch. Without a complete guard, guest schemas skip search assembly, so no catalog
-listing or source summary reaches the model. Bridges stay `not-available`
+authorization expires between checks and dispatch. Without a complete search guard,
+legacy guest schemas skip search assembly; stable session schemas retain
+owner-visible summaries. Bridges stay `not-available`
 when that guard cannot be installed or verified, filtering is missing, or
 snapshots mismatch. `tool_describe` returns the same refusal as a direct call
 for registered names hidden in this turn or unavailable on the host. Owner turns
@@ -425,10 +468,11 @@ Other host limits:
 - Before Hermes 0.20.1, management tools can remain visible to non-owner turns,
   but execution refuses them. Toolset restoration can expose several members
   on older hosts; the hook still checks each concrete tool. Where supported,
-  the catalog filter narrows schemas and search results after host caching
-  and before search assembly.
-- Granted group batches can rebuild the host agent/toolset cache. Other
-  messages cannot interject into a held granted turn.
+  the catalog filter narrows legacy schemas and search results after host caching
+  and before search assembly. Stable model schemas keep the session union.
+- Legacy granted group batches can rebuild the host agent/toolset cache.
+  Stable-capable groups avoid speaker-dependent rebuilds. Other messages cannot
+  interject into a held granted turn.
 
 ## Guest access requests and resumption
 
@@ -534,7 +578,9 @@ direct chat, a same-chat owner-side parent and membership of the called tool
 in that whitelist, and always refuse the four authorization tools. If an older
 host or an unavailable mirror supplies no whitelist in the hook context, the fork
 remains denied; same-thread hooks can still read the host's thread-local value.
-When the host review fork builds its whitelist without a live snapshot, the
+Stable model schemas remain session-wide for review forks too; the execution
+checks above still apply. Under legacy schema filtering, when the host review
+fork builds its whitelist without a live snapshot, the
 catalog retains ordinary owner tools, including `skill_manage`, only on a thread
 named exactly `bg-review`, with `enabled_toolsets` supplied as a nonempty list
 or tuple containing only `memory` and/or `skills`, and with the same
@@ -551,105 +597,12 @@ similar owner tools again (they are refused); no session gains access.
 
 ## Inbound media downloads
 
-Inbound downloads allow HTTPS only; `media_allow_http` explicitly enables HTTP.
-Relative URLs use the media base derived from the [Media settings](configuration.md#media) and undergo the
-same checks. Non-HTTP(S) schemes are rejected before joining a URL to its base.
-For a direct connection, each hop resolves the hostname once, rejects the
-request if **any** resolved address is not public unicast, and connects to a validated IP while retaining
-the hostname for Host and TLS verification. Localhost names are also rejected.
-Connection failures try the remaining distinct validated IPs in order without
-resolving again. TCP connection and TLS handshake each use a timeout capped by
-the remaining attachment deadline. At most four inbound DNS lookups may remain
-pending; further lookups are rejected until a slot becomes available.
-Every redirect chooses its route again and repeats the applicable checks, with
-at most five redirects; HTTPS-to-HTTP redirects require the HTTP opt-in too.
-Backslashes in redirect destinations are
-normalized before resolving and validating their target host.
-
-`media_proxy_mode` controls environment proxies on every hop:
-
-- `auto` (default): use the target scheme's proxy from Python's
-  `urllib.request.getproxies()` (including `HTTP_PROXY` / `HTTPS_PROXY`). Without
-  a proxy for that scheme, connect directly with full address validation.
-  Unsupported proxy URLs, including `socks5://`, fall back to direct connections
-  with a warning once per process; the warning omits the proxy URL.
-- `on`: require a supported proxy for that scheme. A missing or unsupported
-  proxy rejects the download.
-- `off`: always connect directly with full DNS / public-address checks and IP
-  pinning, ignoring environment proxies.
-
-In `auto` and `on`, a hostname matched by `urllib.request.proxy_bypass(host)`
-(`no_proxy` / `NO_PROXY`) takes the direct path with full address validation.
-This also applies after redirects. Only `http://` proxy URLs are supported:
-HTTPS targets use CONNECT followed by TLS with target hostname verification;
-HTTP targets use an absolute-URI GET and still require `media_allow_http`.
-The proxy itself may have a private address.
-
-**Residual risk:** when `auto` (default) or `on` uses a proxy, target hostname
-DNS resolution and private-network checks are delegated to that proxy. The
-plugin rejects private, loopback and link-local IP literals before contacting
-the proxy, and rejects localhost names, unless `media_allow_private_network`
-is enabled. It does not resolve other target hostnames locally. If the proxy
-can access private networks, the plugin cannot prevent a request whose
-hostname resolves to an internal address. Set `media_proxy_mode: "off"` for
-strict local destination validation (and leave `media_allow_private_network`
-disabled).
-
-Downloads **never attach Authorization** to the target, even for URLs on the
-configured base origin: media URLs must be public or presigned GET URLs.
-Proxy URL userinfo is sent only as Basic `Proxy-Authorization` to the proxy
-(on CONNECT for HTTPS), and never logged or sent through the tunnel.
-
-The default limit is 100 MiB per attachment. An oversized Content-Length is
-rejected immediately; bodies stream in 64 KiB chunks with the same byte limit.
-The socket timeout defaults to 30 seconds and the total attachment deadline to
-300 seconds. Temporary `.part` files are removed on failure and renamed only
-after a complete download. A rejected or failed attachment is logged without
-URL userinfo, queries or fragments and skipped; remaining attachments and the
-text message continue normally. Environment values take precedence over the
-matching extra keys for all six inbound download settings.
+See [inbound media downloads](media-boundaries.md#inbound-media-downloads).
 
 ## `media_local_roots` no longer scopes outbound delivery
 
-`media_local_roots` used to be an allowlist of directories a local file could be
-uploaded from. It is still parsed and still threaded through to
-`media_runtime.ensure_allowed_local_path`, but that function accepts the value
-for backward compatibility only and **does not restrict delivery** any more —
-eligible local files may be sent from any directory.
-
-What is actually enforced is a fixed **credential / system-path denylist** in
-`clawchat_gateway/media_runtime.py`, applied after symlinks are resolved so it
-cannot be bypassed via a symlink:
-
-- absolute prefixes `/etc`, `/proc`, `/sys`, `/dev`, `/root`;
-- paths under the user's home: `.ssh`, `.aws`, `.gnupg`, `.kube`,
-  `.config/gcloud`, `.hermes/.env`;
-- each resolved Hermes home and its named profiles: the `clawchat/` plugin data
-  directory, `.env`, `config.yaml`, `auth.json`, and plugin database files
-  (including SQLite sidecars and existing stores at custom paths);
-- the Windows equivalents resolved from the environment (`%SystemRoot%` /
-  `%WINDIR%`, and the Credential Manager / DPAPI / Vault directories under
-  `%APPDATA%` and `%LOCALAPPDATA%`).
-
-A path that matches the denylist is rejected with a neutral `ValueError` in all
-turns; ordinary local files remain available in the owner's direct chat or on a
-local operator surface, regardless of `media_local_roots`.
+See [outbound path restrictions](media-boundaries.md#media_local_roots-no-longer-scopes-outbound-delivery).
 
 ## Known limits of the attachment policy
 
-The plugin judges attachments by the ClawChat turn they come from. Where no
-ClawChat turn is in play, it does not restrict further:
-
-- A delivery made with no session context and no trusted live turn nonce (Hermes sends a turn's reply after
-  clearing the turn's context; cron delivery) may carry attachments into the
-  owner's direct chat, local files and http(s) URLs alike, fetched the ordinary
-  way. The only recipient there is the owner. Into any other chat it carries
-  no local file. A trusted live reply nonce can retain only that turn's Files
-  or artifact permission; a released nonce cannot recover it.
-- A `send_message` call from another platform's own session, or with no session
-  context, to a non-ClawChat target is left to Hermes and that platform: the
-  plugin does not decide what another platform's turns may send.
-- Hermes itself checks that a `MEDIA:` path exists before the plugin sees the
-  call. The plugin applies its attachment policy afterwards; for a refused
-  attachment nothing is read or sent, but that existence check has already happened.
-
+See [attachment policy limits](media-boundaries.md#known-limits-of-the-attachment-policy).

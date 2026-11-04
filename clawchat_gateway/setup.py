@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from clawchat_gateway.activate import activate_and_maybe_restart
-from clawchat_gateway.api_client import DEFAULT_BASE_URL, ClawChatApiError, format_connect_guidance
+from clawchat_gateway.api_client import DEFAULT_BASE_URL, ClawChatApiError, format_connect_guidance, redact_display_text
 
 
 def _prompt(default: str, label: str) -> str:
@@ -33,13 +33,13 @@ def setup_clawchat_platform() -> None:
         # Print the server's next_action/hint (none from older servers), then
         # fail exactly as before.
         for line in format_connect_guidance(exc):
-            print(line)
+            print(redact_display_text(line))
         raise
 
     print("ClawChat activation complete.")
     print(f"  User ID: {result.get('user_id')}")
-    print(f"  Base URL: {result.get('base_url')}")
-    print(f"  WebSocket URL: {result.get('websocket_url')}")
+    print(f"  Base URL: {redact_display_text(result.get('base_url'))}")
+    print(f"  WebSocket URL: {redact_display_text(result.get('websocket_url'))}")
     print(
         "Hermes gateway setup will handle the final gateway service step "
         "after you finish."

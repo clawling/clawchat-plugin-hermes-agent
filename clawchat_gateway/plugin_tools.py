@@ -4,6 +4,7 @@ import json
 import logging
 import time
 
+from clawchat_gateway.api_client import redact_display_data, redact_display_text
 from clawchat_gateway.storage import get_clawchat_store
 
 logger = logging.getLogger(__name__)
@@ -82,7 +83,7 @@ async def _recorded_tool_call(tool_name: str, args: dict, account_id: str | None
             args=safe_args,
             account_id=account_id,
             result=None,
-            error=str(exc),
+            error=redact_display_text(exc),
             started_at=started,
             ended_at=ended,
         )
@@ -355,10 +356,10 @@ async def handle_clawchat_mention_message(args, **kw):
     text = args.get("text") if isinstance(args.get("text"), str) else None
     logger.warning(
         "clawchat_mention_message start task_id=%s chat_id=%s chat_type=%s mentions=%s text_len=%d",
-        task_id,
-        args.get("chatId") or "",
-        args.get("chatType") or "group",
-        mention_user_ids,
+        redact_display_text(task_id),
+        redact_display_text(args.get("chatId") or ""),
+        redact_display_text(args.get("chatType") or "group"),
+        redact_display_data(mention_user_ids),
         len(text or ""),
     )
     from clawchat_gateway import tools
@@ -377,11 +378,11 @@ async def handle_clawchat_mention_message(args, **kw):
     )
     logger.warning(
         "clawchat_mention_message done task_id=%s sent=%s message_id=%s error=%s mentions=%s",
-        task_id,
-        result.get("sent") if isinstance(result, dict) else None,
-        result.get("messageId") if isinstance(result, dict) else None,
-        result.get("error") if isinstance(result, dict) else None,
-        (result.get("mentions") or mention_user_ids) if isinstance(result, dict) else mention_user_ids,
+        redact_display_text(task_id),
+        redact_display_data(result.get("sent") if isinstance(result, dict) else None),
+        redact_display_text(result.get("messageId") if isinstance(result, dict) else None),
+        redact_display_text(result.get("error") if isinstance(result, dict) else None),
+        redact_display_data((result.get("mentions") or mention_user_ids) if isinstance(result, dict) else mention_user_ids),
     )
     return _tool_result(result)
 
@@ -393,7 +394,7 @@ async def handle_clawchat_widget_send(args, **kw):
     widget = args.get("widget")
     doc = widget if isinstance(widget, str) else ""
     checked = check_widget_for_send(doc) if doc.strip() else {}
-    logger.info("clawchat_widget_send id=%r bytes=%d", checked.get("id"), len(doc.encode("utf-8")))
+    logger.info("clawchat_widget_send id=%r bytes=%d", redact_display_text(checked.get("id")), len(doc.encode("utf-8")))
     return _tool_result(await tools.widget_send(widget))
 
 
@@ -401,8 +402,8 @@ async def handle_clawchat_send_file(args, **kw):
     task_id = kw.get("task_id") or "default"
     logger.info(
         "clawchat_send_file start task_id=%s chat_id=%s as_document=%s",
-        task_id,
-        args.get("chat_id") or "",
+        redact_display_text(task_id),
+        redact_display_text(args.get("chat_id") or ""),
         args.get("as_document") is True,
     )
     from clawchat_gateway import tools
@@ -420,10 +421,10 @@ async def handle_clawchat_send_file(args, **kw):
     )
     logger.info(
         "clawchat_send_file done task_id=%s sent=%s message_id=%s error=%s",
-        task_id,
-        result.get("sent") if isinstance(result, dict) else None,
-        result.get("messageId") if isinstance(result, dict) else None,
-        result.get("error") if isinstance(result, dict) else None,
+        redact_display_text(task_id),
+        redact_display_data(result.get("sent") if isinstance(result, dict) else None),
+        redact_display_text(result.get("messageId") if isinstance(result, dict) else None),
+        redact_display_text(result.get("error") if isinstance(result, dict) else None),
     )
     return _tool_result(result)
 
@@ -432,10 +433,10 @@ async def handle_clawchat_react_message(args, **kw):
     task_id = kw.get("task_id") or "default"
     logger.info(
         "clawchat_react_message start task_id=%s chat_id=%s target=%s emoji=%s remove=%s",
-        task_id,
-        args.get("chatId") or "",
-        args.get("targetMessageId") or "",
-        args.get("emoji") or "",
+        redact_display_text(task_id),
+        redact_display_text(args.get("chatId") or ""),
+        redact_display_text(args.get("targetMessageId") or ""),
+        redact_display_text(args.get("emoji") or ""),
         bool(args.get("remove")),
     )
     from clawchat_gateway import tools
@@ -451,7 +452,7 @@ async def handle_clawchat_react_message(args, **kw):
             removed=bool(args.get("remove")),
         ),
     )
-    logger.info("clawchat_react_message done task_id=%s result=%s", task_id, result)
+    logger.info("clawchat_react_message done task_id=%s result=%s", redact_display_text(task_id), redact_display_data(result))
     return _tool_result(result)
 
 
@@ -598,6 +599,29 @@ async def handle_clawchat_memory_read(args, **kw):
     )
     logger.info("clawchat_memory_read done task_id=%s", task_id)
     return _tool_result(result)
+
+
+async def _handle_chat_history(tool_name, args, **kw):
+    from clawchat_gateway.chat_history import HISTORY_UNAVAILABLE, history_for_session
+
+    async def run():
+        try:
+            return history_for_session(tool_name, args, session_id=kw.get("session_id", ""),
+                                       turn_id=kw.get("turn_id", ""))
+        except ValueError as exc:
+            return _tool_result({"error": redact_display_text(str(exc))})
+        except Exception:  # noqa: BLE001 - database/host errors reveal no local details
+            return _tool_result({"error": HISTORY_UNAVAILABLE})
+
+    return await _recorded_tool_call(tool_name, args, "default", run)
+
+
+async def handle_chat_history_search(args, **kw):
+    return await _handle_chat_history("chat_history_search", args, **kw)
+
+
+async def handle_chat_history_read(args, **kw):
+    return await _handle_chat_history("chat_history_read", args, **kw)
 
 
 async def handle_clawchat_memory_search(args, **kw):
@@ -882,6 +906,13 @@ async def handle_clawchat_tool_grants_list(args, **kw):
     return _tool_result(await manage_tool_grants("list", args, session_id=kw.get("session_id", "")))
 
 def register_tools(ctx) -> None:
+    from clawchat_gateway.chat_history import CHAT_HISTORY_TOOLS
+
+    history_handlers = (handle_chat_history_search, handle_chat_history_read)
+    for schema, handler in zip(CHAT_HISTORY_TOOLS, history_handlers):
+        ctx.register_tool(schema["name"], "clawchat", schema, handler, is_async=True,
+                          description=schema["name"], emoji="M")
+
     from clawchat_gateway.widget_send import WIDGET_DESCRIPTION
     ctx.register_tool(
         "clawchat_widget_send", "clawchat",
