@@ -88,6 +88,8 @@ test against the local host, with a verified range through v0.22.5 canary.
 Missing capabilities or the off switch retain legacy notes and host compression.
 A socket close cancels maintenance; READY creates a new instance after reconnect
 or account replacement, fencing the previous account and generation.
+Adapter input queues and active dispatches retain ownership across maintenance
+replacement; journal recovery skips inputs still owned by those queues or tasks.
 The reset result is verified through freshly read persistent routing, never peek.
 An independent five-minute watchdog releases journaled inbound even while a
 shielded reset is unfinished. Private reset output uses a task-local operation
@@ -132,6 +134,8 @@ retracted batch content is never restored from the old snapshot. Recall-read
 errors stop the attempt. Adapter-only terminal decisions, including skill-update
 consent, settle the journal; actual permission queues and maintenance deferrals
 remain recoverable. An in-flight journal head stops a drain from overtaking it.
+With reliable delivery enabled, an unavailable or failed recall write leaves its
+receipt pending for retry; only a durable tombstone and purge complete processing.
 The first post-reset input starts renewed summary inline and wakes later held
 work only after its own handoff or terminal decision, including coalescer inputs.
 
