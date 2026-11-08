@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import logging
 import os
@@ -67,6 +68,7 @@ from clawchat_gateway.connection import (
     HANDSHAKE_TIMEOUT_SECONDS,
     ClawChatConnection,
     ConnectionState,
+    MessageError,
     is_valid_chat_id,
 )
 from clawchat_gateway.reliable_delivery import INBOUND_RETRYABLE
@@ -614,8 +616,36 @@ _HERMES_STREAM_CURSOR_RE = re.compile(r"[ \t]*▉\Z")
 # a reconnect / flood wait. Matched by their shared opening so a reworded tail
 # still counts; the prefix runs up to the first blank line.
 _HOST_RECOVERED_REPLY_OPENING = "♻️ Recovered reply — "
+# Content suppression is bounded and disposable across process restarts.
+_REJECTED_REPLY_CACHE_MAX = 256
+# Bounded inline sender-profile lookup for the agent reply policy; on timeout
+# the sender is treated as human (see docs/configuration.md).
+_AGENT_PROFILE_LOOKUP_TIMEOUT_SECONDS = 3.0
 # Long enough to cover the ledger's 24 h staleness cut-off plus slack.
 _RECOVERED_REPLY_LOOKBACK_MS = 48 * 60 * 60 * 1000
+
+
+# Fragment kinds whose content is fully captured by the reply's visible text
+# (an auto-linked ``@member`` is a mention fragment next to text).
+_TEXT_LIKE_FRAGMENT_KINDS = frozenset({"text", "mention"})
+
+
+def _frame_is_text_only(frame: dict[str, Any]) -> bool:
+    """True when ``frame`` carries no attachment / media / rich fragment."""
+    stack: list[Any] = [frame]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            fragments = node.get("fragments")
+            if isinstance(fragments, list) and any(
+                not isinstance(item, dict) or item.get("kind") not in _TEXT_LIKE_FRAGMENT_KINDS
+                for item in fragments
+            ):
+                return False
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return True
 
 
 def _strip_host_recovered_marker(content: str) -> tuple[str, bool]:
@@ -1240,6 +1270,9 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._plugin_report_tasks: set[asyncio.Task[None]] = set()
         self._conversation_refresh_tasks: set[asyncio.Task[None]] = set()
         self._profile_sync_tasks: set[asyncio.Task[None]] = set()
+        self._agent_profile_locks: dict[str, asyncio.Lock] = {}
+        self._agent_profile_retry_after: dict[str, float] = {}
+        self._agent_profile_warned: set[str] = set()
         self._owner_metadata_refresh_task: asyncio.Task[None] | None = None
         self._conversation_metadata_versions: dict[str, int] = {}
         # chat_id -> recently delivered group message ids (bounded FIFO). See
@@ -3119,7 +3152,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         for task in tasks:
             self._profile_sync_tasks.discard(task)
 
-    async def _refresh_user_profile(self, user_id: str) -> bool:
+    async def _refresh_user_profile(self, user_id: str, *, log_failure: bool = True) -> bool:
         if not user_id:
             return False
         if user_id == self._owner_user_id():
@@ -3128,7 +3161,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 user_id,
             )
             return True
-        root = self._metadata_memory_root("user", user_id)
+        root = self._metadata_memory_root("user", user_id) if log_failure else self._memory_root
         if root is None:
             return False
         try:
@@ -3136,11 +3169,12 @@ class ClawChatAdapter(BasePlatformAdapter):
                 lambda client: pull_user_metadata(root, client, user_id)
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "clawchat user profile refresh failed user_id=%s error=%s",
-                user_id,
-                exc,
-            )
+            if log_failure:
+                logger.warning(
+                    "clawchat user profile refresh failed user_id=%s error=%s",
+                    user_id,
+                    redact_display_text(str(exc)),
+                )
             return False
         return bool(result.get("ok"))
 
@@ -3498,6 +3532,79 @@ class ClawChatAdapter(BasePlatformAdapter):
                 INBOUND_RATE_WINDOW_SECONDS,
             )
 
+    async def _suppress_agent_auto_reply(
+        self, inbound: InboundMessage, *, fetch: bool = True,
+    ) -> bool:
+        """Reply policy only: unknown profiles retain normal human routing.
+
+        REST metadata determines sender type; WS fields cannot attest it.
+        Serialize cache misses per sender and briefly back off failed lookups.
+        ``fetch=False`` (recovery paths) reads the cache only, so a slow
+        profile service never delays redelivery.
+        """
+        config = self._clawchat_config
+        if (config.reply_to_agents or inbound.is_internal_synthetic
+                or inbound.sender_id == self._owner_user_id()):
+            return False
+        if inbound.raw_message.get("clawchat_group_batch"):
+            # A restored batch may have a human trigger and an agent as its
+            # latest speaker. Judge its original messages, not merged mentions.
+            for frame in inbound.raw_message.get("messages", []):
+                member = parse_inbound_message(frame, config)
+                if member and not await self._suppress_agent_auto_reply(member, fetch=fetch):
+                    return False
+            return True
+        if (inbound.chat_type == "group" and config.user_id
+                and config.user_id in inbound.mentioned_user_ids):
+            return False
+        sender_id = inbound.sender_id
+        if not fetch:
+            # Recovery never waits for a live lookup's lock.
+            profile_type = self._read_memory_metadata("user", sender_id).get("profile_type")
+            if not profile_type and sender_id not in self._agent_profile_warned:
+                self._agent_profile_warned.add(sender_id)
+                logger.warning(
+                    "clawchat sender profile not cached on recovery sender_id=%s; treating as human for reply policy",
+                    sender_id,
+                )
+            if profile_type != "agent":
+                return False
+            logger.info(
+                "clawchat auto reply suppressed chat_id=%s sender_id=%s reason=agent_sender",
+                inbound.chat_id, sender_id,
+            )
+            return True
+        async with self._agent_profile_locks.setdefault(sender_id, asyncio.Lock()):
+            profile_type = self._read_memory_metadata("user", sender_id).get("profile_type")
+            if (fetch and not profile_type
+                    and config.base_url and config.token
+                    and time.monotonic() >= self._agent_profile_retry_after.get(sender_id, 0)):
+                try:
+                    await asyncio.wait_for(
+                        self._refresh_user_profile(sender_id, log_failure=False),
+                        _AGENT_PROFILE_LOOKUP_TIMEOUT_SECONDS,
+                    )
+                    profile_type = self._read_memory_metadata("user", sender_id).get("profile_type")
+                except Exception:  # noqa: BLE001 - availability fallback, no authority granted
+                    profile_type = None
+                if not profile_type:
+                    self._agent_profile_retry_after[sender_id] = time.monotonic() + 60.0
+            if not profile_type:
+                if sender_id not in self._agent_profile_warned:
+                    self._agent_profile_warned.add(sender_id)
+                    logger.warning(
+                        "clawchat sender profile unavailable sender_id=%s; treating as human for reply policy",
+                        sender_id,
+                    )
+                return False
+        if profile_type != "agent":
+            return False
+        logger.info(
+            "clawchat auto reply suppressed chat_id=%s sender_id=%s reason=agent_sender",
+            inbound.chat_id, sender_id,
+        )
+        return True
+
     async def _on_message(self, frame: dict[str, Any]) -> object | None:
         # ANY inbound frame naming this chat is authoritative proof the server
         # can still route into it — stronger evidence than the error frame that
@@ -3609,10 +3716,6 @@ class ClawChatAdapter(BasePlatformAdapter):
         self._known_chat_types[inbound.chat_id] = inbound.chat_type
         if inbound.chat_type == "direct" and inbound.sender_id:
             self._direct_chat_peers[inbound.chat_id] = inbound.sender_id
-        if inbound.chat_type == "group":
-            self._schedule_profile_sync(self._refresh_conversation_metadata(inbound.chat_id))
-        elif inbound.sender_id != self._owner_user_id():
-            self._schedule_profile_sync(self._refresh_user_profile(inbound.sender_id))
         inbound = self._resolve_inbound_sender_context(inbound)
         if event_name in {"message.send", "message.reply"}:
             claimed = self._claim_message_once(
@@ -3656,6 +3759,19 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
             if protocol_message_id:
                 self._last_inbound_message_id_by_chat[inbound.chat_id] = protocol_message_id
+        suppress = await self._suppress_agent_auto_reply(inbound)
+        if inbound.chat_type == "group":
+            self._schedule_profile_sync(self._refresh_conversation_metadata(inbound.chat_id))
+        elif (inbound.sender_id != self._owner_user_id()
+                and time.monotonic() >= self._agent_profile_retry_after.get(inbound.sender_id, 0)):
+            # Keep the periodic profile refresh; the policy check above only
+            # fetches on a cache miss and has finished before this runs. A
+            # failed lookup's backoff also pauses this refresh (and its warning).
+            self._schedule_profile_sync(self._refresh_user_profile(inbound.sender_id))
+        if suppress:
+            if self._history:
+                self._history.no_reply(inbound)
+            return
         if self._history and self._history.enabled(inbound):
             await self._history.continue_claimed(inbound)
             return
@@ -3730,6 +3846,12 @@ class ClawChatAdapter(BasePlatformAdapter):
                 await self._continue_claimed_inbound_now(inbound)
 
     async def _continue_claimed_inbound_now(self, inbound: InboundMessage) -> None:
+        # Recovery enters here without passing through _on_message; the live
+        # path already looked the sender up, so read the cache only.
+        if await self._suppress_agent_auto_reply(inbound, fetch=False):
+            if self._history:
+                self._history.no_reply(inbound)
+            return
         self._admit_owner_direct_inbound(inbound)
         if await self._consume_grant_confirmation(inbound):
             if self._history:
@@ -4515,14 +4637,25 @@ class ClawChatAdapter(BasePlatformAdapter):
         @-mention adds only the group messages this session has not been given
         (e.g. ones a mention-only group held back), newest kept first within
         ``delta-budget-chars`` characters; what does not fit is announced in
-        one line. Every call records the turn's own message ids as delivered.
+        one line. With agent replies off, other turns also catch up unseen
+        agent messages. Every call records the turn's own ids as delivered.
 
-        Legacy per-speaker group: the old mention prior-context, unchanged.
+        Legacy per-speaker groups retain mention prior-context; other turns
+        catch up agent messages per speaker when agent replies are off.
         """
         if effective_group_sessions_per_user(self._clawchat_config, inbound.chat_id):
-            if not inbound.was_mentioned:
+            if inbound.was_mentioned:
+                return self._build_mention_prior_context_text(inbound)
+            if (self._clawchat_config.reply_to_agents
+                    or not callable(getattr(self._store, "list_recent_group_transcript", None))):
                 return None
-            return self._build_mention_prior_context_text(inbound)
+            delivery_key = inbound.chat_id + ":" + inbound.sender_id
+            batch_ids = self._batch_message_ids(inbound)
+            context = self._build_group_unseen_text(
+                inbound.chat_id, batch_ids, agents_only=True, delivery_key=delivery_key,
+            )
+            self._remember_delivered_group_ids(delivery_key, batch_ids)
+            return context
         batch_ids = self._batch_message_ids(inbound)
         store = self._store
         context: str | None = None
@@ -4539,6 +4672,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
         elif inbound.was_mentioned and can_read:
             context = self._build_group_unseen_text(inbound.chat_id, batch_ids)
+        elif not self._clawchat_config.reply_to_agents and can_read:
+            context = self._build_group_unseen_text(inbound.chat_id, batch_ids, agents_only=True)
         self._remember_delivered_group_ids(inbound.chat_id, batch_ids)
         return context
 
@@ -4635,7 +4770,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         return "\n".join([GROUP_SEED_HEADER, *reversed(kept)])
 
     def _build_group_unseen_text(
-        self, chat_id: str, batch_ids: set[str], header: str = GROUP_UNSEEN_HEADER
+        self, chat_id: str, batch_ids: set[str], header: str = GROUP_UNSEEN_HEADER,
+        *, agents_only: bool = False, delivery_key: str | None = None,
     ) -> str | None:
         """The group messages this session has not been given, oldest first.
 
@@ -4648,7 +4784,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             "default", chat_id, CATCH_UP_FETCH_ROWS + len(batch_ids)
         )
         window_full = len(rows) >= CATCH_UP_FETCH_ROWS + len(batch_ids)
-        delivered = self._delivered_group_message_ids.get(chat_id, {})
+        delivery_key = delivery_key or chat_id
+        delivered = self._delivered_group_message_ids.get(delivery_key, {})
         unseen = [
             row
             for row in rows
@@ -4656,14 +4793,22 @@ class ClawChatAdapter(BasePlatformAdapter):
             and row.get("message_id") not in batch_ids
             and row.get("message_id") not in delivered
         ]
+        if agents_only:
+            senders = {str(row.get("sender_id") or "") for row in unseen}
+            agent_senders = {
+                sender for sender in senders if sender
+                and self._read_memory_metadata("user", sender).get("profile_type") == "agent"
+                and sender not in {self._owner_user_id(), self._clawchat_config.user_id}
+            }
+            unseen = [row for row in unseen if row.get("sender_id") in agent_senders]
         self._remember_delivered_group_ids(
-            chat_id,
+            delivery_key,
             (row.get("message_id") for row in unseen if self._is_group_history_command(row)),
         )
         unseen = self._group_history_rows(unseen)
         if not unseen:
             return None
-        self._remember_delivered_group_ids(chat_id, (row.get("message_id") for row in unseen))
+        self._remember_delivered_group_ids(delivery_key, (row.get("message_id") for row in unseen))
         budget = self._clawchat_config.delta_budget_chars
         names: dict[str, str] = {}
         kept: list[str] = []
@@ -7666,6 +7811,10 @@ class ClawChatAdapter(BasePlatformAdapter):
                 await self._send_reasoning(chat_id, reasoning, reply_to, metadata)
                 if not visible_content and not self._has_outbound_media(metadata, kwargs):
                     return SendResult(success=True)
+        if (is_host_redelivery and visible_content.strip()
+                and not self._has_outbound_media(metadata, kwargs)
+                and self._reply_content_key(chat_id, visible_content) in self._rejected_reply_cache()):
+            return SendResult(success=False, error="recovered reply was terminally rejected")
         is_immediate_media_send = self._is_immediate_media_send(metadata, kwargs)
         is_stream_intermediate = self._is_stream_intermediate_output(content or "")
         if (
@@ -7870,10 +8019,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 error="clawchat outbound message claim failed",
                 message_id=message_id,
             )
-        sent = await self._connection.send_frame(
-            frame,
-            wait_for_ack=True,
-        )
+        sent = await self._send_final_reply_frame(frame, chat_id, visible_content)
         if not sent:
             error = "clawchat complete reply dropped"
             self._update_message_record(
@@ -8150,7 +8296,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 message_id=run.message_id,
             )
         await self._stream_finish(run, final_content)
-        sent = await self._connection.send_frame(frame, wait_for_ack=True)
+        sent = await self._send_final_reply_frame(frame, run.chat_id, final_content)
         if not sent:
             error = "clawchat complete reply dropped"
             self._update_message_record(
@@ -9731,6 +9877,33 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
         except Exception:  # noqa: BLE001
             logger.warning("clawchat message database update failed")
+
+    def _reply_content_key(self, chat_id: str, content: str) -> tuple[str, str]:
+        return chat_id, hashlib.sha256(content.strip().encode()).hexdigest()
+
+    def _rejected_reply_cache(self) -> OrderedDict:
+        cache = getattr(self, "_rejected_reply_contents", None)
+        if cache is None:
+            cache = self._rejected_reply_contents = OrderedDict()
+        return cache
+
+    async def _send_final_reply_frame(self, frame: dict, chat_id: str, content: str) -> bool:
+        try:
+            return await self._connection.send_frame(frame, wait_for_ack=True)
+        except MessageError as exc:
+            # The host can recover any failed delivery, including a negative ack.
+            # Keep content identity because recovery may mint a different wire id.
+            # Text (and mention) replies only: the key is the visible text, so a
+            # reply carrying attachments (or no text) must never suppress another.
+            if ((not exc.retryable or exc.code != "send_rate_limited")
+                    and content.strip() and _frame_is_text_only(frame)):
+                cache = self._rejected_reply_cache()
+                key = self._reply_content_key(chat_id, content)
+                cache[key] = None
+                cache.move_to_end(key)
+                while len(cache) > _REJECTED_REPLY_CACHE_MAX:
+                    cache.popitem(last=False)
+            raise
 
     def _earlier_attempt_message_id(self, chat_id: str, visible_content: str) -> str | None:
         """The message_id of this reply's earlier send attempt into ``chat_id``.
