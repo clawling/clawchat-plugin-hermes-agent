@@ -3577,6 +3577,7 @@ class ClawChatAdapter(BasePlatformAdapter):
         async with self._agent_profile_locks.setdefault(sender_id, asyncio.Lock()):
             profile_type = self._read_memory_metadata("user", sender_id).get("profile_type")
             if (fetch and not profile_type
+                    and config.base_url and config.token
                     and time.monotonic() >= self._agent_profile_retry_after.get(sender_id, 0)):
                 try:
                     await asyncio.wait_for(

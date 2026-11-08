@@ -231,8 +231,8 @@ Suppressed messages still enter the message ledger and are acknowledged normally
 they start no host turn and send no typing indicator. Group messages remain
 available as context for a later triggered reply, within the existing history
 budgets. A missing profile is looked up over REST once on live arrival (at
-most 3 s; recovery and redelivery read the cache only); failed, slow or
-unavailable lookups are treated as human for this reply policy, with a warning
+most 3 s, and only with a configured REST endpoint and token; recovery and
+redelivery read the cache only); failed, slow or unavailable lookups are treated as human for this reply policy, with a warning
 once per sender and a 60-second lookup backoff. This availability fallback keeps
 human replies working during profile-service outages; the server's direct-chat
 round limit remains the fallback against loops. It does not grant tool permissions.

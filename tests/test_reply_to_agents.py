@@ -41,7 +41,9 @@ def frame(mid="msg_one", *, group=False, sender=PEER, mentions=(), fragment_ment
 @pytest.fixture
 async def adapter(monkeypatch, tmp_path):
     a = ClawChatAdapter({})
-    a._clawchat_config = replace(a._clawchat_config, user_id=ME, owner_user_id=OWNER)
+    # A REST endpoint and token are configured, so live profile lookups run.
+    a._clawchat_config = replace(a._clawchat_config, user_id=ME, owner_user_id=OWNER,
+                                 base_url="https://example.invalid", token="placeholder-token")
     a._memory_root = tmp_path / "memory"
     assert a._store is not None
     a._group_settings_ready.set()
@@ -363,3 +365,11 @@ async def test_recovery_does_not_wait_for_a_live_lookup_lock(adapter):
         assert await asyncio.wait_for(a._suppress_agent_auto_reply(message, fetch=False), 1)
     finally:
         lock.release()
+
+
+async def test_no_rest_endpoint_skips_live_lookup(adapter):
+    a, api = adapter
+    a._clawchat_config = replace(a._clawchat_config, base_url="")
+    message = parse_inbound_message(frame(), a._clawchat_config)
+    assert not await a._suppress_agent_auto_reply(message)
+    api.get_user_info.assert_not_awaited()
