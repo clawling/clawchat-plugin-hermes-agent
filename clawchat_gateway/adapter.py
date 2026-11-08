@@ -625,15 +625,21 @@ _AGENT_PROFILE_LOOKUP_TIMEOUT_SECONDS = 3.0
 _RECOVERED_REPLY_LOOKBACK_MS = 48 * 60 * 60 * 1000
 
 
+# Fragment kinds whose content is fully captured by the reply's visible text
+# (an auto-linked ``@member`` is a mention fragment next to text).
+_TEXT_LIKE_FRAGMENT_KINDS = frozenset({"text", "mention"})
+
+
 def _frame_is_text_only(frame: dict[str, Any]) -> bool:
-    """True when every fragment in ``frame`` is a text fragment."""
+    """True when ``frame`` carries no attachment / media / rich fragment."""
     stack: list[Any] = [frame]
     while stack:
         node = stack.pop()
         if isinstance(node, dict):
             fragments = node.get("fragments")
             if isinstance(fragments, list) and any(
-                not isinstance(item, dict) or item.get("kind") != "text" for item in fragments
+                not isinstance(item, dict) or item.get("kind") not in _TEXT_LIKE_FRAGMENT_KINDS
+                for item in fragments
             ):
                 return False
             stack.extend(node.values())
@@ -3555,6 +3561,12 @@ class ClawChatAdapter(BasePlatformAdapter):
         if not fetch:
             # Recovery never waits for a live lookup's lock.
             profile_type = self._read_memory_metadata("user", sender_id).get("profile_type")
+            if not profile_type and sender_id not in self._agent_profile_warned:
+                self._agent_profile_warned.add(sender_id)
+                logger.warning(
+                    "clawchat sender profile not cached on recovery sender_id=%s; treating as human for reply policy",
+                    sender_id,
+                )
             if profile_type != "agent":
                 return False
             logger.info(
@@ -9880,8 +9892,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         except MessageError as exc:
             # The host can recover any failed delivery, including a negative ack.
             # Keep content identity because recovery may mint a different wire id.
-            # Text-only replies only: the key is the visible text, so a reply
-            # carrying attachments (or no text) must never suppress another.
+            # Text (and mention) replies only: the key is the visible text, so a
+            # reply carrying attachments (or no text) must never suppress another.
             if ((not exc.retryable or exc.code != "send_rate_limited")
                     and content.strip() and _frame_is_text_only(frame)):
                 cache = self._rejected_reply_cache()

@@ -224,3 +224,28 @@ async def test_rejected_reply_with_attachment_or_no_text_is_not_cached(monkeypat
         await adapter._send_final_reply_frame(frame(), CHAT, "   ")
     # Only the visible text is keyed, so neither may suppress a later reply.
     assert not adapter._rejected_reply_cache()
+
+
+async def test_rejected_reply_with_mention_is_not_resent_on_recovery(monkeypatch):
+    adapter = ClawChatAdapter({})
+    adapter._clawchat_config = replace(adapter._clawchat_config,
+                                     user_id="usr_placeholder", owner_user_id="usr_owner_placeholder")
+    adapter._known_chat_types[CHAT] = "group"
+    calls = []
+
+    async def refuse(frame, **kwargs):
+        calls.append(frame)
+        raise MessageError("turn limit", {"code": "agent_turn_limit", "retryable": False})
+
+    monkeypatch.setattr(adapter._connection, "send_frame", refuse)
+    mention = build_message_reply_event(
+        chat_id=CHAT, chat_type="group", message_id="reply-placeholder", include_message_id=True,
+        fragments=[{"kind": "mention", "user_id": "usr_member_placeholder", "display": "@Member"},
+                   {"kind": "text", "text": " report ready"}])
+    with pytest.raises(MessageError):
+        await adapter._send_final_reply_frame(mention, CHAT, "@Member report ready")
+    assert adapter._rejected_reply_cache()
+    monkeypatch.setattr(adapter, "_earlier_attempt_message_id", lambda *_: None)
+    result = await adapter.send(CHAT, RECOVERED + "@Member report ready")
+    assert not result.success
+    assert len(calls) == 1
