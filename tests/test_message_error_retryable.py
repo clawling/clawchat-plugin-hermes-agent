@@ -205,3 +205,22 @@ async def test_jitter_is_added_after_server_minimum(monkeypatch):
     monkeypatch.setattr(connection.random, "uniform", lambda *_: 0.2)
     assert await conn.send_frame(frame(), wait_for_ack=True)
     assert sleeps == [pytest.approx(1.8)]
+
+
+async def test_rejected_reply_with_attachment_or_no_text_is_not_cached(monkeypatch):
+    adapter = ClawChatAdapter({})
+
+    async def refuse(frame, **kwargs):
+        raise MessageError("turn limit", {"code": "agent_turn_limit", "retryable": False})
+
+    monkeypatch.setattr(adapter._connection, "send_frame", refuse)
+    media = build_message_reply_event(
+        chat_id=CHAT, chat_type="direct", message_id="reply-placeholder", include_message_id=True,
+        fragments=[{"kind": "text", "text": "Report ready"},
+                   {"kind": "image", "url": "https://example.invalid/a.png"}])
+    with pytest.raises(MessageError):
+        await adapter._send_final_reply_frame(media, CHAT, "Report ready")
+    with pytest.raises(MessageError):
+        await adapter._send_final_reply_frame(frame(), CHAT, "   ")
+    # Only the visible text is keyed, so neither may suppress a later reply.
+    assert not adapter._rejected_reply_cache()

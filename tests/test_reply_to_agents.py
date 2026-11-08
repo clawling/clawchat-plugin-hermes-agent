@@ -334,3 +334,32 @@ async def test_slow_profile_lookup_times_out_to_human(adapter, monkeypatch):
     assert not await a._suppress_agent_auto_reply(message)
     # The failed lookup backs off instead of stalling every later message.
     assert a._agent_profile_retry_after[PEER] > 0
+
+
+async def test_failed_lookup_backoff_pauses_background_profile_refresh(adapter, monkeypatch):
+    a, _ = adapter
+    scheduled = []
+
+    def schedule(coro):
+        scheduled.append(coro)
+        coro.close()
+
+    monkeypatch.setattr(a, "_schedule_profile_sync", schedule)
+    a._agent_profile_retry_after[PEER] = adapter_module.time.monotonic() + 60
+    await a._on_message(frame())
+    assert not scheduled
+    a._agent_profile_retry_after[PEER] = 0
+    await a._on_message(frame("second"))
+    assert len(scheduled) == 1
+
+
+async def test_recovery_does_not_wait_for_a_live_lookup_lock(adapter):
+    a, _ = adapter
+    cache(a, "agent")
+    message = parse_inbound_message(frame(), a._clawchat_config)
+    lock = a._agent_profile_locks.setdefault(PEER, asyncio.Lock())
+    await lock.acquire()
+    try:
+        assert await asyncio.wait_for(a._suppress_agent_auto_reply(message, fetch=False), 1)
+    finally:
+        lock.release()

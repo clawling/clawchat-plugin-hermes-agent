@@ -625,6 +625,23 @@ _AGENT_PROFILE_LOOKUP_TIMEOUT_SECONDS = 3.0
 _RECOVERED_REPLY_LOOKBACK_MS = 48 * 60 * 60 * 1000
 
 
+def _frame_is_text_only(frame: dict[str, Any]) -> bool:
+    """True when every fragment in ``frame`` is a text fragment."""
+    stack: list[Any] = [frame]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            fragments = node.get("fragments")
+            if isinstance(fragments, list) and any(
+                not isinstance(item, dict) or item.get("kind") != "text" for item in fragments
+            ):
+                return False
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return True
+
+
 def _strip_host_recovered_marker(content: str) -> tuple[str, bool]:
     text = content or ""
     if not text.lstrip().startswith(_HOST_RECOVERED_REPLY_OPENING):
@@ -3535,6 +3552,16 @@ class ClawChatAdapter(BasePlatformAdapter):
                 and config.user_id in inbound.mentioned_user_ids):
             return False
         sender_id = inbound.sender_id
+        if not fetch:
+            # Recovery never waits for a live lookup's lock.
+            profile_type = self._read_memory_metadata("user", sender_id).get("profile_type")
+            if profile_type != "agent":
+                return False
+            logger.info(
+                "clawchat auto reply suppressed chat_id=%s sender_id=%s reason=agent_sender",
+                inbound.chat_id, sender_id,
+            )
+            return True
         async with self._agent_profile_locks.setdefault(sender_id, asyncio.Lock()):
             profile_type = self._read_memory_metadata("user", sender_id).get("profile_type")
             if (fetch and not profile_type
@@ -3722,9 +3749,11 @@ class ClawChatAdapter(BasePlatformAdapter):
         suppress = await self._suppress_agent_auto_reply(inbound)
         if inbound.chat_type == "group":
             self._schedule_profile_sync(self._refresh_conversation_metadata(inbound.chat_id))
-        elif inbound.sender_id != self._owner_user_id():
+        elif (inbound.sender_id != self._owner_user_id()
+                and time.monotonic() >= self._agent_profile_retry_after.get(inbound.sender_id, 0)):
             # Keep the periodic profile refresh; the policy check above only
-            # fetches on a cache miss and has finished before this runs.
+            # fetches on a cache miss and has finished before this runs. A
+            # failed lookup's backoff also pauses this refresh (and its warning).
             self._schedule_profile_sync(self._refresh_user_profile(inbound.sender_id))
         if suppress:
             if self._history:
@@ -7769,7 +7798,9 @@ class ClawChatAdapter(BasePlatformAdapter):
                 await self._send_reasoning(chat_id, reasoning, reply_to, metadata)
                 if not visible_content and not self._has_outbound_media(metadata, kwargs):
                     return SendResult(success=True)
-        if is_host_redelivery and self._reply_content_key(chat_id, visible_content) in self._rejected_reply_cache():
+        if (is_host_redelivery and visible_content.strip()
+                and not self._has_outbound_media(metadata, kwargs)
+                and self._reply_content_key(chat_id, visible_content) in self._rejected_reply_cache()):
             return SendResult(success=False, error="recovered reply was terminally rejected")
         is_immediate_media_send = self._is_immediate_media_send(metadata, kwargs)
         is_stream_intermediate = self._is_stream_intermediate_output(content or "")
@@ -9849,7 +9880,10 @@ class ClawChatAdapter(BasePlatformAdapter):
         except MessageError as exc:
             # The host can recover any failed delivery, including a negative ack.
             # Keep content identity because recovery may mint a different wire id.
-            if not exc.retryable or exc.code != "send_rate_limited":
+            # Text-only replies only: the key is the visible text, so a reply
+            # carrying attachments (or no text) must never suppress another.
+            if ((not exc.retryable or exc.code != "send_rate_limited")
+                    and content.strip() and _frame_is_text_only(frame)):
                 cache = self._rejected_reply_cache()
                 key = self._reply_content_key(chat_id, content)
                 cache[key] = None
