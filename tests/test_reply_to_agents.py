@@ -373,3 +373,13 @@ async def test_no_rest_endpoint_skips_live_lookup(adapter):
     message = parse_inbound_message(frame(), a._clawchat_config)
     assert not await a._suppress_agent_auto_reply(message)
     api.get_user_info.assert_not_awaited()
+
+
+def test_default_group_bio_does_not_forbid_replying_to_agents():
+    from clawchat_gateway.plugin_prompts import default_group_bio_prompt
+
+    bio = default_group_bio_prompt()
+    assert "reply to other bots" not in bio.lower()
+    assert "reply to other agents" not in bio.lower()
+    assert "## What to be careful about here" in bio
+    assert "Do not act publicly for the owner" in bio
