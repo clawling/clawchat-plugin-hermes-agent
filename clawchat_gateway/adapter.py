@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import logging
 import os
@@ -67,6 +68,7 @@ from clawchat_gateway.connection import (
     HANDSHAKE_TIMEOUT_SECONDS,
     ClawChatConnection,
     ConnectionState,
+    MessageError,
     is_valid_chat_id,
 )
 from clawchat_gateway.reliable_delivery import INBOUND_RETRYABLE
@@ -614,6 +616,8 @@ _HERMES_STREAM_CURSOR_RE = re.compile(r"[ \t]*▉\Z")
 # a reconnect / flood wait. Matched by their shared opening so a reworded tail
 # still counts; the prefix runs up to the first blank line.
 _HOST_RECOVERED_REPLY_OPENING = "♻️ Recovered reply — "
+# Content suppression is bounded and disposable across process restarts.
+_REJECTED_REPLY_CACHE_MAX = 256
 # Long enough to cover the ledger's 24 h staleness cut-off plus slack.
 _RECOVERED_REPLY_LOOKBACK_MS = 48 * 60 * 60 * 1000
 
@@ -7666,6 +7670,8 @@ class ClawChatAdapter(BasePlatformAdapter):
                 await self._send_reasoning(chat_id, reasoning, reply_to, metadata)
                 if not visible_content and not self._has_outbound_media(metadata, kwargs):
                     return SendResult(success=True)
+        if is_host_redelivery and self._reply_content_key(chat_id, visible_content) in self._rejected_reply_cache():
+            return SendResult(success=False, error="recovered reply was terminally rejected")
         is_immediate_media_send = self._is_immediate_media_send(metadata, kwargs)
         is_stream_intermediate = self._is_stream_intermediate_output(content or "")
         if (
@@ -7870,10 +7876,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 error="clawchat outbound message claim failed",
                 message_id=message_id,
             )
-        sent = await self._connection.send_frame(
-            frame,
-            wait_for_ack=True,
-        )
+        sent = await self._send_final_reply_frame(frame, chat_id, visible_content)
         if not sent:
             error = "clawchat complete reply dropped"
             self._update_message_record(
@@ -8150,7 +8153,7 @@ class ClawChatAdapter(BasePlatformAdapter):
                 message_id=run.message_id,
             )
         await self._stream_finish(run, final_content)
-        sent = await self._connection.send_frame(frame, wait_for_ack=True)
+        sent = await self._send_final_reply_frame(frame, run.chat_id, final_content)
         if not sent:
             error = "clawchat complete reply dropped"
             self._update_message_record(
@@ -9731,6 +9734,30 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
         except Exception:  # noqa: BLE001
             logger.warning("clawchat message database update failed")
+
+    def _reply_content_key(self, chat_id: str, content: str) -> tuple[str, str]:
+        return chat_id, hashlib.sha256(content.strip().encode()).hexdigest()
+
+    def _rejected_reply_cache(self) -> OrderedDict:
+        cache = getattr(self, "_rejected_reply_contents", None)
+        if cache is None:
+            cache = self._rejected_reply_contents = OrderedDict()
+        return cache
+
+    async def _send_final_reply_frame(self, frame: dict, chat_id: str, content: str) -> bool:
+        try:
+            return await self._connection.send_frame(frame, wait_for_ack=True)
+        except MessageError as exc:
+            # The host can recover any failed delivery, including a negative ack.
+            # Keep content identity because recovery may mint a different wire id.
+            if not exc.retryable or exc.code != "send_rate_limited":
+                cache = self._rejected_reply_cache()
+                key = self._reply_content_key(chat_id, content)
+                cache[key] = None
+                cache.move_to_end(key)
+                while len(cache) > _REJECTED_REPLY_CACHE_MAX:
+                    cache.popitem(last=False)
+            raise
 
     def _earlier_attempt_message_id(self, chat_id: str, visible_content: str) -> str | None:
         """The message_id of this reply's earlier send attempt into ``chat_id``.
