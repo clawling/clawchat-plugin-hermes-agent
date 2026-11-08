@@ -682,6 +682,21 @@ def _read_groups(value: Any) -> dict[str, dict[str, Any]]:
     return groups
 
 
+def _reply_to_agents(extra: dict[str, Any]) -> bool:
+    value = extra.get("reply_to_agents", False)
+    if not isinstance(value, bool):
+        logger.warning("clawchat config reply_to_agents must be a bool; disabling")
+        value = False
+    env = _get_env("CLAWCHAT_REPLY_TO_AGENTS")
+    if env:
+        parsed = _read_optional_bool(env)
+        if parsed is None:
+            logger.warning("clawchat env reply_to_agents is invalid; disabling")
+            return False
+        return parsed
+    return value
+
+
 def _reliable_delivery_v2(extra: dict[str, Any]) -> bool:
     value = extra.get("reliable_delivery_v2", False)
     if not isinstance(value, bool):
@@ -711,6 +726,7 @@ class ClawChatConfig:
     owner_user_id: str = ""
     memory_root: str = ""
     group_mode: str = "all"
+    reply_to_agents: bool = False
     group_command_mode: str = "owner"
     group_sessions_per_user: bool = False
     groups: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -833,6 +849,7 @@ class ClawChatConfig:
                 _get_env("CLAWCHAT_GROUP_MODE")
                 or _get_config_value(extra, "group_mode", "all")
             ),
+            reply_to_agents=_reply_to_agents(extra),
             group_command_mode=_read_group_command_mode(
                 _get_env("CLAWCHAT_GROUP_COMMAND_MODE")
                 or _get_config_value(extra, "group_command_mode", "owner")

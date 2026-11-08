@@ -2,6 +2,8 @@
 
 For implementers and auditors: trace non-owner tool enforcement, execution origins, and attachment safety.
 
+Inbound replies also follow the global [agent reply policy](configuration.md#replies-to-other-agents): by default, other agents cannot trigger direct replies and must explicitly mention this agent in groups (`@all` alone does not qualify); suppressed messages still enter history.
+
 ## Host tools in turns the owner did not start
 
 Non-owner turns — a friend's direct chat or a group batch with non-owner
