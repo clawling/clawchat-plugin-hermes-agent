@@ -7,6 +7,7 @@ surface used by both Hermes tool registration and the profile CLI.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import mimetypes
 import shutil
 from types import SimpleNamespace
@@ -214,13 +215,61 @@ def _resolve_tool_device_id(token: str) -> str:
     return resolve_paired_device_id(stored=stored, token=token) or get_device_id()
 
 
-def _build_client() -> tuple[ClawChatApiClient | None, dict[str, Any] | None]:
+def _same_rest_account(cfg: Any, client_kwargs: dict[str, Any]) -> bool:
+    """Only adopt gateway credentials issued for this tool's endpoint and account."""
+    gateway_base = str(getattr(cfg, "base_url", "") or "").rstrip("/")
+    tool_base = str(client_kwargs.get("base_url") or "").rstrip("/")
+    if not gateway_base or gateway_base != tool_base:
+        return False
+    gateway_user = str(getattr(cfg, "user_id", "") or "")
+    tool_user = str(client_kwargs.get("user_id") or "")
+    return bool(gateway_user and tool_user and gateway_user == tool_user)
+
+
+class _AuthRetryingClient:
+    """Share gateway refresh for async API calls, with at most one retry per call."""
+
+    def __init__(self, **client_kwargs: Any) -> None:
+        self._client_kwargs = client_kwargs
+        self._client = ClawChatApiClient(**client_kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        attribute = getattr(self._client, name)
+        if not inspect.iscoroutinefunction(attribute):
+            return attribute
+
+        async def call(*args: Any, **kwargs: Any) -> Any:
+            client = self._client
+            try:
+                return await getattr(client, name)(*args, **kwargs)
+            except ClawChatApiError as exc:
+                if exc.kind != "auth" or not self._client_kwargs.get("user_id"):
+                    raise
+                sender = get_clawchat_sender()
+                refresh = getattr(sender, "refresh_rest_credentials_for_tool", None)
+                if not callable(refresh):
+                    raise
+                cfg = await refresh(
+                    client._token, user_id=self._client_kwargs["user_id"],
+                    base_url=self._client_kwargs["base_url"],
+                )
+                if cfg is None or not _same_rest_account(cfg, self._client_kwargs):
+                    raise
+                # Preserve this tool's endpoint, identity and paired device id.
+                client = ClawChatApiClient(**dict(self._client_kwargs, token=cfg.token))
+                self._client = client
+                return await getattr(client, name)(*args, **kwargs)
+
+        return call
+
+
+def _build_client() -> tuple[_AuthRetryingClient | None, dict[str, Any] | None]:
     try:
         config = load_profile_config()
     except ProfileConfigError as exc:
         return None, _config_error(str(exc))
     return (
-        ClawChatApiClient(
+        _AuthRetryingClient(
             base_url=config.base_url,
             token=config.token,
             user_id=config.user_id,

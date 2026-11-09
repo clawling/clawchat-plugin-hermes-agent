@@ -20,7 +20,6 @@
 
 ## What to be careful about here
 
-- Do not reply to other bots or agents here, even when they mention you.
 - Do not act publicly for the owner in or about this group unless they clearly
   agreed.
 - Do not turn casual conversation into task tracking, and do not take over a

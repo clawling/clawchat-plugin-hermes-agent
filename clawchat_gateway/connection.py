@@ -80,6 +80,23 @@ CREDENTIAL_READ_FAILURE_LIMIT = 3
 # disconnect budget responsive, so a slow close never leaves an orphan behind.
 _WS_CLOSE_TIMEOUT_SECONDS = 5.0
 SEND_QUEUE_MAX = 128
+MESSAGE_ERROR_RETRY_BASE_SECONDS = 1.0
+MESSAGE_ERROR_RETRY_MAX_WAIT_SECONDS = 30.0
+MESSAGE_ERROR_RETRY_TOTAL_WAIT_SECONDS = 60.0
+MESSAGE_ERROR_RETRY_MAX_RETRIES = 3
+MESSAGE_ERROR_RETRY_JITTER_RATIO = 0.2
+
+
+class MessageError(RuntimeError):
+    """Negative ack, preserving RuntimeError compatibility and wire classification."""
+
+    def __init__(self, reason: str, payload: dict[str, Any]) -> None:
+        super().__init__(f"message.error: {reason}")
+        self.code = payload.get("code") if isinstance(payload.get("code"), str) else ""
+        self.retryable = payload.get("retryable") is True
+        delay = payload.get("retry_after_ms")
+        self.retry_after_ms = delay if type(delay) is int and delay > 0 else None
+
 BACKOFF_RESET_AFTER_SECONDS = 5.0
 # msghub closes the OLDER socket with application code 4001 when a newer session
 # for the same (user_id, device_id) takes over (docs/client-integration.md §3.6).
@@ -476,6 +493,7 @@ class ClawChatConnection:
         self._send_queue: deque[_QueuedFrame] = deque()
         self._flushing_send_queue = False
         self._pending_acks: dict[str, _PendingAck] = {}
+        self._message_retry_waiters: set[asyncio.Task] = set()
         # Inbound message frames are handled OFF the read loop, one lane per
         # chat_id (see ``_dispatch_to_lane``). Lanes outlive a reconnect so a
         # chat's order holds across it; ``stop()`` cancels them.
@@ -502,6 +520,19 @@ class ClawChatConnection:
     @property
     def config(self) -> ClawChatConfig:
         return self._cfg
+
+    def rest_retry_with_current_token_allowed(self) -> bool:
+        """Whether a REST retry may adopt credentials rotated by another caller.
+
+        Mirrors ``_attempt_refresh``'s guards: a stopping connection or one that
+        no longer holds its instance locks must not retry on another owner's behalf.
+        """
+        return self._instance_locks_ready() and not (
+            self._auth_failed
+            or self._allow_superseded_notice
+            or self._install_is_blocked()
+            or self._activation_source_suspended
+        )
 
     @_in_connection_context
     async def start(self) -> None:
@@ -1433,6 +1464,51 @@ class ClawChatConnection:
         frame: dict[str, Any],
         *,
         wait_for_ack: bool = False,
+        queue_when_unready: bool = True,
+    ) -> bool:
+        total_wait = 0.0
+        for attempt in range(MESSAGE_ERROR_RETRY_MAX_RETRIES + 1):
+            try:
+                return await self._send_frame_once(
+                    frame, wait_for_ack=wait_for_ack, queue_when_unready=queue_when_unready,
+                )
+            except MessageError as exc:
+                if (not wait_for_ack or frame.get("event") not in ACKABLE_EVENTS
+                        or exc.code != "send_rate_limited" or not exc.retryable
+                        or attempt == MESSAGE_ERROR_RETRY_MAX_RETRIES):
+                    raise
+                ws, generation = self._ws, self._delivery_generation
+                if self._stopping or self._state != ConnectionState.READY or ws is None:
+                    raise
+                # Never shorten the server's minimum to fit our local wait cap.
+                minimum_ms = exc.retry_after_ms or 0
+                if minimum_ms > MESSAGE_ERROR_RETRY_MAX_WAIT_SECONDS * 1000:
+                    raise
+                delay = max(minimum_ms / 1000.0,
+                            MESSAGE_ERROR_RETRY_BASE_SECONDS * 2 ** attempt)
+                delay = min(MESSAGE_ERROR_RETRY_MAX_WAIT_SECONDS,
+                            delay * (1 + random.uniform(0, MESSAGE_ERROR_RETRY_JITTER_RATIO)))
+                if total_wait + delay > MESSAGE_ERROR_RETRY_TOTAL_WAIT_SECONDS:
+                    raise
+                total_wait += delay
+                waiter = asyncio.create_task(asyncio.sleep(delay))
+                self._message_retry_waiters.add(waiter)
+                try:
+                    # asyncio.wait does not raise when the waiter is cancelled by
+                    # a disconnect; the state check below then fails the send.
+                    await asyncio.wait({waiter})
+                finally:
+                    waiter.cancel()
+                    self._message_retry_waiters.discard(waiter)
+                if (waiter.cancelled() or self._stopping or self._state != ConnectionState.READY
+                        or self._ws is not ws or self._delivery_generation != generation):
+                    raise
+                frame = dict(frame, trace_id=new_frame_id("trace"))
+                queue_when_unready = False
+        return False  # unreachable
+
+    async def _send_frame_once(
+        self, frame: dict[str, Any], *, wait_for_ack: bool = False,
         queue_when_unready: bool = True,
     ) -> bool:
         text = encode_frame(frame)
@@ -2532,6 +2608,7 @@ class ClawChatConnection:
             if self._last_close_code == CLOSE_CODE_SUPERSEDED_BY_OTHER_INSTALL:
                 # Latch before any task can attempt refresh after teardown.
                 self._latch_superseded()
+            self._cancel_message_retry_waits()
             self._ws = None
             self._read_task = None
             self._connection_credential_generation = None
@@ -3960,7 +4037,7 @@ class ClawChatConnection:
             )
         )
         if not pending.future.done():
-            pending.future.set_exception(RuntimeError(f"message.error: {reason}"))
+            pending.future.set_exception(MessageError(reason, payload))
 
     async def _notify_message_error(self, frame: dict[str, Any]) -> None:
         assert self._on_message_error is not None
@@ -3987,7 +4064,12 @@ class ClawChatConnection:
                 return self._sanitize_secret_text(value.strip()) or "unknown"
         return "unknown"
 
+    def _cancel_message_retry_waits(self) -> None:
+        for waiter in self._message_retry_waiters:
+            waiter.cancel()
+
     def _reject_pending_acks(self, exc: Exception) -> None:
+        self._cancel_message_retry_waits()
         pending_acks = list(self._pending_acks.values())
         self._pending_acks.clear()
         for pending in pending_acks:

@@ -20,6 +20,9 @@ as a separate subset addition in §11.7.
 
 Known upstream changes after that full sync **not yet incorporated in full**:
 
+- `retryable` / `retry_after_ms`, `send_rate_limited` and direct-chat
+  `agent_turn_limit` from server commit `acb90da` are incorporated in §14.3 only,
+  not a full sync.
 - `agent_muted` and `agent_turn_limit` rejection and recovery semantics: now included
   in this subset's §14.3; this does not imply a full upstream sync.
 - `replay.done`'s `truncation_check` and v2 `ack_epoch` fields, and revised
@@ -94,6 +97,11 @@ reads `sub` from `CLAWCHAT_TOKEN`, overriding a disagreeing configured `user_id`
 with a warning; it also decodes `exp` for refresh timing. These adapter
 assumptions do not validate the token locally and are not requirements for
 other Protocol v2 clients. See [token refresh](token-refresh.md).
+
+Hermes REST clients treat HTTP 401/403, and HTTP 200 with business `code: 401`
+on a request that sent a bearer token, as auth errors that trigger one
+single-flight refresh and one retry; business `code: 401` without a bearer stays
+an API error. See [reactive refresh](token-refresh.md#a2-reactive-refresh).
 
 ---
 
@@ -186,7 +194,7 @@ unsupported features are not invitations to enable a flag without implementing i
 | `history_sync` | omitted | Hermes does not declare it; full sibling-history semantics belong to the upstream server contract (§11.4). |
 | `e2ee` | omitted | Hermes does not declare it; full ciphertext semantics belong to the upstream server contract. |
 | `reliable_delivery` | omitted | Hermes does not declare it; full v1 cursor semantics belong to the upstream server contract (§11.7). |
-| `reliable_delivery_v2` | omitted by default | Hermes declares `true` only with profile opt-in; OpenClaw does not declare it (§11.7). |
+| `reliable_delivery_v2` | omitted by default | Hermes declares `true` only with profile opt-in; OpenClaw likewise only with its `reliableDeliveryV2` opt-in (§11.7). |
 
 **Hermes:** `ack_progress_clock` is also omitted; it applies only to granted v2
 reliable delivery. Hermes implements only the opt-in v2 sync ack (§11.7).
@@ -1414,7 +1422,7 @@ restart**. An in-memory cache is insufficient (§11).
 
 `platforms.clawchat.extra.reliable_delivery_v2` defaults to `false`; [configuration](configuration.md#connection) covers overrides and rollback.
 Only opt-in Hermes connections advertise `reliable_delivery_v2:true`;
-OpenClaw does not declare this capability. Every hello independently requires
+OpenClaw has its own opt-in (`reliableDeliveryV2`, default false). Every hello independently requires
 `ack_mode:"dseq"` and a non-empty string `ack_epoch`; otherwise delivery is legacy.
 Each grant resets the read sequence and contiguous ack watermark to zero.
 
@@ -1593,6 +1601,8 @@ and optional `to`, with **no `sender` or `chat_type`**.
 | `code` | Stable machine-readable code below. |
 | `reason` | Optional human-readable diagnostic; not a classifier. |
 | `rejected_at` | Server epoch milliseconds. |
+| `retryable` | Boolean, always output; absence from older servers means false. |
+| `retry_after_ms` | Optional positive integer: minimum wait in milliseconds before retry. |
 
 The complete code-name table is retained for tolerance. Unsupported-event
 semantics remain upstream; their codes do not authorize new Hermes uplinks.
@@ -1603,7 +1613,8 @@ semantics remain upstream; their codes do not authorize new Hermes uplinks.
 | `capability_missing` | Required capability absent, currently history transfer. Terminal uplink (§11.4). |
 | `not_member` | Sender is not a chat member. Terminal uplink; re-resolve membership. |
 | `agent_muted` | Enabled owner-mute guard refused an agent's group uplink. Terminal uplink; **do not gate `chat_id` or resend this message**. New messages may succeed after unmute. |
-| `agent_turn_limit` | Owner's per-group agent round-limit guard (off by default) refused an agent's group uplink when enabled. Terminal uplink; **do not gate `chat_id` or resend this message**. New messages may be accepted after human group speech or an owner limit change. |
+| `agent_turn_limit` | Enabled owner round-limit guard refused a group or direct uplink. `retryable=false`; **do not gate `chat_id` or resend the same content, even under a new message ID**. New messages may succeed after human group speech, direct-chat idle expiry or an owner limit change. |
+| `send_rate_limited` | Enabled agent sender × chat send budget exhausted. No message, no ack, no disconnect. `retryable=true`; wait at least `retry_after_ms`, then retry with bounded backoff. |
 | `unsupported_version` | Envelope version missing or not string `"2"`; applies before event handling, including controls. Terminal uplink; connection stays open. |
 | `bad_request` | Invalid structure/value; fix frame before retry. The five source classes are listed below. |
 | `message_too_large` | Marshaled downlink exceeds produce cap, default **1,000,000 bytes**. No fanout; split or upload media. |
@@ -1625,12 +1636,24 @@ legacy recall-client filter, or disabled recall can all return `recall_not_allow
 **Hermes:** Emits no recall/history-transit uplink; this catalogue is for
 recognition, not an implementation of those producer flows.
 
-**Retry classification:** Except for **`recall_rate_limited` and `rate_limited`**,
-the codes above are terminal **for the affected uplink**. Unknown codes are also
-terminal: mark the attempt failed and do not automatically resend unchanged.
-This differs from unknown hello-fail reasons, which are transient (§3.5).
-An error frame is the negative-ack path; sends still need their own timeout
-because it may itself be dropped under backpressure (§14.5).
+**Retry classification:** Use the boolean `retryable` field, treating absent or
+non-boolean values as false. False means never resend the same content, even
+with a new message ID. True requires waiting at least `retry_after_ms` when
+provided, then bounded exponential backoff with jitter and a retry limit; use
+conservative backoff without a valid hint. Unknown codes always terminate,
+even with `retryable=true`. Unlike unknown hello-fail reasons (§3.5), they do
+not authorize retries. Sends still need a timeout because errors can be dropped
+under backpressure (§14.5).
+
+**Hermes:** Only `send_rate_limited` with `retryable=true` retries final
+`message.send` / `message.reply`, keeping the message ID and using a new trace ID.
+At most 3 retries wait max(server minimum, 1 s × 2^(retry−1)) plus 0–20% jitter,
+capped at 30 s per wait and 60 s total scheduled wait. A server minimum over
+30 s terminates rather than shortening it. No hint uses the same base backoff.
+Disconnect or shutdown cancels waiting; intermediate stream frames never retry.
+The adapter retains the latest 256 terminally rejected reply-content digests
+in memory to block host recovered replies, including recovery with a new ID;
+eviction or process restart loses this suppression.
 
 **Two byte limits:** A WebSocket frame over **8 MiB** (64 KiB before auth)
 yields transport close **1009**, not `message.error`. A frame within that cap
@@ -1652,9 +1675,10 @@ Clear this gate early on either:
 - any inbound frame with that chat ID **except `message.error`**; or
 - `notify.signal` with a type starting `conversation.` **except `conversation.dissolved`**.
 
-`agent_muted` and `agent_turn_limit` never enter this gate: discard the rejected
-attempt. New messages can succeed after unmute for `agent_muted`, or after human
-group speech or an owner limit change for `agent_turn_limit`.
+`agent_muted`, `agent_turn_limit` and `send_rate_limited` never enter this gate.
+Discard terminally rejected content. New messages can succeed after unmute for
+`agent_muted`, or human group speech, direct-chat idle expiry or an owner limit
+change for `agent_turn_limit`. `send_rate_limited` uses the bounded retries above.
 The distinct `conversation.dissolved` gate suppresses
 **typing only**, never `message.send`.
 

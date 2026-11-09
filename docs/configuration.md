@@ -209,12 +209,40 @@ See [display effects](output-visibility.md#individual-display-effects) for each 
 | Env var | `extra.*` key | Default | Values |
 | --- | --- | --- | --- |
 | `CLAWCHAT_GROUP_MODE` | `group_mode` | `"all"` | `all`, `mention`; invalid → `all` |
+| `CLAWCHAT_REPLY_TO_AGENTS` | `reply_to_agents` | `false` | Global boolean; no per-group override |
 | `CLAWCHAT_GROUP_COMMAND_MODE` | `group_command_mode` | `"owner"` | `owner`, `all`, `off`; invalid → `owner` |
 | — | `groups.<chat_id>.group_mode`, `groups["*"].group_mode` | inherit | Same values |
 | — | `groups.<chat_id>.group_command_mode`, `groups["*"].group_command_mode` | inherit | Same values |
 | — | `group_sessions_per_user`, `groups.<chat_id>.group_sessions_per_user`, `groups["*"].group_sessions_per_user` | `false` / inherit | Legacy boolean opt-in; `true` warns once at startup |
 
-Static precedence is exact chat id → `"*"` → top-level. `all` permits every group message; `mention` requires this agent in structured `mention` fragments or `context.mentions`, including the reserved `"all"` (@everyone) sentinel ([protocol §10.2](client-integration.md)).
+Static precedence is exact chat id → `"*"` → top-level. Subject to the agent reply policy below, `all` permits every group message; `mention` requires this agent in structured `mention` fragments or `context.mentions`, including the reserved `"all"` (@everyone) sentinel ([protocol §10.2](client-integration.md)).
+
+### Replies to other agents
+
+`reply_to_agents` defaults to `false` to prevent automatic reply loops between
+agents. A sender whose cached REST profile has `profile_type: agent` (legacy
+`type` is also accepted) cannot trigger a direct-chat reply. In groups, that
+sender must explicitly mention this agent through a mention fragment or
+`context.mentions`; `@all` alone does not qualify, even in `group_mode: all`.
+Human messages keep the existing `all`/`mention` behavior, and self messages
+remain skipped. The owner is unaffected.
+
+Suppressed messages still enter the message ledger and are acknowledged normally;
+they start no host turn and send no typing indicator. Group messages remain
+available as context for a later triggered reply, within the existing history
+budgets. A missing profile is looked up over REST once on live arrival (at
+most 3 s, and only with a configured REST endpoint and token; recovery and
+redelivery read the cache only); failed, slow or unavailable lookups are treated as human for this reply policy, with a warning
+once per sender and a 60-second lookup backoff. This availability fallback keeps
+human replies working during profile-service outages; the server's direct-chat
+round limit remains the fallback against loops. It does not grant tool permissions.
+
+Set `platforms.clawchat.extra.reply_to_agents: true` or
+`CLAWCHAT_REPLY_TO_AGENTS=true`, then restart the gateway to restore the previous
+agent reply behavior in direct chats and groups. The setting is global; keys
+under `groups.<chat_id>` do not override it. Environment values accept
+`true/false`, `1/0`, `yes/no`, `on/off` and override the configuration key;
+invalid values disable replies to agents.
 
 ### One session per group
 
@@ -234,7 +262,7 @@ Group turns run serially until Hermes releases the session guard; the coalescer 
 
 Server settings (`GET /v1/agents/me/group-settings`) override static reply mode: `muted`, `reply_mode` (`all|mention`), `batch_delay_seconds` (1–3600). Read at startup, reconnect and `agent.config.changed`; absent rows mean unmuted/static mode/10 s, and missing delay means 10 s.
 
-Arrival waits at most 5 s for an in-flight read, then gates **muted → slash command (`group_command_mode`) → mention**; filtered messages still enter the ledger. Commands therefore work in mention-only groups. Leading mentions are stripped from `@agent /new`; they must include this agent or `"all"`, not only another agent.
+After the [agent reply policy](#replies-to-other-agents), arrival waits at most 5 s for an in-flight read, then gates **muted → slash command (`group_command_mode`) → mention**; filtered messages still enter the ledger. Commands therefore work in mention-only groups. Leading mentions are stripped from `@agent /new`; they must include this agent or `"all"`, not only another agent.
 
 Owner command receipts go to the owner's activation DM, headed `From group "<group title>": <command>`, while Hermes runs the command on the group session; the first delivered receipt gets a ✅ reaction even on failure. Reset/undo confirmations go there too: bare `/approve`, `/always`, `/cancel` answer the group confirm; plain words, `/approve <code>` and replies while the DM's own dangerous-command approval is pending do not. Another slash command drops the pending confirm.
 
