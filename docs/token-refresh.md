@@ -317,13 +317,14 @@ refresh instead keeps a healthy socket; its next connection uses the new pair.
 | Permanent refresh failure → WS stops | OpenClaw: auth-failed latch stops reconnects, runtime flips not-configured. Hermes: a current, confirmed result takes §H.1; stale or uncertain results take §H.3 / §H.6. |
 
 Non-auth closes (duplicate-session takeover, missed pongs, backpressure,
-handshake-timeout) never trigger token refresh. Ordinary non-auth closes reconnect
+handshake-timeout, `4004` ack-silence kick) never trigger token refresh. Ordinary non-auth closes reconnect
 with backoff using the same token and device ID. Terminal **`4010`** is the exception
 to reconnect: it persists superseded state and stops **all** refresh paths (startup,
 proactive, handshake rejection, and REST 401), including sibling senders. Refresh
 returns `skipped`, never permanent failure or auto-logout. The single owner notice
 uses the existing token without refresh; if it fails it is not retried. Restart
 keeps waiting until local reclaim or successful activation clears the state.
+`4004` (ack silence) carries only an advisory `retry_after_ms`: ordinary backoff, no floor.
 Two retryable closes carry timing the client must honour: **`4001`** (takeover) → raise the reconnect
 floor per §3.6 of [the protocol guide](./client-integration.md#36-duplicate-session-policy);
 **`4002`** (`duplicate_session_throttled`, takeover refusal or handshake limiting)
