@@ -1,6 +1,7 @@
 """Bearer business 401 classification and gateway-owned REST retry contracts."""
 
 import asyncio
+import gc
 import io
 import json
 import threading
@@ -64,6 +65,16 @@ class _HttpScript:
     @property
     def authorizations(self):
         return [request.get_header("Authorization") for request in self.requests]
+
+
+@pytest.fixture(autouse=True)
+def _restore_sender_registry():
+    # Tests register adapters / fake senders in the process-wide registry; never
+    # let one leak into later test modules.
+    saved = dict(terminal_send._senders)
+    yield
+    terminal_send._senders.clear()
+    terminal_send._senders.update(saved)
 
 
 @pytest.fixture(autouse=True)
@@ -648,6 +659,14 @@ async def test_tool_refresh_exception_returns_original_error_without_secret_log(
     assert "old-token" not in str(result)
 
 
+@pytest.fixture
+def _collect_real_connection():
+    # A real ClawChatConnection holds many reference cycles; collect them here so
+    # their cost never lands inside a later module's timing-sensitive test.
+    yield
+    gc.collect()
+
+
 async def _mixed_real_connection_refresh(monkeypatch, tmp_path, *, late_401):
     count = 6
     initial_count = count + int(late_401)
@@ -788,13 +807,13 @@ async def _mixed_real_connection_refresh(monkeypatch, tmp_path, *, late_401):
 
 @pytest.mark.asyncio
 async def test_mixed_adapter_and_tools_business_401_share_real_connection_refresh(
-    monkeypatch, tool_profile, tmp_path,
+    monkeypatch, tool_profile, tmp_path, _collect_real_connection,
 ):
     await _mixed_real_connection_refresh(monkeypatch, tmp_path, late_401=False)
 
 
 @pytest.mark.asyncio
 async def test_mixed_real_connection_late_401_reuses_token_without_second_refresh(
-    monkeypatch, tool_profile, tmp_path,
+    monkeypatch, tool_profile, tmp_path, _collect_real_connection,
 ):
     await _mixed_real_connection_refresh(monkeypatch, tmp_path, late_401=True)
