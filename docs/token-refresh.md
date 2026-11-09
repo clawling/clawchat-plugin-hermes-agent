@@ -155,8 +155,9 @@ OpenClaw re-arms its timer.
    new token and **retry the original call once**.
    - **Token already replaced:** when another caller has already rotated the failed
      request's token, retry once with the current token without refreshing — unless the
-     connection is logged out, superseded, blocked by an installation conflict, or its
-     credential source is suspended.
+     connection is stopping or no longer holds its instance locks, is logged out,
+     superseded, blocked by an installation conflict, or its credential source is
+     suspended.
    - **No loops:** a non-success refresh (transient, skipped, permanent) surfaces the
      original error; a retry that is rejected again surfaces its error, with no second
      refresh.

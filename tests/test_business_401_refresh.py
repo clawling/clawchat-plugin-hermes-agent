@@ -156,6 +156,7 @@ class _Connection:
         self._allow_superseded_notice = False
         self._activation_source_suspended = False
         self.blocked = False
+        self.locks_lost = False
         self._owner_loop = asyncio.get_running_loop()
         self.refresh_loops = []
 
@@ -169,6 +170,9 @@ class _Connection:
 
     def _install_is_blocked(self):
         return self.blocked
+
+    def _instance_locks_ready(self):
+        return not self.locks_lost
 
     def session_device_id(self):
         return "test-device"
@@ -246,6 +250,7 @@ async def test_adapter_already_replaced_token_retries_without_refresh(monkeypatc
 @pytest.mark.asyncio
 @pytest.mark.parametrize("guard", [
     "_auth_failed", "_allow_superseded_notice", "blocked", "_activation_source_suspended",
+    "locks_lost",
 ])
 async def test_adapter_replaced_token_cannot_bypass_connection_guards(monkeypatch, guard):
     adapter = _adapter(status="skipped")
@@ -258,6 +263,16 @@ async def test_adapter_replaced_token_cannot_bypass_connection_guards(monkeypatc
         await _profile(adapter)
     adapter._connection.reactive_refresh.assert_awaited_once_with()
     assert script.authorizations == ["Bearer old-token"]
+
+
+def test_stopping_connection_never_reuses_rotated_token():
+    connection = object.__new__(ClawChatConnection)
+    connection._auth_failed = False
+    connection._allow_superseded_notice = False
+    connection._activation_source_suspended = False
+    connection._install_is_blocked = lambda: False
+    connection._stopping = True
+    assert not connection.rest_retry_with_current_token_allowed()
 
 
 @pytest.mark.asyncio
