@@ -1530,14 +1530,16 @@ All nonterminal reconnects need backoff; do not hot-loop after a close.
 |----------------|---------|----------|
 | `4001` | Older session replaced for the same `(user_id,device_id)`. | Raise takeover floor (§3.6); keep token. |
 | `4002` | Handshake attempt limiting, or sustained takeover refusal protecting a healthy incumbent when enabled. | No hello-ok; wait at least JSON reason's `retry_after_ms`, then reconnect with the same token. |
+| `4004` | Ack silence: the connection had unacked entries and no qualifying `sync_ack` for 120 s; JSON reason `{"reason":"ack_silence","retry_after_ms":N}`. | Normal backoff-reconnect, same token and device id; unacked frames replay (§11). `retry_after_ms` is advisory and not read. |
 | `4010` | Distinct installation displaced/refused this session; both valid install IDs differ and loser opted in. | Terminal even before hello-ok: persist superseded state, stop reconnect/refresh; explicit local reclaim. |
 | `1009` | Frame cap exceeded: 8 MiB after auth, 64 KiB for connect. | Split payload or upload media; do not resend unchanged. |
-| `1005` / no status | Server kick, including backpressure. | Backoff-reconnect; retained messages replay (§11). |
+| `1005` / no status | Empty CLOSE or server kick without status (e.g. backpressure). | Backoff-reconnect; retained messages replay (§11). |
 | `1006` / no CLOSE frame | Transport drop or hello-fail rejection. | Read prior `hello-fail` reason (§3.5); code alone cannot classify auth. |
 | Handshake deadline, no hello frame | Connect timeout or early initialization failure. | Backoff-reconnect. |
 | Missing control Pong | About 70 s with defaults. | Backoff-reconnect (§12). |
 
-The server's application close-code set is **`4001`, `4002`, `4010`**.
+The server's application close-code set is **`4001`, `4002`, `4004`, `4010`**.
+Local teardown codes such as `4003` (connect send failed) are client-side, never server-sent.
 Auth failure has no dedicated close code. On `hello-fail`, exact
 `"authentication failed"` is terminal for the token; a reason containing
 `auth service unavailable` is transient. Unknown reasons are transient (§3.5).
