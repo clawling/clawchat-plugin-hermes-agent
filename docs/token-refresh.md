@@ -148,9 +148,24 @@ OpenClaw re-arms its timer.
 
 ### A.2 Reactive refresh
 
-1. **REST 401/403** — both clients classify these as an `auth` error. On such an error
-   from any authenticated REST call, run the single-flight refresh; on success rebuild the
-   api-client with the new token and **retry the original call once**.
+1. **REST auth rejection** — HTTP 401/403, and HTTP 200 with integer business `code: 401`
+   on a request that sent a non-blank bearer, are `auth` errors. Without a bearer, business
+   `code: 401` stays `api`; string `"401"` and other codes keep their classification. On an
+   `auth` error run the single-flight refresh; on success rebuild the API client with the
+   new token and **retry the original call once**.
+   - **Token already replaced:** retry once with the current token without refreshing
+     when another caller rotated it. All retries require the original request's
+     `user_id` and `base_url` (ignoring trailing `/`) to remain unchanged. No reuse while
+     stopping, without instance locks, logged out, superseded, blocked by an
+     installation conflict, or with a suspended credential source.
+   - **No loops:** a non-success refresh (transient, skipped, permanent) surfaces the
+     original error; a retry that is rejected again surfaces its error, with no second
+     refresh.
+   - **Tools** share this refresh through the running gateway adapter of the same Hermes
+     home (scheduled on its owner event loop) and adopt its token only for the same
+     `base_url` and non-empty, matching `user_id` on both sides. An empty tool identity
+     skips refresh. Without a running adapter, tools use profile credentials and do not
+     refresh.
 2. **WS `hello-fail`** — refresh **only** on genuine token rejection:
    - reason is **exactly** `"authentication failed"` (msghub §3.5 — equality, not a regex or
      substring; this is the *only* terminal reason) → refresh.
@@ -311,7 +326,7 @@ refresh instead keeps a healthy socket; its next connection uses the new pair.
 | Scenario | WS behavior |
 |----------|-------------|
 | Proactive refresh succeeds while WS healthy | persist → **close WS** gracefully → reconnect with new token in a fresh `connect`. |
-| Hermes REST 401/403 refresh succeeds | persist → swap → retry the original REST call once; `reactive_refresh()` calls `_attempt_refresh(close_ws_on_success=False)`, leaving the healthy WS open. |
+| Hermes REST auth rejection refresh succeeds | persist → swap → retry the original REST call once; `reactive_refresh()` calls `_attempt_refresh(close_ws_on_success=False)`, leaving the healthy WS open. |
 | Reactive refresh after `hello-fail(auth)` | socket already closed by the server; after refresh the supervisor reconnects with the new token. |
 | Refresh in-flight | supervisor must **not** open a socket with the dead token — gate reconnect on the in-flight refresh. On success reconnect immediately (reset backoff); on transient-fail keep backoff with the current token. |
 | Permanent refresh failure → WS stops | OpenClaw: auth-failed latch stops reconnects, runtime flips not-configured. Hermes: a current, confirmed result takes §H.1; stale or uncertain results take §H.3 / §H.6. |
@@ -366,6 +381,11 @@ value per profile. Boot warns when the resolved id is volatile. See
   response (including 400) transient (OpenClaw asserts the same matrix). Assert `X-Device-Id` = stored device id and
   **no** Authorization header; transient failures keep credentials and write no marker.
 - Single-flight (N concurrent callers → 1 HTTP call), rejected-token latch, min-interval.
+- REST business-code 401 classification with/without a bearer, string codes and
+  unchanged orchestration envelopes; adapter and tool retries use the new token
+  once, preserve the original error on non-success, and never refresh twice.
+  Cover already-replaced tokens with logout/supersession/source guards, missing
+  gateway adapters, cross-loop tool refresh and concurrent auth rejections.
 - Hermes access-token-only hello rejection: several activation polls never reconnect
   with the rejected access token; a different access token is adopted and reconnects.
 - Proactive timer fires at `refresh_at`; startup refresh-if-near.

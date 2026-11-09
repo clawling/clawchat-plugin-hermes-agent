@@ -521,6 +521,19 @@ class ClawChatConnection:
     def config(self) -> ClawChatConfig:
         return self._cfg
 
+    def rest_retry_with_current_token_allowed(self) -> bool:
+        """Whether a REST retry may adopt credentials rotated by another caller.
+
+        Mirrors ``_attempt_refresh``'s guards: a stopping connection or one that
+        no longer holds its instance locks must not retry on another owner's behalf.
+        """
+        return self._instance_locks_ready() and not (
+            self._auth_failed
+            or self._allow_superseded_notice
+            or self._install_is_blocked()
+            or self._activation_source_suspended
+        )
+
     @_in_connection_context
     async def start(self) -> None:
         if self._supervisor_task is not None:

@@ -34,6 +34,7 @@ DEFAULT_WEBSOCKET_URL = "wss://app.clawling.com/ws"
 AGENTS_CONNECT_PLATFORM = "hermes"
 AGENTS_CONNECT_TYPE = "clawbot"
 DEFAULT_REQUEST_TIMEOUT = 30.0
+CODE_UNAUTHENTICATED = 401
 
 # Activation talks to a single-use connect code, so a request that may have
 # reached the server must NOT be retried. We use a shorter timeout than the
@@ -552,14 +553,15 @@ class ClawChatApiClient:
         "zero overrides" and clears it, whereas a 404 (older backend without the
         endpoint) carries no information and must be a no-op.
 
-        Auth (401/403) errors are NOT swallowed: they propagate (``kind ==
-        "auth"``) so the caller's reactive token-refresh-and-retry path runs.
+        Auth (HTTP 401/403 or business code 401 with a non-blank bearer) errors
+        are NOT swallowed: they propagate (``kind == "auth"``) so the caller's
+        reactive token-refresh-and-retry path runs.
         """
         try:
             data = await self._call_json("GET", "/v1/agents/me/group-settings")
         except ClawChatApiError as exc:
-            # Auth (401/403) errors MUST propagate so the caller's reactive
-            # token-refresh-and-retry path runs (mirrors the OpenClaw plugin:
+            # HTTP 401/403 and bearer business-code 401 MUST propagate so the
+            # caller's token-refresh-and-retry path runs (mirrors the OpenClaw plugin:
             # auth throws drive refresh). Swallowing them would leave a
             # mute/reply-mode change unloadable until some unrelated REST call
             # happened to refresh an expired access token.
@@ -1389,7 +1391,7 @@ class ClawChatApiClient:
         if isinstance(payload, dict):
             msg = redact_display_text(payload.get("msg") or payload.get("message") or "", self._token)
         if code != 0:
-            kind = "auth" if status in (401, 403) else "api"
+            kind = "auth" if status in (401, 403) or self._is_bearer_auth_rejection(code) else "api"
             gate_data = payload.get("data") if isinstance(payload, dict) else None
             raise ClawChatApiError(
                 kind,
@@ -1417,8 +1419,9 @@ class ClawChatApiClient:
         Used ONLY by the twelve ``orch_*`` orchestration methods, whose HTTP
         contract is: the business outcome always travels inside the envelope
         (``{code, msg, data}``) with HTTP status 200 on every business path.
-        Unlike :meth:`_call_json`, this does NOT raise on a non-zero envelope
-        ``code`` and does NOT unwrap ``data`` — it returns the parsed envelope
+        Except for business code 401 with a non-blank bearer (``kind="auth"``),
+        this does NOT raise on a non-zero envelope ``code`` and does NOT unwrap
+        ``data`` — it returns the parsed envelope
         exactly as received so the caller (the model, via the tool layer) can
         read ``code`` itself. A genuine transport failure (network error,
         timeout, non-JSON body, or a non-2xx HTTP status — including 401/403,
@@ -1441,10 +1444,27 @@ class ClawChatApiClient:
         extra_headers: dict[str, str],
         base_url: str | None = None,
     ) -> dict:
+        """Preserve business envelopes except bearer business-code 401 auth errors."""
         payload, status = self._request_envelope_sync(method, path, body, extra_headers, base_url)
         if not isinstance(payload, dict):
             raise ClawChatApiError("transport", "invalid envelope: not an object", status=status, path=path)
+        code = payload.get("code")
+        if self._is_bearer_auth_rejection(code):
+            msg = redact_display_text(payload.get("msg") or payload.get("message") or "", self._token)
+            data = payload.get("data")
+            raise ClawChatApiError(
+                "auth", msg or f"code={code}", status=status, path=path, code=code,
+                data=data if isinstance(data, dict) else None,
+            )
         return payload
+
+    def _is_bearer_auth_rejection(self, code: Any) -> bool:
+        return (
+            isinstance(code, int)
+            and not isinstance(code, bool)
+            and code == CODE_UNAUTHENTICATED
+            and bool(self._token.strip())
+        )
 
     def _request_envelope_sync(
         self,
@@ -1462,7 +1482,8 @@ class ClawChatApiClient:
         for 401/403, else ``kind="api"``; network/timeout errors; a non-JSON
         body), and otherwise returns ``(payload, status)`` untouched. Neither
         the envelope ``code`` nor ``data`` is interpreted here — that is each
-        caller's own job.
+        caller's own job, including classifying business code 401 with a
+        non-blank bearer as an auth error.
         """
         request = Request(
             f"{base_url or self._base_url}{path}",
