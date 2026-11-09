@@ -2675,33 +2675,67 @@ class ClawChatAdapter(BasePlatformAdapter):
             device_id=device_id,
         )
 
+    async def _refresh_after_auth_error(self, failed_token: str) -> ClawChatConfig | None:
+        """Resolve replacement REST credentials on the connection's owner loop."""
+        cfg = self._connection.config
+        if (
+            cfg.token.strip()
+            and cfg.token != failed_token
+            and self._connection.rest_retry_with_current_token_allowed()
+        ):
+            self._clawchat_config = cfg
+            return cfg
+        outcome = await self._connection.reactive_refresh()
+        if getattr(outcome, "status", None) != "success":
+            return None
+        cfg = self._connection.config
+        if not cfg.token.strip() or cfg.token == failed_token:
+            return None
+        self._clawchat_config = cfg
+        return cfg
+
+    async def refresh_rest_credentials_for_tool(self, failed_token: str) -> ClawChatConfig | None:
+        """Let tool loops share the gateway's refresh without crossing loop ownership."""
+        try:
+            owner_loop = self._connection._owner_loop
+            if owner_loop is None or owner_loop.is_closed() or not owner_loop.is_running():
+                return None
+            if owner_loop is asyncio.get_running_loop():
+                return await self._refresh_after_auth_error(failed_token)
+            coroutine = self._refresh_after_auth_error(failed_token)
+            try:
+                future = asyncio.run_coroutine_threadsafe(coroutine, owner_loop)
+            except Exception:  # noqa: BLE001
+                coroutine.close()
+                raise
+            return await asyncio.wrap_future(future)
+        except Exception:  # noqa: BLE001
+            logger.warning("clawchat tool REST credential refresh failed")
+            return None
+
     async def _rest_with_auth_retry(
         self,
         call: Callable[[ClawChatApiClient], Awaitable[Any]],
     ) -> Any:
-        """Run an authenticated REST call with one refresh-and-retry on 401/403.
+        """Retry once after an auth rejection (HTTP 401/403 or bearer business 401).
 
-        Token-refresh spec §A.2.1: on a ``kind=='auth'`` error (REST 401/403) from
-        an authenticated call, run the shared single-flight refresh, rebuild the
-        api client with the new token, and retry the original call ONCE. A
-        permanent refresh routes to the existing auto-logout (the manager already
-        cleared creds + emitted the user message); the original auth error then
-        propagates. Transient/skipped refresh → the original auth error
-        propagates unchanged.
+        Reuse an already-replaced token when allowed, otherwise run the shared
+        single-flight refresh. Non-success preserves the original error; a
+        second rejection propagates without another refresh.
         """
+        failed_token = self._clawchat_config.token
         client = self._new_api_client()
         try:
             return await call(client)
         except ClawChatApiError as exc:
             if exc.kind != "auth":
                 raise
-            outcome = await self._connection.reactive_refresh()
-            if getattr(outcome, "status", None) != "success":
+            cfg = await self._refresh_after_auth_error(failed_token)
+            if cfg is None:
                 # permanent (auto-logout already handled) / transient / skipped:
                 # surface the original auth error to the caller's handling.
                 raise
             # Rebuild the client with the freshly-swapped token and retry once.
-            self._clawchat_config = self._connection.config
             return await call(self._new_api_client())
 
     def _is_conversation_not_found_error(self, exc: ClawChatApiError) -> bool:

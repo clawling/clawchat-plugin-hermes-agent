@@ -419,3 +419,5 @@ CLAUDE.md
 !tests/test_history_maintenance.py
 # Restart notices are durable, localized, deduplicated and excluded from history.
 !tests/test_interrupted_turn_notice.py
+# Bearer business-code auth rejection shares one gateway refresh and one REST retry.
+!tests/test_business_401_refresh.py

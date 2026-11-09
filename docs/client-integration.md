@@ -98,6 +98,11 @@ with a warning; it also decodes `exp` for refresh timing. These adapter
 assumptions do not validate the token locally and are not requirements for
 other Protocol v2 clients. See [token refresh](token-refresh.md).
 
+Hermes REST clients treat HTTP 401/403, and HTTP 200 with business `code: 401`
+on a request that sent a bearer token, as auth errors that trigger one
+single-flight refresh and one retry; business `code: 401` without a bearer stays
+an API error. See [reactive refresh](token-refresh.md#a2-reactive-refresh).
+
 ---
 
 ## 3. WebSocket handshake
