@@ -153,18 +153,19 @@ OpenClaw re-arms its timer.
    `code: 401` stays `api`; string `"401"` and other codes keep their classification. On an
    `auth` error run the single-flight refresh; on success rebuild the API client with the
    new token and **retry the original call once**.
-   - **Token already replaced:** when another caller has already rotated the failed
-     request's token, retry once with the current token without refreshing — unless the
-     connection is stopping or no longer holds its instance locks, is logged out,
-     superseded, blocked by an installation conflict, or its credential source is
-     suspended.
+   - **Token already replaced:** retry once with the current token without refreshing
+     when another caller rotated it. All retries require the original request's
+     `user_id` and `base_url` (ignoring trailing `/`) to remain unchanged. No reuse while
+     stopping, without instance locks, logged out, superseded, blocked by an
+     installation conflict, or with a suspended credential source.
    - **No loops:** a non-success refresh (transient, skipped, permanent) surfaces the
      original error; a retry that is rejected again surfaces its error, with no second
      refresh.
    - **Tools** share this refresh through the running gateway adapter of the same Hermes
      home (scheduled on its owner event loop) and adopt its token only for the same
-     `base_url` and agent. Without a running adapter, tools use profile credentials and do
-     not refresh.
+     `base_url` and non-empty, matching `user_id` on both sides. An empty tool identity
+     skips refresh. Without a running adapter, tools use profile credentials and do not
+     refresh.
 2. **WS `hello-fail`** — refresh **only** on genuine token rejection:
    - reason is **exactly** `"authentication failed"` (msghub §3.5 — equality, not a regex or
      substring; this is the *only* terminal reason) → refresh.

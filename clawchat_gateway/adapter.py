@@ -2675,9 +2675,13 @@ class ClawChatAdapter(BasePlatformAdapter):
             device_id=device_id,
         )
 
-    async def _refresh_after_auth_error(self, failed_token: str) -> ClawChatConfig | None:
-        """Resolve replacement REST credentials on the connection's owner loop."""
+    async def _refresh_after_auth_error(
+        self, failed_token: str, *, user_id: str, base_url: str,
+    ) -> ClawChatConfig | None:
+        """Resolve credentials for the original account/endpoint on the owner loop."""
         cfg = self._connection.config
+        if cfg.user_id != user_id or cfg.base_url.rstrip("/") != base_url.rstrip("/"):
+            return None
         if (
             cfg.token.strip()
             and cfg.token != failed_token
@@ -2689,20 +2693,31 @@ class ClawChatAdapter(BasePlatformAdapter):
         if getattr(outcome, "status", None) != "success":
             return None
         cfg = self._connection.config
-        if not cfg.token.strip() or cfg.token == failed_token:
+        if (
+            cfg.user_id != user_id
+            or cfg.base_url.rstrip("/") != base_url.rstrip("/")
+            or not cfg.token.strip()
+            or cfg.token == failed_token
+        ):
             return None
         self._clawchat_config = cfg
         return cfg
 
-    async def refresh_rest_credentials_for_tool(self, failed_token: str) -> ClawChatConfig | None:
+    async def refresh_rest_credentials_for_tool(
+        self, failed_token: str, *, user_id: str, base_url: str,
+    ) -> ClawChatConfig | None:
         """Let tool loops share the gateway's refresh without crossing loop ownership."""
         try:
             owner_loop = self._connection._owner_loop
             if owner_loop is None or owner_loop.is_closed() or not owner_loop.is_running():
                 return None
             if owner_loop is asyncio.get_running_loop():
-                return await self._refresh_after_auth_error(failed_token)
-            coroutine = self._refresh_after_auth_error(failed_token)
+                return await self._refresh_after_auth_error(
+                    failed_token, user_id=user_id, base_url=base_url,
+                )
+            coroutine = self._refresh_after_auth_error(
+                failed_token, user_id=user_id, base_url=base_url,
+            )
             try:
                 future = asyncio.run_coroutine_threadsafe(coroutine, owner_loop)
             except Exception:  # noqa: BLE001
@@ -2723,14 +2738,17 @@ class ClawChatAdapter(BasePlatformAdapter):
         single-flight refresh. Non-success preserves the original error; a
         second rejection propagates without another refresh.
         """
-        failed_token = self._clawchat_config.token
+        request_config = self._clawchat_config
         client = self._new_api_client()
         try:
             return await call(client)
         except ClawChatApiError as exc:
             if exc.kind != "auth":
                 raise
-            cfg = await self._refresh_after_auth_error(failed_token)
+            cfg = await self._refresh_after_auth_error(
+                request_config.token, user_id=request_config.user_id,
+                base_url=request_config.base_url,
+            )
             if cfg is None:
                 # permanent (auto-logout already handled) / transient / skipped:
                 # surface the original auth error to the caller's handling.

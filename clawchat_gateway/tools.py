@@ -223,7 +223,7 @@ def _same_rest_account(cfg: Any, client_kwargs: dict[str, Any]) -> bool:
         return False
     gateway_user = str(getattr(cfg, "user_id", "") or "")
     tool_user = str(client_kwargs.get("user_id") or "")
-    return not (gateway_user and tool_user and gateway_user != tool_user)
+    return bool(gateway_user and tool_user and gateway_user == tool_user)
 
 
 class _AuthRetryingClient:
@@ -243,13 +243,16 @@ class _AuthRetryingClient:
             try:
                 return await getattr(client, name)(*args, **kwargs)
             except ClawChatApiError as exc:
-                if exc.kind != "auth":
+                if exc.kind != "auth" or not self._client_kwargs.get("user_id"):
                     raise
                 sender = get_clawchat_sender()
                 refresh = getattr(sender, "refresh_rest_credentials_for_tool", None)
                 if not callable(refresh):
                     raise
-                cfg = await refresh(client._token)
+                cfg = await refresh(
+                    client._token, user_id=self._client_kwargs["user_id"],
+                    base_url=self._client_kwargs["base_url"],
+                )
                 if cfg is None or not _same_rest_account(cfg, self._client_kwargs):
                     raise
                 # Preserve this tool's endpoint, identity and paired device id.

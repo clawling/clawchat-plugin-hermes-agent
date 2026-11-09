@@ -11,7 +11,7 @@ from urllib.error import HTTPError
 
 import pytest
 
-from clawchat_gateway import api_client, terminal_send, tools
+from clawchat_gateway import api_client, connection, terminal_send, tools
 from clawchat_gateway.adapter import ClawChatAdapter
 from clawchat_gateway.api_client import ClawChatApiClient, ClawChatApiError, RefreshResult
 from clawchat_gateway.config import ClawChatConfig
@@ -248,6 +248,106 @@ async def test_adapter_already_replaced_token_retries_without_refresh(monkeypatc
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("changes", [
+    {"user_id": "other-agent"},
+    {"base_url": "https://other.example.invalid"},
+], ids=["account-changed", "endpoint-changed"])
+@pytest.mark.parametrize("replacement_token", ["old-token", "current-token"])
+async def test_adapter_inflight_repair_preserves_original_error_without_refresh(
+    monkeypatch, changes, replacement_token,
+):
+    adapter = _adapter()
+    request_config = adapter._clawchat_config
+    script = _HttpScript(_envelope(401))
+    monkeypatch.setattr(api_client, "urlopen", script)
+    request_started = asyncio.Event()
+    release_response = asyncio.Event()
+    errors = []
+
+    async def call(client):
+        try:
+            return await client.get_my_profile()
+        except ClawChatApiError as exc:
+            errors.append(exc)
+            request_started.set()
+            await release_response.wait()
+            raise
+
+    task = asyncio.create_task(adapter._rest_with_auth_retry(call))
+    try:
+        await asyncio.wait_for(request_started.wait(), timeout=5)
+        replacement = replace(request_config, token=replacement_token, **changes)
+        adapter._connection.config = replacement
+        # Re-pair can also publish the replacement to the adapter during the call.
+        adapter._clawchat_config = replacement
+        release_response.set()
+        with pytest.raises(ClawChatApiError) as caught:
+            await asyncio.wait_for(task, timeout=5)
+        assert caught.value is errors[0]
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    adapter._connection.reactive_refresh.assert_not_awaited()
+    assert adapter._clawchat_config is replacement
+    assert script.authorizations == ["Bearer old-token"]
+    assert script.requests[0].full_url == "https://example.invalid/v1/users/me"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changes", [
+    {"user_id": "other-agent"},
+    {"base_url": "https://other.example.invalid"},
+], ids=["account-changed", "endpoint-changed"])
+async def test_adapter_refresh_success_with_changed_identity_preserves_original_error(
+    monkeypatch, changes,
+):
+    adapter = _adapter()
+    request_config = adapter._clawchat_config
+
+    async def refresh():
+        await asyncio.sleep(0)
+        adapter._connection.config = replace(request_config, token="new-token", **changes)
+        return RefreshOutcome(status="success")
+
+    adapter._connection.reactive_refresh.side_effect = refresh
+    script = _HttpScript(_envelope(401))
+    monkeypatch.setattr(api_client, "urlopen", script)
+    errors = []
+
+    async def call(client):
+        try:
+            return await client.get_my_profile()
+        except ClawChatApiError as exc:
+            errors.append(exc)
+            raise
+
+    with pytest.raises(ClawChatApiError) as caught:
+        await adapter._rest_with_auth_retry(call)
+    assert caught.value is errors[0]
+    assert adapter._clawchat_config is request_config
+    adapter._connection.reactive_refresh.assert_awaited_once_with()
+    assert script.authorizations == ["Bearer old-token"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("already_replaced", [False, True])
+async def test_adapter_unchanged_empty_identity_and_trailing_slash_allow_retry(
+    monkeypatch, already_replaced,
+):
+    adapter = _adapter()
+    adapter._clawchat_config = replace(adapter._clawchat_config, user_id="")
+    adapter._connection.config = replace(
+        adapter._clawchat_config, base_url="https://example.invalid/",
+        token="new-token" if already_replaced else "old-token",
+    )
+    script = _HttpScript(_envelope(401), _envelope(0))
+    monkeypatch.setattr(api_client, "urlopen", script)
+    assert await _profile(adapter) == {"ok": True}
+    assert adapter._connection.reactive_refresh.await_count == (0 if already_replaced else 1)
+    assert script.authorizations == ["Bearer old-token", "Bearer new-token"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("guard", [
     "_auth_failed", "_allow_superseded_notice", "blocked", "_activation_source_suspended",
     "locks_lost",
@@ -315,7 +415,9 @@ async def test_tool_sender_returning_none_preserves_original_auth_result(monkeyp
         "error": "auth", "message": "first rejection",
         "meta": {"status": 200, "code": 401, "path": "/v1/users/me"},
     }
-    refresh.assert_awaited_once_with("old-token")
+    refresh.assert_awaited_once_with(
+        "old-token", user_id="test-agent", base_url="https://example.invalid",
+    )
     assert len(script.requests) == 1
 
 
@@ -375,7 +477,9 @@ async def test_tool_proxy_keeps_constructor_fields_and_new_token_for_later_calls
     assert original == (client._base_url, client._user_id, client._device_id, client._media_base_url)
     assert script.authorizations == ["Bearer old-token", "Bearer new-token", "Bearer new-token"]
     assert client._headers({}, None)["authorization"] == "Bearer new-token"
-    refresh.assert_awaited_once_with("old-token")
+    refresh.assert_awaited_once_with(
+        "old-token", user_id="test-agent", base_url="https://example.invalid",
+    )
 
 
 @pytest.mark.asyncio
@@ -394,8 +498,53 @@ async def test_tool_never_adopts_gateway_token_for_another_endpoint_or_account(
     result = await tools.get_account_profile()
     assert result["error"] == "auth"
     assert result["message"] == "first rejection"
-    refresh.assert_awaited_once_with("old-token")
+    refresh.assert_awaited_once_with(
+        "old-token", user_id="test-agent", base_url="https://example.invalid",
+    )
     assert script.authorizations == ["Bearer old-token"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("empty_identity", ["gateway", "tool", "both"])
+async def test_tool_empty_identity_preserves_original_auth_without_adopting_token(
+    monkeypatch, tool_profile, empty_identity,
+):
+    tool_config = replace(_config(), user_id="" if empty_identity != "gateway" else "test-agent")
+    gateway_config = replace(
+        _config("new-token"), user_id="" if empty_identity != "tool" else "test-agent",
+    )
+    monkeypatch.setattr(tools, "load_profile_config", lambda: tool_config)
+    refresh = AsyncMock(return_value=gateway_config)
+    terminal_send.set_clawchat_mention_sender(SimpleNamespace(refresh_rest_credentials_for_tool=refresh))
+    script = _HttpScript(_envelope(401, msg="first rejection"))
+    monkeypatch.setattr(api_client, "urlopen", script)
+    assert await tools.get_account_profile() == {
+        "error": "auth", "message": "first rejection",
+        "meta": {"status": 200, "code": 401, "path": "/v1/users/me"},
+    }
+    assert not tools._same_rest_account(gateway_config, {
+        "user_id": tool_config.user_id, "base_url": tool_config.base_url,
+    })
+    if empty_identity == "gateway":
+        refresh.assert_awaited_once_with(
+            "old-token", user_id="test-agent", base_url="https://example.invalid",
+        )
+    else:
+        refresh.assert_not_awaited()
+    assert script.authorizations == ["Bearer old-token"]
+
+
+@pytest.mark.asyncio
+async def test_tool_matching_identity_with_trailing_slash_adopts_gateway_token(monkeypatch, tool_profile):
+    refresh = AsyncMock(return_value=replace(_config("new-token"), base_url="https://example.invalid/"))
+    terminal_send.set_clawchat_mention_sender(SimpleNamespace(refresh_rest_credentials_for_tool=refresh))
+    script = _HttpScript(_envelope(401), _envelope(0))
+    monkeypatch.setattr(api_client, "urlopen", script)
+    assert await tools.get_account_profile() == {"ok": True}
+    refresh.assert_awaited_once_with(
+        "old-token", user_id="test-agent", base_url="https://example.invalid",
+    )
+    assert script.authorizations == ["Bearer old-token", "Bearer new-token"]
 
 
 @pytest.mark.asyncio
@@ -454,7 +603,9 @@ async def test_tool_refresh_unavailable_owner_loop_returns_none(state):
         loop.close()
     adapter._connection._owner_loop = loop
     try:
-        assert await adapter.refresh_rest_credentials_for_tool("old-token") is None
+        assert await adapter.refresh_rest_credentials_for_tool(
+            "old-token", user_id="test-agent", base_url="https://example.invalid",
+        ) is None
         adapter._connection.reactive_refresh.assert_not_awaited()
     finally:
         if loop is not None and not loop.is_closed():
@@ -472,7 +623,9 @@ async def test_tool_refresh_scheduling_failure_closes_coroutine_and_hides_error(
         raise RuntimeError("access_token=old-token")
 
     monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", fail)
-    assert await adapter.refresh_rest_credentials_for_tool("old-token") is None
+    assert await adapter.refresh_rest_credentials_for_tool(
+        "old-token", user_id="test-agent", base_url="https://example.invalid",
+    ) is None
     assert len(scheduled) == 1
     assert scheduled[0].cr_frame is None
     assert "credential refresh failed" in caplog.text
@@ -495,81 +648,153 @@ async def test_tool_refresh_exception_returns_original_error_without_secret_log(
     assert "old-token" not in str(result)
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("via_tools", [False, True], ids=["adapter", "tools"])
-async def test_concurrent_business_401_calls_share_real_refresh_manager(monkeypatch, tool_profile, via_tools):
+async def _mixed_real_connection_refresh(monkeypatch, tmp_path, *, late_401):
     count = 6
-    adapter = _adapter()
+    initial_count = count + int(late_401)
+    # Construct the real connection without starting a socket or touching a profile DB.
+    monkeypatch.setattr(connection, "get_clawchat_store", lambda: None)
+    monkeypatch.setattr(connection, "hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(connection, "hermes_root", lambda: tmp_path)
+    conn = ClawChatConnection(_config(), on_message=AsyncMock())
+    conn._owner_loop = asyncio.get_running_loop()
+    # Isolate installation-state files and host device identity; retain native
+    # lock checks (an unstarted connection requires no supervisor OS locks).
+    monkeypatch.setattr(conn, "_install_is_blocked", lambda: False)
+    monkeypatch.setattr(conn, "_refresh_device_id", lambda: "test-device")
+    adapter = object.__new__(ClawChatAdapter)
+    adapter._clawchat_config = conn.config
+    adapter._connection = conn
     terminal_send.set_clawchat_mention_sender(adapter)
     all_failed = asyncio.Event()
+    all_source_checks = asyncio.Event()
     refresh_started = asyncio.Event()
     release_refresh = asyncio.Event()
+    late_rejected = asyncio.Event()
+    release_late = asyncio.Event()
     authorizations = []
     refresh_http_calls = []
     persisted = []
+    source_checks = []
+    late_tokens = []
+    late_errors = []
+
+    async def recheck_source(**kwargs):
+        # Model an unchanged external credential source. Hold attempts until every
+        # initial request has received its old-token business 401.
+        assert conn.config.token == "old-token"
+        source_checks.append(conn.config)
+        if len(source_checks) == count:
+            all_source_checks.set()
+        await all_failed.wait()
+        return "ok"
+
+    source_check = AsyncMock(side_effect=recheck_source)
+    monkeypatch.setattr(conn, "_recheck_activation_source", source_check)
 
     def http(request, timeout=None):
+        assert request.full_url == "https://example.invalid/v1/users/me"
         authorization = request.get_header("Authorization")
         authorizations.append(authorization)
         assert authorization in ("Bearer old-token", "Bearer new-token")
         if authorization == "Bearer old-token":
-            if authorizations.count(authorization) == count:
+            if authorizations.count(authorization) == initial_count:
                 all_failed.set()
             return _Response(json.dumps(_envelope(401)).encode())
+        assert persisted == [("new-token", "new-refresh-token")]
+        assert conn.config.token == "new-token"
         return _Response(json.dumps(_envelope(0)).encode())
 
-    async def auth_refresh(*, refresh_token, device_id):
+    async def auth_refresh(client, *, refresh_token, device_id):
+        assert client._base_url == "https://example.invalid"
+        assert client._token == ""
+        assert client._user_id == "test-agent"
         refresh_http_calls.append((refresh_token, device_id))
         refresh_started.set()
         await release_refresh.wait()
         return RefreshResult(access_token="new-token", refresh_token="new-refresh-token")
 
-    async def persist(access_token, refresh_token):
+    async def persist(access_token, refresh_token, *, expected_credentials):
+        assert expected_credentials is source_checks[0]
+        assert conn.config is expected_credentials
+        assert conn.config.token == "old-token"
         persisted.append((access_token, refresh_token))
         return True
 
-    manager = RefreshManager(
-        build_client=lambda: SimpleNamespace(auth_refresh=auth_refresh),
-        persist_tokens=persist,
-        persist_logout=AsyncMock(),
-        device_id_provider=lambda: "test-device",
-    )
-    waiters = 0
-    all_waiting = asyncio.Event()
+    # Keep the connection's factory, refresh control flow, result adoption, and
+    # manager single-flight logic; stub exchange HTTP and durable persistence.
+    monkeypatch.setattr(ClawChatApiClient, "auth_refresh", auth_refresh)
+    monkeypatch.setattr(conn, "_persist_rotated_tokens", persist)
+    conn._refresh_manager = conn._build_refresh_manager()
+    assert isinstance(conn._refresh_manager, RefreshManager)
+    assert conn.reactive_refresh.__func__ is ClawChatConnection.reactive_refresh
+    assert conn._attempt_refresh.__func__ is ClawChatConnection._attempt_refresh
 
-    async def reactive_refresh():
-        nonlocal waiters
-        await all_failed.wait()
-        waiters += 1
-        if waiters == count:
-            all_waiting.set()
-        outcome = await manager.refresh(
-            access_token="old-token", refresh_token="old-refresh-token",
-        )
-        if outcome.status == "success":
-            assert persisted == [(outcome.access_token, outcome.refresh_token)]
-            adapter._connection.config = replace(
-                adapter._connection.config,
-                token=outcome.access_token, refresh_token=outcome.refresh_token,
-            )
-        return outcome
+    async def delayed_profile(client):
+        late_tokens.append(client._token)
+        try:
+            return await client.get_my_profile()
+        except ClawChatApiError as exc:
+            assert exc.kind == "auth" and exc.code == 401
+            assert client._token == "old-token"
+            late_errors.append(exc)
+            # Delay delivery of the real parser's old-token auth error until the
+            # six mixed callers have completed refresh and retried successfully.
+            late_rejected.set()
+            await release_late.wait()
+            assert conn.config.token == "new-token"
+            raise
 
-    adapter._connection.reactive_refresh = AsyncMock(side_effect=reactive_refresh)
     monkeypatch.setattr(api_client, "urlopen", http)
-    tasks = [asyncio.create_task(tools.get_account_profile() if via_tools else _profile(adapter))
-             for _ in range(count)]
+    tasks = []
     try:
-        await asyncio.wait_for(all_waiting.wait(), timeout=5)
+        late_task = None
+        if late_401:
+            late_task = asyncio.create_task(adapter._rest_with_auth_retry(delayed_profile))
+            tasks.append(late_task)
+            await asyncio.wait_for(late_rejected.wait(), timeout=5)
+        mixed_tasks = [asyncio.create_task(_profile(adapter)) for _ in range(3)]
+        mixed_tasks += [asyncio.create_task(tools.get_account_profile()) for _ in range(3)]
+        tasks.extend(mixed_tasks)
         await asyncio.wait_for(refresh_started.wait(), timeout=5)
+        await asyncio.wait_for(all_source_checks.wait(), timeout=5)
+        assert authorizations == ["Bearer old-token"] * initial_count
+        assert conn.config.token == "old-token"
+        assert persisted == []
         release_refresh.set()
-        assert await asyncio.wait_for(asyncio.gather(*tasks), timeout=5) == [{"ok": True}] * count
+        assert await asyncio.wait_for(asyncio.gather(*mixed_tasks), timeout=5) == [{"ok": True}] * count
+        assert conn.config.token == "new-token"
+        assert conn.config.refresh_token == "new-refresh-token"
+        assert source_check.await_count == count
+        assert persisted == [("new-token", "new-refresh-token")]
+        if late_task is not None:
+            assert not late_task.done()
+            release_late.set()
+            assert await asyncio.wait_for(late_task, timeout=5) == {"ok": True}
+            assert late_tokens == ["old-token", "new-token"]
+            assert len(late_errors) == 1
     finally:
         release_refresh.set()
+        release_late.set()
         for task in tasks:
             if not task.done():
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
     assert refresh_http_calls == [("old-refresh-token", "test-device")]
-    assert authorizations.count("Bearer old-token") == count
-    assert authorizations.count("Bearer new-token") == count
-    assert adapter._connection.reactive_refresh.await_count == count
+    assert authorizations.count("Bearer old-token") == initial_count
+    assert authorizations.count("Bearer new-token") == initial_count
+    assert source_check.await_count == count  # The late 401 must take the fast path.
+    assert conn._credential_generation == 1
+
+
+@pytest.mark.asyncio
+async def test_mixed_adapter_and_tools_business_401_share_real_connection_refresh(
+    monkeypatch, tool_profile, tmp_path,
+):
+    await _mixed_real_connection_refresh(monkeypatch, tmp_path, late_401=False)
+
+
+@pytest.mark.asyncio
+async def test_mixed_real_connection_late_401_reuses_token_without_second_refresh(
+    monkeypatch, tool_profile, tmp_path,
+):
+    await _mixed_real_connection_refresh(monkeypatch, tmp_path, late_401=True)
