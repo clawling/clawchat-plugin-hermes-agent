@@ -70,7 +70,10 @@ maintenance diagnostic line (conversation, reason, result, blocks, duration and
 prompt tokens before/after).
 
 Arrivals are journaled in the same transaction as their ledger claim, held during
-maintenance, and released in ledger order. The journal records held, dispatching
+maintenance, and released in ledger order. Live inbound holds adapter input ownership
+from a successful durable claim through sender profile lookup and reply-policy evaluation
+until dispatch, no-reply completion or queue handoff; release yields to owned input and
+resumes when ownership is released. The journal records held, dispatching
 and dispatched states and a stable host event snapshot before handoff. Restart
 replays held or uncertain dispatching input through ordinary authorization and
 routing. Recall tombstones are checked before replay and after asynchronous
