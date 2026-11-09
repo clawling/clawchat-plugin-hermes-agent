@@ -3811,23 +3811,31 @@ class ClawChatAdapter(BasePlatformAdapter):
             )
             if protocol_message_id:
                 self._last_inbound_message_id_by_chat[inbound.chat_id] = protocol_message_id
-        suppress = await self._suppress_agent_auto_reply(inbound)
-        if inbound.chat_type == "group":
-            self._schedule_profile_sync(self._refresh_conversation_metadata(inbound.chat_id))
-        elif (inbound.sender_id != self._owner_user_id()
-                and time.monotonic() >= self._agent_profile_retry_after.get(inbound.sender_id, 0)):
-            # Keep the periodic profile refresh; the policy check above only
-            # fetches on a cache miss and has finished before this runs. A
-            # failed lookup's backoff also pauses this refresh (and its warning).
-            self._schedule_profile_sync(self._refresh_user_profile(inbound.sender_id))
-        if suppress:
-            if self._history:
-                self._history.no_reply(inbound)
-            return
-        if self._history and self._history.enabled(inbound):
-            await self._history.continue_claimed(inbound)
-            return
-        await self._continue_claimed_inbound(inbound)
+        with self._history_input_scope(inbound) as admitted:
+            if not admitted:
+                logger.info(
+                    "clawchat inbound skipped chat_id=%s message_id=%s reason=input_owned_elsewhere",
+                    inbound.chat_id,
+                    protocol_message_id,
+                )
+                return
+            suppress = await self._suppress_agent_auto_reply(inbound)
+            if inbound.chat_type == "group":
+                self._schedule_profile_sync(self._refresh_conversation_metadata(inbound.chat_id))
+            elif (inbound.sender_id != self._owner_user_id()
+                    and time.monotonic() >= self._agent_profile_retry_after.get(inbound.sender_id, 0)):
+                # Keep the periodic profile refresh; the policy check above only
+                # fetches on a cache miss and has finished before this runs. A
+                # failed lookup's backoff also pauses this refresh (and its warning).
+                self._schedule_profile_sync(self._refresh_user_profile(inbound.sender_id))
+            if suppress:
+                if self._history:
+                    self._history.no_reply(inbound)
+                return
+            if self._history and self._history.enabled(inbound):
+                await self._history.continue_claimed(inbound)
+                return
+            await self._continue_claimed_inbound(inbound)
 
     def _history_input_queued(self, inbound: InboundMessage) -> bool:
         ids = self._batch_message_ids(inbound)

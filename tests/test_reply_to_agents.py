@@ -71,6 +71,135 @@ async def flush(a):
         await a._group_message_coalescer.flush_now(key)
 
 
+@pytest.fixture
+async def journaled_adapter(adapter):
+    from clawchat_gateway.history_maintenance import HistoryMaintenance
+
+    a, api = adapter
+    a.build_source = lambda **kwargs: SimpleNamespace(**kwargs)
+    history = HistoryMaintenance(a)
+    history.available = True
+    history.read_route = Mock(side_effect=AssertionError("host route read"))
+    history.gateway = SimpleNamespace(
+        session_store=SimpleNamespace(peek_session_id=Mock()),
+        _session_key_for_source=lambda source: "test-history-key",
+    )
+    a._history = history
+
+    async def handoff(inbound):
+        history.dispatched(SimpleNamespace(
+            source=history.source(inbound), raw_message={"clawchat_raw": inbound.raw_message}))
+
+    a._handle_inbound.side_effect = handoff
+    try:
+        yield a, api, history
+    finally:
+        await history.close()
+
+
+@pytest.mark.parametrize("profile_type", ["agent", "user"])
+async def test_history_release_waits_for_live_profile_lookup(journaled_adapter, profile_type):
+    a, api, history = journaled_adapter
+    entered, gate = asyncio.Event(), asyncio.Event()
+
+    async def lookup(_sender):
+        entered.set()
+        await gate.wait()
+        return {"user": {"profile_type": profile_type}}
+
+    api.get_user_info.side_effect = lookup
+    incoming = frame()
+    message = parse_inbound_message(incoming, a._clawchat_config)
+    key = history.key(message)
+    assert not a._read_memory_metadata("user", PEER)
+    live = asyncio.create_task(a._on_message(incoming))
+    releasing = None
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        assert history.held_row(key, "msg_one")["state"] == "held"
+        releasing = asyncio.create_task(history.release(key))
+        await asyncio.wait_for(releasing, 1)
+        a._handle_inbound.assert_not_awaited()
+        assert key in history.drain_waiting
+        gate.set()
+        await asyncio.wait_for(live, 1)
+        await history.release(key)
+        assert a._handle_inbound.await_count == int(profile_type == "user")
+        assert not a._store.list_held(ME, key)
+        completed, = a._store.list_held(ME, key, states=("dispatched",))
+        if profile_type == "agent":
+            assert completed["payload"]["local_consumed"] is True
+        else:
+            assert completed["payload"]["handoff_at"] > 0
+        assert not a._history_input_owners
+    finally:
+        tasks = [live] + ([releasing] if releasing is not None else [])
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def test_cancelled_profile_lookup_releases_history_input(journaled_adapter):
+    a, api, history = journaled_adapter
+    entered, gate = asyncio.Event(), asyncio.Event()
+
+    async def lookup(_sender):
+        entered.set()
+        await gate.wait()
+        return {"user": {"profile_type": "agent"}}
+
+    api.get_user_info.side_effect = lookup
+    incoming = frame()
+    message = parse_inbound_message(incoming, a._clawchat_config)
+    key = history.key(message)
+    owner_key = (ME, CHAT, "msg_one")
+    live = asyncio.create_task(a._on_message(incoming))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        assert history.held_row(key, "msg_one")["state"] == "held"
+        assert a._history_input_owners[owner_key] is live
+        live.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await live
+        assert owner_key not in a._history_input_owners
+        assert not a._read_memory_metadata("user", PEER)
+        await asyncio.wait_for(history.release(key), 1)
+        a._handle_inbound.assert_awaited_once()
+        api.get_user_info.assert_awaited_once_with(PEER)
+        assert not a._store.list_held(ME, key)
+    finally:
+        live.cancel()
+        await asyncio.gather(live, return_exceptions=True)
+
+
+async def test_live_input_owned_elsewhere_stops_before_reply_policy(journaled_adapter, caplog):
+    a, api, history = journaled_adapter
+    entered, gate = asyncio.Event(), asyncio.Event()
+    incoming = frame()
+    message = parse_inbound_message(incoming, a._clawchat_config)
+    history.no_reply = Mock(wraps=history.no_reply)
+
+    async def hold():
+        with a._history_input_scope(message) as admitted:
+            assert admitted
+            entered.set()
+            await gate.wait()
+
+    owner = asyncio.create_task(hold())
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        with caplog.at_level(logging.INFO, logger="clawchat_gateway.adapter"):
+            await asyncio.wait_for(a._on_message(incoming), 1)
+        api.get_user_info.assert_not_awaited()
+        a._handle_inbound.assert_not_awaited()
+        history.no_reply.assert_not_called()
+        assert history.held_row(history.key(message), "msg_one")["state"] == "held"
+        assert "reason=input_owned_elsewhere" in caplog.text
+    finally:
+        owner.cancel()
+        await asyncio.gather(owner, return_exceptions=True)
+
+
 async def test_default_direct_agent_is_recorded_without_host_admission(adapter, caplog):
     a, api = adapter
     cache(a, "agent")
@@ -241,7 +370,8 @@ async def test_suppression_precedes_history_maintenance(adapter):
     a, _ = adapter
     cache(a, "agent")
     history = SimpleNamespace(claim_options=Mock(return_value={}), no_reply=Mock(),
-                              enabled=Mock(side_effect=AssertionError("maintenance admission")))
+                              enabled=Mock(side_effect=AssertionError("maintenance admission")),
+                              journal_ready=Mock(return_value=False))
     a._history = history
     await a._on_message(frame())
     history.no_reply.assert_called_once()
