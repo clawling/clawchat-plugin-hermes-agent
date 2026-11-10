@@ -4,11 +4,13 @@ import logging
 import sqlite3
 import time
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
 from clawchat_gateway import host_tools_guard as guard, tools, turn_grants as turns
+from clawchat_gateway.adapter import _SedimentTurn
 from clawchat_gateway.inbound import InboundMessage
 from clawchat_gateway.tool_grants import OWNER_DOWNGRADED_MESSAGE, GRANT_TOOL_NAMES
 from test_tool_grants_admission import harness, message, OWNER_CHAT, CHAT
@@ -23,10 +25,24 @@ def latest(h):
 
 
 def notice(a, kind):
-    return InboundMessage.internal_synthetic(
+    inbound = InboundMessage.internal_synthetic(
         plugin_notification=True, chat_id=OWNER_CHAT, chat_type="direct",
         sender_id="plugin-notice", sender_name="Plugin", text="Operation completed.",
         raw_message={"synthetic": True, kind: True})
+    if kind == "clawchat_sediment":
+        # Match the runner's registration before dispatch; the host turn stays in flight.
+        turn_id = "notice-sediment"
+        inbound.raw_message.update(sediment_id=turn_id, conversation_id=inbound.chat_id)
+        source = a._sediment_source(inbound.chat_id, inbound.chat_type, inbound.sender_id)
+        if getattr(a, 'gateway_runner', None) is None:
+            a.gateway_runner = SimpleNamespace(
+                _session_key_for_source=lambda source: f'{source.chat_type}:{source.chat_id}:{source.user_id}',
+                session_store=SimpleNamespace(peek_session_id=lambda key: 'notice-session'))
+        key, sid = a._sediment_target(source)
+        a._sediment_done[inbound.chat_id] = _SedimentTurn(
+            turn_id, asyncio.Event(), key=key, session_id=sid,
+            interruption=a._maintenance_interrupt_epoch(inbound.chat_id, key))
+    return inbound
 
 
 @pytest.mark.asyncio
@@ -36,6 +52,7 @@ async def test_local_notice_in_flight_preserves_owner_ordinary_tools(harness, ho
     # Keep exercising overlapping permissions after the input's hold deadline.
     a._owner_input_hold_seconds = 0
     await a._handle_inbound(notice(a, kind))
+    assert len(harness.events) == 1
     notification = latest(harness)
     assert notification.plugin_notification and not notification.owner_verified
     assert not notification.owner_side and not notification.legacy_owner_tools
@@ -351,6 +368,7 @@ async def test_consumption_during_preparation_keeps_old_batch_restricted(harness
 @pytest.mark.parametrize("kind", ["permission_result", "awareness", "memory_migration_hint", "bootstrap", "clawchat_sediment"])
 async def test_notification_turn_itself_keeps_default_tools(harness, host, kind):
     await harness.adapter._handle_inbound(notice(harness.adapter, kind))
+    assert len(harness.events) == 1
     notification = latest(harness)
     assert notification.plugin_notification
     assert not notification.owner_side and not notification.owner_verified

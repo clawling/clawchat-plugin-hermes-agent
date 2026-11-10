@@ -297,8 +297,12 @@ ClawChat conversations are compacted into a rolling summary when their history e
 
 Hermes has no pre-compression/reset memory flush; its periodic single-user review is disabled below. The plugin runs a synthetic sediment turn in the same session before losing context:
 
-- `/new` / `/reset`: finish sediment before the host command/confirmation; skip busy sessions or those with nothing said since reset, so reset remains an immediate escape.
+- `/new` / `/reset`: finish sediment before the host command/confirmation; skip busy sessions (including held or awaited host leases) or those with nothing said since reset, so reset remains an immediate escape.
 - Compression with budget maintenance: run notes after summary publication and before renewal. When budget maintenance is unavailable or off, use the legacy trigger after a turn, when idle, once per Hermes session id. The compression point is the lower of the absolute cap and Hermes' ratio threshold (default 0.5; 0.75 below 512 K, accounting for output reservation). Plugin load/activation **fill only missing** `compression.threshold_tokens` from `session-cap-tokens`; this host key is global across platforms (Hermes 0.20.1+).
+
+Busy host leases, interruptions and unexecuted notes defer automatic renewal;
+see [history maintenance admission](history-budget.md) for execution evidence,
+retry and older-host compatibility rules.
 
 Legacy fallback trigger example without output reservation: `0.75 × 128000 − 10000 = 86000`, rather than `150000 − 10000 = 140000`. Computation uses `post_api_request` usage/context length, `pre_api_request` max tokens and Hermes `ContextCompressor` math when importable (same fallback rule). Per-model ratio overrides are unseen; until the first request supplies a window, the cap alone decides.
 See [Effective compression point](#effective-compression-point) for read-only status diagnostics.

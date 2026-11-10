@@ -6,6 +6,7 @@ inferred from a returned banner or an in-memory session entry.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from contextvars import ContextVar
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, replace
@@ -15,6 +16,7 @@ import json
 import logging
 from pathlib import Path
 import time
+import threading
 import weakref
 
 from clawchat_gateway.config import effective_history_settings
@@ -38,6 +40,101 @@ POLL_SECONDS = .1
 _internal_reset = ContextVar("clawchat_internal_history_reset", default=None)
 _llm = None
 _instances = weakref.WeakSet()
+_sediment_observers = {}
+_sediment_observer_lock = threading.Lock()
+
+
+def register_sediment_observer(adapter, pending):
+    identity = (pending.nonce, pending.key, pending.session_id)
+    if not all(identity):
+        return
+    with _sediment_observer_lock:
+        if identity in _sediment_observers:
+            raise RuntimeError("duplicate sediment request identity")
+        _sediment_observers[identity] = (pending, weakref.ref(adapter), asyncio.get_running_loop())
+
+
+def unregister_sediment_observer(pending):
+    identity = (pending.nonce, pending.key, pending.session_id)
+    with _sediment_observer_lock:
+        registered = _sediment_observers.get(identity)
+        if registered and registered[0] is pending:
+            _sediment_observers.pop(identity)
+
+
+def host_turn_lease_idle(gateway, source):
+    """Read the host's loop-owned lease state without acquiring or releasing it."""
+    absent = object()
+    try:
+        registry = getattr(gateway, "_turn_leases", absent)
+        if registry is absent:
+            return True  # Older hosts have no lease registry.
+        leases = getattr(registry, "_leases", None)
+        if not isinstance(leases, dict):
+            raise ValueError
+        key = gateway._session_key_for_source(source)
+        sid = gateway.session_store.peek_session_id(key)
+        if sid is not None and not isinstance(sid, str):
+            raise ValueError
+        if not sid or sid not in leases:
+            return True
+        lease = leases[sid]
+        holder = getattr(lease, "holder", absent)
+        waiting = getattr(lease, "pending_acquires", None)
+        locked = getattr(getattr(lease, "lock", None), "locked", None)
+        if holder is absent or type(waiting) is not int or waiting < 0 or not callable(locked):
+            raise ValueError
+        lock_state = locked()
+        if type(lock_state) is not bool:
+            raise ValueError
+        return holder is None and not lock_state and waiting == 0
+    except Exception:
+        logger.debug("clawchat host turn lease state unavailable; deferring notes and renewal")
+        return False
+
+
+def sediment_request_hook_supported() -> bool | None:
+    """True: supported; False: known unsupported; None: capability probe failed."""
+    try:
+        from importlib import import_module
+        try:
+            plugins = import_module("hermes_cli.plugins")
+        except ModuleNotFoundError as exc:
+            if exc.name in {"hermes_cli", "hermes_cli.plugins"}:
+                return False
+            raise
+        valid_hooks = getattr(plugins, "VALID_HOOKS", None)
+        if not isinstance(valid_hooks, (set, frozenset)):
+            return None
+        if "post_api_request" not in valid_hooks:
+            return False
+        try:
+            session_context = import_module("gateway.session_context")
+        except ModuleNotFoundError as exc:
+            if exc.name in {"gateway", "gateway.session_context"}:
+                return False
+            raise
+        # Use the same context-map contract as host_tools_guard's stable-schema
+        # probe; that broader probe also requires unrelated tool-policy hooks.
+        variables = getattr(session_context, "_VAR_MAP", None)
+        if not isinstance(variables, Mapping):
+            return None
+        required = {"HERMES_SESSION_MESSAGE_ID", "HERMES_SESSION_KEY"}
+        if not required <= variables.keys():
+            return False  # Known older context: completion compatibility is needed.
+        if (not callable(getattr(session_context, "get_session_env", None))
+                or any(not isinstance(variables[name], ContextVar) for name in required)):
+            return None
+        hooks = getattr(plugins.get_plugin_manager(), "_hooks", None)
+        if not isinstance(hooks, Mapping):
+            return None
+        callbacks = hooks.get("post_api_request")
+        if not isinstance(callbacks, (list, tuple)) or post_api_request not in callbacks:
+            return None
+        return True
+    except Exception:
+        logger.debug("clawchat sediment hook capability probe failed")
+        return None
 
 
 @dataclass
@@ -194,6 +291,17 @@ def post_api_request(**kwargs):
     sid = str(kwargs.get("session_id") or "")
     from clawchat_gateway.sediment import _prompt_tokens
     tokens = _prompt_tokens(kwargs.get("usage"))
+    with _sediment_observer_lock:
+        observer = _sediment_observers.get((nonce, key, sid))
+        if observer:
+            # Model threads publish proof before their completion can be handled.
+            # The event belongs only to this operation; no loop-owned state is changed.
+            observer[0].request_seen.set()
+    if observer:
+        _, reference, loop = observer
+        adapter = reference()
+        if adapter is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(adapter._observe_sediment_request, nonce, key, sid)
     for instance in list(_instances):
         if instance.loop and not instance.loop.is_closed() and not instance.closed:
             instance.loop.call_soon_threadsafe(instance.observe_request, nonce, key, sid, tokens)
@@ -859,6 +967,8 @@ class HistoryMaintenance:
 
     async def reset_notes(self, inbound):
         async with self.locks.setdefault(self.key(inbound), asyncio.Lock()):
+            if not self.adapter._sediment_lease_idle(inbound.chat_id, inbound.chat_type, inbound.sender_id):
+                return False
             return await self.adapter._run_sediment_turn(chat_id=inbound.chat_id,
                 chat_type=inbound.chat_type, sender_id=inbound.sender_id, reason="reset")
 
@@ -1135,6 +1245,9 @@ class HistoryMaintenance:
         key = self.key(inbound)
         chat = inbound.chat_id
         a, g = self.adapter, self.gateway
+        if (a._maintenance_interrupted(inbound.chat_id, key)
+                or not host_turn_lease_idle(g, self.source(inbound))):
+            return False
         if a._chat_session_active(chat) or chat in a._group_dispatching or chat in a._sediment_chats:
             return False
         for name in ("_pending_messages", "_text_debounce"):
@@ -1167,6 +1280,8 @@ class HistoryMaintenance:
 
     async def wait_idle(self, inbound, token):
         while self.blocked.get(self.key(inbound)) is token and not self.closed:
+            if self.adapter._maintenance_interrupted(inbound.chat_id, self.key(inbound)):
+                return False
             if await self.idle(inbound):
                 return True
             await asyncio.sleep(POLL_SECONDS)
@@ -1188,6 +1303,7 @@ class HistoryMaintenance:
             return
         self.blocked[key] = token
         epoch = self.epoch
+        interruption = self.adapter._maintenance_interrupt_epoch(inbound.chat_id, key)
         watchdog = asyncio.create_task(self.watchdog(key, token))
         self.watchdogs[key] = watchdog
         started = time.monotonic()
@@ -1206,7 +1322,10 @@ class HistoryMaintenance:
                         return
                     if not renewed and not await self.wait_idle(inbound, token):
                         return
-                    blocks, result = await self.maintain(inbound, token)
+                    if interruption != self.adapter._maintenance_interrupt_epoch(inbound.chat_id, key):
+                        result = "busy"
+                        return
+                    blocks, result = await self.maintain(inbound, token, deadline=started + MAINTENANCE_SECONDS)
         except PermissionError:
             self.available = False
             result = "llm-unavailable"
@@ -1244,14 +1363,20 @@ class HistoryMaintenance:
             finally:
                 self.running_tasks.discard(running)
 
-    async def maintain(self, inbound, token):
+    async def maintain(self, inbound, token, *, deadline=None):
         key = self.key(inbound)
+        interruption = self.adapter._maintenance_interrupt_epoch(inbound.chat_id, key)
+        def current():
+            return (interruption == self.adapter._maintenance_interrupt_epoch(inbound.chat_id, key)
+                    and not self.adapter._maintenance_interrupted(inbound.chat_id, key))
         state = self.state(key)
         pending = state.get("pending")
         if self.blocked.get(key) is not token or self.closed:
             return 0, "deadline"
         if not pending:
             return 0, "empty"
+        if not current():
+            return 0, "busy"
         renewed = pending["why"] == "renewed"
         blocks = split_blocks([render_entry(e) for e in self.interval(inbound, state, cut=pending["cut_id"], cut_seq=pending.get("cut_seq"), boundary=not renewed)], marker_id=rendered_id) if pending["cut_id"] else []
         count = 0
@@ -1268,6 +1393,8 @@ class HistoryMaintenance:
                 reply = await self.llm.acomplete(messages, timeout=120, max_tokens=max_tokens)
                 if self.blocked.get(key) is not token or self.closed:
                     return count, "deadline"
+                if not current():
+                    return count, "busy"
                 if not summary_truncated(reply, max_tokens):
                     break
                 if attempt or max_tokens == 32000:
@@ -1292,22 +1419,33 @@ class HistoryMaintenance:
             self.cas(key, state, inject_next=1, pending=None, failures=0, retry_after_msgs=0)
             return count, "renewed"
         if self.adapter._clawchat_config.sediment_on_compact and pending.get("notes") != "done":
+            if not await self.wait_idle(inbound, token) or not current():
+                return count, "busy"
+            if self.read_route(key) != state.get("host_session"):
+                raise Superseded
             try:
-                await self.adapter._run_sediment_turn(chat_id=inbound.chat_id, chat_type=inbound.chat_type,
-                                                     sender_id=inbound.sender_id, reason="compact")
+                executed = await self.adapter._run_sediment_turn(
+                    chat_id=inbound.chat_id, chat_type=inbound.chat_type,
+                    sender_id=inbound.sender_id, reason="compact", maintenance=self,
+                    maintenance_token=token, deadline=deadline)
             except Exception:
-                logger.warning("clawchat history notes failed conv=%s; continuing renewal", key)
+                # The runner converts ordinary errors after an observed request
+                # to executed=True. An exception escaping preparation proves no execution.
+                logger.warning("clawchat history notes preparation failed conv=%s; deferring renewal", key)
+                executed = False
             if self.blocked.get(key) is not token or self.closed:
                 return count, "deadline"
+            if not current() or not executed:
+                return count, "notes-deferred"
             pending = dict(pending, notes="done")
             state = self.cas(key, state, pending=pending)
-        if not await self.wait_idle(inbound, token):
+        if not await self.wait_idle(inbound, token) or not current():
             return count, "busy"
         # The pre-reset durable ID must still be the target summarized above.
         old = self.read_route(key)
         if not old or old != state.get("host_session"):
             raise RuntimeError("reset target changed")
-        task = asyncio.create_task(self.reset(inbound, state, token, old))
+        task = asyncio.create_task(self.reset(inbound, state, token, old, interruption))
         self.reset_tasks[key] = task
         try:
             done, _ = await asyncio.wait({task}, timeout=RESET_WARNING_SECONDS)
@@ -1322,9 +1460,13 @@ class HistoryMaintenance:
             cleanup_summaries(self.directory(key), {r for r in (previous_ref, self.state(key).get("summary_ref")) if r})
         return count, "reset" if success else "reset-pending"
 
-    async def reset(self, inbound, state, token, old):
+    async def reset(self, inbound, state, token, old, interruption):
         key = self.key(inbound)
         epoch = self.epoch
+        if (self.closed or self.blocked.get(key) is not token
+                or interruption != self.adapter._maintenance_interrupt_epoch(inbound.chat_id, key)
+                or not await self.idle(inbound)):
+            return False
         operation = (token, inbound.chat_id)
         context = _internal_reset.set(operation)
         try:

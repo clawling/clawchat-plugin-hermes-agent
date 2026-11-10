@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import ast
 import asyncio
+from contextvars import ContextVar
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import inspect
 import json
+import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace as NS
 
@@ -14,7 +17,7 @@ import pytest
 
 from conftest import FAKE_SECRETS
 from clawchat_gateway import history_maintenance as hm
-from clawchat_gateway.adapter import ClawChatAdapter, MessageEvent
+from clawchat_gateway.adapter import ClawChatAdapter, MessageEvent, _SedimentTurn
 from clawchat_gateway.atomic_file import atomic_write_text
 from clawchat_gateway.config import ClawChatConfig
 from clawchat_gateway.inbound import InboundMessage
@@ -31,9 +34,11 @@ class LLM:
         self.error = None
         self.text = SUMMARY
         self.wait = None
+        self.started = asyncio.Event()
 
     async def acomplete(self, messages, *, timeout, max_tokens):
         self.calls.append((messages, timeout, max_tokens))
+        self.started.set()
         if self.wait:
             await self.wait.wait()
         if self.error:
@@ -42,7 +47,9 @@ class LLM:
 
 
 class Host:
-    def __init__(self, directory):
+    def __init__(self, directory, turn_leases=None):
+        if turn_leases is not None:
+            self._turn_leases = turn_leases
         self.path = directory / 'sessions.json'
         self.routes = {}
         self.session_store = NS(sessions_dir=directory, peek_session_id=lambda key: self.routes.get(key))
@@ -509,6 +516,9 @@ async def test_idle_is_after_answer_and_uses_original_timestamp(rig):
 @pytest.mark.parametrize('outcome,failed', [
     pytest.param('FAILURE', True, id='failure-string'),
     pytest.param(NS(name='FAILURE'), True, id='failure-enum'),
+    pytest.param('CANCELLED', True, id='cancelled-string'),
+    pytest.param(NS(name='CANCELLED'), True, id='cancelled-enum'),
+    pytest.param('INTERRUPTED_SUCCESS', True, id='interrupted-success'),
     pytest.param(NS(name='SUCCESS'), False, id='success'),
     pytest.param(None, False, id='legacy-completion'),
 ])
@@ -528,6 +538,10 @@ async def test_processing_outcome_gates_budget_and_idle_maintenance(rig, monkeyp
     monkeypatch.setattr(rig.m, 'schedule', scheduled.append)
     monkeypatch.setattr(rig.a, '_maybe_schedule_compact_sediment', lambda *a: legacy.append(a))
     ev = event(rig, message)
+    rig.a._bind_maintenance_turn(ev)
+    if outcome == 'INTERRUPTED_SUCCESS':
+        await rig.a.interrupt_session_activity(key, message.chat_id)
+        outcome = NS(name='SUCCESS')
     await rig.a.on_processing_complete(ev, outcome)
     if failed:
         assert rig.m.state(key) == previous
@@ -549,9 +563,15 @@ async def test_failed_processing_preserves_backoff_until_successful_turns(rig, m
     scheduled, legacy = [], []
     monkeypatch.setattr(rig.m, 'schedule', scheduled.append)
     monkeypatch.setattr(rig.a, '_maybe_schedule_compact_sediment', lambda *a: legacy.append(a))
-    for outcome, remaining in (('FAILURE', 2), ('SUCCESS', 1), ('SUCCESS', 0)):
+    for outcome, remaining in (('FAILURE', 2), ('CANCELLED', 2),
+                               ('INTERRUPTED_SUCCESS', 2), ('SUCCESS', 1), ('SUCCESS', 0)):
         await rig.m.before(message)
-        await rig.a.on_processing_complete(event(rig, message), outcome)
+        ev = event(rig, message)
+        await rig.a.on_processing_start(ev)
+        if outcome == 'INTERRUPTED_SUCCESS':
+            await rig.a.interrupt_session_activity(key, message.chat_id)
+            outcome = 'SUCCESS'
+        await rig.a.on_processing_complete(ev, outcome)
         assert rig.m.state(key)['retry_after_msgs'] == remaining
         assert rig.m.state(key)['failures'] == 2
         assert len(scheduled) == (1 if remaining == 0 else 0)
@@ -605,7 +625,7 @@ async def test_failed_sediment_completion_still_sets_done(rig, monkeypatch):
     message = inbound('notes-question')
     initialize(rig, message)
     done = asyncio.Event()
-    rig.a._sediment_done[message.chat_id] = ('notes-operation', done)
+    rig.a._sediment_done[message.chat_id] = _SedimentTurn('notes-operation', done)
     ev = event(rig, message)
     ev.raw_message = {'clawchat_raw': {'clawchat_sediment': True,
         'conversation_id': message.chat_id, 'sediment_id': 'notes-operation'}}
@@ -1501,13 +1521,296 @@ async def test_original_summary_unchanged_on_next_call_failure(rig):
     assert not rig.host.reset_calls
 
 
-async def test_note_failure_does_not_prevent_reset(rig):
+async def test_note_failure_does_not_prevent_reset(rig, monkeypatch):
     ledger(rig)
     msg = inbound()
-    async def failed_notes(**kwargs): raise RuntimeError('placeholder-notes-failure')
-    rig.a._run_sediment_turn = failed_notes
+    monkeypatch.setattr(rig.a, '_run_sediment_turn',
+                        ClawChatAdapter._run_sediment_turn.__get__(rig.a))
+    monkeypatch.setattr(hm, 'sediment_request_hook_supported', lambda: True)
+    async def handle(ev):
+        pending = rig.a._sediment_done[msg.chat_id]
+        values = {'HERMES_SESSION_MESSAGE_ID': pending.nonce, 'HERMES_SESSION_KEY': pending.key}
+        monkeypatch.setattr(hm, '_session_env', lambda name: values.get(name, ''))
+        hm.post_api_request(platform='clawchat', session_id='old-session')
+        raise RuntimeError('placeholder-notes-failure')
+    monkeypatch.setattr(rig.a, 'handle_message', handle, raising=False)
     _, state = await compact(rig, msg)
     assert state['host_session'] == 'new-session' and not state['pending']
+
+
+async def test_note_preparation_failure_defers_reset(rig, monkeypatch):
+    ledger(rig)
+    async def failed_notes(**kwargs):
+        raise RuntimeError('placeholder-notes-preparation-failure')
+    monkeypatch.setattr(rig.a, '_run_sediment_turn', failed_notes)
+    _, state = await compact(rig, inbound())
+    assert state['pending'].get('notes') != 'done' and not rig.host.reset_calls
+
+
+async def test_old_lease_blocks_notes_and_reset_until_released(rig, monkeypatch):
+    ledger(rig)
+    msg = inbound()
+    key = initialize(rig, msg)
+    rig.m.queue_pending(msg, rig.m.state(key), 'budget')
+    lock = asyncio.Lock()
+    await lock.acquire()
+    lease = NS(holder=NS(generation=1), lock=lock, pending_acquires=0)
+    rig.host._turn_leases = NS(_leases={'old-session': lease})
+    assert not rig.a._active_sessions and not rig.host.running
+    checked = asyncio.Event()
+    idle = rig.m.idle
+    async def observed_idle(message):
+        result = await idle(message)
+        checked.set()
+        return result
+    monkeypatch.setattr(rig.m, 'idle', observed_idle)
+    task = asyncio.create_task(rig.m.start(msg))
+    try:
+        await checked.wait()
+        assert 'notes' not in rig.calls and not rig.host.reset_calls
+        assert rig.m.state(key)['pending']
+        lease.holder = None
+        lock.release()
+        await task
+        assert rig.calls[0] == 'notes' and rig.calls.count('notes') == 1
+        assert len(rig.host.reset_calls) == 1
+        assert not rig.m.state(key)['pending']
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize('change', ['lease', 'interrupt', 'interrupt-cleared'])
+async def test_summary_rechecks_admission_after_async_gap(rig, monkeypatch, change):
+    ledger(rig, count=3, text='中' * 2000)
+    msg = inbound()
+    key = initialize(rig, msg)
+    rig.m.queue_pending(msg, rig.m.state(key), 'budget')
+    rig.llm.wait = asyncio.Event()
+    checked = asyncio.Event()
+    idle = rig.m.idle
+    async def observed_idle(message):
+        result = await idle(message)
+        if rig.llm.wait.is_set():
+            checked.set()
+        return result
+    monkeypatch.setattr(rig.m, 'idle', observed_idle)
+    task = asyncio.create_task(rig.m.start(msg))
+    try:
+        await rig.llm.started.wait()
+        if change == 'lease':
+            rig.host._turn_leases = NS(_leases={
+                'old-session': NS(holder=NS(generation=1), lock=asyncio.Lock(), pending_acquires=0)})
+        else:
+            await rig.a.interrupt_session_activity(key, msg.chat_id)
+            if change == 'interrupt-cleared':
+                next_message = inbound('next-success')
+                ev = event(rig, next_message)
+                await rig.a.on_processing_start(ev)
+                await rig.a.on_processing_complete(ev, NS(name='SUCCESS'))
+                assert not rig.a._maintenance_interrupted(msg.chat_id, key)
+        rig.llm.wait.set()
+        if change == 'lease':
+            await checked.wait()
+            assert 'notes' not in rig.calls and not rig.host.reset_calls
+            # Model the existing watchdog releasing input while the lease stays busy.
+            rig.m.blocked.pop(key)
+        await task
+        pending = rig.m.state(key)['pending']
+        assert pending and pending.get('notes') != 'done'
+        assert 'notes' not in rig.calls and not rig.host.reset_calls
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_unexecuted_notes_preserve_pending_then_retry_from_notes(rig, monkeypatch, caplog):
+    ledger(rig, count=3, text='中' * 2000)
+    msg = inbound()
+    key = initialize(rig, msg)
+    rig.m.queue_pending(msg, rig.m.state(key), 'budget')
+    monkeypatch.setattr(rig.a, '_run_sediment_turn',
+                        ClawChatAdapter._run_sediment_turn.__get__(rig.a))
+    monkeypatch.setattr(hm, 'sediment_request_hook_supported', lambda: True)
+    observed = False
+    async def handle_message(ev):
+        pending = rig.a._sediment_done[msg.chat_id]
+        assert pending.nonce and pending.turn_id == ev.raw_message['clawchat_raw']['sediment_id']
+        if observed:
+            values = {'HERMES_SESSION_MESSAGE_ID': pending.nonce, 'HERMES_SESSION_KEY': key}
+            monkeypatch.setattr(hm, '_session_env', lambda name: values.get(name, ''))
+            hm.post_api_request(platform='clawchat', session_id='old-session', usage=None)
+        await rig.a.on_processing_complete(ev, NS(name='SUCCESS'))
+    monkeypatch.setattr(rig.a, 'handle_message', handle_message, raising=False)
+    with caplog.at_level('INFO'):
+        await rig.m.start(msg)
+    assert 'result=notes-deferred' in caplog.text
+    state = rig.m.state(key)
+    assert state['pending'].get('notes') != 'done' and not rig.host.reset_calls
+    assert state['summary_ref']
+    calls = len(rig.llm.calls)
+    observed = True
+    await rig.m.start(msg)
+    assert len(rig.llm.calls) == calls  # The committed summary is reused.
+    assert len(rig.host.reset_calls) == 1 and not rig.m.state(key)['pending']
+
+
+async def test_legacy_host_completion_allows_maintenance_reset(rig, monkeypatch):
+    ledger(rig, count=3, text='中' * 2000)
+    assert not hasattr(rig.host, '_turn_leases')
+    monkeypatch.setattr(hm, 'sediment_request_hook_supported', lambda: False)
+    monkeypatch.setattr(rig.a, '_run_sediment_turn',
+                        ClawChatAdapter._run_sediment_turn.__get__(rig.a))
+    async def handle(ev):
+        await rig.a.on_processing_complete(ev, NS(name='SUCCESS'))
+    monkeypatch.setattr(rig.a, 'handle_message', handle, raising=False)
+    _, state = await compact(rig, inbound())
+    assert len(rig.host.reset_calls) == 1 and not state['pending']
+
+
+@pytest.mark.parametrize('change', ['session', 'deadline', 'operation', 'maintenance', 'epoch'])
+async def test_sediment_preparation_fences_target_and_maintenance(rig, monkeypatch, change):
+    msg = inbound(group=True)
+    key = initialize(rig, msg)
+    rig.m.queue_pending(msg, rig.m.state(key), 'budget')
+    preparing, resume = asyncio.Event(), asyncio.Event()
+    results, dispatched = [], []
+    async def metadata(chat):
+        preparing.set()
+        await resume.wait()
+    runner = ClawChatAdapter._run_sediment_turn.__get__(rig.a)
+    async def notes(**kwargs):
+        result = await runner(**kwargs)
+        results.append(result)
+        return result
+    async def handle(ev):
+        dispatched.append(ev)
+        await rig.a.on_processing_complete(ev, 'SUCCESS')
+    monkeypatch.setattr(hm, 'sediment_request_hook_supported', lambda: False)
+    monkeypatch.setattr(rig.a, '_ensure_group_participants_metadata', metadata)
+    monkeypatch.setattr(rig.a, '_run_sediment_turn', notes)
+    monkeypatch.setattr(rig.a, 'handle_message', handle, raising=False)
+    task = asyncio.create_task(rig.m.start(msg))
+    try:
+        await asyncio.wait_for(preparing.wait(), 2)
+        pending = rig.a._sediment_done[msg.chat_id]
+        assert (pending.key, pending.session_id) == (key, 'old-session')
+        if change == 'session':
+            rig.host.persist(key, 'replacement-session')
+        elif change == 'deadline':
+            pending.deadline = time.monotonic() - 1
+        elif change == 'operation':
+            rig.m.blocked[key] = object()
+        elif change == 'epoch':
+            rig.m.epoch += 1
+        else:
+            rig.a._history = None
+        resume.set()
+        await asyncio.wait_for(task, 2)
+        assert results == [False] and pending.failed and pending.done.is_set()
+        assert not dispatched and not rig.host.reset_calls
+        assert rig.m.state(key)['pending'].get('notes') != 'done'
+    finally:
+        resume.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        rig.m.blocked.pop(key, None)
+
+
+@pytest.mark.parametrize('probe', ['exception', 'import-error', 'unknown-hooks', 'unknown-context'])
+async def test_unknown_sediment_hook_capability_defers_reset(rig, monkeypatch, probe):
+    ledger(rig, count=3, text='中' * 2000)
+    context = NS(get_session_env=lambda *args: '', _VAR_MAP={
+        name: ContextVar(name) for name in ('HERMES_SESSION_MESSAGE_ID', 'HERMES_SESSION_KEY')})
+    def manager():
+        if probe == 'exception':
+            raise RuntimeError('placeholder-capability-probe-failure')
+        if probe == 'import-error':
+            raise ModuleNotFoundError('placeholder-capability-import-failure', name='gateway.session_context')
+        return NS(_hooks=None if probe == 'unknown-hooks' else {'post_api_request': [hm.post_api_request]})
+    if probe == 'unknown-context':
+        context._VAR_MAP = None
+    monkeypatch.setitem(sys.modules, 'gateway.session_context', context)
+    monkeypatch.setitem(sys.modules, 'hermes_cli.plugins', NS(
+        VALID_HOOKS={'post_api_request'}, get_plugin_manager=manager))
+    assert hm.sediment_request_hook_supported() is None
+    dispatched = []
+    async def handle(ev):
+        dispatched.append(ev)
+        await rig.a.on_processing_complete(ev, 'SUCCESS')
+    monkeypatch.setattr(rig.a, 'handle_message', handle, raising=False)
+    monkeypatch.setattr(rig.a, '_run_sediment_turn',
+                        ClawChatAdapter._run_sediment_turn.__get__(rig.a))
+    _, state = await compact(rig, inbound())
+    assert not dispatched and not rig.host.reset_calls
+    assert state['pending'].get('notes') != 'done'
+
+
+async def test_missing_nonce_context_uses_legacy_completion(rig, monkeypatch):
+    ledger(rig, count=3, text='中' * 2000)
+    context = NS(get_session_env=lambda *args: '', _VAR_MAP={
+        'HERMES_SESSION_KEY': ContextVar('HERMES_SESSION_KEY')})
+    monkeypatch.setitem(sys.modules, 'gateway.session_context', context)
+    monkeypatch.setitem(sys.modules, 'hermes_cli.plugins', NS(
+        VALID_HOOKS={'post_api_request'},
+        get_plugin_manager=lambda: NS(_hooks={'post_api_request': [hm.post_api_request]})))
+    assert hm.sediment_request_hook_supported() is False
+    async def handle(ev):
+        await rig.a.on_processing_complete(ev, 'SUCCESS')
+    monkeypatch.setattr(rig.a, 'handle_message', handle, raising=False)
+    monkeypatch.setattr(rig.a, '_run_sediment_turn',
+                        ClawChatAdapter._run_sediment_turn.__get__(rig.a))
+    _, state = await compact(rig, inbound())
+    assert len(rig.host.reset_calls) == 1 and not state['pending']
+
+
+@pytest.mark.parametrize('lease', [
+    NS(holder=object(), lock=asyncio.Lock(), pending_acquires=0),
+    NS(holder=None, lock=asyncio.Lock(), pending_acquires=1),
+    NS(holder=None),
+    None,
+    'locked',
+])
+async def test_lease_probe_rejects_holders_waiters_and_unknown_state(rig, lease):
+    msg = inbound()
+    initialize(rig, msg)
+    if lease == 'locked':
+        lock = asyncio.Lock()
+        await lock.acquire()
+        lease = NS(holder=None, lock=lock, pending_acquires=0)
+    rig.host._turn_leases = NS(_leases={'old-session': lease})
+    assert not await rig.m.idle(msg)
+    assert not rig.a._should_sediment_before_reset(msg)
+
+
+async def test_unknown_registry_fails_closed_but_missing_registry_is_compatible(rig, caplog):
+    msg = inbound()
+    initialize(rig, msg)
+    assert await rig.m.idle(msg)
+    rig.host._turn_leases = NS()
+    with caplog.at_level('DEBUG'):
+        assert not await rig.m.idle(msg)
+    assert 'lease state unavailable' in caplog.text
+
+
+@pytest.mark.parametrize('outcome', ['SUCCESS', 'CANCELLED'])
+async def test_late_interrupted_completion_does_not_affect_new_success(rig, monkeypatch, outcome):
+    msg = inbound('interrupted-input')
+    key = initialize(rig, msg)
+    old = event(rig, msg)
+    await rig.a.on_processing_start(old)
+    await rig.a.interrupt_session_activity(key, msg.chat_id)
+    new = event(rig, inbound('next-success'))
+    await rig.a.on_processing_start(new)
+    await rig.a.on_processing_complete(new, 'SUCCESS')
+    assert not rig.a._maintenance_interrupted(msg.chat_id, key)
+    calls = []
+    monkeypatch.setattr(rig.m, 'after_turn', lambda ev: calls.append(ev))
+    await rig.a.on_processing_complete(old, outcome)
+    assert not calls and not rig.a._maintenance_interrupted(msg.chat_id, key)
 
 
 async def test_empty_fold_budget_rotates_with_only_window(rig):
