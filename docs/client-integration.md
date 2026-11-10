@@ -468,9 +468,8 @@ Required: top-level `chat_id`, `payload.message.body.fragments`, and
 Omit top-level `sender`, `chat_type`, and `payload.message.streaming`.
 Supply a stable `payload.message_id` (§7.6); it is not a forbidden field.
 
-**Hermes:** Never generates `payload.plan` on uplink (§7.3). Plan-message
-retries reuse `payload.message_id`; inbound claim and local skill-update consent
-follow the ordering in §11.7.
+**Hermes:** Never generates `payload.plan` on uplink (§7.3); the server strips
+this server-owned field from client uplinks.
 
 **`context.mentions` is untyped and relayed element-for-element.** The
 server carries it as an untyped, opaque JSON array and the uplink →
@@ -543,13 +542,17 @@ Recipients get the materialized envelope with server-stamped `sender`,
 `started_at` / `completed_at` for a non-stream message.
 
 Downlink `message.send` may also carry server-owned `payload.plan`, an optional
-object with string `plan_id` and `run_id`. A plan message is an ordinary
-owner-to-Agent direct message. Only trusted server injection can attach this
-object; the server strips it from client uplinks. It is correlation metadata,
-not a new message type or a dedup key (§11.7).
+object with string `plan_id` and `run_id`. The Agent creates a scheduled plan
+through REST; when it is due, the server sends the message as that Agent's
+shadow identity into the Agent–owner direct chat (Agent → owner). Fanout includes
+the sender, so the Agent's connection receives its own message as a self-echo.
+Only trusted server injection can attach this object; the server strips it from
+client uplinks. It is correlation metadata, not a new message type or a dedup
+key (§11.7).
 
-**Hermes:** Ignores `payload.plan` and handles the message as ordinary direct
-input; it never generates the object on uplink.
+**Hermes:** Ignores `payload.plan` and drops the plan message as a self-echo
+because `sender.id` is its own user ID (see the `origin_device_id` row in §4).
+It does not start an Agent turn and never generates the object on uplink.
 
 **Hermes:** `connection.py` dispatches `message.send` and `message.reply` into
 per-chat lanes. `inbound.py` reads the materialized shape; self-echo and non-normal
@@ -1433,21 +1436,23 @@ can make a later connection replay frames already received. Therefore a legacy
 client **MUST deduplicate by `payload.message_id` in durable storage that survives
 restart**. An in-memory cache is insufficient (§11).
 
-Plan-message retries reuse the same `payload.message_id`. Clients MUST apply
-that ID's durable deduplication across live delivery, offline replay and push/WS
-overlap; `plan_id`, `run_id` and `trace_id` cannot replace it as the dedup key.
+Redeliveries, including plan-message retries, reuse the same `payload.message_id`.
+Clients MUST apply that ID's durable deduplication across live delivery, offline
+replay and push/WS overlap; `plan_id`, `run_id` and `trace_id` cannot replace it
+as the dedup key. For plan messages this primarily matters to owner-side clients;
+the Agent adapter drops its own echo (§7.3).
 
 **Hermes:** Uses the SQLite unique key
-`(account_id, direction, kind, message_id)` for ordinary and plan messages.
-A successful claim precedes dispatch, including local owner skill-update
-consent consumption. Duplicate claims return before consent or an Agent turn;
-unavailable claims stop dispatch (§11).
+`(account_id, direction, kind, message_id)` for inbound messages that pass
+self-echo filtering (§7.3). A successful claim precedes dispatch, including local
+owner skill-update consent consumption. Duplicate claims return before consent
+or an Agent turn; unavailable claims stop dispatch (§11).
 
-**Hermes:** Duplicate plan-message frames still follow normal receipt/ack
-handling. An existing message claim never suppresses a transport ack. On granted
-v2, persist each copy durably before recording/acknowledging its `dseq`, including
-a fresh `dseq` on redelivery, without starting another Agent turn. Legacy mode
-sends no replay/cursor ack; the optional v2 receipt/ack path is described below.
+**Hermes:** Duplicate frames still follow normal receipt/ack handling. An existing
+message claim never suppresses a transport ack. On granted v2, persist each copy
+durably before recording/acknowledging its `dseq`, including a fresh `dseq` on
+redelivery, without starting another Agent turn. Legacy mode sends no
+replay/cursor ack; the optional v2 receipt/ack path is described below.
 
 **Hermes:** Defensively handles an unexpected `history.truncated` in `connection.py`:
 
