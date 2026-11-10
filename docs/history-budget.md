@@ -58,13 +58,51 @@ ordinary failure backoff. Cuts and summary/reset boundaries retain
 immutable ledger positions even when their referenced messages are recalled;
 withdrawal never moves a fixed interval. Each pass handles at most three blocks; confirmed
 `/new` finishes its whole interval before the next input is handed to Hermes.
-After publication, optional notes run in the old session, then a completely idle
-host session is renewed. The plugin rereads the **persistent route** to verify
+After publication, the plugin waits for idle again before optional notes run in
+the old session, and waits once more before renewal. Idle requires no adapter or
+host work, including any holder, locked lease or waiting lease acquisition for
+the session resolved from the canonical routing key. Hosts without a turn lease
+registry retain the other idle checks; an unrecognized registry defers maintenance.
+An interruption invalidates maintenance waiting on a summary, even if its result
+arrives after a later successful turn. Busy or interrupted work keeps its pending
+stage and published summaries, without dispatching notes or renewing the session.
+The independent five-minute input release still applies while waiting for idle.
+
+Each notes operation fixes its canonical routing key and target session ID before
+asynchronous preparation. Dispatch rechecks that target, the operation identity
+and deadline; session replacement, an unavailable target, an expired deadline or
+a superseded maintenance instance discards the notes without injecting them into
+another session. The maintenance deadline includes notes preparation.
+
+Notes count as executed only when `post_api_request` matches that sediment
+operation's nonce and host session. A completed turn without that evidence, or
+with a `CANCELLED` or `FAILURE` outcome, leaves notes pending and defers renewal;
+a retry resumes from notes without repeating published summary blocks. Ordinary
+notes errors after observed execution remain best effort.
+
+Hook capability has
+three states: supported, explicitly unsupported, and unknown because probing
+failed. Support requires the registered observer and nonce/key ContextVars in the
+host session-context map. Only explicitly unsupported hosts use completion-based
+notes behavior: for example, a host without `post_api_request` or session context,
+or a recognized older context map without the message nonce. Probe exceptions,
+unknown structures and missing observer registration defer notes and renewal.
+
+The model thread records request proof in a synchronized operation-specific event
+before posting its loop notification. Completion does not rely on notification
+queue order or a grace sleep. Proof arriving after operation cleanup cannot
+confirm that operation or a replacement, and requests for another session never
+confirm the fixed target.
+
+The plugin rereads the **persistent route** to verify
 that the session ID changed. Failures retain the original history and pending
-work; retries back off by 1/2/4/8 completed real messages. A host `FAILURE` outcome
-does not advance that backoff or trigger budget/idle maintenance. Budget-enabled
-conversations also skip legacy notes on that failure; disabled or unavailable
-budget maintenance retains the legacy behavior. Published blocks remain
+work; retries back off by 1/2/4/8 completed real messages. A host `FAILURE` or
+`CANCELLED` outcome does not advance that backoff or trigger budget/idle maintenance.
+A turn marked interrupted is excluded even if the host reports `SUCCESS`;
+the next real successful turn clears the interruption marker. Cancelled and
+interrupted turns also skip legacy notes. For `FAILURE`, budget-enabled
+conversations skip legacy notes, while disabled or unavailable budget maintenance
+retains the legacy behavior. Published blocks remain
 available when a later block fails. No summary text or credentials enter the
 maintenance diagnostic line (conversation, reason, result, blocks, duration and
 prompt tokens before/after).
@@ -111,8 +149,10 @@ omission and recent-window selection, so budgets measure the text actually sent;
 reinjected recent messages keep their timestamp.
 Legacy summary files are redacted again before reinjection.
 
-A user's `/new` keeps the host's confirmation gate and the existing old-session
-notes. The command alone does not advance a boundary. `on_session_reset` or the
+A user's `/new` keeps the host's confirmation gate. Its old-session notes are
+skipped while the host lease is busy, and the command still reaches the host.
+Legacy threshold notes also wait for the host lease and retry on a later idle
+turn when their idle wait expires. The command alone does not advance a boundary. `on_session_reset` or the
 next dispatch's durable route check must confirm the change first. The confirmed
 boundary excludes pre-command originals from the next window; renewed summary
 work folds those originals into the summary, including a conversation never
