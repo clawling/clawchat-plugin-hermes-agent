@@ -184,14 +184,17 @@ async def test_terminal_stream_rejection_stops_reply_and_host_recovery(
 
 
 @pytest.mark.parametrize("event", ["message.created", "message.add"])
-@pytest.mark.parametrize("hint, wait", [(1500, 1.5), (30000, 30), (None, 0)])
+@pytest.mark.parametrize("hint, wait", [
+    (1500, 1.5), (30000, 30), (None, 1), (0, 1), (-5, 1), ("1500", 1), (True, 1),
+])
 async def test_retryable_stream_rejection_waits_before_final_reply(
     adapter, monkeypatch, event, hint, wait,
 ):
     clock, sleeps = [100.0], []
     monkeypatch.setattr(adapter_mod.time, "monotonic", lambda: clock[0])
 
-    async def wait_message_retry(delay):
+    async def wait_message_retry(delay, *, generation=None):
+        assert generation == adapter._connection.delivery_generation
         sleeps.append(delay)
         assert adapter.frames[-1]["event"] == event
         clock[0] += delay
@@ -217,6 +220,7 @@ async def test_retryable_stream_rejection_waits_before_final_reply(
     first = await adapter.send(DM, "Hello" + CURSOR, reply_to="msg-in")
     run = adapter._active_runs_by_id[first.message_id]
     assert run.stream_failed and not run.stream_open and run.rejected_code is None
+    assert run.retry_generation == adapter._connection.delivery_generation
     frames = list(adapter.frames)
     await adapter._stream_update(run, "Hello again")
     assert adapter.frames == frames
@@ -239,7 +243,7 @@ async def test_stream_retry_hint_above_wait_cap_discards_reply(adapter, monkeypa
         "retry_after_ms": hint,
     }})
 
-    async def unexpected_wait(_delay):
+    async def unexpected_wait(_delay, *, generation=None):
         pytest.fail("a server minimum above the cap must not be shortened")
 
     monkeypatch.setattr(adapter._connection, "wait_message_retry", unexpected_wait)
@@ -304,7 +308,7 @@ async def test_stream_retry_wait_rechecks_run(adapter, monkeypatch, interruption
         "retry_after_ms": 1500,
     }})
 
-    async def wait_message_retry(delay):
+    async def wait_message_retry(delay, *, generation=None):
         clock[0] += delay
         if interruption == "discard":
             adapter._discard_run(run)
@@ -367,6 +371,51 @@ async def test_stream_retry_wait_abandoned_on_connection_change(adapter, monkeyp
     recovered = "♻️ Recovered reply — the gateway restarted during delivery, so this may be a duplicate:\n\n"
     assert not (await adapter.send(DM, recovered + "Hello again")).success
     assert adapter.frames == frames
+
+
+@pytest.mark.parametrize("hint", [1500, None])
+@pytest.mark.parametrize("elapsed", [0.0, 2.0])
+async def test_stream_retry_generation_changed_before_finalize(adapter, monkeypatch, hint, elapsed):
+    clock = [100.0]
+    monkeypatch.setattr(adapter_mod.time, "monotonic", lambda: clock[0])
+    conn = adapter._connection
+    conn._state = ConnectionState.READY
+    conn._ws = object()
+    first = await adapter.send(DM, "Hello" + CURSOR, reply_to="msg-in")
+    await adapter._on_message_error({"chat_id": DM, "payload": {
+        "message_id": first.message_id, "code": "send_rate_limited", "retryable": True,
+        "retry_after_ms": hint,
+    }})
+    run = adapter._active_runs_by_id[first.message_id]
+    assert run.retry_generation == conn.delivery_generation
+    frames = list(adapter.frames)
+    clock[0] += elapsed
+    conn._delivery_generation += 1
+
+    async def unexpected_wait(_delay, *, generation=None):
+        pytest.fail("a reply refused on an earlier generation must be discarded before waiting")
+
+    monkeypatch.setattr(conn, "wait_message_retry", unexpected_wait)
+    result = await adapter.edit_message(DM, first.message_id, "Hello again", finalize=True)
+    assert not result.success and result.error
+    assert adapter.frames == frames
+    assert first.message_id not in adapter._active_runs_by_id
+    assert not conn._message_retry_waiters and not conn._send_queue
+    key = adapter._reply_content_key(DM, "Hello again")
+    assert adapter._rejected_reply_cache()[key] == clock[0] + adapter_mod.MESSAGE_ERROR_RETRY_TOTAL_WAIT_SECONDS
+
+
+async def test_retryable_stream_error_without_connection_uses_base_delay(monkeypatch):
+    monkeypatch.setattr(adapter_mod.time, "monotonic", lambda: 100.0)
+    bare = ClawChatAdapter.__new__(ClawChatAdapter)
+    run = adapter_mod._ActiveRun(chat_id=DM, chat_type="direct", message_id="reply-example", started_order=1)
+    bare._active_runs_by_id = {run.message_id: run}
+    await bare._on_message_error({"chat_id": DM, "payload": {
+        "message_id": run.message_id, "code": "send_rate_limited", "retryable": True,
+    }})
+    assert run.retry_not_before == 101.0
+    assert run.retry_generation is None
+    assert run.stream_failed and not run.stream_open and run.rejected_code is None
 
 
 async def test_group_replies_are_not_streamed(adapter):

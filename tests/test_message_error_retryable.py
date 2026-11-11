@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from dataclasses import replace
 
 import pytest
@@ -205,6 +206,86 @@ async def test_wait_message_retry_refuses_unready_connection(monkeypatch, unread
         conn._ws = None
     assert await conn.wait_message_retry(1.5) is False
     assert not sleeps and not conn._message_retry_waiters
+
+
+@pytest.mark.parametrize("changed", ["before", "during"])
+async def test_wait_message_retry_honors_supplied_generation(monkeypatch, changed):
+    conn, _, sleeps = peer(monkeypatch, [])
+    generation = conn.delivery_generation
+    if changed == "before":
+        conn._delivery_generation += 1
+    else:
+        async def sleep(delay):
+            sleeps.append(delay)
+            conn._delivery_generation += 1
+
+        monkeypatch.setattr(asyncio, "sleep", sleep)
+    assert await conn.wait_message_retry(1.5, generation=generation) is False
+    assert sleeps == ([] if changed == "before" else [1.5])
+    assert not conn._message_retry_waiters
+
+
+@pytest.mark.parametrize("disconnect", [False, True])
+async def test_wait_message_retry_uses_owner_loop_from_another_thread(monkeypatch, disconnect):
+    conn, _, _ = peer(monkeypatch, [])
+    owner = asyncio.new_event_loop()
+    started = threading.Event()
+    loops = []
+
+    def run_owner():
+        asyncio.set_event_loop(owner)
+        owner.call_soon(started.set)
+        try:
+            owner.run_forever()
+        finally:
+            tasks = asyncio.all_tasks(owner)
+            for task in tasks:
+                task.cancel()
+            owner.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+            owner.close()
+
+    async def sleep(delay):
+        loops.append(asyncio.get_running_loop())
+        assert loops[-1] is owner
+        assert delay == 1.5
+        assert asyncio.current_task() in conn._message_retry_waiters
+        assert all(waiter.get_loop() is owner for waiter in conn._message_retry_waiters)
+        if disconnect:
+            # Both waiter creation and disconnect cancellation happen on owner.
+            owner.call_soon(conn._reject_pending_acks, RuntimeError("connection disconnected"))
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    thread = threading.Thread(target=run_owner, name="test-retry-owner-loop", daemon=True)
+    thread.start()
+    try:
+        assert started.wait(timeout=2)
+        conn._owner_loop = owner
+        assert asyncio.get_running_loop() is not owner
+        result = await asyncio.wait_for(
+            conn.wait_message_retry(1.5, generation=conn.delivery_generation), timeout=2,
+        )
+        assert result is (not disconnect)
+        assert loops == [owner]
+        assert not conn._message_retry_waiters
+    finally:
+        owner.call_soon_threadsafe(owner.stop)
+        thread.join(timeout=2)
+    assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("closed", [False, True])
+async def test_wait_message_retry_refuses_unavailable_owner_loop(monkeypatch, closed):
+    conn, _, sleeps = peer(monkeypatch, [])
+    owner = asyncio.new_event_loop()
+    conn._owner_loop = owner
+    try:
+        if closed:
+            owner.close()
+        assert await conn.wait_message_retry(1.5, generation=conn.delivery_generation) is False
+        assert not sleeps and not conn._message_retry_waiters
+    finally:
+        owner.close()
 
 
 async def test_stream_add_does_not_retry(monkeypatch):

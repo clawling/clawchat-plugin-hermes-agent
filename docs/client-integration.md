@@ -1704,7 +1704,8 @@ Disconnect or shutdown cancels waiting; intermediate stream frames never retry.
 once. A terminal code discards the reply: no further `message.add` / `message.done`
 and no final reply. Retryable `send_rate_limited` sends the final reply whole,
 no earlier than `retry_after_ms` (a hint over 30 s discards it instead).
-Disconnect, shutdown or connection replacement cancels the wait and discards the reply.
+Without a valid hint it waits 1 s without jitter. Disconnect, shutdown or connection
+replacement after rejection discards the reply, including before finalization.
 
 **Hermes:** The adapter keeps the latest 256 rejected text-reply digests in
 memory and refuses host-recovered replies with the same content, even under a

@@ -1496,10 +1496,31 @@ class ClawChatConnection:
                 queue_when_unready = False
         return False  # unreachable
 
-    async def wait_message_retry(self, delay: float) -> bool:
-        """Wait only while the current ready socket and delivery generation survive."""
-        ws, generation = self._ws, self._delivery_generation
-        if self._stopping or self._state != ConnectionState.READY or ws is None:
+    async def wait_message_retry(self, delay: float, generation: int | None = None) -> bool:
+        """Keep retry waiters on the owner loop, fenced by the supplied generation."""
+        owner = self._owner_loop
+        if owner is None or owner is asyncio.get_running_loop():
+            return await self._wait_message_retry_here(delay, generation=generation)
+        if owner.is_closed() or not owner.is_running():
+            return False
+        coro = self._wait_message_retry_here(delay, generation=generation)
+        try:
+            fut = asyncio.run_coroutine_threadsafe(coro, owner)
+        except RuntimeError:
+            coro.close()
+            return False
+        try:
+            return await asyncio.wrap_future(fut)
+        except asyncio.CancelledError:
+            fut.cancel()
+            raise
+
+    async def _wait_message_retry_here(self, delay: float, *, generation: int | None = None) -> bool:
+        if generation is None:
+            generation = self._delivery_generation
+        ws = self._ws
+        if (self._stopping or self._state != ConnectionState.READY or ws is None
+                or self._delivery_generation != generation):
             return False
         waiter = asyncio.create_task(asyncio.sleep(delay))
         self._message_retry_waiters.add(waiter)
@@ -1596,6 +1617,11 @@ class ClawChatConnection:
                 # _flush_send_queue dropped this frame after we queued it.
                 return False
         return True
+
+    @property
+    def delivery_generation(self) -> int:
+        """Identity of the current delivery connection; callers cannot change it."""
+        return self._delivery_generation
 
     @property
     def is_ready(self) -> bool:

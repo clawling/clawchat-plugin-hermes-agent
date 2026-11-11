@@ -67,6 +67,7 @@ from clawchat_gateway.config import (
 )
 from clawchat_gateway.connection import (
     HANDSHAKE_TIMEOUT_SECONDS,
+    MESSAGE_ERROR_RETRY_BASE_SECONDS,
     MESSAGE_ERROR_RETRY_MAX_WAIT_SECONDS,
     MESSAGE_ERROR_RETRY_TOTAL_WAIT_SECONDS,
     ClawChatConnection,
@@ -1015,6 +1016,7 @@ class _ActiveRun:
     stream_failed: bool = False
     rejected_code: str | None = None
     retry_not_before: float | None = None
+    retry_generation: int | None = None
     reject_expires_at: float | None = None
 
 
@@ -1807,16 +1809,18 @@ class ClawChatAdapter(BasePlatformAdapter):
         if code == "send_rate_limited" and error.retryable:
             if run.rejected_code is not None and run.reject_expires_at is None:
                 return  # A later retryable error cannot downgrade a terminal rejection.
-            if error.retry_after_ms is not None:
-                now = time.monotonic()
-                delay = error.retry_after_ms / 1000.0
-                run.retry_not_before = max(run.retry_not_before or 0.0, now + delay)
-                if error.retry_after_ms > MESSAGE_ERROR_RETRY_MAX_WAIT_SECONDS * 1000:
-                    run.rejected_code = code
-                    run.reject_expires_at = max(
-                        run.reject_expires_at or 0.0,
-                        now + max(delay, MESSAGE_ERROR_RETRY_TOTAL_WAIT_SECONDS),
-                    )
+            if run.retry_generation is None:
+                run.retry_generation = getattr(getattr(self, "_connection", None), "delivery_generation", None)
+            now = time.monotonic()
+            delay = (error.retry_after_ms / 1000.0 if error.retry_after_ms is not None
+                     else MESSAGE_ERROR_RETRY_BASE_SECONDS)
+            run.retry_not_before = max(run.retry_not_before or 0.0, now + delay)
+            if delay > MESSAGE_ERROR_RETRY_MAX_WAIT_SECONDS:
+                run.rejected_code = code
+                run.reject_expires_at = max(
+                    run.reject_expires_at or 0.0,
+                    now + max(delay, MESSAGE_ERROR_RETRY_TOTAL_WAIT_SECONDS),
+                )
         else:
             run.rejected_code = code or "unknown"
             run.reject_expires_at = None
@@ -8618,9 +8622,13 @@ class ClawChatAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="reply run discarded", message_id=run.message_id)
         while run.rejected_code is None and run.retry_not_before is not None:
             delay = run.retry_not_before - time.monotonic()
-            if delay <= 0:
+            if (run.retry_generation is not None
+                    and getattr(self._connection, "delivery_generation", None) != run.retry_generation):
+                waited = False
+            elif delay <= 0:
                 break
-            waited = await self._connection.wait_message_retry(delay)
+            else:
+                waited = await self._connection.wait_message_retry(delay, generation=run.retry_generation)
             if self._active_runs_by_id.get(run.message_id) is not run:
                 return SendResult(success=False, error="reply run discarded", message_id=run.message_id)
             if not waited:
