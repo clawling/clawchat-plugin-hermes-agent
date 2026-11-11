@@ -1699,9 +1699,16 @@ At most 3 retries wait max(server minimum, 1 s × 2^(retry−1)) plus 0–20% ji
 capped at 30 s per wait and 60 s total scheduled wait. A server minimum over
 30 s terminates rather than shortening it. No hint uses the same base backoff.
 Disconnect or shutdown cancels waiting; intermediate stream frames never retry.
-The adapter retains the latest 256 terminally rejected reply-content digests
-in memory to block host recovered replies, including recovery with a new ID;
-eviction or process restart loses this suppression.
+
+**Hermes:** A `message.error` for a streamed reply's ID stops that stream at
+once. A terminal code discards the reply: no further `message.add` / `message.done`
+and no final reply. Retryable `send_rate_limited` sends the final reply whole,
+no earlier than `retry_after_ms` (a hint over 30 s discards it instead).
+
+**Hermes:** The adapter keeps the latest 256 rejected text-reply digests in
+memory and refuses host-recovered replies with the same content, even under a
+new ID: permanently after a terminal rejection, and for max(server minimum,
+60 s) after `send_rate_limited` retries run out. Eviction or restart clears it.
 
 **Two byte limits:** A WebSocket frame over **8 MiB** (64 KiB before auth)
 yields transport close **1009**, not `message.error`. A frame within that cap

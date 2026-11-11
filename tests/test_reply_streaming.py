@@ -131,6 +131,179 @@ async def test_unchanged_edits_add_nothing(adapter):
     assert _events(adapter.frames) == ["message.created", "message.add", "message.add"]
 
 
+@pytest.mark.parametrize("event", ["message.created", "message.add"])
+@pytest.mark.parametrize("payload", [
+    {"code": "agent_turn_limit", "retryable": False},
+    {"code": "agent_muted", "retryable": False},
+    {"code": "future_code", "retryable": True},
+    {"code": "send_rate_limited", "retryable": False},
+    {"code": "send_rate_limited"},
+    {"code": "send_rate_limited", "retryable": "true"},
+])
+async def test_terminal_stream_rejection_stops_reply_and_host_recovery(
+    adapter, monkeypatch, event, payload, caplog,
+):
+    send_frame = adapter._connection.send_frame
+    records = []
+    monkeypatch.setattr(adapter, "_update_message_record", lambda **record: records.append(record))
+
+    async def reject(frame, **kwargs):
+        sent = await send_frame(frame, **kwargs)
+        if frame["event"] == event:
+            await adapter._on_message_error({
+                "chat_id": DM, "payload": dict(payload, message_id=frame["payload"]["message_id"]),
+            })
+        return sent
+
+    monkeypatch.setattr(adapter._connection, "send_frame", reject)
+    first = await adapter.send(DM, "Hello" + CURSOR, reply_to="msg-in")
+    run = adapter._active_runs_by_id[first.message_id]
+    assert run.rejected_code == payload["code"]
+    assert run.stream_failed and not run.stream_open
+    frames = list(adapter.frames)
+    assert _events(frames) == (["message.created"] if event == "message.created"
+                               else ["message.created", "message.add"])
+    await adapter._stream_update(run, "Hello again")
+    result = await adapter.edit_message(DM, first.message_id, "Hello again", finalize=True)
+    assert not result.success and result.error
+    assert adapter.frames == frames  # No add, done, failed or final reply.
+    assert first.message_id not in adapter._active_runs_by_id
+    assert first.message_id in adapter._completed_run_ids
+    assert records[-1]["event_type"] == "message.error"
+    assert records[-1]["message_id"] == first.message_id
+    assert "clawchat reply rejected" in caplog.text
+    assert not adapter._server_rejected_chats
+    key = adapter._reply_content_key(DM, "Hello again")
+    assert key in adapter._rejected_reply_cache() and adapter._rejected_reply_cache()[key] is None
+    monkeypatch.setattr(adapter, "_earlier_attempt_message_id", lambda *_: None)
+    recovered = "♻️ Recovered reply — the gateway restarted during delivery, so this may be a duplicate:\n\n"
+    result = await adapter.send(DM, recovered + "Hello again")
+    assert not result.success
+    assert adapter.frames == frames
+
+
+@pytest.mark.parametrize("event", ["message.created", "message.add"])
+@pytest.mark.parametrize("hint, wait", [(1500, 1.5), (30000, 30), (None, 0)])
+async def test_retryable_stream_rejection_waits_before_final_reply(
+    adapter, monkeypatch, event, hint, wait,
+):
+    clock, sleeps = [100.0], []
+    monkeypatch.setattr(adapter_mod.time, "monotonic", lambda: clock[0])
+
+    async def sleep(delay):
+        sleeps.append(delay)
+        assert adapter.frames[-1]["event"] == event
+        clock[0] += delay
+
+    monkeypatch.setattr(adapter_mod.asyncio, "sleep", sleep)
+    send_frame = adapter._connection.send_frame
+
+    async def reject(frame, **kwargs):
+        if frame["event"] == "message.reply":
+            assert clock[0] >= 100.0 + wait
+        sent = await send_frame(frame, **kwargs)
+        if frame["event"] == event:
+            await adapter._on_message_error({
+                "chat_id": DM, "payload": {
+                    "message_id": frame["payload"]["message_id"], "code": "send_rate_limited",
+                    "retryable": True, "retry_after_ms": hint,
+                },
+            })
+        return sent
+
+    monkeypatch.setattr(adapter._connection, "send_frame", reject)
+    first = await adapter.send(DM, "Hello" + CURSOR, reply_to="msg-in")
+    run = adapter._active_runs_by_id[first.message_id]
+    assert run.stream_failed and not run.stream_open and run.rejected_code is None
+    frames = list(adapter.frames)
+    await adapter._stream_update(run, "Hello again")
+    assert adapter.frames == frames
+    result = await adapter.edit_message(DM, first.message_id, "Hello again", finalize=True)
+    assert result.success
+    assert sleeps == ([wait] if wait else [])
+    assert adapter.frames[:-1] == frames
+    assert adapter.frames[-1]["event"] == "message.reply"
+    assert adapter.acked[-1] is True
+    assert not adapter._rejected_reply_cache()
+
+
+async def test_stream_retry_hint_above_wait_cap_discards_reply(adapter, monkeypatch):
+    first = await adapter.send(DM, "Hello" + CURSOR, reply_to="msg-in")
+    await adapter._on_message_error({"chat_id": DM, "payload": {
+        "message_id": first.message_id, "code": "send_rate_limited", "retryable": True,
+        "retry_after_ms": int(adapter_mod.MESSAGE_ERROR_RETRY_MAX_WAIT_SECONDS * 1000) + 1,
+    }})
+
+    async def unexpected_sleep(_delay):
+        pytest.fail("a server minimum above the cap must not be shortened")
+
+    monkeypatch.setattr(adapter_mod.asyncio, "sleep", unexpected_sleep)
+    frames = list(adapter.frames)
+    result = await adapter.edit_message(DM, first.message_id, "Hello again", finalize=True)
+    assert not result.success
+    assert adapter.frames == frames
+    assert adapter._reply_content_rejected(DM, "Hello again")
+
+
+@pytest.mark.parametrize("mismatch", ["message_id", "chat_id", "discarded"])
+async def test_unmatched_stream_error_does_not_change_run(adapter, mismatch):
+    first = await adapter.send(DM, "Hello" + CURSOR, reply_to="msg-in")
+    run = adapter._active_runs_by_id[first.message_id]
+    # No connection or other adapter initialization is required by this callback.
+    bare = ClawChatAdapter.__new__(ClawChatAdapter)
+    bare._active_runs_by_id = {} if mismatch == "discarded" else {first.message_id: run}
+    await bare._on_message_error({
+        "chat_id": GROUP if mismatch == "chat_id" else DM,
+        "payload": {"message_id": "other-reply" if mismatch == "message_id" else first.message_id,
+                    "code": "agent_turn_limit", "retryable": False},
+    })
+    assert run.stream_open and not run.stream_failed
+    assert run.rejected_code is None and run.retry_not_before is None
+
+
+async def test_stream_run_discarded_while_created_is_sent_stays_closed(adapter, monkeypatch):
+    send_frame = adapter._connection.send_frame
+
+    async def discard(frame, **kwargs):
+        sent = await send_frame(frame, **kwargs)
+        run = adapter._active_runs_by_id[frame["payload"]["message_id"]]
+        adapter._discard_run(run)
+        return sent
+
+    monkeypatch.setattr(adapter._connection, "send_frame", discard)
+    first = await adapter.send(DM, "Hello" + CURSOR, reply_to="msg-in")
+    assert first.message_id not in adapter._active_runs_by_id
+    assert _events(adapter.frames) == ["message.created"]
+
+
+@pytest.mark.parametrize("interruption", ["discard", "terminal"])
+async def test_stream_retry_wait_rechecks_run(adapter, monkeypatch, interruption):
+    clock = [100.0]
+    monkeypatch.setattr(adapter_mod.time, "monotonic", lambda: clock[0])
+    first = await adapter.send(DM, "Hello" + CURSOR, reply_to="msg-in")
+    run = adapter._active_runs_by_id[first.message_id]
+    await adapter._on_message_error({"chat_id": DM, "payload": {
+        "message_id": first.message_id, "code": "send_rate_limited", "retryable": True,
+        "retry_after_ms": 1500,
+    }})
+
+    async def sleep(delay):
+        clock[0] += delay
+        if interruption == "discard":
+            adapter._discard_run(run)
+        else:
+            await adapter._on_message_error({"chat_id": DM, "payload": {
+                "message_id": first.message_id, "code": "agent_turn_limit", "retryable": False,
+            }})
+
+    monkeypatch.setattr(adapter_mod.asyncio, "sleep", sleep)
+    frames = list(adapter.frames)
+    result = await adapter.edit_message(DM, first.message_id, "Hello again", finalize=True)
+    assert not result.success
+    assert adapter.frames == frames
+    assert first.message_id not in adapter._active_runs_by_id
+
+
 async def test_group_replies_are_not_streamed(adapter):
     await _stream(adapter, GROUP, "Hello", "Hello, wor", final="Hello, world")
     assert _events(adapter.frames) == ["message.reply"]

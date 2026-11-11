@@ -7,7 +7,7 @@ from dataclasses import replace
 
 import pytest
 
-from clawchat_gateway import connection, storage
+from clawchat_gateway import adapter as adapter_mod, connection, storage
 from clawchat_gateway.adapter import ClawChatAdapter
 from clawchat_gateway.config import ClawChatConfig
 from clawchat_gateway.connection import ClawChatConnection, ConnectionState, MessageError
@@ -182,6 +182,71 @@ async def test_terminal_recovered_content_is_blocked_even_without_old_id(monkeyp
         with pytest.raises(MessageError):
             await adapter._send_final_reply_frame(frame(), CHAT, str(n))
     assert len(adapter._rejected_reply_cache()) == 256
+
+
+async def test_exhausted_rate_limit_blocks_host_recovery_until_cooldown_expires(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(adapter_mod.time, "monotonic", lambda: clock[0])
+    conn, frames, sleeps = peer(monkeypatch, [limited()] * 4)
+    adapter = ClawChatAdapter({})
+    adapter._clawchat_config = replace(adapter._clawchat_config,
+                                     user_id="usr_placeholder", owner_user_id="usr_owner_placeholder")
+    adapter._known_chat_types[CHAT] = "direct"
+    monkeypatch.setattr(adapter._connection, "send_frame", conn.send_frame)
+    monkeypatch.setattr(adapter, "_earlier_attempt_message_id", lambda *_: None)
+    with pytest.raises(MessageError):
+        await adapter.send(CHAT, "Report ready")
+    assert len(frames) == 4 and sleeps == [1.5, 2, 4]
+    key = adapter._reply_content_key(CHAT, "Report ready")
+    deadline = 1000.0 + connection.MESSAGE_ERROR_RETRY_TOTAL_WAIT_SECONDS
+    assert adapter._rejected_reply_cache()[key] == deadline
+
+    async def accept(frame, **kwargs):
+        assert kwargs["wait_for_ack"] is True
+        frames.append(frame)
+        return True
+
+    monkeypatch.setattr(adapter._connection, "send_frame", accept)
+    for now in (1000.0, deadline - 0.001):
+        clock[0] = now
+        result = await adapter.send(CHAT, RECOVERED + "Report ready")
+        assert not result.success
+        assert len(frames) == 4
+        assert adapter._rejected_reply_cache()[key] == deadline  # Recovery cannot renew the budget.
+    clock[0] = deadline
+    result = await adapter.send(CHAT, RECOVERED + "Report ready")
+    assert result.success
+    assert len(frames) == 5
+    assert key not in adapter._rejected_reply_cache()
+
+
+async def test_exhausted_rate_limit_cooldown_preserves_long_server_hint(monkeypatch):
+    monkeypatch.setattr(adapter_mod.time, "monotonic", lambda: 1000.0)
+    adapter = ClawChatAdapter({})
+
+    async def refuse(frame, **kwargs):
+        raise MessageError("refused", dict(limited(), retry_after_ms=120000))
+
+    monkeypatch.setattr(adapter._connection, "send_frame", refuse)
+    with pytest.raises(MessageError):
+        await adapter._send_final_reply_frame(frame(), CHAT, "Report ready")
+    key = adapter._reply_content_key(CHAT, "Report ready")
+    assert adapter._rejected_reply_cache()[key] == 1120.0
+
+
+def test_rejected_reply_cache_refreshes_lru_and_preserves_terminal_entries():
+    adapter = ClawChatAdapter.__new__(ClawChatAdapter)
+    adapter._cache_rejected_reply(frame(), CHAT, "Report ready")
+    adapter._cache_rejected_reply(frame(), CHAT, "Report ready", 1200.0)
+    key = adapter._reply_content_key(CHAT, "Report ready")
+    assert adapter._rejected_reply_cache()[key] is None
+    for n in range(255):
+        adapter._cache_rejected_reply(frame(), CHAT, str(n))
+    assert adapter._reply_content_rejected(CHAT, "Report ready")
+    adapter._cache_rejected_reply(frame(), CHAT, "new reply")
+    assert len(adapter._rejected_reply_cache()) == 256
+    assert key in adapter._rejected_reply_cache()
+    assert adapter._reply_content_key(CHAT, "0") not in adapter._rejected_reply_cache()
 
 
 async def test_replaced_socket_fences_retry(monkeypatch):

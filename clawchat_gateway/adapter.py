@@ -67,6 +67,8 @@ from clawchat_gateway.config import (
 )
 from clawchat_gateway.connection import (
     HANDSHAKE_TIMEOUT_SECONDS,
+    MESSAGE_ERROR_RETRY_MAX_WAIT_SECONDS,
+    MESSAGE_ERROR_RETRY_TOTAL_WAIT_SECONDS,
     ClawChatConnection,
     ConnectionState,
     MessageError,
@@ -1011,6 +1013,8 @@ class _ActiveRun:
     streamed_text: str = ""
     stream_sequence: int = -1
     stream_failed: bool = False
+    rejected_code: str | None = None
+    retry_not_before: float | None = None
 
 
 def check_clawchat_requirements(platform_config: Any) -> bool:
@@ -1786,9 +1790,30 @@ class ClawChatAdapter(BasePlatformAdapter):
             return
         value = payload.get("code")
         code = value if isinstance(value, str) else ""
-        if code not in TERMINAL_CHAT_CODES:
+        chat_id = str(frame.get("chat_id") or "")
+        if code in TERMINAL_CHAT_CODES:
+            self._mark_chat_server_rejected(chat_id)
+        message_id = payload.get("message_id")
+        if not isinstance(message_id, str):
             return
-        self._mark_chat_server_rejected(str(frame.get("chat_id") or ""))
+        run = getattr(self, "_active_runs_by_id", {}).get(message_id)
+        if run is None or run.chat_id != chat_id:
+            return
+        # No await between lookup and mutation: a discarded run is ignored.
+        run.stream_failed = True
+        run.stream_open = False
+        error = MessageError("stream rejected", payload)
+        if code == "send_rate_limited" and error.retryable:
+            if error.retry_after_ms is not None:
+                if error.retry_after_ms > MESSAGE_ERROR_RETRY_MAX_WAIT_SECONDS * 1000:
+                    run.rejected_code = code
+                else:
+                    run.retry_not_before = max(
+                        run.retry_not_before or 0.0,
+                        time.monotonic() + error.retry_after_ms / 1000.0,
+                    )
+        else:
+            run.rejected_code = code or "unknown"
 
     async def _on_notify_signal(self, frame: dict[str, Any]) -> None:
         """Handle inbound ``notify.signal`` frames dispatched by the connection.
@@ -8096,8 +8121,8 @@ class ClawChatAdapter(BasePlatformAdapter):
                     return SendResult(success=True)
         if (is_host_redelivery and visible_content.strip()
                 and not self._has_outbound_media(metadata, kwargs)
-                and self._reply_content_key(chat_id, visible_content) in self._rejected_reply_cache()):
-            return SendResult(success=False, error="recovered reply was terminally rejected")
+                and self._reply_content_rejected(chat_id, visible_content)):
+            return SendResult(success=False, error="recovered reply was rejected")
         is_immediate_media_send = self._is_immediate_media_send(metadata, kwargs)
         is_stream_intermediate = self._is_stream_intermediate_output(content or "")
         if (
@@ -8479,7 +8504,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             return SendResult(success=True, message_id=run.message_id)
         final_content = visible_final_text if visible_final_text else run.last_text
         reasoning, final_content = self._split_reasoning_prefix(final_content)
-        if reasoning:
+        if reasoning and run.rejected_code is None:
             await self._send_reasoning(run.chat_id, reasoning, run.reply_to_message_id, run.metadata)
         # Single throat for the final text (mirrors outbound.ts's
         # sendOpenclawClawlingText): the token suppresses the whole reply unless
@@ -8538,6 +8563,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             ),
             MESSAGE_MODE_NORMAL,
         )
+        if self._active_runs_by_id.get(run.message_id) is not run:
+            return SendResult(success=False, error="reply run discarded", message_id=run.message_id)
         if policy_dropped and (
             not final_fragments
             or self._is_empty_text_response(final_fragments)
@@ -8566,6 +8593,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             raw=frame,
             history_activity=outbound_activity(run.chat_id, run.metadata),
         )
+        if run.rejected_code is not None:
+            return await self._finish_rejected_run(run, frame, final_content)
         if claimed is False:
             # The reply under this id already went out: close the stream as
             # done. A message.failed here would withdraw a delivered message.
@@ -8579,6 +8608,19 @@ class ClawChatAdapter(BasePlatformAdapter):
                 message_id=run.message_id,
             )
         await self._stream_finish(run, final_content)
+        if self._active_runs_by_id.get(run.message_id) is not run:
+            return SendResult(success=False, error="reply run discarded", message_id=run.message_id)
+        while run.rejected_code is None and run.retry_not_before is not None:
+            delay = run.retry_not_before - time.monotonic()
+            if delay <= 0:
+                break
+            await asyncio.sleep(delay)
+            if self._active_runs_by_id.get(run.message_id) is not run:
+                return SendResult(success=False, error="reply run discarded", message_id=run.message_id)
+        if self._active_runs_by_id.get(run.message_id) is not run:
+            return SendResult(success=False, error="reply run discarded", message_id=run.message_id)
+        if run.rejected_code is not None:
+            return await self._finish_rejected_run(run, frame, final_content)
         sent = await self._send_final_reply_frame(frame, run.chat_id, final_content)
         if not sent:
             error = "clawchat complete reply dropped"
@@ -8622,6 +8664,19 @@ class ClawChatAdapter(BasePlatformAdapter):
 
     # --- reply streaming (§8), opt-in, direct chats only ----------------------
 
+    async def _finish_rejected_run(self, run: _ActiveRun, frame: dict, content: str) -> SendResult:
+        error = "clawchat reply rejected by server"
+        self._cache_rejected_reply(frame, run.chat_id, content)
+        self._update_message_record(
+            kind="message", direction="outbound", event_type="message.error",
+            trace_id=frame.get("trace_id") or frame.get("id"),
+            chat_id=run.chat_id, message_id=run.message_id, text=error, raw=frame,
+        )
+        logger.warning("clawchat reply rejected chat_id=%s message_id=%s",
+                       run.chat_id, run.message_id)
+        await self._retire_run(run)
+        return SendResult(success=False, error=error, message_id=run.message_id)
+
     def _stream_replies_enabled(self) -> bool:
         # Experimental and off by default: not every client renders §8 streams.
         # Without it the host's drafts are buffered and the reply goes out
@@ -8633,7 +8688,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         # mentions (they are only added to the final reply) and another agent
         # in the group would read that copy first, under the same message id.
         return (
-            self._stream_replies_enabled()
+            self._active_runs_by_id.get(run.message_id) is run
+            and self._stream_replies_enabled()
             and run.chat_type == "direct"
             and not run.stream_failed
             and run.chat_id not in self._sediment_chats
@@ -8668,6 +8724,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             await self._send_stream_frame(
                 build_stream_created_event(chat_id=run.chat_id, message_id=run.message_id)
             )
+            if not self._should_stream(run):
+                return
             run.stream_open = True
             logger.info("clawchat stream opened chat_id=%s message_id=%s", run.chat_id, run.message_id)
         run.stream_sequence += 1
@@ -8680,9 +8738,13 @@ class ClawChatAdapter(BasePlatformAdapter):
                 delta=text[len(run.streamed_text):],
             )
         )
+        if not self._should_stream(run):
+            return
         run.streamed_text = text
 
     async def _stream_fail(self, run: _ActiveRun) -> None:
+        if self._active_runs_by_id.get(run.message_id) is not run:
+            return
         if run.stream_open:
             await self._send_stream_frame(
                 build_stream_end_event(
@@ -8694,12 +8756,15 @@ class ClawChatAdapter(BasePlatformAdapter):
                 )
             )
             logger.info("clawchat stream failed chat_id=%s message_id=%s", run.chat_id, run.message_id)
+        if self._active_runs_by_id.get(run.message_id) is not run:
+            return
         run.stream_open = False
         run.stream_failed = True
 
     async def _stream_finish(self, run: _ActiveRun, final_text: str) -> None:
         """Close an open stream with ``message.done`` before its final reply."""
-        if not run.stream_open:
+        if (self._active_runs_by_id.get(run.message_id) is not run
+                or not run.stream_open or run.stream_failed):
             return
         await self._send_stream_frame(
             build_stream_end_event(
@@ -8709,6 +8774,8 @@ class ClawChatAdapter(BasePlatformAdapter):
                 text=final_text,
             )
         )
+        if self._active_runs_by_id.get(run.message_id) is not run:
+            return
         run.stream_open = False
         logger.info("clawchat stream done chat_id=%s message_id=%s", run.chat_id, run.message_id)
 
@@ -8716,6 +8783,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         """Drop a run that will send no (further) reply; fail its open stream."""
         if run.stream_open:
             await self._stream_fail(run)
+        if self._active_runs_by_id.get(run.message_id) is not run:
+            return
         self._discard_run(run)
         self._remember_completed_run(run.message_id)
 
@@ -10164,11 +10233,39 @@ class ClawChatAdapter(BasePlatformAdapter):
     def _reply_content_key(self, chat_id: str, content: str) -> tuple[str, str]:
         return chat_id, hashlib.sha256(content.strip().encode()).hexdigest()
 
-    def _rejected_reply_cache(self) -> OrderedDict:
+    def _rejected_reply_cache(self) -> OrderedDict[tuple[str, str], float | None]:
         cache = getattr(self, "_rejected_reply_contents", None)
         if cache is None:
             cache = self._rejected_reply_contents = OrderedDict()
         return cache
+
+    def _reply_content_rejected(self, chat_id: str, content: str) -> bool:
+        cache = self._rejected_reply_cache()
+        key = self._reply_content_key(chat_id, content)
+        if key not in cache:
+            return False
+        expires_at = cache[key]
+        if expires_at is not None and time.monotonic() >= expires_at:
+            del cache[key]
+            return False
+        cache.move_to_end(key)
+        return True
+
+    def _cache_rejected_reply(
+        self, frame: dict, chat_id: str, content: str, expires_at: float | None = None,
+    ) -> None:
+        # Text (and mention) replies only: visible text cannot identify media.
+        if not content.strip() or not _frame_is_text_only(frame):
+            return
+        cache = self._rejected_reply_cache()
+        key = self._reply_content_key(chat_id, content)
+        if key not in cache or (cache[key] is not None and expires_at is None):
+            cache[key] = expires_at
+        elif cache[key] is not None and expires_at is not None:
+            cache[key] = max(cache[key], expires_at)
+        cache.move_to_end(key)
+        while len(cache) > _REJECTED_REPLY_CACHE_MAX:
+            cache.popitem(last=False)
 
     async def _send_final_reply_frame(self, frame: dict, chat_id: str, content: str) -> bool:
         try:
@@ -10176,16 +10273,13 @@ class ClawChatAdapter(BasePlatformAdapter):
         except MessageError as exc:
             # The host can recover any failed delivery, including a negative ack.
             # Keep content identity because recovery may mint a different wire id.
-            # Text (and mention) replies only: the key is the visible text, so a
-            # reply carrying attachments (or no text) must never suppress another.
-            if ((not exc.retryable or exc.code != "send_rate_limited")
-                    and content.strip() and _frame_is_text_only(frame)):
-                cache = self._rejected_reply_cache()
-                key = self._reply_content_key(chat_id, content)
-                cache[key] = None
-                cache.move_to_end(key)
-                while len(cache) > _REJECTED_REPLY_CACHE_MAX:
-                    cache.popitem(last=False)
+            expires_at = None
+            if exc.code == "send_rate_limited" and exc.retryable:
+                expires_at = time.monotonic() + max(
+                    (exc.retry_after_ms or 0) / 1000.0,
+                    MESSAGE_ERROR_RETRY_TOTAL_WAIT_SECONDS,
+                )
+            self._cache_rejected_reply(frame, chat_id, content, expires_at)
             raise
 
     def _earlier_attempt_message_id(self, chat_id: str, visible_content: str) -> str | None:
