@@ -1016,7 +1016,7 @@ class _ActiveRun:
     stream_failed: bool = False
     rejected_code: str | None = None
     retry_not_before: float | None = None
-    retry_generation: int | None = None
+    retry_epoch: int | None = None
     reject_expires_at: float | None = None
 
 
@@ -1809,8 +1809,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         if code == "send_rate_limited" and error.retryable:
             if run.rejected_code is not None and run.reject_expires_at is None:
                 return  # A later retryable error cannot downgrade a terminal rejection.
-            if run.retry_generation is None:
-                run.retry_generation = getattr(getattr(self, "_connection", None), "delivery_generation", None)
+            if run.retry_epoch is None:
+                run.retry_epoch = getattr(getattr(self, "_connection", None), "connection_epoch", None)
             now = time.monotonic()
             delay = (error.retry_after_ms / 1000.0 if error.retry_after_ms is not None
                      else MESSAGE_ERROR_RETRY_BASE_SECONDS)
@@ -8622,13 +8622,13 @@ class ClawChatAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="reply run discarded", message_id=run.message_id)
         while run.rejected_code is None and run.retry_not_before is not None:
             delay = run.retry_not_before - time.monotonic()
-            if (run.retry_generation is not None
-                    and getattr(self._connection, "delivery_generation", None) != run.retry_generation):
+            if (run.retry_epoch is not None
+                    and getattr(self._connection, "connection_epoch", None) != run.retry_epoch):
                 waited = False
             elif delay <= 0:
                 break
             else:
-                waited = await self._connection.wait_message_retry(delay, generation=run.retry_generation)
+                waited = await self._connection.wait_message_retry(delay, epoch=run.retry_epoch)
             if self._active_runs_by_id.get(run.message_id) is not run:
                 return SendResult(success=False, error="reply run discarded", message_id=run.message_id)
             if not waited:

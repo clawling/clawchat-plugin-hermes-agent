@@ -182,7 +182,7 @@ async def test_wait_message_retry_rechecks_connection_after_wait(monkeypatch, ch
     async def sleep(_delay):
         assert asyncio.current_task() in conn._message_retry_waiters
         if change == "generation":
-            conn._delivery_generation += 1
+            conn._connection_epoch += 1
         elif change == "socket":
             conn._ws = object()
         elif change == "stopping":
@@ -209,18 +209,18 @@ async def test_wait_message_retry_refuses_unready_connection(monkeypatch, unread
 
 
 @pytest.mark.parametrize("changed", ["before", "during"])
-async def test_wait_message_retry_honors_supplied_generation(monkeypatch, changed):
+async def test_wait_message_retry_honors_supplied_epoch(monkeypatch, changed):
     conn, _, sleeps = peer(monkeypatch, [])
-    generation = conn.delivery_generation
+    generation = conn.connection_epoch
     if changed == "before":
-        conn._delivery_generation += 1
+        conn._connection_epoch += 1
     else:
         async def sleep(delay):
             sleeps.append(delay)
-            conn._delivery_generation += 1
+            conn._connection_epoch += 1
 
         monkeypatch.setattr(asyncio, "sleep", sleep)
-    assert await conn.wait_message_retry(1.5, generation=generation) is False
+    assert await conn.wait_message_retry(1.5, epoch=generation) is False
     assert sleeps == ([] if changed == "before" else [1.5])
     assert not conn._message_retry_waiters
 
@@ -263,7 +263,7 @@ async def test_wait_message_retry_uses_owner_loop_from_another_thread(monkeypatc
         conn._owner_loop = owner
         assert asyncio.get_running_loop() is not owner
         result = await asyncio.wait_for(
-            conn.wait_message_retry(1.5, generation=conn.delivery_generation), timeout=2,
+            conn.wait_message_retry(1.5, epoch=conn.connection_epoch), timeout=2,
         )
         assert result is (not disconnect)
         assert loops == [owner]
@@ -282,7 +282,7 @@ async def test_wait_message_retry_refuses_unavailable_owner_loop(monkeypatch, cl
     try:
         if closed:
             owner.close()
-        assert await conn.wait_message_retry(1.5, generation=conn.delivery_generation) is False
+        assert await conn.wait_message_retry(1.5, epoch=conn.connection_epoch) is False
         assert not sleeps and not conn._message_retry_waiters
     finally:
         owner.close()
@@ -395,7 +395,7 @@ async def test_replaced_socket_fences_retry(monkeypatch):
         if asyncio.current_task().get_name() == "clawchat-ack-timeout":
             await asyncio.Event().wait()
         else:
-            conn._delivery_generation += 1
+            conn._connection_epoch += 1
             conn._ws = object()
 
     monkeypatch.setattr(asyncio, "sleep", replace_socket)

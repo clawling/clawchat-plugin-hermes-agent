@@ -193,8 +193,8 @@ async def test_retryable_stream_rejection_waits_before_final_reply(
     clock, sleeps = [100.0], []
     monkeypatch.setattr(adapter_mod.time, "monotonic", lambda: clock[0])
 
-    async def wait_message_retry(delay, *, generation=None):
-        assert generation == adapter._connection.delivery_generation
+    async def wait_message_retry(delay, *, epoch=None):
+        assert epoch == adapter._connection.connection_epoch
         sleeps.append(delay)
         assert adapter.frames[-1]["event"] == event
         clock[0] += delay
@@ -220,7 +220,7 @@ async def test_retryable_stream_rejection_waits_before_final_reply(
     first = await adapter.send(DM, "Hello" + CURSOR, reply_to="msg-in")
     run = adapter._active_runs_by_id[first.message_id]
     assert run.stream_failed and not run.stream_open and run.rejected_code is None
-    assert run.retry_generation == adapter._connection.delivery_generation
+    assert run.retry_epoch == adapter._connection.connection_epoch
     frames = list(adapter.frames)
     await adapter._stream_update(run, "Hello again")
     assert adapter.frames == frames
@@ -243,7 +243,7 @@ async def test_stream_retry_hint_above_wait_cap_discards_reply(adapter, monkeypa
         "retry_after_ms": hint,
     }})
 
-    async def unexpected_wait(_delay, *, generation=None):
+    async def unexpected_wait(_delay, *, epoch=None):
         pytest.fail("a server minimum above the cap must not be shortened")
 
     monkeypatch.setattr(adapter._connection, "wait_message_retry", unexpected_wait)
@@ -308,7 +308,7 @@ async def test_stream_retry_wait_rechecks_run(adapter, monkeypatch, interruption
         "retry_after_ms": 1500,
     }})
 
-    async def wait_message_retry(delay, *, generation=None):
+    async def wait_message_retry(delay, *, epoch=None):
         clock[0] += delay
         if interruption == "discard":
             adapter._discard_run(run)
@@ -355,7 +355,7 @@ async def test_stream_retry_wait_abandoned_on_connection_change(adapter, monkeyp
     assert len(conn._message_retry_waiters) == 1
     clock[0] = 100.5
     if interruption == "generation":
-        conn._delivery_generation += 1
+        conn._connection_epoch += 1
         resume.set()
     else:
         conn._state = ConnectionState.DISCONNECTED
@@ -375,7 +375,7 @@ async def test_stream_retry_wait_abandoned_on_connection_change(adapter, monkeyp
 
 @pytest.mark.parametrize("hint", [1500, None])
 @pytest.mark.parametrize("elapsed", [0.0, 2.0])
-async def test_stream_retry_generation_changed_before_finalize(adapter, monkeypatch, hint, elapsed):
+async def test_stream_retry_epoch_changed_before_finalize(adapter, monkeypatch, hint, elapsed):
     clock = [100.0]
     monkeypatch.setattr(adapter_mod.time, "monotonic", lambda: clock[0])
     conn = adapter._connection
@@ -387,12 +387,12 @@ async def test_stream_retry_generation_changed_before_finalize(adapter, monkeypa
         "retry_after_ms": hint,
     }})
     run = adapter._active_runs_by_id[first.message_id]
-    assert run.retry_generation == conn.delivery_generation
+    assert run.retry_epoch == conn.connection_epoch
     frames = list(adapter.frames)
     clock[0] += elapsed
-    conn._delivery_generation += 1
+    conn._connection_epoch += 1
 
-    async def unexpected_wait(_delay, *, generation=None):
+    async def unexpected_wait(_delay, *, epoch=None):
         pytest.fail("a reply refused on an earlier generation must be discarded before waiting")
 
     monkeypatch.setattr(conn, "wait_message_retry", unexpected_wait)
@@ -414,7 +414,7 @@ async def test_retryable_stream_error_without_connection_uses_base_delay(monkeyp
         "message_id": run.message_id, "code": "send_rate_limited", "retryable": True,
     }})
     assert run.retry_not_before == 101.0
-    assert run.retry_generation is None
+    assert run.retry_epoch is None
     assert run.stream_failed and not run.stream_open and run.rejected_code is None
 
 
