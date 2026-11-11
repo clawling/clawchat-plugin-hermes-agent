@@ -40,6 +40,7 @@ import pytest
 
 from clawchat_gateway import adapter as adapter_mod
 from clawchat_gateway.adapter import ClawChatAdapter
+from clawchat_gateway.connection import ConnectionState
 
 AGENT = "usr_agent"
 OWNER = "usr_owner"
@@ -190,12 +191,13 @@ async def test_retryable_stream_rejection_waits_before_final_reply(
     clock, sleeps = [100.0], []
     monkeypatch.setattr(adapter_mod.time, "monotonic", lambda: clock[0])
 
-    async def sleep(delay):
+    async def wait_message_retry(delay):
         sleeps.append(delay)
         assert adapter.frames[-1]["event"] == event
         clock[0] += delay
+        return True
 
-    monkeypatch.setattr(adapter_mod.asyncio, "sleep", sleep)
+    monkeypatch.setattr(adapter._connection, "wait_message_retry", wait_message_retry)
     send_frame = adapter._connection.send_frame
 
     async def reject(frame, **kwargs):
@@ -227,22 +229,37 @@ async def test_retryable_stream_rejection_waits_before_final_reply(
     assert not adapter._rejected_reply_cache()
 
 
-async def test_stream_retry_hint_above_wait_cap_discards_reply(adapter, monkeypatch):
+@pytest.mark.parametrize("hint", [30001, 120000])
+async def test_stream_retry_hint_above_wait_cap_discards_reply(adapter, monkeypatch, hint):
+    clock = [100.0]
+    monkeypatch.setattr(adapter_mod.time, "monotonic", lambda: clock[0])
     first = await adapter.send(DM, "Hello" + CURSOR, reply_to="msg-in")
     await adapter._on_message_error({"chat_id": DM, "payload": {
         "message_id": first.message_id, "code": "send_rate_limited", "retryable": True,
-        "retry_after_ms": int(adapter_mod.MESSAGE_ERROR_RETRY_MAX_WAIT_SECONDS * 1000) + 1,
+        "retry_after_ms": hint,
     }})
 
-    async def unexpected_sleep(_delay):
+    async def unexpected_wait(_delay):
         pytest.fail("a server minimum above the cap must not be shortened")
 
-    monkeypatch.setattr(adapter_mod.asyncio, "sleep", unexpected_sleep)
+    monkeypatch.setattr(adapter._connection, "wait_message_retry", unexpected_wait)
     frames = list(adapter.frames)
     result = await adapter.edit_message(DM, first.message_id, "Hello again", finalize=True)
     assert not result.success
     assert adapter.frames == frames
     assert adapter._reply_content_rejected(DM, "Hello again")
+    key = adapter._reply_content_key(DM, "Hello again")
+    deadline = 100.0 + max(hint / 1000.0, adapter_mod.MESSAGE_ERROR_RETRY_TOTAL_WAIT_SECONDS)
+    assert adapter._rejected_reply_cache()[key] == deadline
+    monkeypatch.setattr(adapter, "_earlier_attempt_message_id", lambda *_: None)
+    recovered = "♻️ Recovered reply — the gateway restarted during delivery, so this may be a duplicate:\n\n"
+    clock[0] = deadline - 0.001
+    assert not (await adapter.send(DM, recovered + "Hello again")).success
+    assert adapter.frames == frames
+    clock[0] = deadline
+    assert (await adapter.send(DM, recovered + "Hello again")).success
+    assert key not in adapter._rejected_reply_cache()
+    assert _events(adapter.frames[len(frames):]) == ["message.reply"]
 
 
 @pytest.mark.parametrize("mismatch", ["message_id", "chat_id", "discarded"])
@@ -287,7 +304,7 @@ async def test_stream_retry_wait_rechecks_run(adapter, monkeypatch, interruption
         "retry_after_ms": 1500,
     }})
 
-    async def sleep(delay):
+    async def wait_message_retry(delay):
         clock[0] += delay
         if interruption == "discard":
             adapter._discard_run(run)
@@ -295,13 +312,61 @@ async def test_stream_retry_wait_rechecks_run(adapter, monkeypatch, interruption
             await adapter._on_message_error({"chat_id": DM, "payload": {
                 "message_id": first.message_id, "code": "agent_turn_limit", "retryable": False,
             }})
+        return True
 
-    monkeypatch.setattr(adapter_mod.asyncio, "sleep", sleep)
+    monkeypatch.setattr(adapter._connection, "wait_message_retry", wait_message_retry)
     frames = list(adapter.frames)
     result = await adapter.edit_message(DM, first.message_id, "Hello again", finalize=True)
     assert not result.success
     assert adapter.frames == frames
     assert first.message_id not in adapter._active_runs_by_id
+
+
+@pytest.mark.parametrize("interruption", ["generation", "disconnect"])
+async def test_stream_retry_wait_abandoned_on_connection_change(adapter, monkeypatch, interruption):
+    clock = [100.0]
+    monkeypatch.setattr(adapter_mod.time, "monotonic", lambda: clock[0])
+    conn = adapter._connection
+    conn._state = ConnectionState.READY
+    conn._ws = object()
+    entered, resume = adapter_mod.asyncio.Event(), adapter_mod.asyncio.Event()
+
+    async def sleep(delay):
+        assert delay == 1.5
+        entered.set()
+        await resume.wait()
+
+    monkeypatch.setattr(adapter_mod.asyncio, "sleep", sleep)
+    first = await adapter.send(DM, "Hello" + CURSOR, reply_to="msg-in")
+    await adapter._on_message_error({"chat_id": DM, "payload": {
+        "message_id": first.message_id, "code": "send_rate_limited", "retryable": True,
+        "retry_after_ms": 1500,
+    }})
+    frames = list(adapter.frames)
+    task = adapter_mod.asyncio.create_task(
+        adapter.edit_message(DM, first.message_id, "Hello again", finalize=True),
+    )
+    await entered.wait()
+    assert first.message_id in adapter._active_runs_by_id
+    assert len(conn._message_retry_waiters) == 1
+    clock[0] = 100.5
+    if interruption == "generation":
+        conn._delivery_generation += 1
+        resume.set()
+    else:
+        conn._state = ConnectionState.DISCONNECTED
+        conn._reject_pending_acks(RuntimeError("connection disconnected"))
+    result = await task
+    assert not result.success and result.error
+    assert adapter.frames == frames
+    assert not conn._message_retry_waiters
+    assert not conn._send_queue
+    assert first.message_id not in adapter._active_runs_by_id
+    key = adapter._reply_content_key(DM, "Hello again")
+    assert adapter._rejected_reply_cache()[key] == 100.5 + adapter_mod.MESSAGE_ERROR_RETRY_TOTAL_WAIT_SECONDS
+    recovered = "♻️ Recovered reply — the gateway restarted during delivery, so this may be a duplicate:\n\n"
+    assert not (await adapter.send(DM, recovered + "Hello again")).success
+    assert adapter.frames == frames
 
 
 async def test_group_replies_are_not_streamed(adapter):

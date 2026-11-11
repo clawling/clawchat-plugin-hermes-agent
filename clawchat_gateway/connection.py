@@ -1477,8 +1477,7 @@ class ClawChatConnection:
                         or exc.code != "send_rate_limited" or not exc.retryable
                         or attempt == MESSAGE_ERROR_RETRY_MAX_RETRIES):
                     raise
-                ws, generation = self._ws, self._delivery_generation
-                if self._stopping or self._state != ConnectionState.READY or ws is None:
+                if self._stopping or self._state != ConnectionState.READY or self._ws is None:
                     raise
                 # Never shorten the server's minimum to fit our local wait cap.
                 minimum_ms = exc.retry_after_ms or 0
@@ -1491,21 +1490,28 @@ class ClawChatConnection:
                 if total_wait + delay > MESSAGE_ERROR_RETRY_TOTAL_WAIT_SECONDS:
                     raise
                 total_wait += delay
-                waiter = asyncio.create_task(asyncio.sleep(delay))
-                self._message_retry_waiters.add(waiter)
-                try:
-                    # asyncio.wait does not raise when the waiter is cancelled by
-                    # a disconnect; the state check below then fails the send.
-                    await asyncio.wait({waiter})
-                finally:
-                    waiter.cancel()
-                    self._message_retry_waiters.discard(waiter)
-                if (waiter.cancelled() or self._stopping or self._state != ConnectionState.READY
-                        or self._ws is not ws or self._delivery_generation != generation):
+                if not await self.wait_message_retry(delay):
                     raise
                 frame = dict(frame, trace_id=new_frame_id("trace"))
                 queue_when_unready = False
         return False  # unreachable
+
+    async def wait_message_retry(self, delay: float) -> bool:
+        """Wait only while the current ready socket and delivery generation survive."""
+        ws, generation = self._ws, self._delivery_generation
+        if self._stopping or self._state != ConnectionState.READY or ws is None:
+            return False
+        waiter = asyncio.create_task(asyncio.sleep(delay))
+        self._message_retry_waiters.add(waiter)
+        try:
+            # A disconnect cancels the waiter without cancelling its caller.
+            await asyncio.wait({waiter})
+        finally:
+            waiter.cancel()
+            self._message_retry_waiters.discard(waiter)
+        return (not waiter.cancelled() and not self._stopping
+                and self._state == ConnectionState.READY and self._ws is ws
+                and self._delivery_generation == generation)
 
     async def _send_frame_once(
         self, frame: dict[str, Any], *, wait_for_ack: bool = False,

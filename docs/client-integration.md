@@ -1704,11 +1704,13 @@ Disconnect or shutdown cancels waiting; intermediate stream frames never retry.
 once. A terminal code discards the reply: no further `message.add` / `message.done`
 and no final reply. Retryable `send_rate_limited` sends the final reply whole,
 no earlier than `retry_after_ms` (a hint over 30 s discards it instead).
+Disconnect, shutdown or connection replacement cancels the wait and discards the reply.
 
 **Hermes:** The adapter keeps the latest 256 rejected text-reply digests in
 memory and refuses host-recovered replies with the same content, even under a
-new ID: permanently after a terminal rejection, and for max(server minimum,
-60 s) after `send_rate_limited` retries run out. Eviction or restart clears it.
+new ID: permanently for terminal rejection; retryable `send_rate_limited` uses
+max(server minimum or remaining wait, 60 s) after retry exhaustion, a hint over
+30 s, or a cancelled streaming wait. Eviction or restart clears it.
 
 **Two byte limits:** A WebSocket frame over **8 MiB** (64 KiB before auth)
 yields transport close **1009**, not `message.error`. A frame within that cap

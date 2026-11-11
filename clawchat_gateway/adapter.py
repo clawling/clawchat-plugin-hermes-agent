@@ -1015,6 +1015,7 @@ class _ActiveRun:
     stream_failed: bool = False
     rejected_code: str | None = None
     retry_not_before: float | None = None
+    reject_expires_at: float | None = None
 
 
 def check_clawchat_requirements(platform_config: Any) -> bool:
@@ -1804,16 +1805,21 @@ class ClawChatAdapter(BasePlatformAdapter):
         run.stream_open = False
         error = MessageError("stream rejected", payload)
         if code == "send_rate_limited" and error.retryable:
+            if run.rejected_code is not None and run.reject_expires_at is None:
+                return  # A later retryable error cannot downgrade a terminal rejection.
             if error.retry_after_ms is not None:
+                now = time.monotonic()
+                delay = error.retry_after_ms / 1000.0
+                run.retry_not_before = max(run.retry_not_before or 0.0, now + delay)
                 if error.retry_after_ms > MESSAGE_ERROR_RETRY_MAX_WAIT_SECONDS * 1000:
                     run.rejected_code = code
-                else:
-                    run.retry_not_before = max(
-                        run.retry_not_before or 0.0,
-                        time.monotonic() + error.retry_after_ms / 1000.0,
+                    run.reject_expires_at = max(
+                        run.reject_expires_at or 0.0,
+                        now + max(delay, MESSAGE_ERROR_RETRY_TOTAL_WAIT_SECONDS),
                     )
         else:
             run.rejected_code = code or "unknown"
+            run.reject_expires_at = None
 
     async def _on_notify_signal(self, frame: dict[str, Any]) -> None:
         """Handle inbound ``notify.signal`` frames dispatched by the connection.
@@ -8614,9 +8620,18 @@ class ClawChatAdapter(BasePlatformAdapter):
             delay = run.retry_not_before - time.monotonic()
             if delay <= 0:
                 break
-            await asyncio.sleep(delay)
+            waited = await self._connection.wait_message_retry(delay)
             if self._active_runs_by_id.get(run.message_id) is not run:
                 return SendResult(success=False, error="reply run discarded", message_id=run.message_id)
+            if not waited:
+                if run.rejected_code is None:
+                    run.rejected_code = "send_rate_limited"
+                    now = time.monotonic()
+                    run.reject_expires_at = now + max(
+                        (run.retry_not_before or now) - now,
+                        MESSAGE_ERROR_RETRY_TOTAL_WAIT_SECONDS,
+                    )
+                break
         if self._active_runs_by_id.get(run.message_id) is not run:
             return SendResult(success=False, error="reply run discarded", message_id=run.message_id)
         if run.rejected_code is not None:
@@ -8666,7 +8681,7 @@ class ClawChatAdapter(BasePlatformAdapter):
 
     async def _finish_rejected_run(self, run: _ActiveRun, frame: dict, content: str) -> SendResult:
         error = "clawchat reply rejected by server"
-        self._cache_rejected_reply(frame, run.chat_id, content)
+        self._cache_rejected_reply(frame, run.chat_id, content, run.reject_expires_at)
         self._update_message_record(
             kind="message", direction="outbound", event_type="message.error",
             trace_id=frame.get("trace_id") or frame.get("id"),

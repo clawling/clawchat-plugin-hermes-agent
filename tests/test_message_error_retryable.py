@@ -149,6 +149,64 @@ async def test_disconnect_cancels_retry_wait(monkeypatch):
     assert not conn._message_retry_waiters
 
 
+async def test_wait_message_retry_succeeds_and_unregisters_waiter(monkeypatch):
+    conn, frames, sleeps = peer(monkeypatch, [])
+    assert await conn.wait_message_retry(1.5) is True
+    assert sleeps == [1.5]
+    assert not frames and not conn._message_retry_waiters
+
+
+async def test_wait_message_retry_disconnect_cancellation_returns_false(monkeypatch):
+    conn, _, _ = peer(monkeypatch, [])
+    entered = asyncio.Event()
+
+    async def sleep(_delay):
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    task = asyncio.create_task(conn.wait_message_retry(1.5))
+    await entered.wait()
+    assert len(conn._message_retry_waiters) == 1
+    # Even if reconnect has already restored READY, the cancelled waiter fails.
+    conn._reject_pending_acks(RuntimeError("connection disconnected"))
+    assert await task is False
+    assert not conn._message_retry_waiters
+
+
+@pytest.mark.parametrize("change", ["generation", "socket", "stopping", "state"])
+async def test_wait_message_retry_rechecks_connection_after_wait(monkeypatch, change):
+    conn, _, _ = peer(monkeypatch, [])
+
+    async def sleep(_delay):
+        assert asyncio.current_task() in conn._message_retry_waiters
+        if change == "generation":
+            conn._delivery_generation += 1
+        elif change == "socket":
+            conn._ws = object()
+        elif change == "stopping":
+            conn._stopping = True
+        else:
+            conn._state = ConnectionState.DISCONNECTED
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    assert await conn.wait_message_retry(1.5) is False
+    assert not conn._message_retry_waiters
+
+
+@pytest.mark.parametrize("unready", ["stopping", "state", "socket"])
+async def test_wait_message_retry_refuses_unready_connection(monkeypatch, unready):
+    conn, _, sleeps = peer(monkeypatch, [])
+    if unready == "stopping":
+        conn._stopping = True
+    elif unready == "state":
+        conn._state = ConnectionState.DISCONNECTED
+    else:
+        conn._ws = None
+    assert await conn.wait_message_retry(1.5) is False
+    assert not sleeps and not conn._message_retry_waiters
+
+
 async def test_stream_add_does_not_retry(monkeypatch):
     conn, frames, sleeps = peer(monkeypatch, [limited()])
     async def refuse(*args, **kwargs):
