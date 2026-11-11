@@ -433,6 +433,13 @@ async def test_stop_flushes_before_close_and_disposes(monkeypatch, store):
         assert tracker.disposed and h.conn._delivery_tracker is None
 
 
+async def test_connection_epoch_advances_without_delivery_v2(monkeypatch, store):
+    # Retry fencing must see every reconnect, not only delivery-v2 generations.
+    async with peer(monkeypatch, store, enabled=False) as h:
+        assert h.conn.connection_epoch == 1
+        assert h.conn._delivery_generation == 0
+
+
 async def test_density_violation_reconnect_resets_baseline_and_epoch(monkeypatch, store):
     async with peer(monkeypatch, store) as h:
         old_ws = h.ws

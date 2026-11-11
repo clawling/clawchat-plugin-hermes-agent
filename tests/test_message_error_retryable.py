@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from dataclasses import replace
 
 import pytest
 
-from clawchat_gateway import connection, storage
+from clawchat_gateway import adapter as adapter_mod, connection, storage
 from clawchat_gateway.adapter import ClawChatAdapter
 from clawchat_gateway.config import ClawChatConfig
 from clawchat_gateway.connection import ClawChatConnection, ConnectionState, MessageError
@@ -149,6 +150,144 @@ async def test_disconnect_cancels_retry_wait(monkeypatch):
     assert not conn._message_retry_waiters
 
 
+async def test_wait_message_retry_succeeds_and_unregisters_waiter(monkeypatch):
+    conn, frames, sleeps = peer(monkeypatch, [])
+    assert await conn.wait_message_retry(1.5) is True
+    assert sleeps == [1.5]
+    assert not frames and not conn._message_retry_waiters
+
+
+async def test_wait_message_retry_disconnect_cancellation_returns_false(monkeypatch):
+    conn, _, _ = peer(monkeypatch, [])
+    entered = asyncio.Event()
+
+    async def sleep(_delay):
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    task = asyncio.create_task(conn.wait_message_retry(1.5))
+    await entered.wait()
+    assert len(conn._message_retry_waiters) == 1
+    # Even if reconnect has already restored READY, the cancelled waiter fails.
+    conn._reject_pending_acks(RuntimeError("connection disconnected"))
+    assert await task is False
+    assert not conn._message_retry_waiters
+
+
+@pytest.mark.parametrize("change", ["generation", "socket", "stopping", "state"])
+async def test_wait_message_retry_rechecks_connection_after_wait(monkeypatch, change):
+    conn, _, _ = peer(monkeypatch, [])
+
+    async def sleep(_delay):
+        assert asyncio.current_task() in conn._message_retry_waiters
+        if change == "generation":
+            conn._connection_epoch += 1
+        elif change == "socket":
+            conn._ws = object()
+        elif change == "stopping":
+            conn._stopping = True
+        else:
+            conn._state = ConnectionState.DISCONNECTED
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    assert await conn.wait_message_retry(1.5) is False
+    assert not conn._message_retry_waiters
+
+
+@pytest.mark.parametrize("unready", ["stopping", "state", "socket"])
+async def test_wait_message_retry_refuses_unready_connection(monkeypatch, unready):
+    conn, _, sleeps = peer(monkeypatch, [])
+    if unready == "stopping":
+        conn._stopping = True
+    elif unready == "state":
+        conn._state = ConnectionState.DISCONNECTED
+    else:
+        conn._ws = None
+    assert await conn.wait_message_retry(1.5) is False
+    assert not sleeps and not conn._message_retry_waiters
+
+
+@pytest.mark.parametrize("changed", ["before", "during"])
+async def test_wait_message_retry_honors_supplied_epoch(monkeypatch, changed):
+    conn, _, sleeps = peer(monkeypatch, [])
+    generation = conn.connection_epoch
+    if changed == "before":
+        conn._connection_epoch += 1
+    else:
+        async def sleep(delay):
+            sleeps.append(delay)
+            conn._connection_epoch += 1
+
+        monkeypatch.setattr(asyncio, "sleep", sleep)
+    assert await conn.wait_message_retry(1.5, epoch=generation) is False
+    assert sleeps == ([] if changed == "before" else [1.5])
+    assert not conn._message_retry_waiters
+
+
+@pytest.mark.parametrize("disconnect", [False, True])
+async def test_wait_message_retry_uses_owner_loop_from_another_thread(monkeypatch, disconnect):
+    conn, _, _ = peer(monkeypatch, [])
+    owner = asyncio.new_event_loop()
+    started = threading.Event()
+    loops = []
+
+    def run_owner():
+        asyncio.set_event_loop(owner)
+        owner.call_soon(started.set)
+        try:
+            owner.run_forever()
+        finally:
+            tasks = asyncio.all_tasks(owner)
+            for task in tasks:
+                task.cancel()
+            owner.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+            owner.close()
+
+    async def sleep(delay):
+        loops.append(asyncio.get_running_loop())
+        assert loops[-1] is owner
+        assert delay == 1.5
+        assert asyncio.current_task() in conn._message_retry_waiters
+        assert all(waiter.get_loop() is owner for waiter in conn._message_retry_waiters)
+        if disconnect:
+            # Both waiter creation and disconnect cancellation happen on owner.
+            owner.call_soon(conn._reject_pending_acks, RuntimeError("connection disconnected"))
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    thread = threading.Thread(target=run_owner, name="test-retry-owner-loop", daemon=True)
+    thread.start()
+    try:
+        assert started.wait(timeout=2)
+        conn._owner_loop = owner
+        assert asyncio.get_running_loop() is not owner
+        result = await asyncio.wait_for(
+            conn.wait_message_retry(1.5, epoch=conn.connection_epoch), timeout=2,
+        )
+        assert result is (not disconnect)
+        assert loops == [owner]
+        assert not conn._message_retry_waiters
+    finally:
+        owner.call_soon_threadsafe(owner.stop)
+        thread.join(timeout=2)
+    assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("closed", [False, True])
+async def test_wait_message_retry_refuses_unavailable_owner_loop(monkeypatch, closed):
+    conn, _, sleeps = peer(monkeypatch, [])
+    owner = asyncio.new_event_loop()
+    conn._owner_loop = owner
+    try:
+        if closed:
+            owner.close()
+        assert await conn.wait_message_retry(1.5, epoch=conn.connection_epoch) is False
+        assert not sleeps and not conn._message_retry_waiters
+    finally:
+        owner.close()
+
+
 async def test_stream_add_does_not_retry(monkeypatch):
     conn, frames, sleeps = peer(monkeypatch, [limited()])
     async def refuse(*args, **kwargs):
@@ -184,6 +323,71 @@ async def test_terminal_recovered_content_is_blocked_even_without_old_id(monkeyp
     assert len(adapter._rejected_reply_cache()) == 256
 
 
+async def test_exhausted_rate_limit_blocks_host_recovery_until_cooldown_expires(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(adapter_mod.time, "monotonic", lambda: clock[0])
+    conn, frames, sleeps = peer(monkeypatch, [limited()] * 4)
+    adapter = ClawChatAdapter({})
+    adapter._clawchat_config = replace(adapter._clawchat_config,
+                                     user_id="usr_placeholder", owner_user_id="usr_owner_placeholder")
+    adapter._known_chat_types[CHAT] = "direct"
+    monkeypatch.setattr(adapter._connection, "send_frame", conn.send_frame)
+    monkeypatch.setattr(adapter, "_earlier_attempt_message_id", lambda *_: None)
+    with pytest.raises(MessageError):
+        await adapter.send(CHAT, "Report ready")
+    assert len(frames) == 4 and sleeps == [1.5, 2, 4]
+    key = adapter._reply_content_key(CHAT, "Report ready")
+    deadline = 1000.0 + connection.MESSAGE_ERROR_RETRY_TOTAL_WAIT_SECONDS
+    assert adapter._rejected_reply_cache()[key] == deadline
+
+    async def accept(frame, **kwargs):
+        assert kwargs["wait_for_ack"] is True
+        frames.append(frame)
+        return True
+
+    monkeypatch.setattr(adapter._connection, "send_frame", accept)
+    for now in (1000.0, deadline - 0.001):
+        clock[0] = now
+        result = await adapter.send(CHAT, RECOVERED + "Report ready")
+        assert not result.success
+        assert len(frames) == 4
+        assert adapter._rejected_reply_cache()[key] == deadline  # Recovery cannot renew the budget.
+    clock[0] = deadline
+    result = await adapter.send(CHAT, RECOVERED + "Report ready")
+    assert result.success
+    assert len(frames) == 5
+    assert key not in adapter._rejected_reply_cache()
+
+
+async def test_exhausted_rate_limit_cooldown_preserves_long_server_hint(monkeypatch):
+    monkeypatch.setattr(adapter_mod.time, "monotonic", lambda: 1000.0)
+    adapter = ClawChatAdapter({})
+
+    async def refuse(frame, **kwargs):
+        raise MessageError("refused", dict(limited(), retry_after_ms=120000))
+
+    monkeypatch.setattr(adapter._connection, "send_frame", refuse)
+    with pytest.raises(MessageError):
+        await adapter._send_final_reply_frame(frame(), CHAT, "Report ready")
+    key = adapter._reply_content_key(CHAT, "Report ready")
+    assert adapter._rejected_reply_cache()[key] == 1120.0
+
+
+def test_rejected_reply_cache_refreshes_lru_and_preserves_terminal_entries():
+    adapter = ClawChatAdapter.__new__(ClawChatAdapter)
+    adapter._cache_rejected_reply(frame(), CHAT, "Report ready")
+    adapter._cache_rejected_reply(frame(), CHAT, "Report ready", 1200.0)
+    key = adapter._reply_content_key(CHAT, "Report ready")
+    assert adapter._rejected_reply_cache()[key] is None
+    for n in range(255):
+        adapter._cache_rejected_reply(frame(), CHAT, str(n))
+    assert adapter._reply_content_rejected(CHAT, "Report ready")
+    adapter._cache_rejected_reply(frame(), CHAT, "new reply")
+    assert len(adapter._rejected_reply_cache()) == 256
+    assert key in adapter._rejected_reply_cache()
+    assert adapter._reply_content_key(CHAT, "0") not in adapter._rejected_reply_cache()
+
+
 async def test_replaced_socket_fences_retry(monkeypatch):
     conn, frames, sleeps = peer(monkeypatch, [limited()])
 
@@ -191,7 +395,7 @@ async def test_replaced_socket_fences_retry(monkeypatch):
         if asyncio.current_task().get_name() == "clawchat-ack-timeout":
             await asyncio.Event().wait()
         else:
-            conn._delivery_generation += 1
+            conn._connection_epoch += 1
             conn._ws = object()
 
     monkeypatch.setattr(asyncio, "sleep", replace_socket)
