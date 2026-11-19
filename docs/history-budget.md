@@ -172,6 +172,46 @@ If a reset's outcome is uncertain after a restart, the user must issue it again.
 This policy does not bypass the host's confirmation gate or confirm a reset
 before its persistent route changes.
 
+## Prompt-cache cost of budget maintenance
+
+Budget maintenance is not free on providers with prompt caching. It adds
+cache-write cost in bursts, not on every turn. A turn that does not trigger
+maintenance behaves like any other turn and only extends the cached prefix.
+
+When a pass runs (history over the DM/group budget, an idle interval, or a
+confirmed `/new`), it adds, in the following order:
+
+1. **Summary requests.** Independent calls with their own prompt, which do not
+   reuse the conversation's cached prefix, plus any retry after truncation.
+2. **A silent notes round** in the old session, when notes apply.
+3. **A renewed host session.** The next real message starts from an empty
+   cache: the system prompt, tools, injected summary and recent window are all
+   written to the cache once, a larger one-time write than an ordinary turn.
+
+Afterwards the new session caches normally. In an active conversation, expect
+one noticeably larger cache write per pass; another pass happens only after
+history grows past the budget again.
+Exact cost depends on the provider's cache pricing, model, prompt size and TTL.
+
+Hermes also changes how a cached message is encoded as the cache breakpoint
+moves; this is a host behavior and happens with `budget-compaction` on or off.
+
+### Turning it off
+
+Set `budget-compaction: off` in `platforms.clawchat.extra` of the Hermes
+`config.yaml` (default `on`), then restart the gateway. To limit it to some
+conversations, set the same key under `extra.groups.<chat_id>`,
+`extra.groups."*"` or `extra.chats.<chat_id>`; see the table above for priority.
+
+With `off`, the plugin stops summary requests, notes rounds and
+budget-driven session renewal. Hermes' own compression applies instead, with
+the legacy threshold note turn, and `compression.threshold_tokens` is no
+longer only a backstop. The cost: the plugin no longer keeps a rolling summary
+or recent window within the DM/group budget, so history is trimmed only by
+Hermes' compression, which has its own summary cost and may keep the session
+longer. Keep the default unless the one-time cache write matters more than
+bounded history.
+
 ## Interrupted turns after a restart
 
 `interrupted-turn-notice` is a global boolean, enabled by default so a user is
