@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import secrets
+import threading
 import time
 
 from clawchat_gateway.no_reply import (
@@ -66,6 +67,9 @@ from clawchat_gateway.config import (
 )
 from clawchat_gateway.connection import (
     HANDSHAKE_TIMEOUT_SECONDS,
+    MESSAGE_ERROR_RETRY_BASE_SECONDS,
+    MESSAGE_ERROR_RETRY_MAX_WAIT_SECONDS,
+    MESSAGE_ERROR_RETRY_TOTAL_WAIT_SECONDS,
     ClawChatConnection,
     ConnectionState,
     MessageError,
@@ -1010,6 +1014,10 @@ class _ActiveRun:
     streamed_text: str = ""
     stream_sequence: int = -1
     stream_failed: bool = False
+    rejected_code: str | None = None
+    retry_not_before: float | None = None
+    retry_epoch: int | None = None
+    reject_expires_at: float | None = None
 
 
 def check_clawchat_requirements(platform_config: Any) -> bool:
@@ -1138,6 +1146,28 @@ _TRUSTED_RECEIPT_REASONS = frozenset({
     "", "owner_allowed", "owner_denied", "owner_timeout", "owner_turn_only",
     "policy_allow", "policy_deny", "policy_forbidden", "window_allow",
 })
+
+
+@dataclass
+class _SedimentTurn:
+    turn_id: str
+    done: asyncio.Event
+    nonce: str = ""
+    key: str = ""
+    session_id: str = ""
+    failed: bool = False
+    interruption: tuple[int, int] | None = None
+    deadline: float = float("inf")
+    maintenance: Any = None
+    maintenance_token: object | None = None
+    maintenance_epoch: int | None = None
+    request_seen: threading.Event = field(default_factory=threading.Event, repr=False)
+    observe_requests: bool = False
+    operation_current: Callable[[], bool] | None = None
+
+    @property
+    def executed(self):
+        return self.request_seen.is_set()
 
 
 class ClawChatAdapter(BasePlatformAdapter):
@@ -1289,8 +1319,10 @@ class ClawChatAdapter(BasePlatformAdapter):
         # and chats whose current turn ended in a no-reply.
         self._held_status_sends: dict[str, list[tuple[str, Any, Any, dict[str, Any]]]] = {}
         self._silent_turn_chats: set[str] = set()
-        self._sediment_done: dict[str, tuple[str, asyncio.Event]] = {}
-        self._sedimented_session_ids: OrderedDict[str, None] = OrderedDict()
+        self._sediment_done: dict[str, _SedimentTurn] = {}
+        self._maintenance_interrupt_epochs: dict[str, int] = {}
+        self._maintenance_interrupted_keys: set[str] = set()
+        self._sedimented_session_ids: OrderedDict[str, object] = OrderedDict()
         self._reset_clean_chats: set[str] = set()
         self._sediment_tasks: set[asyncio.Task[None]] = set()
         # Delayed closers of streams the host left open (see stop_typing).
@@ -1761,9 +1793,37 @@ class ClawChatAdapter(BasePlatformAdapter):
             return
         value = payload.get("code")
         code = value if isinstance(value, str) else ""
-        if code not in TERMINAL_CHAT_CODES:
+        chat_id = str(frame.get("chat_id") or "")
+        if code in TERMINAL_CHAT_CODES:
+            self._mark_chat_server_rejected(chat_id)
+        message_id = payload.get("message_id")
+        if not isinstance(message_id, str):
             return
-        self._mark_chat_server_rejected(str(frame.get("chat_id") or ""))
+        run = getattr(self, "_active_runs_by_id", {}).get(message_id)
+        if run is None or run.chat_id != chat_id:
+            return
+        # No await between lookup and mutation: a discarded run is ignored.
+        run.stream_failed = True
+        run.stream_open = False
+        error = MessageError("stream rejected", payload)
+        if code == "send_rate_limited" and error.retryable:
+            if run.rejected_code is not None and run.reject_expires_at is None:
+                return  # A later retryable error cannot downgrade a terminal rejection.
+            if run.retry_epoch is None:
+                run.retry_epoch = getattr(getattr(self, "_connection", None), "connection_epoch", None)
+            now = time.monotonic()
+            delay = (error.retry_after_ms / 1000.0 if error.retry_after_ms is not None
+                     else MESSAGE_ERROR_RETRY_BASE_SECONDS)
+            run.retry_not_before = max(run.retry_not_before or 0.0, now + delay)
+            if delay > MESSAGE_ERROR_RETRY_MAX_WAIT_SECONDS:
+                run.rejected_code = code
+                run.reject_expires_at = max(
+                    run.reject_expires_at or 0.0,
+                    now + max(delay, MESSAGE_ERROR_RETRY_TOTAL_WAIT_SECONDS),
+                )
+        else:
+            run.rejected_code = code or "unknown"
+            run.reject_expires_at = None
 
     async def _on_notify_signal(self, frame: dict[str, Any]) -> None:
         """Handle inbound ``notify.signal`` frames dispatched by the connection.
@@ -5592,6 +5652,20 @@ class ClawChatAdapter(BasePlatformAdapter):
             return
         if self._history and self._history.recalled_inbound(inbound):
             return
+        if is_sediment_turn:
+            pending = self._sediment_done.get(inbound.chat_id)
+            source = self._sediment_source(inbound.chat_id, inbound.chat_type, inbound.sender_id)
+            chat, session_key = self._maintenance_source_scope(source)
+            if (pending is None or pending.turn_id != inbound.raw_message.get("sediment_id")
+                    or not self._sediment_operation_current(inbound.chat_id, pending)
+                    or not self._sediment_target_matches(source, pending)
+                    or pending.interruption != self._maintenance_interrupt_epoch(chat, session_key)
+                    or self._maintenance_interrupted(chat, session_key)
+                    or not self._sediment_lease_idle(chat, inbound.chat_type, inbound.sender_id)):
+                if pending and pending.turn_id == inbound.raw_message.get("sediment_id"):
+                    pending.failed = True
+                    pending.done.set()
+                return
         source_kwargs: dict[str, Any] = {}
         snapshot = None
         if inbound.chat_id:
@@ -5801,6 +5875,24 @@ class ClawChatAdapter(BasePlatformAdapter):
             control = bool(_slash_command_name(inbound.text)) or bool(
                 self._history and self._history.control_input(inbound))
             with activity_turn(event, inbound, control=control) as activity:
+                self._bind_maintenance_turn(event)
+                if is_sediment_turn:
+                    pending = self._sediment_done.get(inbound.chat_id)
+                    if pending and pending.turn_id == inbound.raw_message.get("sediment_id"):
+                        if (not self._sediment_operation_current(inbound.chat_id, pending)
+                                or not self._sediment_target_matches(event.source, pending)):
+                            pending.failed = True
+                            pending.done.set()
+                            if snapshot is not None:
+                                from clawchat_gateway.turn_grants import release_turn
+                                release_turn(snapshot.nonce)
+                                if self._grant_dispatch_started.get(key) == snapshot.nonce:
+                                    self._grant_dispatch_started.pop(key, None)
+                            return
+                        pending.nonce = str(getattr(event.source, "message_id", "") or "")
+                        if pending.observe_requests:
+                            from clawchat_gateway.history_maintenance import register_sediment_observer
+                            register_sediment_observer(self, pending)
                 nonce = str(getattr(event.source, "message_id", "") or "")
                 if nonce:
                     if not hasattr(self, "_history_activity_markers"):
@@ -5852,10 +5944,67 @@ class ClawChatAdapter(BasePlatformAdapter):
         if not chat_id or chat_id in self._reset_clean_chats or chat_id in self._sediment_chats:
             return False
         # A busy session gets /new at once: it is how a stuck turn is escaped.
-        if chat_id in self._group_dispatching or self._chat_session_active(chat_id):
+        if (chat_id in self._group_dispatching or self._chat_session_active(chat_id)
+                or not self._sediment_lease_idle(chat_id, inbound.chat_type, inbound.sender_id)):
             logger.info("clawchat sediment before reset skipped chat_id=%s reason=busy", chat_id)
             return False
         return True
+
+    def _sediment_source(self, chat_id, chat_type, sender_id):
+        inbound = InboundMessage(chat_id=chat_id, chat_type=chat_type, sender_id=sender_id,
+                                 sender_name="", text="", raw_message={})
+        return self.build_source(chat_id=chat_id, chat_type=self._map_source_chat_type(chat_type),
+                                 user_id=self._session_user_id_for_inbound(inbound))
+
+    def _sediment_lease_idle(self, chat_id, chat_type, sender_id):
+        from clawchat_gateway.history_maintenance import host_turn_lease_idle
+        gateway = getattr(self, "gateway_runner", None)
+        try:
+            # Avoid requiring source construction on hosts without leases.
+            absent = object()
+            if getattr(gateway, "_turn_leases", absent) is absent:
+                return True
+            return host_turn_lease_idle(gateway, self._sediment_source(chat_id, chat_type, sender_id))
+        except Exception:
+            logger.debug("clawchat notes lease probe unavailable; deferring")
+            return False
+
+    def _observe_sediment_request(self, nonce, key, sid):
+        for chat, pending in self._sediment_done.items():
+            if (nonce and nonce == pending.nonce and sid == pending.session_id and key == pending.key
+                    and self._sediment_operation_current(chat, pending)):
+                pending.request_seen.set()
+
+    def _sediment_target(self, source):
+        gateway = self.gateway_runner
+        key = gateway._session_key_for_source(source)
+        sid = gateway.session_store.peek_session_id(key)
+        if not isinstance(key, str) or not key or not isinstance(sid, str) or not sid:
+            raise ValueError("sediment target session unavailable")
+        return key, sid
+
+    def _sediment_target_matches(self, source, pending):
+        try:
+            return self._sediment_target(source) == (pending.key, pending.session_id)
+        except Exception:
+            logger.debug("clawchat sediment target unavailable; deferring")
+            return False
+
+    def _sediment_operation_current(self, chat_id, pending):
+        if self._sediment_done.get(chat_id) is not pending or time.monotonic() >= pending.deadline:
+            return False
+        if pending.operation_current is not None:
+            try:
+                if not pending.operation_current():
+                    return False
+            except Exception:
+                logger.debug("clawchat sediment operation probe failed; deferring")
+                return False
+        maintenance = pending.maintenance
+        return (maintenance is None or (
+            self._history is maintenance and not maintenance.closed
+            and maintenance.epoch == pending.maintenance_epoch
+            and maintenance.blocked.get(pending.key) is pending.maintenance_token))
 
     def _sediment_targets(
         self, chat_id: str, chat_type: str, *, sender_id: str
@@ -5885,9 +6034,10 @@ class ClawChatAdapter(BasePlatformAdapter):
         return targets
 
     async def _run_sediment_turn(
-        self, *, chat_id: str, chat_type: str, sender_id: str, reason: str
+        self, *, chat_id: str, chat_type: str, sender_id: str, reason: str,
+        maintenance=None, maintenance_token=None, deadline=None, operation_current=None,
     ) -> bool:
-        """Run one silent sediment turn in this chat's session and wait for it."""
+        """Return execution evidence; refusal, cancellation and failure return False."""
         targets = self._sediment_targets(chat_id, chat_type, sender_id=sender_id)
         if not targets or chat_id in self._sediment_chats:
             return False
@@ -5897,6 +6047,29 @@ class ClawChatAdapter(BasePlatformAdapter):
         )
         turn_id = secrets.token_hex(16)
         done = asyncio.Event()
+        pending = _SedimentTurn(turn_id, done)
+        source = self._sediment_source(chat_id, chat_type, sender_id)
+        try:
+            pending.key, pending.session_id = self._sediment_target(source)
+        except Exception:
+            logger.debug("clawchat sediment target unavailable; deferring")
+            return False
+        chat, key = chat_id, pending.key
+        pending.interruption = self._maintenance_interrupt_epoch(chat, key)
+        pending.deadline = min(deadline if deadline is not None else float("inf"),
+                               time.monotonic() + SEDIMENT_TURN_TIMEOUT_SECONDS)
+        pending.maintenance = maintenance
+        pending.maintenance_token = maintenance_token
+        pending.maintenance_epoch = maintenance.epoch if maintenance is not None else None
+        pending.operation_current = operation_current
+        from clawchat_gateway.history_maintenance import (
+            unregister_sediment_observer, sediment_request_hook_supported,
+        )
+        evidence_required = sediment_request_hook_supported()
+        if evidence_required is not True and evidence_required is not False:
+            logger.debug("clawchat sediment hook capability unknown; deferring")
+            return False
+        pending.observe_requests = evidence_required is True
         text = session_sediment.build_sediment_prompt(reason=reason, targets=targets)
         if shared_group:
             # A mention-only group holds back messages that do not mention the
@@ -5927,7 +6100,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             },
         )
         self._sediment_chats.add(chat_id)
-        self._sediment_done[chat_id] = (turn_id, done)
+        self._sediment_done[chat_id] = pending
         logger.info(
             "clawchat sediment turn start chat_id=%s reason=%s notes=%d",
             chat_id,
@@ -5942,12 +6115,11 @@ class ClawChatAdapter(BasePlatformAdapter):
             finally:
                 if is_group:
                     self._group_dispatching.discard(chat_id)
-            loop = asyncio.get_running_loop()
-            deadline = loop.time() + SEDIMENT_TURN_TIMEOUT_SECONDS
             idle_since: float | None = None
             while not done.is_set():
-                now = loop.time()
-                if now >= deadline:
+                now = time.monotonic()
+                if not self._sediment_operation_current(chat_id, pending):
+                    pending.failed = True
                     logger.warning("clawchat sediment turn timed out chat_id=%s", chat_id)
                     break
                 # The host never took the turn (or finished without telling us).
@@ -5961,13 +6133,18 @@ class ClawChatAdapter(BasePlatformAdapter):
                     await asyncio.wait_for(done.wait(), timeout=SEDIMENT_POLL_SECONDS)
                 except asyncio.TimeoutError:
                     pass
-            return done.is_set()
+            # Request proof is published synchronously by the worker hook before
+            # its loop notification. No scheduling barrier or grace sleep is needed.
+            return (self._sediment_operation_current(chat_id, pending) and not pending.failed
+                    and (pending.executed if evidence_required is True else done.is_set()))
         except Exception:  # noqa: BLE001 - a failed sediment never blocks the chat
             logger.warning("clawchat sediment turn failed chat_id=%s", chat_id, exc_info=True)
-            return False
+            return (self._sediment_operation_current(chat_id, pending)
+                    and pending.executed and not pending.failed)
         finally:
+            unregister_sediment_observer(pending)
             self._sediment_chats.discard(chat_id)
-            if self._sediment_done.get(chat_id, ("", None))[0] == turn_id:
+            if self._sediment_done.get(chat_id) is pending:
                 self._sediment_done.pop(chat_id, None)
             logger.info("clawchat sediment turn end chat_id=%s reason=%s", chat_id, reason)
 
@@ -5991,6 +6168,7 @@ class ClawChatAdapter(BasePlatformAdapter):
 
     async def on_processing_start(self, event: Any) -> None:
         from clawchat_gateway.history_maintenance import bind_activity, restore_activity
+        self._bind_maintenance_turn(event)
         nonce = str(getattr(getattr(event, "source", None), "message_id", "") or "")
         activity = getattr(self, "_history_activity_markers", {}).get(nonce)
         if activity is None and getattr(event, "_clawchat_history_activity", None) is None:
@@ -6107,6 +6285,40 @@ class ClawChatAdapter(BasePlatformAdapter):
             return None
         return trigger
 
+    def _maintenance_scope(self, event):
+        return self._maintenance_source_scope(getattr(event, "source", None))
+
+    def _maintenance_source_scope(self, source):
+        chat = str(getattr(source, "chat_id", "") or "")
+        gateway = getattr(self, "gateway_runner", None)
+        try:
+            return chat, gateway._session_key_for_source(source)
+        except Exception:
+            return chat, chat
+
+    def _maintenance_interrupt_epoch(self, chat_id, session_key):
+        return (self._maintenance_interrupt_epochs.get(chat_id, 0),
+                self._maintenance_interrupt_epochs.get(session_key, 0))
+
+    def _maintenance_interrupted(self, chat_id, session_key):
+        return bool({chat_id, session_key} & self._maintenance_interrupted_keys)
+
+    def _mark_maintenance_interrupted(self, session_key, chat_id):
+        key = session_key or chat_id
+        self._maintenance_interrupt_epochs[key] = self._maintenance_interrupt_epochs.get(key, 0) + 1
+        self._maintenance_interrupted_keys.add(key)
+
+    def _bind_maintenance_turn(self, event):
+        if getattr(event, "_clawchat_maintenance_epoch", None) is None:
+            chat, key = self._maintenance_scope(event)
+            event._clawchat_maintenance_epoch = self._maintenance_interrupt_epoch(chat, key)
+
+    async def interrupt_session_activity(self, session_key: str, chat_id: str, metadata=None) -> None:
+        self._mark_maintenance_interrupted(session_key, chat_id)
+        parent = getattr(super(), "interrupt_session_activity", None)
+        if callable(parent):
+            await parent(session_key, chat_id, metadata)
+
     async def on_processing_complete(self, event: Any, outcome: Any) -> None:
         from clawchat_gateway.history_maintenance import finish_activity
         from clawchat_gateway.turn_grants import release_turn
@@ -6145,10 +6357,24 @@ class ClawChatAdapter(BasePlatformAdapter):
         try:
             if self._history:
                 self._history.completed(event, outcome)
-            if getattr(outcome, "name", str(outcome)).upper() == "FAILURE":
-                self._after_host_turn(event, failed=True)
-            else:
-                self._after_host_turn(event)
+            chat, key = self._maintenance_scope(event)
+            name = getattr(outcome, "name", str(outcome)).upper()
+            stamp = getattr(event, "_clawchat_maintenance_epoch", None)
+            interrupted = (stamp != self._maintenance_interrupt_epoch(chat, key) if stamp is not None
+                           else self._maintenance_interrupted(chat, key))
+            if name == "CANCELLED":
+                if not interrupted:
+                    self._mark_maintenance_interrupted(key, chat)
+                interrupted = True
+            raw = getattr(event, "raw_message", {}) or {}
+            synthetic = bool(raw.get("clawchat_raw", {}).get("synthetic"))
+            if (not interrupted and name not in {"FAILURE", "CANCELLED"} and not synthetic
+                    and not getattr(event, "internal", False)
+                    and self._turn_trigger_message_id(event)
+                    and not _slash_command_name(str(getattr(event, "text", "") or ""))):
+                self._maintenance_interrupted_keys.difference_update((chat, key))
+            self._after_host_turn(event, failed=name in {"FAILURE", "CANCELLED"},
+                                  interrupted=interrupted)
         except Exception:  # noqa: BLE001
             logger.warning("clawchat post-turn maintenance failed", exc_info=True)
         chat_id = str(getattr(getattr(event, "source", None), "chat_id", "") or "")
@@ -6161,15 +6387,20 @@ class ClawChatAdapter(BasePlatformAdapter):
                 if key.split(":", 1)[0] == chat_id:
                     self._grant_session_busy(key)
 
-    def _after_host_turn(self, event: Any, *, failed: bool = False) -> None:
+    def _after_host_turn(self, event: Any, *, failed: bool = False, interrupted: bool = False) -> None:
         raw = getattr(event, "raw_message", None)
         inner = raw.get("clawchat_raw") if isinstance(raw, dict) else None
         source = getattr(event, "source", None)
         chat_id = str(getattr(source, "chat_id", "") or "")
         if isinstance(inner, dict) and inner.get("clawchat_sediment"):
             pending = self._sediment_done.get(str(inner.get("conversation_id") or chat_id))
-            if pending is not None and pending[0] == inner.get("sediment_id"):
-                pending[1].set()
+            if pending is not None and pending.turn_id == inner.get("sediment_id"):
+                pending.failed = pending.failed or failed or interrupted
+                pending.done.set()
+            return
+        if interrupted:
+            if self._history:
+                self._history.finish_failed_turn(event)
             return
         if chat_id and not _slash_command_name(str(getattr(event, "text", "") or "")):
             if self._history:
@@ -6190,7 +6421,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             return
         if session_id in self._sedimented_session_ids:
             return
-        self._sedimented_session_ids[session_id] = None
+        operation = object()
+        self._sedimented_session_ids[session_id] = operation
         while len(self._sedimented_session_ids) > 2048:
             self._sedimented_session_ids.popitem(last=False)
         raw = getattr(event, "raw_message", None)
@@ -6208,28 +6440,54 @@ class ClawChatAdapter(BasePlatformAdapter):
             self._compact_sediment_threshold(chat_id),
         )
         task = asyncio.ensure_future(
-            self._compact_sediment_when_idle(chat_id, chat_type, sender_id)
+            self._compact_sediment_when_idle(chat_id, chat_type, sender_id, session_id, operation)
         )
         self._sediment_tasks.add(task)
         task.add_done_callback(self._sediment_tasks.discard)
 
     async def _compact_sediment_when_idle(
-        self, chat_id: str, chat_type: str, sender_id: str
+        self, chat_id: str, chat_type: str, sender_id: str, session_id: str = "", operation=None
     ) -> None:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + SEDIMENT_IDLE_WAIT_SECONDS
+        source = self._sediment_source(chat_id, chat_type, sender_id)
+        chat, key = self._maintenance_source_scope(source)
+        interruption = self._maintenance_interrupt_epoch(chat, key)
+        def current():
+            return operation is None or self._sedimented_session_ids.get(session_id) is operation
+        def retry_later():
+            if current():
+                self._sedimented_session_ids.pop(session_id, None)
         while (
             self._chat_session_active(chat_id)
             or chat_id in self._group_dispatching
             or chat_id in self._sediment_chats
+            or not self._sediment_lease_idle(chat_id, chat_type, sender_id)
         ):
+            if (not current() or interruption != self._maintenance_interrupt_epoch(chat, key)
+                    or self._maintenance_interrupted(chat, key)):
+                retry_later()
+                return
             if loop.time() >= deadline:
                 logger.info("clawchat sediment before compaction skipped chat_id=%s reason=busy", chat_id)
+                retry_later()
                 return
             await asyncio.sleep(SEDIMENT_POLL_SECONDS)
-        await self._run_sediment_turn(
-            chat_id=chat_id, chat_type=chat_type, sender_id=sender_id, reason="compact"
+        if (not current() or interruption != self._maintenance_interrupt_epoch(chat, key)
+                or self._maintenance_interrupted(chat, key)):
+            retry_later()
+            return
+        gateway = getattr(self, "gateway_runner", None)
+        peek = getattr(getattr(gateway, "session_store", None), "peek_session_id", None)
+        if session_id and callable(peek) and peek(key) != session_id:
+            retry_later()
+            return
+        executed = await self._run_sediment_turn(
+            chat_id=chat_id, chat_type=chat_type, sender_id=sender_id, reason="compact",
+            operation_current=current,
         )
+        if not executed:
+            retry_later()
 
     def _session_user_id_for_inbound(self, inbound: InboundMessage) -> str:
         if inbound.chat_type == "group" and not effective_group_sessions_per_user(
@@ -7873,8 +8131,8 @@ class ClawChatAdapter(BasePlatformAdapter):
                     return SendResult(success=True)
         if (is_host_redelivery and visible_content.strip()
                 and not self._has_outbound_media(metadata, kwargs)
-                and self._reply_content_key(chat_id, visible_content) in self._rejected_reply_cache()):
-            return SendResult(success=False, error="recovered reply was terminally rejected")
+                and self._reply_content_rejected(chat_id, visible_content)):
+            return SendResult(success=False, error="recovered reply was rejected")
         is_immediate_media_send = self._is_immediate_media_send(metadata, kwargs)
         is_stream_intermediate = self._is_stream_intermediate_output(content or "")
         if (
@@ -8256,7 +8514,7 @@ class ClawChatAdapter(BasePlatformAdapter):
             return SendResult(success=True, message_id=run.message_id)
         final_content = visible_final_text if visible_final_text else run.last_text
         reasoning, final_content = self._split_reasoning_prefix(final_content)
-        if reasoning:
+        if reasoning and run.rejected_code is None:
             await self._send_reasoning(run.chat_id, reasoning, run.reply_to_message_id, run.metadata)
         # Single throat for the final text (mirrors outbound.ts's
         # sendOpenclawClawlingText): the token suppresses the whole reply unless
@@ -8315,6 +8573,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             ),
             MESSAGE_MODE_NORMAL,
         )
+        if self._active_runs_by_id.get(run.message_id) is not run:
+            return SendResult(success=False, error="reply run discarded", message_id=run.message_id)
         if policy_dropped and (
             not final_fragments
             or self._is_empty_text_response(final_fragments)
@@ -8343,6 +8603,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             raw=frame,
             history_activity=outbound_activity(run.chat_id, run.metadata),
         )
+        if run.rejected_code is not None:
+            return await self._finish_rejected_run(run, frame, final_content)
         if claimed is False:
             # The reply under this id already went out: close the stream as
             # done. A message.failed here would withdraw a delivered message.
@@ -8356,6 +8618,32 @@ class ClawChatAdapter(BasePlatformAdapter):
                 message_id=run.message_id,
             )
         await self._stream_finish(run, final_content)
+        if self._active_runs_by_id.get(run.message_id) is not run:
+            return SendResult(success=False, error="reply run discarded", message_id=run.message_id)
+        while run.rejected_code is None and run.retry_not_before is not None:
+            delay = run.retry_not_before - time.monotonic()
+            if (run.retry_epoch is not None
+                    and getattr(self._connection, "connection_epoch", None) != run.retry_epoch):
+                waited = False
+            elif delay <= 0:
+                break
+            else:
+                waited = await self._connection.wait_message_retry(delay, epoch=run.retry_epoch)
+            if self._active_runs_by_id.get(run.message_id) is not run:
+                return SendResult(success=False, error="reply run discarded", message_id=run.message_id)
+            if not waited:
+                if run.rejected_code is None:
+                    run.rejected_code = "send_rate_limited"
+                    now = time.monotonic()
+                    run.reject_expires_at = now + max(
+                        (run.retry_not_before or now) - now,
+                        MESSAGE_ERROR_RETRY_TOTAL_WAIT_SECONDS,
+                    )
+                break
+        if self._active_runs_by_id.get(run.message_id) is not run:
+            return SendResult(success=False, error="reply run discarded", message_id=run.message_id)
+        if run.rejected_code is not None:
+            return await self._finish_rejected_run(run, frame, final_content)
         sent = await self._send_final_reply_frame(frame, run.chat_id, final_content)
         if not sent:
             error = "clawchat complete reply dropped"
@@ -8399,6 +8687,19 @@ class ClawChatAdapter(BasePlatformAdapter):
 
     # --- reply streaming (§8), opt-in, direct chats only ----------------------
 
+    async def _finish_rejected_run(self, run: _ActiveRun, frame: dict, content: str) -> SendResult:
+        error = "clawchat reply rejected by server"
+        self._cache_rejected_reply(frame, run.chat_id, content, run.reject_expires_at)
+        self._update_message_record(
+            kind="message", direction="outbound", event_type="message.error",
+            trace_id=frame.get("trace_id") or frame.get("id"),
+            chat_id=run.chat_id, message_id=run.message_id, text=error, raw=frame,
+        )
+        logger.warning("clawchat reply rejected chat_id=%s message_id=%s",
+                       run.chat_id, run.message_id)
+        await self._retire_run(run)
+        return SendResult(success=False, error=error, message_id=run.message_id)
+
     def _stream_replies_enabled(self) -> bool:
         # Experimental and off by default: not every client renders §8 streams.
         # Without it the host's drafts are buffered and the reply goes out
@@ -8410,7 +8711,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         # mentions (they are only added to the final reply) and another agent
         # in the group would read that copy first, under the same message id.
         return (
-            self._stream_replies_enabled()
+            self._active_runs_by_id.get(run.message_id) is run
+            and self._stream_replies_enabled()
             and run.chat_type == "direct"
             and not run.stream_failed
             and run.chat_id not in self._sediment_chats
@@ -8445,6 +8747,8 @@ class ClawChatAdapter(BasePlatformAdapter):
             await self._send_stream_frame(
                 build_stream_created_event(chat_id=run.chat_id, message_id=run.message_id)
             )
+            if not self._should_stream(run):
+                return
             run.stream_open = True
             logger.info("clawchat stream opened chat_id=%s message_id=%s", run.chat_id, run.message_id)
         run.stream_sequence += 1
@@ -8457,9 +8761,13 @@ class ClawChatAdapter(BasePlatformAdapter):
                 delta=text[len(run.streamed_text):],
             )
         )
+        if not self._should_stream(run):
+            return
         run.streamed_text = text
 
     async def _stream_fail(self, run: _ActiveRun) -> None:
+        if self._active_runs_by_id.get(run.message_id) is not run:
+            return
         if run.stream_open:
             await self._send_stream_frame(
                 build_stream_end_event(
@@ -8471,12 +8779,15 @@ class ClawChatAdapter(BasePlatformAdapter):
                 )
             )
             logger.info("clawchat stream failed chat_id=%s message_id=%s", run.chat_id, run.message_id)
+        if self._active_runs_by_id.get(run.message_id) is not run:
+            return
         run.stream_open = False
         run.stream_failed = True
 
     async def _stream_finish(self, run: _ActiveRun, final_text: str) -> None:
         """Close an open stream with ``message.done`` before its final reply."""
-        if not run.stream_open:
+        if (self._active_runs_by_id.get(run.message_id) is not run
+                or not run.stream_open or run.stream_failed):
             return
         await self._send_stream_frame(
             build_stream_end_event(
@@ -8486,6 +8797,8 @@ class ClawChatAdapter(BasePlatformAdapter):
                 text=final_text,
             )
         )
+        if self._active_runs_by_id.get(run.message_id) is not run:
+            return
         run.stream_open = False
         logger.info("clawchat stream done chat_id=%s message_id=%s", run.chat_id, run.message_id)
 
@@ -8493,6 +8806,8 @@ class ClawChatAdapter(BasePlatformAdapter):
         """Drop a run that will send no (further) reply; fail its open stream."""
         if run.stream_open:
             await self._stream_fail(run)
+        if self._active_runs_by_id.get(run.message_id) is not run:
+            return
         self._discard_run(run)
         self._remember_completed_run(run.message_id)
 
@@ -9941,11 +10256,39 @@ class ClawChatAdapter(BasePlatformAdapter):
     def _reply_content_key(self, chat_id: str, content: str) -> tuple[str, str]:
         return chat_id, hashlib.sha256(content.strip().encode()).hexdigest()
 
-    def _rejected_reply_cache(self) -> OrderedDict:
+    def _rejected_reply_cache(self) -> OrderedDict[tuple[str, str], float | None]:
         cache = getattr(self, "_rejected_reply_contents", None)
         if cache is None:
             cache = self._rejected_reply_contents = OrderedDict()
         return cache
+
+    def _reply_content_rejected(self, chat_id: str, content: str) -> bool:
+        cache = self._rejected_reply_cache()
+        key = self._reply_content_key(chat_id, content)
+        if key not in cache:
+            return False
+        expires_at = cache[key]
+        if expires_at is not None and time.monotonic() >= expires_at:
+            del cache[key]
+            return False
+        cache.move_to_end(key)
+        return True
+
+    def _cache_rejected_reply(
+        self, frame: dict, chat_id: str, content: str, expires_at: float | None = None,
+    ) -> None:
+        # Text (and mention) replies only: visible text cannot identify media.
+        if not content.strip() or not _frame_is_text_only(frame):
+            return
+        cache = self._rejected_reply_cache()
+        key = self._reply_content_key(chat_id, content)
+        if key not in cache or (cache[key] is not None and expires_at is None):
+            cache[key] = expires_at
+        elif cache[key] is not None and expires_at is not None:
+            cache[key] = max(cache[key], expires_at)
+        cache.move_to_end(key)
+        while len(cache) > _REJECTED_REPLY_CACHE_MAX:
+            cache.popitem(last=False)
 
     async def _send_final_reply_frame(self, frame: dict, chat_id: str, content: str) -> bool:
         try:
@@ -9953,16 +10296,13 @@ class ClawChatAdapter(BasePlatformAdapter):
         except MessageError as exc:
             # The host can recover any failed delivery, including a negative ack.
             # Keep content identity because recovery may mint a different wire id.
-            # Text (and mention) replies only: the key is the visible text, so a
-            # reply carrying attachments (or no text) must never suppress another.
-            if ((not exc.retryable or exc.code != "send_rate_limited")
-                    and content.strip() and _frame_is_text_only(frame)):
-                cache = self._rejected_reply_cache()
-                key = self._reply_content_key(chat_id, content)
-                cache[key] = None
-                cache.move_to_end(key)
-                while len(cache) > _REJECTED_REPLY_CACHE_MAX:
-                    cache.popitem(last=False)
+            expires_at = None
+            if exc.code == "send_rate_limited" and exc.retryable:
+                expires_at = time.monotonic() + max(
+                    (exc.retry_after_ms or 0) / 1000.0,
+                    MESSAGE_ERROR_RETRY_TOTAL_WAIT_SECONDS,
+                )
+            self._cache_rejected_reply(frame, chat_id, content, expires_at)
             raise
 
     def _earlier_attempt_message_id(self, chat_id: str, visible_content: str) -> str | None:

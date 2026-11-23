@@ -86,6 +86,21 @@ Budget work requires Hermes >= v0.14.0 and connect-time capability checks; the
 private bound async `_handle_reset_command(event)` signature is pinned by an AST
 test against the local host, with a verified range through v0.22.5 canary.
 Missing capabilities or the off switch retain legacy notes and host compression.
+When present, the host's loop-owned `_turn_leases._leases` is read by canonical
+routing key and resolved session ID: holder, lock and pending acquisitions must
+all be idle. Missing registries preserve compatibility; unknown structures defer
+notes and renewal. Sediment fixes routing key, session ID, operation identity and
+deadline before the first preparation await, then rechecks them before dispatch.
+Execution uses the registered `post_api_request` observer and the nonce/key
+ContextVars declared in `_VAR_MAP`, following the context-map contract used by
+`host_tools_guard`. Capability probing is tri-state: only known unsupported hooks
+or context use completion compatibility; exceptions and unknown structures defer.
+Request proof is recorded synchronously in a lock-protected operation registry
+and a thread-safe event before `call_soon_threadsafe` posts the loop notification;
+cleanup unregisters that exact operation so late hooks cannot confirm another.
+Interruption epochs fence
+summary results and turn completion before automatic maintenance can proceed.
+See [maintenance admission and renewal](history-budget.md) for the full behavior.
 A socket close cancels maintenance; READY creates a new instance after reconnect
 or account replacement, fencing the previous account and generation.
 Adapter input queues and active dispatches retain ownership across maintenance

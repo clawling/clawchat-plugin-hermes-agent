@@ -18,6 +18,11 @@ catalogue with the server implementation inspected at `dd7eafc`.
 Hermes' optional v2 negotiation, durable receipts and ack rhythm are applied
 as a separate subset addition in §11.7.
 
+Separately applied upstream subset items:
+
+- Upstream §7.3/§9.4 plan messages (`payload.plan`, `message_id` deduplication
+  and `plan.changed`), server commit `7f963fa`.
+
 Known upstream changes after that full sync **not yet incorporated in full**:
 
 - `retryable` / `retry_after_ms`, `send_rate_limited` and direct-chat
@@ -194,7 +199,7 @@ unsupported features are not invitations to enable a flag without implementing i
 | `history_sync` | omitted | Hermes does not declare it; full sibling-history semantics belong to the upstream server contract (§11.4). |
 | `e2ee` | omitted | Hermes does not declare it; full ciphertext semantics belong to the upstream server contract. |
 | `reliable_delivery` | omitted | Hermes does not declare it; full v1 cursor semantics belong to the upstream server contract (§11.7). |
-| `reliable_delivery_v2` | `true` by default | Hermes declares `true` unless the profile sets it to `false`; OpenClaw only with its `reliableDeliveryV2` opt-in (§11.7). |
+| `reliable_delivery_v2` | `true` by default | Hermes gateway connections declare `true` unless the profile sets it to `false`; standalone (sibling) connections never declare it. OpenClaw only with its `reliableDeliveryV2` opt-in (§11.7). |
 
 **Hermes:** `ack_progress_clock` is also omitted; it applies only to granted v2
 reliable delivery. Hermes implements only the v2 sync ack, on by default (§11.7).
@@ -215,8 +220,9 @@ A successful response echoes the connect `trace_id` and resolved `device_id`
 `delivery_mode` is `"device_replay"`; tolerate future values. No field returns
 your own user identity (§2). Replay begins after this frame (§11).
 
-**Hermes:** Defaults to legacy replay. Only an opted-in connection that declared
-v2 accepts `ack_mode:"dseq"` with a non-empty string `ack_epoch` (§11.7).
+**Hermes:** The gateway connection declares v2 by default; standalone (sibling)
+connections and profiles with `reliable_delivery_v2: false` use legacy replay.
+Only a connection that declared v2 accepts `ack_mode:"dseq"` with a non-empty string `ack_epoch` (§11.7).
 
 ### 3.5 `hello-fail` (S → C)
 
@@ -463,6 +469,9 @@ Required: top-level `chat_id`, `payload.message.body.fragments`, and
 Omit top-level `sender`, `chat_type`, and `payload.message.streaming`.
 Supply a stable `payload.message_id` (§7.6); it is not a forbidden field.
 
+**Hermes:** Never generates `payload.plan` on uplink (§7.3); the server strips
+this server-owned field from client uplinks.
+
 **`context.mentions` is untyped and relayed element-for-element.** The
 server carries it as an untyped, opaque JSON array and the uplink →
 downlink rewrite only re-marshals it, so element *types* reach every
@@ -532,6 +541,19 @@ Recipients get the materialized envelope with server-stamped `sender`,
 `payload.message.context`. The server fills `payload.message.streaming` with
 `status: "static"`, `sequence: 0`, `mutation_policy: "sealed"`, and null
 `started_at` / `completed_at` for a non-stream message.
+
+Downlink `message.send` may also carry server-owned `payload.plan`, an optional
+object with string `plan_id` and `run_id`. The Agent creates a scheduled plan
+through REST; when it is due, the server sends the message as that Agent's
+shadow identity into the Agent–owner direct chat (Agent → owner). Fanout includes
+the sender, so the Agent's connection receives its own message as a self-echo.
+Only trusted server injection can attach this object; the server strips it from
+client uplinks. It is correlation metadata, not a new message type or a dedup
+key (§11.7).
+
+**Hermes:** Ignores `payload.plan` and drops the plan message as a self-echo
+because `sender.id` is its own user ID (see the `origin_device_id` row in §4).
+It does not start an Agent turn and never generates the object on uplink.
 
 **Hermes:** `connection.py` dispatches `message.send` and `message.reply` into
 per-chat lanes. `inbound.py` reads the materialized shape; self-echo and non-normal
@@ -949,7 +971,7 @@ best-effort live. It is not a chat message and has no `chat_id`, `chat_type`,
 |---------------|----------|
 | `type` | Required logical change type, e.g. `friend.added`; unknown types must be tolerated. |
 | `entity_id` | Required changed-entity ID; interpretation depends on type. |
-| `version` | Required monotonic mutation cursor, currently epoch milliseconds. |
+| `version` | Required monotonic mutation cursor, usually epoch milliseconds; `plan.changed` uses an Agent-level sequence. |
 | `event_id` | Required globally unique occurrence ID; dedup across live/replay and other notification channels. |
 | `message_id` | Required inbox coalesce key **`notify:{type}:{entity_id}`**, not a chat-message ID. |
 
@@ -967,10 +989,19 @@ too; omitted means the replay signal is skipped. Hermes advertises the flag and
 uses legacy delivery. Keep this distinction when comparing peer clients.
 
 A full live send buffer can drop the live frame without kicking the device;
-the inbox provides reconnect recovery. No live ack, negative ack or delivery
-confirmation is emitted. Handle replay and live signals identically: dedup,
+the inbox provides reconnect recovery. No notification-specific ack, negative
+ack or delivery confirmation is emitted; transport acks follow §11.7.
+Handle replay and live signals identically: dedup,
 route by type, then obtain authoritative state over REST rather than mutating
 from the signal alone.
+
+For `plan.changed`, `entity_id` is the `agent_id`; recipients are the owner and
+the Agent shadow identity. Clients with a plan-list surface refetch that Agent's
+plans. An adapter without that surface may ignore the signal while retaining
+normal receipt/ack handling (§11.7).
+
+**Hermes:** Observes `plan.changed` but otherwise ignores it; it neither refetches
+a plan list nor starts an Agent turn.
 
 **Hermes:** `connection.py` observes/deduplicates occurrences through
 `clawchat_gateway/notify_signal.py`, logs them and forwards fresh observations
@@ -1147,8 +1178,8 @@ server contract.
 Lifecycle notices (member joined / left, group renamed, announcements,
 permission results, owner-facing service notices…) are injected by the
 deployment's own services and delivered as ordinary **durable `message.send`**
-downlinks: persisted and replayed on reconnect. Hermes defaults to legacy;
-granted v2 follows §11.7. They
+downlinks: persisted and replayed on reconnect. Hermes gateway connections
+declare v2 by default and granted v2 follows §11.7; with v2 off it is legacy. They
 differ from a user message in exactly one envelope field — `sender` is the
 fixed system identity — plus a flat `payload.metadata` block:
 
@@ -1397,14 +1428,34 @@ Legacy, v1 and v2 here name delivery mechanisms, not the envelope version:
 all use Protocol v2 envelopes. Full reliable-delivery semantics belong to the
 upstream server contract.
 
-**Hermes:** Defaults to legacy advance-on-socket-write. It never declares v1
-`reliable_delivery` or emits `message.cursor_ack`. Default-on v2 is described below.
+**Hermes:** Uses legacy advance-on-socket-write whenever v2 is off for a connection —
+the profile sets `reliable_delivery_v2: false`, or the connection is a standalone
+(sibling) sender. It never declares v1 `reliable_delivery` or emits
+`message.cursor_ack`. v2, on by default for the gateway connection, is described below.
 
 Legacy is **not at-most-once**. A crash before local persistence can lose a frame;
 a cursor write failure or a connection served through another server instance
 can make a later connection replay frames already received. Therefore a legacy
 client **MUST deduplicate by `payload.message_id` in durable storage that survives
 restart**. An in-memory cache is insufficient (§11).
+
+Redeliveries, including plan-message retries, reuse the same `payload.message_id`.
+Clients MUST apply that ID's durable deduplication across live delivery, offline
+replay and push/WS overlap; `plan_id`, `run_id` and `trace_id` cannot replace it
+as the dedup key. For plan messages this primarily matters to owner-side clients;
+the Agent adapter drops its own echo (§7.3).
+
+**Hermes:** Uses the SQLite unique key
+`(account_id, direction, kind, message_id)` for inbound messages that pass
+self-echo filtering (§7.3). A successful claim precedes dispatch, including local
+owner skill-update consent consumption. Duplicate claims return before consent
+or an Agent turn; unavailable claims stop dispatch (§11).
+
+**Hermes:** Duplicate frames still follow normal receipt/ack handling. An existing
+message claim never suppresses a transport ack. On granted v2, persist each copy
+durably before recording/acknowledging its `dseq`, including a fresh `dseq` on
+redelivery, without starting another Agent turn. Legacy mode sends no
+replay/cursor ack; the optional v2 receipt/ack path is described below.
 
 **Hermes:** Defensively handles an unexpected `history.truncated` in `connection.py`:
 
@@ -1421,7 +1472,8 @@ restart**. An in-memory cache is insufficient (§11).
 #### Hermes: optional reliable_delivery_v2
 
 `platforms.clawchat.extra.reliable_delivery_v2` defaults to `true`; [configuration](configuration.md#connection) covers overrides and rollback.
-Hermes connections advertise `reliable_delivery_v2:true` unless the profile sets it to `false`;
+Hermes gateway connections advertise `reliable_delivery_v2:true` unless the profile sets it to `false`;
+standalone (sibling) connections always run with v2 off and never touch receipts ([architecture](architecture.md#standalone-sender-out-of-process-hermes-send--cron));
 OpenClaw has its own opt-in (`reliableDeliveryV2`, default false). Every hello independently requires
 `ack_mode:"dseq"` and a non-empty string `ack_epoch`; otherwise delivery is legacy.
 Each grant resets the read sequence and contiguous ack watermark to zero.
@@ -1447,7 +1499,7 @@ Trackers belong to one socket generation and are disposed on teardown.
 Ack means durable receipt, not a completed turn; lanes (including recall) and inline handlers mark done/failed on completion/error.
 Errors use display redaction plus long-secret/JWT filtering, at most 500 characters. Unavailable claims stay pending;
 no turn starts, and one timer retries after 30 s, continuing after recovery failures until success.
-At every READY, even without a v2 grant, recover all pending kinds in received_at,
+On a v2-enabled connection, at every READY, even without a v2 grant, recover all pending kinds in received_at,
 rowid order, skipping only dispatched work; frames waiting at the gate remain recoverable, with no startup cutoff.
 Enqueue recovered lane work before admitting new business frames; then release
 the ordering gate before awaiting inline handlers. Control frames bypass the gate;
@@ -1651,9 +1703,19 @@ At most 3 retries wait max(server minimum, 1 s × 2^(retry−1)) plus 0–20% ji
 capped at 30 s per wait and 60 s total scheduled wait. A server minimum over
 30 s terminates rather than shortening it. No hint uses the same base backoff.
 Disconnect or shutdown cancels waiting; intermediate stream frames never retry.
-The adapter retains the latest 256 terminally rejected reply-content digests
-in memory to block host recovered replies, including recovery with a new ID;
-eviction or process restart loses this suppression.
+
+**Hermes:** A `message.error` for a streamed reply's ID stops that stream at
+once. A terminal code discards the reply: no further `message.add` / `message.done`
+and no final reply. Retryable `send_rate_limited` sends the final reply whole,
+no earlier than `retry_after_ms` (a hint over 30 s discards it instead).
+Without a valid hint it waits 1 s without jitter. Disconnect, shutdown or connection
+replacement after rejection discards the reply, including before finalization.
+
+**Hermes:** The adapter keeps the latest 256 rejected text-reply digests in
+memory and refuses host-recovered replies with the same content, even under a
+new ID: permanently for terminal rejection; retryable `send_rate_limited` uses
+max(server minimum or remaining wait, 60 s) after retry exhaustion, a hint over
+30 s, or a cancelled streaming wait. Eviction or restart clears it.
 
 **Two byte limits:** A WebSocket frame over **8 MiB** (64 KiB before auth)
 yields transport close **1009**, not `message.error`. A frame within that cap

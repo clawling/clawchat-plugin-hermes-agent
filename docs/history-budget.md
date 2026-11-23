@@ -58,13 +58,51 @@ ordinary failure backoff. Cuts and summary/reset boundaries retain
 immutable ledger positions even when their referenced messages are recalled;
 withdrawal never moves a fixed interval. Each pass handles at most three blocks; confirmed
 `/new` finishes its whole interval before the next input is handed to Hermes.
-After publication, optional notes run in the old session, then a completely idle
-host session is renewed. The plugin rereads the **persistent route** to verify
+After publication, the plugin waits for idle again before optional notes run in
+the old session, and waits once more before renewal. Idle requires no adapter or
+host work, including any holder, locked lease or waiting lease acquisition for
+the session resolved from the canonical routing key. Hosts without a turn lease
+registry retain the other idle checks; an unrecognized registry defers maintenance.
+An interruption invalidates maintenance waiting on a summary, even if its result
+arrives after a later successful turn. Busy or interrupted work keeps its pending
+stage and published summaries, without dispatching notes or renewing the session.
+The independent five-minute input release still applies while waiting for idle.
+
+Each notes operation fixes its canonical routing key and target session ID before
+asynchronous preparation. Dispatch rechecks that target, the operation identity
+and deadline; session replacement, an unavailable target, an expired deadline or
+a superseded maintenance instance discards the notes without injecting them into
+another session. The maintenance deadline includes notes preparation.
+
+Notes count as executed only when `post_api_request` matches that sediment
+operation's nonce and host session. A completed turn without that evidence, or
+with a `CANCELLED` or `FAILURE` outcome, leaves notes pending and defers renewal;
+a retry resumes from notes without repeating published summary blocks. Ordinary
+notes errors after observed execution remain best effort.
+
+Hook capability has
+three states: supported, explicitly unsupported, and unknown because probing
+failed. Support requires the registered observer and nonce/key ContextVars in the
+host session-context map. Only explicitly unsupported hosts use completion-based
+notes behavior: for example, a host without `post_api_request` or session context,
+or a recognized older context map without the message nonce. Probe exceptions,
+unknown structures and missing observer registration defer notes and renewal.
+
+The model thread records request proof in a synchronized operation-specific event
+before posting its loop notification. Completion does not rely on notification
+queue order or a grace sleep. Proof arriving after operation cleanup cannot
+confirm that operation or a replacement, and requests for another session never
+confirm the fixed target.
+
+The plugin rereads the **persistent route** to verify
 that the session ID changed. Failures retain the original history and pending
-work; retries back off by 1/2/4/8 completed real messages. A host `FAILURE` outcome
-does not advance that backoff or trigger budget/idle maintenance. Budget-enabled
-conversations also skip legacy notes on that failure; disabled or unavailable
-budget maintenance retains the legacy behavior. Published blocks remain
+work; retries back off by 1/2/4/8 completed real messages. A host `FAILURE` or
+`CANCELLED` outcome does not advance that backoff or trigger budget/idle maintenance.
+A turn marked interrupted is excluded even if the host reports `SUCCESS`;
+the next real successful turn clears the interruption marker. Cancelled and
+interrupted turns also skip legacy notes. For `FAILURE`, budget-enabled
+conversations skip legacy notes, while disabled or unavailable budget maintenance
+retains the legacy behavior. Published blocks remain
 available when a later block fails. No summary text or credentials enter the
 maintenance diagnostic line (conversation, reason, result, blocks, duration and
 prompt tokens before/after).
@@ -111,8 +149,10 @@ omission and recent-window selection, so budgets measure the text actually sent;
 reinjected recent messages keep their timestamp.
 Legacy summary files are redacted again before reinjection.
 
-A user's `/new` keeps the host's confirmation gate and the existing old-session
-notes. The command alone does not advance a boundary. `on_session_reset` or the
+A user's `/new` keeps the host's confirmation gate. Its old-session notes are
+skipped while the host lease is busy, and the command still reaches the host.
+Legacy threshold notes also wait for the host lease and retry on a later idle
+turn when their idle wait expires. The command alone does not advance a boundary. `on_session_reset` or the
 next dispatch's durable route check must confirm the change first. The confirmed
 boundary excludes pre-command originals from the next window; renewed summary
 work folds those originals into the summary, including a conversation never
@@ -131,6 +171,46 @@ Legacy inference applies only when the control marker is absent; explicit
 If a reset's outcome is uncertain after a restart, the user must issue it again.
 This policy does not bypass the host's confirmation gate or confirm a reset
 before its persistent route changes.
+
+## Prompt-cache cost of budget maintenance
+
+Budget maintenance is not free on providers with prompt caching. It adds
+cache-write cost in bursts, not on every turn. A turn that does not trigger
+maintenance behaves like any other turn and only extends the cached prefix.
+
+When a pass runs (history over the DM/group budget, an idle interval, or a
+confirmed `/new`), it adds, in the following order:
+
+1. **Summary requests.** Independent calls with their own prompt, which do not
+   reuse the conversation's cached prefix, plus any retry after truncation.
+2. **A silent notes round** in the old session, when notes apply.
+3. **A renewed host session.** The next real message starts from an empty
+   cache: the system prompt, tools, injected summary and recent window are all
+   written to the cache once, a larger one-time write than an ordinary turn.
+
+Afterwards the new session caches normally. In an active conversation, expect
+one noticeably larger cache write per pass; another pass happens only after
+history grows past the budget again.
+Exact cost depends on the provider's cache pricing, model, prompt size and TTL.
+
+Hermes also changes how a cached message is encoded as the cache breakpoint
+moves; this is a host behavior and happens with `budget-compaction` on or off.
+
+### Turning it off
+
+Set `budget-compaction: off` in `platforms.clawchat.extra` of the Hermes
+`config.yaml` (default `on`), then restart the gateway. To limit it to some
+conversations, set the same key under `extra.groups.<chat_id>`,
+`extra.groups."*"` or `extra.chats.<chat_id>`; see the table above for priority.
+
+With `off`, the plugin stops summary requests, notes rounds and
+budget-driven session renewal. Hermes' own compression applies instead, with
+the legacy threshold note turn, and `compression.threshold_tokens` is no
+longer only a backstop. The cost: the plugin no longer keeps a rolling summary
+or recent window within the DM/group budget, so history is trimmed only by
+Hermes' compression, which has its own summary cost and may keep the session
+longer. Keep the default unless the one-time cache write matters more than
+bounded history.
 
 ## Interrupted turns after a restart
 

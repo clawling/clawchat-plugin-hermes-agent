@@ -410,6 +410,9 @@ class ClawChatConnection:
         # re-login). msghub enforces single-session per (user_id, device_id)
         # via takeover, so a standalone sender must present a sibling device
         # id or it kicks a gateway running in another process off the socket.
+        # Production sibling callers must go through use_sibling_connect_device_id,
+        # which also turns reliable delivery v2 off; this constructor argument
+        # only swaps the id (tests use it) and leaves the configured v2 flag alone.
         self._connect_device_id = connect_device_id
         self._owner_locale = owner_locale
         self._allow_superseded_notice = _allow_superseded_notice
@@ -444,6 +447,8 @@ class ClawChatConnection:
         self._state = ConnectionState.DISCONNECTED
         self._ws: Any = None
         self._delivery_generation = 0
+        # Advances on every accepted socket, independent of reliable_delivery_v2.
+        self._connection_epoch = 0
         self._v2_declared = False
         self._delivery_tracker: reliable_delivery.DseqAckTracker | None = None
         self.dseq_density_violations = 0
@@ -1078,9 +1083,18 @@ class ClawChatConnection:
         the inbox is user-scoped with per-device cursors, so it never steals
         messages from the real device. REST refresh keeps the canonical id.
         Must be called before ``start``. Returns the id that will be presented.
+
+        A sibling session is outbound-only: it shares the profile's receipt
+        store and account with the gateway, so it must never declare reliable
+        delivery v2 or run receipt recovery — recovery would hand the
+        gateway's pending receipts to the sibling's no-op inbound handler and
+        mark them done, and v2 acks would advance the shared connection
+        sequence. Turning v2 off here covers every sibling caller.
         """
         sibling = f"{self._refresh_device_id()}{suffix}"
         self._connect_device_id = sibling
+        if self._cfg.reliable_delivery_v2:
+            self._cfg = replace(self._cfg, reliable_delivery_v2=False)
         return sibling
 
     def _refresh_seed_conversation_id(self) -> str | None:
@@ -1478,8 +1492,7 @@ class ClawChatConnection:
                         or exc.code != "send_rate_limited" or not exc.retryable
                         or attempt == MESSAGE_ERROR_RETRY_MAX_RETRIES):
                     raise
-                ws, generation = self._ws, self._delivery_generation
-                if self._stopping or self._state != ConnectionState.READY or ws is None:
+                if self._stopping or self._state != ConnectionState.READY or self._ws is None:
                     raise
                 # Never shorten the server's minimum to fit our local wait cap.
                 minimum_ms = exc.retry_after_ms or 0
@@ -1492,21 +1505,50 @@ class ClawChatConnection:
                 if total_wait + delay > MESSAGE_ERROR_RETRY_TOTAL_WAIT_SECONDS:
                     raise
                 total_wait += delay
-                waiter = asyncio.create_task(asyncio.sleep(delay))
-                self._message_retry_waiters.add(waiter)
-                try:
-                    # asyncio.wait does not raise when the waiter is cancelled by
-                    # a disconnect; the state check below then fails the send.
-                    await asyncio.wait({waiter})
-                finally:
-                    waiter.cancel()
-                    self._message_retry_waiters.discard(waiter)
-                if (waiter.cancelled() or self._stopping or self._state != ConnectionState.READY
-                        or self._ws is not ws or self._delivery_generation != generation):
+                if not await self.wait_message_retry(delay):
                     raise
                 frame = dict(frame, trace_id=new_frame_id("trace"))
                 queue_when_unready = False
         return False  # unreachable
+
+    async def wait_message_retry(self, delay: float, epoch: int | None = None) -> bool:
+        """Keep retry waiters on the owner loop, fenced by the supplied connection epoch."""
+        owner = self._owner_loop
+        if owner is None or owner is asyncio.get_running_loop():
+            return await self._wait_message_retry_here(delay, epoch=epoch)
+        if owner.is_closed() or not owner.is_running():
+            return False
+        coro = self._wait_message_retry_here(delay, epoch=epoch)
+        try:
+            fut = asyncio.run_coroutine_threadsafe(coro, owner)
+        except RuntimeError:
+            coro.close()
+            return False
+        try:
+            return await asyncio.wrap_future(fut)
+        except asyncio.CancelledError:
+            fut.cancel()
+            raise
+
+    async def _wait_message_retry_here(self, delay: float, *, epoch: int | None = None) -> bool:
+        if epoch is None:
+            epoch = self._connection_epoch
+        ws, generation = self._ws, self._delivery_generation
+        if (self._stopping or self._state != ConnectionState.READY or ws is None
+                or self._connection_epoch != epoch):
+            return False
+        waiter = asyncio.create_task(asyncio.sleep(delay))
+        self._message_retry_waiters.add(waiter)
+        try:
+            # A disconnect cancels the waiter without cancelling its caller.
+            await asyncio.wait({waiter})
+        finally:
+            waiter.cancel()
+            self._message_retry_waiters.discard(waiter)
+        return (not waiter.cancelled() and not self._stopping
+                and self._state == ConnectionState.READY and self._ws is ws
+                and self._connection_epoch == epoch
+                and self._delivery_generation == generation)
 
     async def _send_frame_once(
         self, frame: dict[str, Any], *, wait_for_ack: bool = False,
@@ -1591,6 +1633,11 @@ class ClawChatConnection:
                 # _flush_send_queue dropped this frame after we queued it.
                 return False
         return True
+
+    @property
+    def connection_epoch(self) -> int:
+        """Identity of the current socket; advances on every accepted connection."""
+        return self._connection_epoch
 
     @property
     def is_ready(self) -> bool:
@@ -2517,6 +2564,7 @@ class ClawChatConnection:
             if not self._connection_credentials_current():
                 return False
             self._ws = ws
+            self._connection_epoch += 1
             if self._cfg.reliable_delivery_v2:
                 self._dispose_delivery_tracker()
                 self._delivery_generation += 1

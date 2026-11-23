@@ -41,6 +41,9 @@ def adapter(monkeypatch, tmp_path):
     a._host_compression_ratio = None
     a._active_sessions = {}
     a.dispatched = []
+    a.gateway_runner = SimpleNamespace(
+        _session_key_for_source=lambda source: f'{source.chat_type}:{source.chat_id}:{source.user_id}',
+        session_store=SimpleNamespace(peek_session_id=lambda key: 's1'))
 
     async def handle_message(event):
         a.dispatched.append(event)
@@ -140,6 +143,53 @@ async def test_without_a_known_window_the_cap_still_decides(adapter, monkeypatch
     await _turn_completes(adapter)
     assert _sediments(adapter) == []
     assert adapter._compact_sediment_threshold(DM) == 140_000
+
+
+async def test_legacy_notes_defer_on_host_lease_and_retry_when_idle(adapter, monkeypatch):
+    lease = SimpleNamespace(holder=object(), lock=asyncio.Lock(), pending_acquires=0)
+    adapter.gateway_runner = SimpleNamespace(
+        _session_key_for_source=lambda source: 'canonical-session-key',
+        session_store=SimpleNamespace(peek_session_id=lambda key: 's1'),
+        _turn_leases=SimpleNamespace(_leases={'s1': lease}))
+    monkeypatch.setattr('clawchat_gateway.adapter.SEDIMENT_IDLE_WAIT_SECONDS', 0)
+    _request(monkeypatch, prompt_tokens=145_000)
+    await _turn_completes(adapter)
+    assert not _sediments(adapter) and 's1' not in adapter._sedimented_session_ids
+    lease.holder = None
+    await _turn_completes(adapter)
+    assert len(_sediments(adapter)) == 1
+    assert 's1' in adapter._sedimented_session_ids
+
+
+async def test_legacy_waiter_is_invalidated_even_after_next_success(adapter, monkeypatch):
+    lease = SimpleNamespace(holder=object(), lock=asyncio.Lock(), pending_acquires=0)
+    key = 'canonical-session-key'
+    adapter.gateway_runner = SimpleNamespace(
+        _session_key_for_source=lambda source: key,
+        session_store=SimpleNamespace(peek_session_id=lambda key: 's1'),
+        _turn_leases=SimpleNamespace(_leases={'s1': lease}))
+    checked = asyncio.Event()
+    probe = adapter._sediment_lease_idle
+    def observed_probe(*args):
+        result = probe(*args)
+        checked.set()
+        return result
+    monkeypatch.setattr(adapter, '_sediment_lease_idle', observed_probe)
+    _request(monkeypatch, prompt_tokens=145_000)
+    await _turn_completes(adapter)
+    await checked.wait()
+    await adapter.interrupt_session_activity(key, DM)
+    successor = SimpleNamespace(
+        source=SimpleNamespace(chat_id=DM, chat_type='dm', user_id=FRIEND),
+        text='next question', raw_message={'clawchat_raw': {'payload': {'message_id': 'next-input'}}})
+    await adapter.on_processing_start(successor)
+    await adapter.on_processing_complete(successor, 'SUCCESS')
+    assert not adapter._maintenance_interrupted(DM, key)
+    lease.holder = None
+    await asyncio.gather(*adapter._sediment_tasks)
+    assert not _sediments(adapter) and 's1' not in adapter._sedimented_session_ids
+    await _turn_completes(adapter)
+    assert len(_sediments(adapter)) == 1
 
 
 def test_an_operator_ratio_is_honoured(adapter, monkeypatch):

@@ -2254,12 +2254,22 @@ async def test_synthetic_producer_authority_is_explicit(harness, host, monkeypat
         await a._dispatch_friend_greeting(friend_user_id="usr_guest", dedupe_key="greeting")
     elif producer == "sediment":
         monkeypatch.setattr(a, "_sediment_targets", lambda *_, **__: [("owner", "owner", "Owner")])
+        routing_key = f"agent:main:clawchat:dm:{OWNER_CHAT}"
+        monkeypatch.setattr(a, "gateway_runner", SimpleNamespace(
+            _session_key_for_source=lambda source: f"agent:main:clawchat:{source.chat_type}:{source.chat_id}",
+            session_store=SimpleNamespace(
+                peek_session_id=lambda key: "sediment-session" if key == routing_key else None)), raising=False)
+        # This authority harness models completion on a host without request hooks.
+        monkeypatch.setattr("clawchat_gateway.history_maintenance.sediment_request_hook_supported", lambda: False)
         original = a._handle_inbound
         async def finish(incoming):
             await original(incoming)
-            a._sediment_done[OWNER_CHAT][1].set()
+            pending = a._sediment_done[OWNER_CHAT]
+            assert (pending.key, pending.session_id) == (routing_key, "sediment-session")
+            pending.done.set()
         monkeypatch.setattr(a, "_handle_inbound", finish)
-        await a._run_sediment_turn(chat_id=OWNER_CHAT, chat_type="direct", sender_id="usr_owner", reason="compact")
+        assert await a._run_sediment_turn(
+            chat_id=OWNER_CHAT, chat_type="direct", sender_id="usr_owner", reason="compact")
     else:
         incoming = handle_permission_result({"chat_id": OWNER_CHAT, "chat_type": "direct", "sender": {"id": "system"},
             "payload": {"metadata": {"kind": "permission_result", "request_id": f"receipt-{binding}",

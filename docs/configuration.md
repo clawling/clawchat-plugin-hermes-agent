@@ -42,14 +42,15 @@ Automatic refresh, permanent-failure markers, empty credential tombstones and ac
 | `CLAWCHAT_WIKI_VERSION` | — | empty | Optional install-page stamp for connect/connect-check onboarding telemetry; profile-first, trimmed to 40 characters (`onboarding.wiki_version`), never gates activation. |
 | `CLAWCHAT_RELIABLE_DELIVERY_V2` | `reliable_delivery_v2` | `true` | Durable inbound receipts and negotiated dseq acknowledgements (§11.7); on by default, set `false` to opt out. |
 
-`platforms.clawchat.extra.reliable_delivery_v2` is a YAML bool; unset (or null) means `true`.
+`platforms.clawchat.extra.reliable_delivery_v2` is a YAML bool; unset or an explicit YAML `null` (an empty value) means the default, `true`, without a warning. Any other non-bool value warns and disables it.
 A non-empty env value overrides YAML. A profile that already sets `false` stays off after upgrade.
 The receipt tables are created lazily on the first enabled connection; no manual migration is needed.
 Env overrides accept case-insensitive `true/false`, `1/0`, `yes/no`,
 `on/off`. Invalid explicit values (non-bool YAML, unknown env) warn and disable it. For rollback, [drain pending receipts first](#reliable-delivery-rollback).
-Off (explicit `false`): legacy, no receipts or sync acks.
+Off (explicit `false`, and always for standalone sends): legacy, no receipts or sync acks.
 Each v2 grant registers a durable connection sequence before READY; registration or receipt-write failure closes without ack/dispatch, using normal reconnect/backoff.
 Each v2-enabled connection recovers pending even without a v2 grant, skipping dispatched work only.
+The setting applies to the gateway connection only: standalone sends always connect with v2 off and never touch receipts ([architecture](architecture.md#standalone-sender-out-of-process-hermes-send--cron)).
 Gate waiters can recover. Old lane work precedes new business; controls bypass the gate.
 Recovery failure/10 s timeout opens only the gate. Unavailable claims stay pending;
 recovery retries every 30 s through failures until success. Turns require a claim.
@@ -299,8 +300,12 @@ ClawChat conversations are compacted into a rolling summary when their history e
 
 Hermes has no pre-compression/reset memory flush; its periodic single-user review is disabled below. The plugin runs a synthetic sediment turn in the same session before losing context:
 
-- `/new` / `/reset`: finish sediment before the host command/confirmation; skip busy sessions or those with nothing said since reset, so reset remains an immediate escape.
+- `/new` / `/reset`: finish sediment before the host command/confirmation; skip busy sessions (including held or awaited host leases) or those with nothing said since reset, so reset remains an immediate escape.
 - Compression with budget maintenance: run notes after summary publication and before renewal. When budget maintenance is unavailable or off, use the legacy trigger after a turn, when idle, once per Hermes session id. The compression point is the lower of the absolute cap and Hermes' ratio threshold (default 0.5; 0.75 below 512 K, accounting for output reservation). Plugin load/activation **fill only missing** `compression.threshold_tokens` from `session-cap-tokens`; this host key is global across platforms (Hermes 0.20.1+).
+
+Busy host leases, interruptions and unexecuted notes defer automatic renewal;
+see [history maintenance admission](history-budget.md) for execution evidence,
+retry and older-host compatibility rules.
 
 Legacy fallback trigger example without output reservation: `0.75 × 128000 − 10000 = 86000`, rather than `150000 − 10000 = 140000`. Computation uses `post_api_request` usage/context length, `pre_api_request` max tokens and Hermes `ContextCompressor` math when importable (same fallback rule). Per-model ratio overrides are unseen; until the first request supplies a window, the cap alone decides.
 See [Effective compression point](#effective-compression-point) for read-only status diagnostics.

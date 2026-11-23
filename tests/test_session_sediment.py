@@ -25,13 +25,17 @@ Triggers:
 from __future__ import annotations
 
 import asyncio
+import sys
+import threading
+import time
+from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from clawchat_gateway import activate, sediment
+from clawchat_gateway import activate, sediment, history_maintenance as hm
 from clawchat_gateway.adapter import NO_REPLY_TOKEN, ClawChatAdapter
 from clawchat_gateway.config import ClawChatConfig
 from clawchat_gateway.inbound import InboundMessage
@@ -56,6 +60,9 @@ def adapter(monkeypatch, tmp_path):
     a._active_sessions = {}
     a.dispatched = []
     a.frames = []
+    a.gateway_runner = SimpleNamespace(
+        _session_key_for_source=lambda source: f'{source.chat_type}:{source.chat_id}:{source.user_id}',
+        session_store=SimpleNamespace(peek_session_id=lambda key: 's1'))
 
     async def handle_message(event):
         a.dispatched.append(event)
@@ -169,6 +176,203 @@ async def test_busy_session_gets_the_command_at_once(adapter):
     adapter._active_sessions = {f"agent:main:clawchat:dm:{DM}": object()}
     await adapter._handle_inbound(direct("/new"))
     assert [e.text for e in adapter.dispatched] == ["/new"]
+
+
+@pytest.mark.parametrize('group_chat', [False, True])
+async def test_lease_busy_skips_reset_notes_but_forwards_new(adapter, group_chat):
+    keys = []
+    def canonical(source):
+        keys.append((source.chat_id, source.user_id))
+        return 'canonical-session-key'
+    adapter.gateway_runner = SimpleNamespace(
+        _session_key_for_source=canonical,
+        session_store=SimpleNamespace(peek_session_id=lambda key: 'old-session'),
+        _turn_leases=SimpleNamespace(_leases={'old-session': SimpleNamespace(
+            holder=object(), lock=asyncio.Lock(), pending_acquires=0)}))
+    message = group('/new') if group_chat else direct('/new')
+    await adapter._handle_inbound(message)
+    assert [e.text for e in adapter.dispatched] == ['/new']
+    assert keys and set(keys) == {(GROUP, '__group_shared__') if group_chat else (DM, FRIEND)}
+
+
+@pytest.mark.parametrize('hook,evidence,outcome,expected', [
+    (True, False, 'SUCCESS', False),
+    (True, True, 'SUCCESS', True),
+    (True, 'wrong-session', 'SUCCESS', False),
+    (True, 'wrong-key', 'SUCCESS', False),
+    (True, True, 'FAILURE', False),
+    (True, True, 'CANCELLED', False),
+    (False, False, 'SUCCESS', True),
+    (False, False, 'FAILURE', False),
+    (False, False, 'CANCELLED', False),
+])
+async def test_sediment_execution_requires_request_and_success(
+    adapter, monkeypatch, hook, evidence, outcome, expected,
+):
+    monkeypatch.setattr(hm, 'sediment_request_hook_supported', lambda: hook)
+    async def handle(ev):
+        pending = adapter._sediment_done[DM]
+        assert pending.nonce == ev.source.message_id
+        if evidence:
+            values = {'HERMES_SESSION_MESSAGE_ID': pending.nonce,
+                      'HERMES_SESSION_KEY': 'other-key' if evidence == 'wrong-key' else pending.key}
+            monkeypatch.setattr(hm, '_session_env', lambda name: values.get(name, ''))
+            hm.post_api_request(platform='clawchat',
+                                session_id='other-session' if evidence == 'wrong-session' else pending.session_id,
+                                usage=None)
+        await adapter.on_processing_complete(ev, SimpleNamespace(name=outcome))
+    monkeypatch.setattr(adapter, 'handle_message', handle)
+    assert await adapter._run_sediment_turn(
+        chat_id=DM, chat_type='direct', sender_id=FRIEND, reason='compact') is expected
+    assert not adapter._sediment_done
+    assert not any(item[1]() is adapter for item in hm._sediment_observers.values())
+
+
+def test_sediment_hook_capability_checks_registration_and_context(monkeypatch):
+    hooks = {'post_api_request': [hm.post_api_request]}
+    valid_hooks = {'post_api_request'}
+    monkeypatch.setitem(sys.modules, 'hermes_cli.plugins', SimpleNamespace(
+        VALID_HOOKS=valid_hooks, get_plugin_manager=lambda: SimpleNamespace(_hooks=hooks)))
+    context = SimpleNamespace(get_session_env=lambda *args: '', _VAR_MAP={
+        name: ContextVar(name) for name in ('HERMES_SESSION_MESSAGE_ID', 'HERMES_SESSION_KEY')})
+    monkeypatch.setitem(sys.modules, 'gateway.session_context', context)
+    assert hm.sediment_request_hook_supported() is True
+    valid_hooks.clear()
+    assert hm.sediment_request_hook_supported() is False
+    valid_hooks.add('post_api_request')
+    hooks['post_api_request'] = [lambda **kwargs: None]
+    assert hm.sediment_request_hook_supported() is None
+    hooks['post_api_request'] = [hm.post_api_request]
+    monkeypatch.delattr(context, 'get_session_env')
+    assert hm.sediment_request_hook_supported() is None
+    monkeypatch.setitem(sys.modules, 'gateway.session_context', None)
+    assert hm.sediment_request_hook_supported() is False
+
+
+async def test_worker_request_proof_precedes_completion_with_delayed_loop_observer(adapter, monkeypatch):
+    monkeypatch.setattr(hm, 'sediment_request_hook_supported', lambda: True)
+    loop = asyncio.get_running_loop()
+    loop_thread = threading.get_ident()
+    notifications, worker_threads, failures, captured = [], [], [], []
+    original = adapter._observe_sediment_request
+    # The loop notification deliberately does not apply proof. The worker must
+    # publish it synchronously, independent of this callback's delivery order.
+    def deferred_observer(*identity):
+        assert threading.get_ident() == loop_thread
+        notifications.append(identity)
+    monkeypatch.setattr(adapter, '_observe_sediment_request', deferred_observer)
+    async def handle(ev):
+        pending = adapter._sediment_done[DM]
+        captured.append(pending)
+        values = {'HERMES_SESSION_MESSAGE_ID': pending.nonce, 'HERMES_SESSION_KEY': pending.key}
+        monkeypatch.setattr(hm, '_session_env', lambda name: values.get(name, ''))
+        def model_worker():
+            try:
+                worker_threads.append(threading.get_ident())
+                hm.post_api_request(platform='clawchat', session_id=pending.session_id)
+                assert pending.executed
+                asyncio.run_coroutine_threadsafe(
+                    adapter.on_processing_complete(ev, SimpleNamespace(name='SUCCESS')), loop).result(timeout=2)
+            except BaseException as exc:
+                failures.append(exc)
+        worker = threading.Thread(target=model_worker)
+        worker.start()
+        await asyncio.to_thread(worker.join, 3)
+        assert not worker.is_alive() and not failures
+    monkeypatch.setattr(adapter, 'handle_message', handle)
+    assert await adapter._run_sediment_turn(
+        chat_id=DM, chat_type='direct', sender_id=FRIEND, reason='compact')
+    assert worker_threads and worker_threads[0] != loop_thread
+    assert notifications == [(captured[0].nonce, captured[0].key, captured[0].session_id)]
+    # Applying the delayed callback after cleanup cannot affect another turn.
+    for identity in notifications:
+        original(*identity)
+    assert not adapter._sediment_done
+
+
+async def test_worker_hook_after_deadline_cannot_confirm_replacement(adapter, monkeypatch):
+    monkeypatch.setattr(hm, 'sediment_request_hook_supported', lambda: True)
+    loop = asyncio.get_running_loop()
+    expired, replacements, failures, workers = [], [], [], []
+    async def handle(ev):
+        pending = adapter._sediment_done[DM]
+        if not expired:
+            expired.append(pending)
+            pending.deadline = time.monotonic() - 1
+            await adapter.on_processing_complete(ev, SimpleNamespace(name='SUCCESS'))
+            return
+        replacements.append(pending)
+        old = expired[0]
+        values = {'HERMES_SESSION_MESSAGE_ID': old.nonce, 'HERMES_SESSION_KEY': old.key}
+        monkeypatch.setattr(hm, '_session_env', lambda name: values.get(name, ''))
+        def late_model_worker():
+            try:
+                hm.post_api_request(platform='clawchat', session_id=old.session_id)
+                asyncio.run_coroutine_threadsafe(
+                    adapter.on_processing_complete(ev, SimpleNamespace(name='SUCCESS')), loop).result(timeout=2)
+            except BaseException as exc:
+                failures.append(exc)
+        worker = threading.Thread(target=late_model_worker)
+        workers.append(worker)
+        worker.start()
+        await asyncio.to_thread(worker.join, 3)
+        assert not worker.is_alive() and not failures
+    monkeypatch.setattr(adapter, 'handle_message', handle)
+    for _ in range(2):
+        assert not await adapter._run_sediment_turn(
+            chat_id=DM, chat_type='direct', sender_id=FRIEND, reason='compact')
+    assert replacements[0].nonce != expired[0].nonce
+    assert not expired[0].executed and not replacements[0].executed
+    assert not failures and all(not worker.is_alive() for worker in workers)
+
+
+@pytest.mark.parametrize('change', ['key', 'operation'])
+async def test_sediment_route_or_operation_change_during_preparation_is_discarded(adapter, monkeypatch, change):
+    monkeypatch.setattr(hm, 'sediment_request_hook_supported', lambda: False)
+    preparing, resume = asyncio.Event(), asyncio.Event()
+    key = 'original-key'
+    operation_active = True
+    adapter.gateway_runner._session_key_for_source = lambda source: key
+    async def metadata(chat):
+        preparing.set()
+        await resume.wait()
+    monkeypatch.setattr(adapter, '_ensure_group_participants_metadata', metadata)
+    task = asyncio.create_task(adapter._run_sediment_turn(
+        chat_id=GROUP, chat_type='group', sender_id=FRIEND, reason='compact',
+        operation_current=lambda: operation_active))
+    try:
+        await asyncio.wait_for(preparing.wait(), 2)
+        pending = adapter._sediment_done[GROUP]
+        assert pending.key == 'original-key' and pending.session_id == 's1'
+        if change == 'key':
+            key = 'replacement-key'
+        else:
+            operation_active = False
+        resume.set()
+        assert not await asyncio.wait_for(task, 2)
+        assert pending.failed and pending.done.is_set() and not adapter.dispatched
+    finally:
+        resume.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_stale_sediment_events_and_requests_do_not_complete_replacement(adapter):
+    from clawchat_gateway.adapter import _SedimentTurn
+    current = _SedimentTurn('new-operation', asyncio.Event(), nonce='new-nonce',
+                            key='canonical-session-key', session_id='old-session')
+    adapter._sediment_done[DM] = current
+    old = SimpleNamespace(source=SimpleNamespace(chat_id=DM), raw_message={'clawchat_raw': {
+        'clawchat_sediment': True, 'sediment_id': 'old-operation'}})
+    adapter._after_host_turn(old)
+    for nonce, key, sid in [('old-nonce', current.key, current.session_id),
+                            (current.nonce, 'other-key', current.session_id),
+                            (current.nonce, current.key, 'other-session')]:
+        adapter._observe_sediment_request(nonce, key, sid)
+    assert not current.done.is_set() and not current.executed
+    adapter._observe_sediment_request(current.nonce, current.key, current.session_id)
+    assert current.executed
 
 
 @pytest.mark.asyncio
