@@ -1084,19 +1084,18 @@ async def test_recovery_failure_releases_order_gate_without_finishing_pending(mo
 @pytest.mark.parametrize("env,configured,expected", [("TRUE", False, True), ("false", True, False),
     ("1", False, True), ("0", True, False), ("YeS", False, True), ("NO", True, False),
     ("on", False, True), ("OFF", True, False), ("invalid", True, False),
-    (None, True, True), (None, False, False), (None, "true", False), (None, 1, False), (None, None, True)])
+    (None, True, True), (None, False, False), (None, "true", False), (None, 1, False), (None, None, False)])
 def test_config_env_precedence_and_invalid_values(monkeypatch, store, env, configured, expected, caplog):
     monkeypatch.setattr(config_module, "_get_env", lambda *names: env or "" if names[0] == "CLAWCHAT_RELIABLE_DELIVERY_V2" else "")
     cfg = ClawChatConfig.from_platform_config(SimpleNamespace(extra={"reliable_delivery_v2": configured}))
     assert cfg.reliable_delivery_v2 is expected
-    if env == "invalid" or not (configured is None or isinstance(configured, bool)):
+    if env == "invalid" or not isinstance(configured, bool):
         assert any(r.levelno == logging.WARNING and "reliable_delivery_v2" in r.message for r in caplog.records)
 
 
-def test_config_default_enabled_and_profile_dotenv(monkeypatch, tmp_path, store):
+def test_config_default_disabled_and_profile_dotenv(monkeypatch, tmp_path, store):
     monkeypatch.delenv("CLAWCHAT_RELIABLE_DELIVERY_V2", raising=False)
-    assert ClawChatConfig.from_platform_config(SimpleNamespace(extra={})).reliable_delivery_v2 is True
-    assert ClawChatConfig.from_platform_config(SimpleNamespace(extra={"reliable_delivery_v2": False})).reliable_delivery_v2 is False
+    assert ClawChatConfig.from_platform_config(SimpleNamespace(extra={})).reliable_delivery_v2 is False
     monkeypatch.setenv("CLAWCHAT_RELIABLE_DELIVERY_V2", "false")
     (tmp_path / ".env").write_text("CLAWCHAT_RELIABLE_DELIVERY_V2=yes\n")
     monkeypatch.setattr(config_module, "hermes_home", lambda: tmp_path)

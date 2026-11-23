@@ -306,8 +306,8 @@ contract first, then this subset and the peer client implementations.
 5. Compare `connection.py:build_connect_capabilities` with the OpenClaw peer,
    honoring its “keep in sync with OpenClaw” comment; an upstream feature does
    not authorize adding its capability to either plugin.
-   `reliable_delivery_v2` is an approved exception: on by default in Hermes
-   (opt out with `false`), opt-in and off by default in OpenClaw (`reliableDeliveryV2`).
+   `reliable_delivery_v2` is an approved opt-in exception, off by default in
+   both plugins (OpenClaw: `reliableDeliveryV2`).
 6. Diff heading text, resolve all § references and verify constants/error names
    against both implementations. Update provenance without exposing private paths.
 
