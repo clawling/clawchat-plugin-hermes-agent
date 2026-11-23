@@ -206,7 +206,8 @@ def build_connect_capabilities(
 
     Extracted so tests can assert on the capability set without wiring up a
     full WebSocket session. Keep the default set in sync with OpenClaw;
-    reliable_delivery_v2 is an approved Hermes-only opt-in exception.
+    reliable_delivery_v2 is an approved Hermes-only exception (declared by default;
+    OpenClaw opts in per account).
     """
     return {
         **({"install_conflict": True} if install_conflict else {}),

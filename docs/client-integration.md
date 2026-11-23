@@ -199,10 +199,10 @@ unsupported features are not invitations to enable a flag without implementing i
 | `history_sync` | omitted | Hermes does not declare it; full sibling-history semantics belong to the upstream server contract (§11.4). |
 | `e2ee` | omitted | Hermes does not declare it; full ciphertext semantics belong to the upstream server contract. |
 | `reliable_delivery` | omitted | Hermes does not declare it; full v1 cursor semantics belong to the upstream server contract (§11.7). |
-| `reliable_delivery_v2` | omitted by default | Hermes declares `true` only with profile opt-in; OpenClaw likewise only with its `reliableDeliveryV2` opt-in (§11.7). |
+| `reliable_delivery_v2` | `true` by default | Hermes declares `true` unless the profile sets it to `false`; OpenClaw only with its `reliableDeliveryV2` opt-in (§11.7). |
 
 **Hermes:** `ack_progress_clock` is also omitted; it applies only to granted v2
-reliable delivery. Hermes implements only the opt-in v2 sync ack (§11.7).
+reliable delivery. Hermes implements only the v2 sync ack, on by default (§11.7).
 Send `connect` within the server handshake deadline (default about 10 s);
 timeout closes the socket without `hello-fail`.
 
@@ -1428,7 +1428,7 @@ all use Protocol v2 envelopes. Full reliable-delivery semantics belong to the
 upstream server contract.
 
 **Hermes:** Defaults to legacy advance-on-socket-write. It never declares v1
-`reliable_delivery` or emits `message.cursor_ack`. Optional v2 is described below.
+`reliable_delivery` or emits `message.cursor_ack`. Default-on v2 is described below.
 
 Legacy is **not at-most-once**. A crash before local persistence can lose a frame;
 a cursor write failure or a connection served through another server instance
@@ -1468,8 +1468,8 @@ replay/cursor ack; the optional v2 receipt/ack path is described below.
 
 #### Hermes: optional reliable_delivery_v2
 
-`platforms.clawchat.extra.reliable_delivery_v2` defaults to `false`; [configuration](configuration.md#connection) covers overrides and rollback.
-Only opt-in Hermes connections advertise `reliable_delivery_v2:true`;
+`platforms.clawchat.extra.reliable_delivery_v2` defaults to `true`; [configuration](configuration.md#connection) covers overrides and rollback.
+Hermes connections advertise `reliable_delivery_v2:true` unless the profile sets it to `false`;
 OpenClaw has its own opt-in (`reliableDeliveryV2`, default false). Every hello independently requires
 `ack_mode:"dseq"` and a non-empty string `ack_epoch`; otherwise delivery is legacy.
 Each grant resets the read sequence and contiguous ack watermark to zero.
@@ -1559,7 +1559,7 @@ history semantics are outside this subset (§11.4).
 - Tolerate object/string/null mentions, absent/empty media URLs, and unknown
   events, fragment kinds and system-message kinds (§7.1, §9.9, §10).
 - Unsupported receipt/history obligations are not activated by this plugin's
-  capability set (§3.3); reliable delivery requires the explicit opt-in (§11.7).
+  capability set (§3.3); reliable delivery is on by default and can be turned off per profile (§11.7).
 
 ### 13.2 Limits and fair use
 
@@ -1942,7 +1942,7 @@ numbers remain stable for code, tests and external references.
 
 ### E2EE / history sync (if supported)
 
-- [ ] Keep unsupported history/E2EE/v1 capabilities omitted; v2 requires opt-in (§3.3, §11.7).
+- [ ] Keep unsupported history/E2EE/v1 capabilities omitted; Hermes declares v2 by default (opt out with `false`); OpenClaw only with opt-in (§3.3, §11.7).
 
 ### Heartbeat
 
