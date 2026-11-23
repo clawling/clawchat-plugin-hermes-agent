@@ -50,6 +50,7 @@ Env overrides accept case-insensitive `true/false`, `1/0`, `yes/no`,
 Off (explicit `false`): legacy, no receipts or sync acks.
 Each v2 grant registers a durable connection sequence before READY; registration or receipt-write failure closes without ack/dispatch, using normal reconnect/backoff.
 Each v2-enabled connection recovers pending even without a v2 grant, skipping dispatched work only.
+The setting applies to the gateway connection only: standalone sends always connect with v2 off and never touch receipts ([architecture](architecture.md#standalone-sender-out-of-process-hermes-send--cron)).
 Gate waiters can recover. Old lane work precedes new business; controls bypass the gate.
 Recovery failure/10 s timeout opens only the gate. Unavailable claims stay pending;
 recovery retries every 30 s through failures until success. Turns require a claim.

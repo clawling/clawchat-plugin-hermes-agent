@@ -1080,9 +1080,18 @@ class ClawChatConnection:
         the inbox is user-scoped with per-device cursors, so it never steals
         messages from the real device. REST refresh keeps the canonical id.
         Must be called before ``start``. Returns the id that will be presented.
+
+        A sibling session is outbound-only: it shares the profile's receipt
+        store and account with the gateway, so it must never declare reliable
+        delivery v2 or run receipt recovery — recovery would hand the
+        gateway's pending receipts to the sibling's no-op inbound handler and
+        mark them done, and v2 acks would advance the shared connection
+        sequence. Turning v2 off here covers every sibling caller.
         """
         sibling = f"{self._refresh_device_id()}{suffix}"
         self._connect_device_id = sibling
+        if self._cfg.reliable_delivery_v2:
+            self._cfg = replace(self._cfg, reliable_delivery_v2=False)
         return sibling
 
     def _refresh_seed_conversation_id(self) -> str | None:
