@@ -1091,18 +1091,35 @@ async def test_recovery_failure_releases_order_gate_without_finishing_pending(mo
 @pytest.mark.parametrize("env,configured,expected", [("TRUE", False, True), ("false", True, False),
     ("1", False, True), ("0", True, False), ("YeS", False, True), ("NO", True, False),
     ("on", False, True), ("OFF", True, False), ("invalid", True, False),
-    (None, True, True), (None, False, False), (None, "true", False), (None, 1, False), (None, None, False)])
+    (None, True, True), (None, False, False), (None, "true", False), (None, 1, False), (None, None, True)])
 def test_config_env_precedence_and_invalid_values(monkeypatch, store, env, configured, expected, caplog):
     monkeypatch.setattr(config_module, "_get_env", lambda *names: env or "" if names[0] == "CLAWCHAT_RELIABLE_DELIVERY_V2" else "")
     cfg = ClawChatConfig.from_platform_config(SimpleNamespace(extra={"reliable_delivery_v2": configured}))
     assert cfg.reliable_delivery_v2 is expected
-    if env == "invalid" or not isinstance(configured, bool):
+    if env == "invalid" or not (configured is None or isinstance(configured, bool)):
         assert any(r.levelno == logging.WARNING and "reliable_delivery_v2" in r.message for r in caplog.records)
 
 
-def test_config_default_disabled_and_profile_dotenv(monkeypatch, tmp_path, store):
+def test_config_yaml_null_means_default_on_without_warning(monkeypatch, caplog):
+    # YAML ``reliable_delivery_v2:`` / ``null`` is "unset", i.e. the default (on);
+    # any other non-bool value still warns and disables.
+    monkeypatch.setattr(config_module, "_get_env", lambda *names: "")
+    with caplog.at_level(logging.WARNING):
+        cfg = ClawChatConfig.from_platform_config(SimpleNamespace(extra={"reliable_delivery_v2": None}))
+    assert cfg.reliable_delivery_v2 is True
+    assert not [r for r in caplog.records if "reliable_delivery_v2" in r.getMessage()]
+    for invalid in ("true", 1, [], {}):
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            cfg = ClawChatConfig.from_platform_config(SimpleNamespace(extra={"reliable_delivery_v2": invalid}))
+        assert cfg.reliable_delivery_v2 is False, invalid
+        assert any("reliable_delivery_v2" in r.getMessage() for r in caplog.records), invalid
+
+
+def test_config_default_enabled_and_profile_dotenv(monkeypatch, tmp_path, store):
     monkeypatch.delenv("CLAWCHAT_RELIABLE_DELIVERY_V2", raising=False)
-    assert ClawChatConfig.from_platform_config(SimpleNamespace(extra={})).reliable_delivery_v2 is False
+    assert ClawChatConfig.from_platform_config(SimpleNamespace(extra={})).reliable_delivery_v2 is True
+    assert ClawChatConfig.from_platform_config(SimpleNamespace(extra={"reliable_delivery_v2": False})).reliable_delivery_v2 is False
     monkeypatch.setenv("CLAWCHAT_RELIABLE_DELIVERY_V2", "false")
     (tmp_path / ".env").write_text("CLAWCHAT_RELIABLE_DELIVERY_V2=yes\n")
     monkeypatch.setattr(config_module, "hermes_home", lambda: tmp_path)
@@ -1465,3 +1482,75 @@ def test_same_connection_updates_only_increasing_dseq(store):
     assert store.upsert_inbound_receipt(**kwargs) == InboundReceiptWriteResult("ok", 1)
     assert rows(store)[0]["conn_seq"] == 1 and rows(store)[0]["dseq"] == 3
     assert "latest" in rows(store)[0]["raw_json"]
+
+
+async def test_standalone_send_leaves_pending_v2_receipt_for_gateway(monkeypatch, store, tmp_path):
+    import clawchat_gateway.standalone_send as sender
+
+    chat_id = "cnv_" + "0" * 26
+    pending = {**message(message_id="test-gateway-pending"), "chat_id": chat_id}
+    seed_pending(store, pending)
+    cfg = ClawChatConfig(
+        websocket_url="wss://example.invalid/ws", token=FAKE_SECRETS["access"],
+        refresh_token=FAKE_SECRETS["refresh"], user_id="usr_test_agent",
+        owner_user_id="usr_test_owner", reliable_delivery_v2=True,
+    )
+    startup_drained = asyncio.Event()
+
+    async def watch_credentials(conn):
+        # The watcher starts after READY recovery has queued the pending work.
+        await until(lambda: not conn._inbound_lanes)
+        startup_drained.set()
+
+    class StandaloneWS(FakeWS):
+        async def send(self, raw):
+            await super().send(raw)
+            frame = self.sent[-1]
+            if frame["event"] == "message.send":
+                # Keep the sibling open until any startup recovery can finish.
+                await until(startup_drained.is_set)
+                # A v2 tracker would flush a sync ack before reading message.ack.
+                self.feed({"event": "replay.done", "dseq": 1,
+                           "payload": {"ack_epoch": GRANT["ack_epoch"]}})
+                self.feed({"event": "message.ack", "trace_id": frame["trace_id"],
+                           "payload": {"message_id": frame["payload"]["message_id"]}})
+
+    ws = StandaloneWS(GRANT)
+    with monkeypatch.context() as standalone_patches:
+        standalone_patches.setattr(sender, "hermes_home", lambda: tmp_path)
+        standalone_patches.setattr(connection, "_ws_connect", AsyncMock(return_value=ws))
+        standalone_patches.setattr(ClawChatConnection, "_watch_activation_credentials", watch_credentials)
+        result = await asyncio.wait_for(sender.standalone_send(cfg, chat_id, "test outbound"), 5)
+
+    assert result.get("success") is True, result
+    assert [row["status"] for row in rows(store)] == ["pending"]
+    connect_payload = next(frame["payload"] for frame in ws.sent if frame["event"] == "connect")
+    assert connect_payload["device_id"].endswith(sender.STANDALONE_DEVICE_SUFFIX)
+    assert "reliable_delivery_v2" not in connect_payload["capabilities"]
+    assert not ws.acks
+
+    handler = AsyncMock()
+    async with peer(monkeypatch, store, on_message=handler) as gateway:
+        await until(lambda: not gateway.conn._inbound_lanes)
+        handler.assert_awaited_once_with(pending)
+        assert [row["status"] for row in rows(store)] == ["done"]
+
+
+def test_sibling_v2_stays_disabled_after_activation_credentials_update(store):
+    from clawchat_gateway.storage import ActivationCredentials
+
+    cfg = ClawChatConfig(
+        websocket_url="wss://example.invalid/ws", token=FAKE_SECRETS["access"],
+        reliable_delivery_v2=True,
+    )
+    conn = ClawChatConnection(cfg, on_message=AsyncMock())
+    conn.use_sibling_connect_device_id("-standalone")
+    assert conn.config.reliable_delivery_v2 is False
+
+    credentials = ActivationCredentials(
+        user_id="usr_test_agent", owner_user_id="usr_test_owner",
+        access_token=FAKE_SECRETS["access"] + "-updated", refresh_token=FAKE_SECRETS["refresh"],
+    )
+    conn._apply_activation_credentials(credentials)
+    assert conn.config.token == credentials.access_token
+    assert conn.config.reliable_delivery_v2 is False

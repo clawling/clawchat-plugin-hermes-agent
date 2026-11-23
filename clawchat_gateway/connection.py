@@ -206,7 +206,8 @@ def build_connect_capabilities(
 
     Extracted so tests can assert on the capability set without wiring up a
     full WebSocket session. Keep the default set in sync with OpenClaw;
-    reliable_delivery_v2 is an approved Hermes-only opt-in exception.
+    reliable_delivery_v2 is an approved Hermes-only exception (declared by default;
+    OpenClaw opts in per account).
     """
     return {
         **({"install_conflict": True} if install_conflict else {}),
@@ -409,6 +410,9 @@ class ClawChatConnection:
         # re-login). msghub enforces single-session per (user_id, device_id)
         # via takeover, so a standalone sender must present a sibling device
         # id or it kicks a gateway running in another process off the socket.
+        # Production sibling callers must go through use_sibling_connect_device_id,
+        # which also turns reliable delivery v2 off; this constructor argument
+        # only swaps the id (tests use it) and leaves the configured v2 flag alone.
         self._connect_device_id = connect_device_id
         self._owner_locale = owner_locale
         self._allow_superseded_notice = _allow_superseded_notice
@@ -1079,9 +1083,18 @@ class ClawChatConnection:
         the inbox is user-scoped with per-device cursors, so it never steals
         messages from the real device. REST refresh keeps the canonical id.
         Must be called before ``start``. Returns the id that will be presented.
+
+        A sibling session is outbound-only: it shares the profile's receipt
+        store and account with the gateway, so it must never declare reliable
+        delivery v2 or run receipt recovery — recovery would hand the
+        gateway's pending receipts to the sibling's no-op inbound handler and
+        mark them done, and v2 acks would advance the shared connection
+        sequence. Turning v2 off here covers every sibling caller.
         """
         sibling = f"{self._refresh_device_id()}{suffix}"
         self._connect_device_id = sibling
+        if self._cfg.reliable_delivery_v2:
+            self._cfg = replace(self._cfg, reliable_delivery_v2=False)
         return sibling
 
     def _refresh_seed_conversation_id(self) -> str | None:

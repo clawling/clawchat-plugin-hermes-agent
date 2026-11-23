@@ -40,14 +40,17 @@ Automatic refresh, permanent-failure markers, empty credential tombstones and ac
 | `CLAWCHAT_WEBSOCKET_URL` (or `CLAWCHAT_WS_URL`) | `websocket_url` | `wss://app.clawling.com/ws` | Activation records the env value when set, else derives one from `base_url` (`activate._derive_websocket_url`). |
 | `CLAWCHAT_DEVICE_ID` | — | derived (below) | Pin per agent in container deployments; used verbatim with `hermes-` prefix, otherwise sanitized to `[A-Za-z0-9_.:-]` and prefixed. |
 | `CLAWCHAT_WIKI_VERSION` | — | empty | Optional install-page stamp for connect/connect-check onboarding telemetry; profile-first, trimmed to 40 characters (`onboarding.wiki_version`), never gates activation. |
-| `CLAWCHAT_RELIABLE_DELIVERY_V2` | `reliable_delivery_v2` | `false` | Profile opt-in to durable inbound receipts and negotiated dseq acknowledgements (§11.7). |
+| `CLAWCHAT_RELIABLE_DELIVERY_V2` | `reliable_delivery_v2` | `true` | Durable inbound receipts and negotiated dseq acknowledgements (§11.7); on by default, set `false` to opt out. |
 
-`platforms.clawchat.extra.reliable_delivery_v2` is a YAML bool.
+`platforms.clawchat.extra.reliable_delivery_v2` is a YAML bool; unset or an explicit YAML `null` (an empty value) means the default, `true`, without a warning. Any other non-bool value warns and disables it.
+A non-empty env value overrides YAML. A profile that already sets `false` stays off after upgrade.
+The receipt tables are created lazily on the first enabled connection; no manual migration is needed.
 Env overrides accept case-insensitive `true/false`, `1/0`, `yes/no`,
-`on/off`. Invalid values warn and disable it. For rollback, [drain pending receipts first](#reliable-delivery-rollback).
-Off: legacy, no receipts or sync acks.
+`on/off`. Invalid explicit values (non-bool YAML, unknown env) warn and disable it. For rollback, [drain pending receipts first](#reliable-delivery-rollback).
+Off (explicit `false`, and always for standalone sends): legacy, no receipts or sync acks.
 Each v2 grant registers a durable connection sequence before READY; registration or receipt-write failure closes without ack/dispatch, using normal reconnect/backoff.
-Each opt-in connection recovers pending even without a v2 grant, skipping dispatched work only.
+Each v2-enabled connection recovers pending even without a v2 grant, skipping dispatched work only.
+The setting applies to the gateway connection only: standalone sends always connect with v2 off and never touch receipts ([architecture](architecture.md#standalone-sender-out-of-process-hermes-send--cron)).
 Gate waiters can recover. Old lane work precedes new business; controls bypass the gate.
 Recovery failure/10 s timeout opens only the gate. Unavailable claims stay pending;
 recovery retries every 30 s through failures until success. Turns require a claim.
