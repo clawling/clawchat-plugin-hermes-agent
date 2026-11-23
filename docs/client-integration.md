@@ -199,7 +199,7 @@ unsupported features are not invitations to enable a flag without implementing i
 | `history_sync` | omitted | Hermes does not declare it; full sibling-history semantics belong to the upstream server contract (§11.4). |
 | `e2ee` | omitted | Hermes does not declare it; full ciphertext semantics belong to the upstream server contract. |
 | `reliable_delivery` | omitted | Hermes does not declare it; full v1 cursor semantics belong to the upstream server contract (§11.7). |
-| `reliable_delivery_v2` | `true` by default | Hermes declares `true` unless the profile sets it to `false`; OpenClaw only with its `reliableDeliveryV2` opt-in (§11.7). |
+| `reliable_delivery_v2` | `true` by default | Hermes gateway connections declare `true` unless the profile sets it to `false`; standalone (sibling) connections never declare it. OpenClaw only with its `reliableDeliveryV2` opt-in (§11.7). |
 
 **Hermes:** `ack_progress_clock` is also omitted; it applies only to granted v2
 reliable delivery. Hermes implements only the v2 sync ack, on by default (§11.7).
@@ -220,8 +220,9 @@ A successful response echoes the connect `trace_id` and resolved `device_id`
 `delivery_mode` is `"device_replay"`; tolerate future values. No field returns
 your own user identity (§2). Replay begins after this frame (§11).
 
-**Hermes:** Defaults to legacy replay. Only an opted-in connection that declared
-v2 accepts `ack_mode:"dseq"` with a non-empty string `ack_epoch` (§11.7).
+**Hermes:** The gateway connection declares v2 by default; standalone (sibling)
+connections and profiles with `reliable_delivery_v2: false` use legacy replay.
+Only a connection that declared v2 accepts `ack_mode:"dseq"` with a non-empty string `ack_epoch` (§11.7).
 
 ### 3.5 `hello-fail` (S → C)
 
@@ -1177,8 +1178,8 @@ server contract.
 Lifecycle notices (member joined / left, group renamed, announcements,
 permission results, owner-facing service notices…) are injected by the
 deployment's own services and delivered as ordinary **durable `message.send`**
-downlinks: persisted and replayed on reconnect. Hermes defaults to legacy;
-granted v2 follows §11.7. They
+downlinks: persisted and replayed on reconnect. Hermes gateway connections
+declare v2 by default and granted v2 follows §11.7; with v2 off it is legacy. They
 differ from a user message in exactly one envelope field — `sender` is the
 fixed system identity — plus a flat `payload.metadata` block:
 
@@ -1427,8 +1428,10 @@ Legacy, v1 and v2 here name delivery mechanisms, not the envelope version:
 all use Protocol v2 envelopes. Full reliable-delivery semantics belong to the
 upstream server contract.
 
-**Hermes:** Defaults to legacy advance-on-socket-write. It never declares v1
-`reliable_delivery` or emits `message.cursor_ack`. Default-on v2 is described below.
+**Hermes:** Uses legacy advance-on-socket-write whenever v2 is off for a connection —
+the profile sets `reliable_delivery_v2: false`, or the connection is a standalone
+(sibling) sender. It never declares v1 `reliable_delivery` or emits
+`message.cursor_ack`. v2, on by default for the gateway connection, is described below.
 
 Legacy is **not at-most-once**. A crash before local persistence can lose a frame;
 a cursor write failure or a connection served through another server instance
@@ -1469,7 +1472,8 @@ replay/cursor ack; the optional v2 receipt/ack path is described below.
 #### Hermes: optional reliable_delivery_v2
 
 `platforms.clawchat.extra.reliable_delivery_v2` defaults to `true`; [configuration](configuration.md#connection) covers overrides and rollback.
-Hermes connections advertise `reliable_delivery_v2:true` unless the profile sets it to `false`;
+Hermes gateway connections advertise `reliable_delivery_v2:true` unless the profile sets it to `false`;
+standalone (sibling) connections always run with v2 off and never touch receipts ([architecture](architecture.md#standalone-sender-out-of-process-hermes-send--cron));
 OpenClaw has its own opt-in (`reliableDeliveryV2`, default false). Every hello independently requires
 `ack_mode:"dseq"` and a non-empty string `ack_epoch`; otherwise delivery is legacy.
 Each grant resets the read sequence and contiguous ack watermark to zero.
@@ -1495,7 +1499,7 @@ Trackers belong to one socket generation and are disposed on teardown.
 Ack means durable receipt, not a completed turn; lanes (including recall) and inline handlers mark done/failed on completion/error.
 Errors use display redaction plus long-secret/JWT filtering, at most 500 characters. Unavailable claims stay pending;
 no turn starts, and one timer retries after 30 s, continuing after recovery failures until success.
-At every READY, even without a v2 grant, recover all pending kinds in received_at,
+On a v2-enabled connection, at every READY, even without a v2 grant, recover all pending kinds in received_at,
 rowid order, skipping only dispatched work; frames waiting at the gate remain recoverable, with no startup cutoff.
 Enqueue recovered lane work before admitting new business frames; then release
 the ordering gate before awaiting inline handlers. Control frames bypass the gate;

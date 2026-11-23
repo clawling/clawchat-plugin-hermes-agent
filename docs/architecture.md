@@ -219,6 +219,13 @@ Two invariants:
   never consumes messages on the real device's behalf; its only durable
   footprint is its own replay cursor, which the server expires after a period
   of inactivity.
+- **Outbound-only, no reliable delivery v2.** The sibling session shares the
+  profile's receipt store and account with the gateway, so
+  `use_sibling_connect_device_id` turns `reliable_delivery_v2` off for that
+  connection whatever the configured value: it never declares the v2
+  capability, never acks v2 frames and never runs receipt recovery. Pending
+  receipts the gateway left behind stay pending until the gateway itself
+  recovers them.
 - **Canonical refresh id.** `/v1/auth/refresh` rejects a mismatched
   `X-Device-Id` with a 10003 forced re-login, so token refresh keeps using the
   canonical resolved device id — only the WS connect payload is overridden.
