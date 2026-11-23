@@ -41,7 +41,7 @@ def fetch(monkeypatch, steps):
 
 
 def test_shipped_pins_and_windows_arm64():
-    assert cli.LIVEWARE_CLI_VERSION == '0.0.47-20260921'
+    assert cli.LIVEWARE_CLI_VERSION == '0.0.55-20261107'
     assert len(cli.LIVEWARE_CLI_SHA256) == 6
     assert all(len(bytes.fromhex(value)) == 32 for value in cli.LIVEWARE_CLI_SHA256.values())
     assert cli.platform_assets('windows', 'arm64') == 'liveware-windows-arm64.exe'
