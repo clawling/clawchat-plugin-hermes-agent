@@ -28,16 +28,16 @@ from clawchat_gateway.api_client import redact_display_text
 logger = logging.getLogger(__name__)
 
 LIVEWARE_BASE_URL = "https://media.clawling.chat/liveware/"
-LIVEWARE_CLI_VERSION = "0.0.47-20260921"
+LIVEWARE_CLI_VERSION = "0.0.55-20261107"
 # These shipped digests are the trust anchor, never fetched from the download
 # server. Updating the CLI requires both constants to change in a plugin release.
 LIVEWARE_CLI_SHA256: dict[str, str] = {
-    "liveware-darwin-amd64": "28c63d371115889cd8ebeed916af0d5ede62e10016ae34a8984de31ec49d00fe",
-    "liveware-darwin-arm64": "eebc9f9a881f9a4da3eb81559290581f0054d15b94eb8c0d2dd21e9472169765",
-    "liveware-linux-amd64": "bbbf7c0b74e5633cf869ea3af78997d5ec0f57f3253f1fb3c3cdd75ead5cebba",
-    "liveware-linux-arm64": "691b79a8f346e10780e8270d9b759bd749d1df5a3d08bf033c66765c470d6a15",
-    "liveware-windows-amd64.exe": "b5fe6fa02cf23d0101af20cc3f8c936ac5d6f32a13896bc1c14622089e3504a1",
-    "liveware-windows-arm64.exe": "9400709b2cdd0d2282e478fd8ef6f9953e3190f48653e2cf775817b44f0c34ce",
+    "liveware-darwin-amd64": "52945fa06136b5f5bc5fd89eebf9734d1270078f5e46070a888219246d73eaa5",
+    "liveware-darwin-arm64": "94ae6fcc74283f63acff589d78faea00d0e7d9ea0239146159660c9eff222abd",
+    "liveware-linux-amd64": "5d42ce553da1ae305394cc72b5a5a38aefd8dca902c2ff3b8477a3bf3517b2c2",
+    "liveware-linux-arm64": "a18208e0bc46b35560c9445512001f2bdb0134936f2ead7f92a32193eacfacf4",
+    "liveware-windows-amd64.exe": "c8f5a4889789adab9733bbff36c521d386c3da2a947458a0665f1f50b3f7eb2a",
+    "liveware-windows-arm64.exe": "568dd2ee42d5b67a765147a7b2a47bc278cd8dfb40054b3fc6e1fd3eeebf50da",
 }
 _DOWNLOAD_TIMEOUT = 60
 _DOWNLOAD_DEADLINE = 240.0
