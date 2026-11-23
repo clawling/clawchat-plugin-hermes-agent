@@ -698,8 +698,10 @@ def _reply_to_agents(extra: dict[str, Any]) -> bool:
 
 
 def _reliable_delivery_v2(extra: dict[str, Any]) -> bool:
-    value = extra.get("reliable_delivery_v2", False)
-    if not isinstance(value, bool):
+    value = extra.get("reliable_delivery_v2")
+    if value is None:
+        value = True  # default on; explicit false (YAML or env) opts out
+    elif not isinstance(value, bool):
         logger.warning("clawchat config reliable_delivery_v2 must be a bool; disabling")
         value = False
     env = _get_env("CLAWCHAT_RELIABLE_DELIVERY_V2")
@@ -738,7 +740,7 @@ class ClawChatConfig:
     heartbeat_timeout_ms: int = 10000
     ack_timeout_ms: int = 15000
     ack_auto_resend_on_timeout: bool = False
-    reliable_delivery_v2: bool = False
+    reliable_delivery_v2: bool = True
     media_local_roots: tuple[str, ...] = field(default_factory=tuple)
     media_download_dir: str = "/tmp/clawchat-media"
     media_allow_http: bool = False
