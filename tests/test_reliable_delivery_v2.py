@@ -1100,6 +1100,22 @@ def test_config_env_precedence_and_invalid_values(monkeypatch, store, env, confi
         assert any(r.levelno == logging.WARNING and "reliable_delivery_v2" in r.message for r in caplog.records)
 
 
+def test_config_yaml_null_means_default_on_without_warning(monkeypatch, caplog):
+    # YAML ``reliable_delivery_v2:`` / ``null`` is "unset", i.e. the default (on);
+    # any other non-bool value still warns and disables.
+    monkeypatch.setattr(config_module, "_get_env", lambda *names: "")
+    with caplog.at_level(logging.WARNING):
+        cfg = ClawChatConfig.from_platform_config(SimpleNamespace(extra={"reliable_delivery_v2": None}))
+    assert cfg.reliable_delivery_v2 is True
+    assert not [r for r in caplog.records if "reliable_delivery_v2" in r.getMessage()]
+    for invalid in ("true", 1, [], {}):
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            cfg = ClawChatConfig.from_platform_config(SimpleNamespace(extra={"reliable_delivery_v2": invalid}))
+        assert cfg.reliable_delivery_v2 is False, invalid
+        assert any("reliable_delivery_v2" in r.getMessage() for r in caplog.records), invalid
+
+
 def test_config_default_enabled_and_profile_dotenv(monkeypatch, tmp_path, store):
     monkeypatch.delenv("CLAWCHAT_RELIABLE_DELIVERY_V2", raising=False)
     assert ClawChatConfig.from_platform_config(SimpleNamespace(extra={})).reliable_delivery_v2 is True

@@ -410,6 +410,9 @@ class ClawChatConnection:
         # re-login). msghub enforces single-session per (user_id, device_id)
         # via takeover, so a standalone sender must present a sibling device
         # id or it kicks a gateway running in another process off the socket.
+        # Production sibling callers must go through use_sibling_connect_device_id,
+        # which also turns reliable delivery v2 off; this constructor argument
+        # only swaps the id (tests use it) and leaves the configured v2 flag alone.
         self._connect_device_id = connect_device_id
         self._owner_locale = owner_locale
         self._allow_superseded_notice = _allow_superseded_notice

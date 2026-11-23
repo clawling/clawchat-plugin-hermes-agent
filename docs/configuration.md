@@ -42,12 +42,12 @@ Automatic refresh, permanent-failure markers, empty credential tombstones and ac
 | `CLAWCHAT_WIKI_VERSION` | — | empty | Optional install-page stamp for connect/connect-check onboarding telemetry; profile-first, trimmed to 40 characters (`onboarding.wiki_version`), never gates activation. |
 | `CLAWCHAT_RELIABLE_DELIVERY_V2` | `reliable_delivery_v2` | `true` | Durable inbound receipts and negotiated dseq acknowledgements (§11.7); on by default, set `false` to opt out. |
 
-`platforms.clawchat.extra.reliable_delivery_v2` is a YAML bool; unset (or null) means `true`.
+`platforms.clawchat.extra.reliable_delivery_v2` is a YAML bool; unset or an explicit YAML `null` (an empty value) means the default, `true`, without a warning. Any other non-bool value warns and disables it.
 A non-empty env value overrides YAML. A profile that already sets `false` stays off after upgrade.
 The receipt tables are created lazily on the first enabled connection; no manual migration is needed.
 Env overrides accept case-insensitive `true/false`, `1/0`, `yes/no`,
 `on/off`. Invalid explicit values (non-bool YAML, unknown env) warn and disable it. For rollback, [drain pending receipts first](#reliable-delivery-rollback).
-Off (explicit `false`): legacy, no receipts or sync acks.
+Off (explicit `false`, and always for standalone sends): legacy, no receipts or sync acks.
 Each v2 grant registers a durable connection sequence before READY; registration or receipt-write failure closes without ack/dispatch, using normal reconnect/backoff.
 Each v2-enabled connection recovers pending even without a v2 grant, skipping dispatched work only.
 The setting applies to the gateway connection only: standalone sends always connect with v2 off and never touch receipts ([architecture](architecture.md#standalone-sender-out-of-process-hermes-send--cron)).
