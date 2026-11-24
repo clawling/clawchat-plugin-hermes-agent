@@ -23,6 +23,8 @@ Separately applied upstream subset items:
 - Upstream §7.3/§9.4 plan messages (`payload.plan`, `message_id` deduplication
   and `plan.changed`), server commit `7f963fa`.
 
+The §9.9 `kind` closed set is synced to seventeen values, server commit `c6b9b4b`.
+
 Known upstream changes after that full sync **not yet incorporated in full**:
 
 - `retryable` / `retry_after_ms`, `send_rate_limited` and direct-chat
@@ -1210,14 +1212,19 @@ and the key has no underscore.
   on `message.send` / `message.reply` is dropped by the typed round-trip, so a
   `metadata` block that reaches you next to `sender.id == "system"` was
   minted by the server.
-- **`kind` is a closed set.** The server accepts exactly fifteen values and
+- **`kind` is a closed set.** The server accepts exactly seventeen values and
   rejects any injection outside it — or one that smuggles a `kind` inside the
   producer payload — with `400`, publishing nothing:
   `member_joined`, `member_left`, `member_removed`, `group_created`,
   `group_renamed`, `group_avatar_changed`, `admin_appointed`,
   `admin_revoked`, `announcement_added`, `announcement_updated`,
   `announcement_removed`, `permission_result`, `service_error`,
-  `balance_low`, `service_notice`. Widening the set is a cross-repo change
+  `balance_low`, `service_notice`, `agent_behavior_edited_by_agent`,
+  `agent_wake_hook`. The last two are owner-facing notices in the owner↔agent
+  direct conversation (the producer excludes the agent's own shadow user, but
+  when the orchestrating agent cannot be resolved the first can fan out to the
+  agent too); `agent_wake_hook` carries `request_id`, `hook_id`, `device_id`,
+  `status` (`degraded` / `disabled`) and `reason`. Widening the set is a cross-repo change
   (producer, server list and rendering client ship together), so a `kind` you
   do not recognise is simply newer than your build — never a forgery once
   `sender.id == "system"` holds.
