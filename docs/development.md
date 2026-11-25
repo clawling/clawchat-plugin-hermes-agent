@@ -353,7 +353,7 @@ already imports from `PYTHONPATH` / `sys.path`, `tests/conftest.py` uses the rea
 host even without `HERMES_REAL_HOST=1`.
 When the session cannot use the required real-host imports, multiplex isolation
 and orchestrate context checks run their modules in subprocesses using the shared
-source lookup. The real compaction formula assertion and environment-lock check
+source lookup. Each original test keeps its own name there (one subprocess per test), so `-k` and `file::Class::test` select it as usual; a parametrized test runs all its params in that subprocess, so select it by function name, not by `[param]` id. The real compaction formula assertion and environment-lock check
 also use subprocesses when unavailable in the session. A missing checkout skips
 with searched paths, or fails with `HERMES_SOURCE_REQUIRED=1`; a pytest subprocess
 must report at least one passed test, and nonzero exits or timeouts fail the check.
