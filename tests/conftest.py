@@ -38,6 +38,7 @@ item)" section, including its source version, date and recheck conditions.
 
 from __future__ import annotations
 
+import ast
 import atexit
 from contextlib import contextmanager
 import importlib
@@ -172,18 +173,64 @@ _REAL_HOST_MODULES = {
 }
 
 
+def _real_host_test_names(path: Path) -> list[tuple[str, str]]:
+    """(class name or "", test name) for each test the module defines, read from source.
+
+    The module cannot be imported here: it needs the real host that is missing.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    found: list[tuple[str, str]] = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
+            found.append(("", node.name))
+        elif isinstance(node, ast.ClassDef):
+            found += [
+                (node.name, child.name) for child in node.body
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name.startswith("test")
+            ]
+    return found
+
+
 class _RealHostItem(pytest.Item):
+    def __init__(self, *, selector: str = "", **kwargs):
+        super().__init__(**kwargs)
+        self._selector = selector
+
     def runtest(self):
         marker, _ = _REAL_HOST_MODULES[self.path.name]
-        run_pytest_on_real_host(self.path, marker)
+        run_pytest_on_real_host(self.path, marker, selector=self._selector)
 
     def reportinfo(self):
         return self.path, 0, "real Hermes subprocess"
 
 
-class _RealHostModule(pytest.Module):
+class _RealHostClass(pytest.Collector):
     def collect(self):
-        yield _RealHostItem.from_parent(self, name="test_real_host_subprocess")
+        for cls, name in _real_host_test_names(self.path):
+            if cls == self.name:
+                yield _RealHostItem.from_parent(self, name=name, selector=f"{cls}::{name}")
+
+
+class _RealHostModule(pytest.Module):
+    """Stand-in for a module that needs the real host.
+
+    Keeps the original test names, so `-k` and `file::test` / `file::Class::test`
+    still select them; each one runs in its own real-host subprocess (a
+    parametrized test runs all its params there; select it by function name).
+    """
+
+    def collect(self):
+        names = _real_host_test_names(self.path)
+        if not names:  # nothing recognisable: keep the old whole-module item
+            yield _RealHostItem.from_parent(self, name="test_real_host_subprocess")
+            return
+        seen: set[str] = set()
+        for cls, name in names:
+            if not cls:
+                yield _RealHostItem.from_parent(self, name=name, selector=name)
+            elif cls not in seen:
+                seen.add(cls)
+                yield _RealHostClass.from_parent(self, name=cls)
 
 
 @pytest.hookimpl(tryfirst=True)

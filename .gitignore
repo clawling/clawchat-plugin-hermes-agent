@@ -272,6 +272,7 @@ tests/fixtures/*
 !tests/test_takeover_close_backoff.py
 !tests/test_credential_revocation.py
 !tests/test_multiplex_isolation.py
+!tests/test_real_host_selection.py
 !tests/test_device_id_scope.py
 !tests/test_activate_device_id.py
 !tests/test_activate_precheck.py

@@ -105,10 +105,16 @@ def _run_on_real_host(marker: str, *args: str) -> subprocess.CompletedProcess[st
     return result
 
 
-def run_pytest_on_real_host(test_path: Path, marker: str, *pytest_args: str) -> None:
-    """Run actual host tests outside the session's doubles; all-skipped is failure."""
+def run_pytest_on_real_host(
+    test_path: Path, marker: str, *pytest_args: str, selector: str = "",
+) -> None:
+    """Run actual host tests outside the session's doubles; all-skipped is failure.
+
+    `selector` is an optional `Class::test_name` / `test_name` node suffix.
+    """
+    target = f"{test_path}::{selector}" if selector else str(test_path)
     result = _run_on_real_host(
-        marker, "-m", "pytest", str(test_path), "-p", "no:cacheprovider", *pytest_args,
+        marker, "-m", "pytest", target, "-p", "no:cacheprovider", *pytest_args,
     )
     if re.search(r"\b[1-9]\d* passed\b", result.stdout) is None:
         pytest.fail(
